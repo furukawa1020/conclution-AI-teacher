@@ -1,7 +1,9 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import {
+  browserSessionPersistence,
   getAuth,
   getIdToken,
+  setPersistence,
   signInAnonymously,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 import {
@@ -102,6 +104,7 @@ async function initializeServices() {
   }
 
   const auth = getAuth(app);
+  await setPersistence(auth, browserSessionPersistence);
   const credential = auth.currentUser
     ? { user: auth.currentUser }
     : await signInAnonymously(auth);

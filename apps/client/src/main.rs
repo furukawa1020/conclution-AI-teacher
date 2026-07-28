@@ -13,6 +13,7 @@ enum HistoryMode {
 enum CloudState {
     Connecting,
     Ready,
+    Verified,
     ConfigurationRequired,
     Unavailable,
 }
@@ -21,15 +22,16 @@ impl CloudState {
     fn label(self) -> &'static str {
         match self {
             Self::Connecting => "CLOUD 接続確認中",
-            Self::Ready => "CLOUD 接続済み",
+            Self::Ready => "CLOUD 準備済み",
+            Self::Verified => "CLOUD 検証済み",
             Self::ConfigurationRequired => "CLOUD 設定待ち",
-            Self::Unavailable => "CLOUD 接続エラー",
+            Self::Unavailable => "CLOUD 要確認",
         }
     }
 
     fn class_name(self) -> &'static str {
         match self {
-            Self::Ready => "stamp stamp--cloud-ready",
+            Self::Ready | Self::Verified => "stamp stamp--cloud-ready",
             Self::Connecting | Self::ConfigurationRequired => "stamp stamp--pending",
             Self::Unavailable => "stamp stamp--cloud-error",
         }
@@ -134,6 +136,7 @@ fn main() {
 fn App() -> Element {
     let mut answer = use_signal(String::new);
     let mut evaluation_state = use_signal(|| EvaluationState::Idle);
+    let mut cloud_verification = use_signal(|| None::<bool>);
     let mut history_mode = use_signal(|| HistoryMode::Managed);
     let cloud_status = use_resource(|| async { cloud::status().await });
 
@@ -142,11 +145,16 @@ fn App() -> Element {
     let character_count = answer_value.chars().count();
     let evaluation_snapshot = evaluation_state.read().clone();
     let evaluation_running = evaluation_snapshot == EvaluationState::Loading;
-    let cloud_state = cloud_status
+    let prepared_cloud_state = cloud_status
         .read()
         .as_ref()
         .copied()
         .unwrap_or(CloudState::Connecting);
+    let cloud_state = match *cloud_verification.read() {
+        Some(true) => CloudState::Verified,
+        Some(false) => CloudState::Unavailable,
+        None => prepared_cloud_state,
+    };
 
     rsx! {
         div { class: "app-shell",
@@ -165,7 +173,7 @@ fn App() -> Element {
                         "LOCAL / RUST"
                     }
                     span { class: cloud_state.class_name(),
-                        if cloud_state == CloudState::Ready {
+                        if matches!(cloud_state, CloudState::Ready | CloudState::Verified) {
                             span { class: "stamp__dot" }
                         }
                         {cloud_state.label()}
@@ -281,8 +289,14 @@ fn App() -> Element {
                                 evaluation_state.set(EvaluationState::Loading);
                                 spawn(async move {
                                     let next_state = match cloud::evaluate(QUESTION, &submitted_answer).await {
-                                        Ok(result) => EvaluationState::Success(result),
-                                        Err(message) => EvaluationState::Error(message),
+                                        Ok(result) => {
+                                            cloud_verification.set(Some(true));
+                                            EvaluationState::Success(result)
+                                        }
+                                        Err(message) => {
+                                            cloud_verification.set(Some(false));
+                                            EvaluationState::Error(message)
+                                        }
                                     };
                                     evaluation_state.set(next_state);
                                 });

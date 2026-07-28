@@ -88,7 +88,25 @@ fn stop_microphone(
 
 #[cfg(target_arch = "wasm32")]
 async fn wait_for_recording_tick() {
-    gloo_timers::future::TimeoutFuture::new(100).await;
+    use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+    use wasm_bindgen_futures::JsFuture;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let fallback = resolve.clone();
+        let callback = Closure::once_into_js(move || {
+            let _ = resolve.call0(&JsValue::UNDEFINED);
+        });
+        if window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), 100)
+            .is_err()
+        {
+            let _ = fallback.call0(&JsValue::UNDEFINED);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -210,8 +228,8 @@ fn App() -> Element {
     let timing_snapshot = *timing_features.read();
     let has_timing_measurement =
         timing_snapshot.elapsed_ms > 0 || recording_snapshot == RecordingState::Complete;
-    let remaining_seconds = 10_u64
-        .saturating_sub(timing_snapshot.elapsed_ms.min(10_000).div_ceil(1_000));
+    let remaining_seconds =
+        10_u64.saturating_sub(timing_snapshot.elapsed_ms.min(10_000).div_ceil(1_000));
     let initial_silence_ms = timing_snapshot
         .first_voice_ms
         .unwrap_or(timing_snapshot.elapsed_ms);
@@ -316,20 +334,201 @@ fn App() -> Element {
                         for second in 0..10 {
                             div {
                                 key: "{second}",
-                                class: if second < 2 { "ruler-tick ruler-tick--focus" } else { "ruler-tick" },
+                                class: if timing_snapshot.elapsed_ms >= second * 1_000 {
+                                    "ruler-tick ruler-tick--elapsed"
+                                } else if second < 2 {
+                                    "ruler-tick ruler-tick--focus"
+                                } else {
+                                    "ruler-tick"
+                                },
                                 span { class: "ruler-tick__number", "{second + 1}" }
                                 span { class: "ruler-tick__line" }
                             }
                         }
                     }
 
-                    div { class: "engine-notice", role: "status",
-                        span { class: "engine-notice__icon", aria_hidden: "true", "◉" }
-                        div {
-                            strong { "ローカル音声エンジンは接続準備中" }
-                            p { "現在は画面設計版です。マイクを使ったふりはせず、接続後に録音状態を常時表示します。" }
+                    div {
+                        class: if recording_snapshot == RecordingState::Recording {
+                            "engine-notice engine-notice--recording"
+                        } else {
+                            "engine-notice"
+                        },
+                        role: "status",
+                        aria_live: "polite",
+                        aria_busy: matches!(
+                            recording_snapshot,
+                            RecordingState::Starting | RecordingState::Recording
+                        ),
+                        span {
+                            class: "engine-notice__icon",
+                            aria_hidden: "true",
+                            if recording_snapshot == RecordingState::Recording { "●" } else { "◉" }
                         }
-                        button { class: "text-button", disabled: true, "マイクを接続" }
+                        div {
+                            strong {
+                                match recording_snapshot {
+                                    RecordingState::Idle => "10秒の端末内測定",
+                                    RecordingState::Starting => "マイクの許可を確認しています",
+                                    RecordingState::Recording => "録音中 — 端末内だけで解析",
+                                    RecordingState::Complete => "測定を終了しました",
+                                    RecordingState::Error(_) => "マイク測定を開始できませんでした",
+                                }
+                            }
+                            p {
+                                match recording_snapshot {
+                                    RecordingState::Idle => {
+                                        "音声は保存・送信せず、発話の時間特徴だけをRustで計算します。"
+                                    }
+                                    RecordingState::Starting => {
+                                        "ブラウザの確認画面で、この測定に使うマイクを選んでください。"
+                                    }
+                                    RecordingState::Recording => {
+                                        "残り約{remaining_seconds}秒。いつでも停止できます。"
+                                    }
+                                    RecordingState::Complete => {
+                                        "下の実測値を確認できます。元の音声データは残していません。"
+                                    }
+                                    RecordingState::Error(message) => message,
+                                }
+                            }
+                        }
+                        if matches!(
+                            recording_snapshot,
+                            RecordingState::Idle
+                                | RecordingState::Complete
+                                | RecordingState::Error(_)
+                        ) {
+                            button {
+                                class: "text-button text-button--start",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    if matches!(
+                                        *recording_state.peek(),
+                                        RecordingState::Starting | RecordingState::Recording
+                                    ) {
+                                        return;
+                                    }
+
+                                    stop_microphone(microphone_session, timing_features);
+                                    timing_features.set(TimingFeatures::default());
+                                    let operation = recording_generation
+                                        .peek()
+                                        .wrapping_add(1);
+                                    recording_generation.set(operation);
+                                    recording_state.set(RecordingState::Starting);
+
+                                    spawn(async move {
+                                        let started = MicrophoneSession::start().await;
+                                        let operation_is_current =
+                                            *recording_generation.peek() == operation
+                                                && *recording_state.peek()
+                                                    == RecordingState::Starting;
+                                        if !operation_is_current {
+                                            if let Ok(mut stale_session) = started {
+                                                stale_session.stop();
+                                            }
+                                            return;
+                                        }
+
+                                        match started {
+                                            Ok(session) => {
+                                                timing_features.set(session.features());
+                                                microphone_session.set(Some(session));
+                                                recording_state.set(RecordingState::Recording);
+
+                                                loop {
+                                                    wait_for_recording_tick().await;
+                                                    if *recording_generation.peek() != operation {
+                                                        return;
+                                                    }
+
+                                                    let snapshot = microphone_session
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|session| {
+                                                            (
+                                                                session.is_active(),
+                                                                session.features(),
+                                                                session.analysis_error(),
+                                                            )
+                                                        });
+                                                    let Some((active, features, analysis_error)) =
+                                                        snapshot
+                                                    else {
+                                                        return;
+                                                    };
+                                                    timing_features.set(features);
+
+                                                    if let Some(error) = analysis_error {
+                                                        recording_generation
+                                                            .set(operation.wrapping_add(1));
+                                                        stop_microphone(
+                                                            microphone_session,
+                                                            timing_features,
+                                                        );
+                                                        recording_state.set(
+                                                            RecordingState::Error(
+                                                                microphone_error_message(error),
+                                                            ),
+                                                        );
+                                                        return;
+                                                    }
+
+                                                    if !active {
+                                                        stop_microphone(
+                                                            microphone_session,
+                                                            timing_features,
+                                                        );
+                                                        recording_state
+                                                            .set(RecordingState::Complete);
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                recording_state.set(RecordingState::Error(
+                                                    microphone_error_message(error),
+                                                ));
+                                            }
+                                        }
+                                    });
+                                },
+                                if recording_snapshot == RecordingState::Complete {
+                                    "もう一度測る"
+                                } else {
+                                    "マイクで測る"
+                                }
+                            }
+                        } else {
+                            button {
+                                class: "text-button text-button--stop",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    let current = *recording_state.peek();
+                                    recording_generation.set(
+                                        recording_generation.peek().wrapping_add(1),
+                                    );
+                                    match current {
+                                        RecordingState::Starting => {
+                                            recording_state.set(RecordingState::Idle);
+                                        }
+                                        RecordingState::Recording => {
+                                            stop_microphone(
+                                                microphone_session,
+                                                timing_features,
+                                            );
+                                            recording_state.set(RecordingState::Complete);
+                                        }
+                                        _ => {}
+                                    }
+                                },
+                                if recording_snapshot == RecordingState::Starting {
+                                    "キャンセル"
+                                } else {
+                                    "測定を停止"
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -463,65 +662,129 @@ fn App() -> Element {
                 section { class: "answer-print", aria_labelledby: "answer-print-heading",
                     div { class: "section-heading",
                         div {
-                            p { class: "eyebrow", "ANSWER PRINT / 答頭線" }
-                            h2 { id: "answer-print-heading", "答え方だけを残す" }
+                            p { class: "eyebrow", "LOCAL TIMING / 実測" }
+                            h2 { id: "answer-print-heading", "声を残さず、間を測る" }
                         }
-                        span { class: "prototype-badge", "独自プロトタイプ" }
+                        span {
+                            class: "prototype-badge",
+                            if recording_snapshot == RecordingState::Recording {
+                                "LIVE"
+                            } else if has_timing_measurement {
+                                "測定済み"
+                            } else {
+                                "未測定"
+                            }
+                        }
                     }
                     p { class: "answer-print__lead",
-                        "声紋でも文字起こしでもない。無音・前置き・結論・根拠の時間構造だけを、過去の自分と比べます。"
+                        "文字起こしや話者識別は行いません。マイクの波形は短いメモリ領域で解析後に上書きし、時間特徴だけを画面に表示します。"
                     }
                     div {
-                        class: "answer-print__track",
+                        class: if has_timing_measurement {
+                            "answer-print__track answer-print__track--measured"
+                        } else {
+                            "answer-print__track answer-print__track--empty"
+                        },
                         role: "img",
-                        aria_label: "無音0.8秒、前置き1.4秒、結論1.2秒、根拠4.6秒の例",
-                        span { class: "track-segment track-segment--silence", style: "flex: 0.8" }
-                        span { class: "track-segment track-segment--preamble", style: "flex: 1.4" }
-                        span { class: "track-segment track-segment--conclusion", style: "flex: 1.2",
-                            span { "結論" }
+                        aria_label: if has_timing_measurement {
+                            "端末内で測定した発話タイミング"
+                        } else {
+                            "まだ測定されていません"
+                        },
+                        if has_timing_measurement {
+                            span {
+                                class: "track-segment track-segment--initial",
+                                style: "{initial_style}",
+                                title: "発話開始まで"
+                            }
+                            span {
+                                class: "track-segment track-segment--voice",
+                                style: "{voice_style}",
+                                title: "発話判定"
+                            }
+                            span {
+                                class: "track-segment track-segment--unclassified",
+                                style: "{unclassified_style}",
+                                title: "区間内の無音"
+                            }
+                            span {
+                                class: "track-segment track-segment--trailing",
+                                style: "{trailing_style}",
+                                title: "末尾の無音"
+                            }
+                        } else {
+                            span { class: "track-empty-label", "マイクで測ると、ここに実測線が現れます" }
                         }
-                        span { class: "track-segment track-segment--evidence", style: "flex: 4.6" }
                     }
-                    ul { class: "track-legend", aria_label: "答頭線の凡例",
-                        li { span { class: "legend-chip legend-chip--silence" } "無音" }
-                        li { span { class: "legend-chip legend-chip--preamble" } "前置き" }
-                        li { span { class: "legend-chip legend-chip--conclusion" } "結論" }
-                        li { span { class: "legend-chip legend-chip--evidence" } "根拠" }
+                    dl { class: "timing-metrics", aria_live: "polite",
+                        div {
+                            dt { "発話開始" }
+                            dd {
+                                if has_timing_measurement {
+                                    "{format_first_voice(timing_snapshot.first_voice_ms)}"
+                                } else {
+                                    "—"
+                                }
+                            }
+                        }
+                        div {
+                            dt { "発話判定" }
+                            dd {
+                                if has_timing_measurement {
+                                    "{format_duration(timing_snapshot.voiced_ms)}"
+                                } else {
+                                    "—"
+                                }
+                            }
+                        }
+                        div {
+                            dt { "末尾の無音" }
+                            dd {
+                                if has_timing_measurement {
+                                    "{format_duration(timing_snapshot.trailing_silence_ms)}"
+                                } else {
+                                    "—"
+                                }
+                            }
+                        }
+                        div {
+                            dt { "発話区間" }
+                            dd {
+                                if has_timing_measurement {
+                                    "{timing_snapshot.speech_segments} 回"
+                                } else {
+                                    "—"
+                                }
+                            }
+                        }
+                    }
+                    p { class: "answer-print__privacy-note",
+                        "この測定では音声の保存・再生・送信は行いません。表示値はページを閉じると失われます。"
                     }
                 }
 
                 section { class: "privacy-drawer", aria_labelledby: "privacy-heading",
                     div { class: "privacy-drawer__intro",
-                        p { class: "eyebrow", "VOICE VAULT" }
-                        h2 { id: "privacy-heading", "保存方法は、機能ごと選ぶ。" }
-                        p { "「全部一時保存」にはしません。履歴と再評価を残しながら、復号できる条件を狭くします。" }
+                        p { class: "eyebrow", "VOICE VAULT / DESIGN" }
+                        h2 { id: "privacy-heading", "履歴機能は、まだ設計段階。" }
+                        p { "現在の測定は保存しません。次の二方式は、履歴を実装する際の設計候補です。" }
                     }
-                    div { class: "mode-switch", role: "radiogroup", aria_label: "音声履歴モード",
-                        button {
-                            class: if *history_mode.read() == HistoryMode::Managed { "mode-card mode-card--selected" } else { "mode-card" },
-                            role: "radio",
-                            aria_checked: if *history_mode.read() == HistoryMode::Managed { "true" } else { "false" },
-                            onclick: move |_| history_mode.set(HistoryMode::Managed),
-                            span { class: "mode-card__check", aria_hidden: "true", "●" }
+                    div { class: "mode-switch", aria_label: "検討中の音声履歴方式",
+                        article { class: "mode-card mode-card--planned",
+                            span { class: "mode-card__check", aria_hidden: "true", "01" }
                             strong { "管理型セキュア履歴" }
-                            small { "履歴・再生・自動再評価が使える" }
+                            small { "設計案：監査付きの復号で再評価に対応" }
+                            span { class: "mode-card__status", "未実装" }
                         }
-                        button {
-                            class: if *history_mode.read() == HistoryMode::Vault { "mode-card mode-card--selected" } else { "mode-card" },
-                            role: "radio",
-                            aria_checked: if *history_mode.read() == HistoryMode::Vault { "true" } else { "false" },
-                            onclick: move |_| history_mode.set(HistoryMode::Vault),
-                            span { class: "mode-card__check", aria_hidden: "true", "●" }
+                        article { class: "mode-card mode-card--planned",
+                            span { class: "mode-card__check", aria_hidden: "true", "02" }
                             strong { "本人解除 Vault" }
-                            small { "本人が開くまでサーバーも復号不可" }
+                            small { "設計案：本人の解除なしでは復号しない" }
+                            span { class: "mode-card__status", "未実装" }
                         }
                     }
                     p { class: "privacy-drawer__truth",
-                        if *history_mode.read() == HistoryMode::Managed {
-                            "一回限りの認可で再評価できます。復号アクセスは履歴に残ります。"
-                        } else {
-                            "無人の後日再評価はできません。再評価する時は本人の鍵解除が必要です。"
-                        }
+                        "今使えるのは、音声を保存しない10秒の端末内タイミング測定だけです。"
                     }
                 }
             }

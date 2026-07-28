@@ -100,10 +100,10 @@ pub fn seal(
     let cipher =
         Aes256Gcm::new_from_slice(key.expose()).map_err(|_| VaultError::EncryptionFailed)?;
     let aad = encode_aad(binding);
-    let nonce = Nonce::<U12>::from(nonce);
+    let cipher_nonce = Nonce::<U12>::from(nonce);
     let ciphertext = cipher
         .encrypt(
-            &nonce,
+            &cipher_nonce,
             Payload {
                 msg: plaintext,
                 aad: &aad,

@@ -1,8 +1,11 @@
 # Local tools and generated artifacts
 .tools/
+.cache/
 bin/
 coverage.out
 *.test
+target/
+dist/
 
 # Local Firebase state
 .firebase/
@@ -28,4 +31,3 @@ web/app-check-debug-token.txt
 Thumbs.db
 .idea/
 .vscode/
-

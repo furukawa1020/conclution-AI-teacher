@@ -195,7 +195,10 @@ fn App() -> Element {
     let mut answer = use_signal(String::new);
     let mut evaluation_state = use_signal(|| EvaluationState::Idle);
     let mut cloud_verification = use_signal(|| None::<bool>);
-    let mut history_mode = use_signal(|| HistoryMode::Managed);
+    let mut recording_state = use_signal(|| RecordingState::Idle);
+    let mut recording_generation = use_signal(|| 0_u64);
+    let mut microphone_session = use_signal(|| None::<MicrophoneSession>);
+    let mut timing_features = use_signal(TimingFeatures::default);
     let cloud_status = use_resource(|| async { cloud::status().await });
 
     let answer_value = answer.read().clone();
@@ -203,6 +206,24 @@ fn App() -> Element {
     let character_count = answer_value.chars().count();
     let evaluation_snapshot = evaluation_state.read().clone();
     let evaluation_running = evaluation_snapshot == EvaluationState::Loading;
+    let recording_snapshot = *recording_state.read();
+    let timing_snapshot = *timing_features.read();
+    let has_timing_measurement =
+        timing_snapshot.elapsed_ms > 0 || recording_snapshot == RecordingState::Complete;
+    let remaining_seconds = 10_u64
+        .saturating_sub(timing_snapshot.elapsed_ms.min(10_000).div_ceil(1_000));
+    let initial_silence_ms = timing_snapshot
+        .first_voice_ms
+        .unwrap_or(timing_snapshot.elapsed_ms);
+    let unclassified_ms = timing_snapshot
+        .elapsed_ms
+        .saturating_sub(initial_silence_ms)
+        .saturating_sub(timing_snapshot.voiced_ms)
+        .saturating_sub(timing_snapshot.trailing_silence_ms);
+    let initial_style = format!("flex: {}", initial_silence_ms.max(1));
+    let voice_style = format!("flex: {}", timing_snapshot.voiced_ms.max(1));
+    let unclassified_style = format!("flex: {}", unclassified_ms.max(1));
+    let trailing_style = format!("flex: {}", timing_snapshot.trailing_silence_ms.max(1));
     let prepared_cloud_state = cloud_status
         .read()
         .as_ref()

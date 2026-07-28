@@ -1,0 +1,17 @@
+[package]
+name = "kotae-client"
+description = "Rust/Wasm client for KOTAE AI"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+dioxus = { workspace = true, features = ["web"] }
+kotae-answer-print = { path = "../../crates/answer_print" }
+kotae-audio-core = { path = "../../crates/audio_core" }
+kotae-audio-vault = { path = "../../crates/audio_vault" }
+serde.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

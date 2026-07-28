@@ -1,0 +1,9 @@
+[application]
+name = "kotae-client"
+default_platform = "web"
+
+[web.app]
+title = "コタエーAI — 答えを、先に。"
+
+[web.watcher]
+watch_path = ["src", "assets"]

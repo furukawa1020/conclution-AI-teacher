@@ -86,16 +86,11 @@ mod cloud {
         }
     }
 
-    pub async fn evaluate(
-        question: &str,
-        answer: &str,
-    ) -> Result<EvaluationResult, &'static str> {
-        let value = evaluate_js(question, answer)
-            .await
-            .map_err(|error| {
-                let message = js_sys::Error::from(error).message();
-                user_message(message.as_string().as_deref())
-            })?;
+    pub async fn evaluate(question: &str, answer: &str) -> Result<EvaluationResult, &'static str> {
+        let value = evaluate_js(question, answer).await.map_err(|error| {
+            let message = js_sys::Error::from(error).message();
+            user_message(message.as_string().as_deref())
+        })?;
         serde_wasm_bindgen::from_value(value).map_err(|_| "評価結果の形式を確認できませんでした。")
     }
 
@@ -104,7 +99,9 @@ mod cloud {
             Some("app_check_not_configured") => {
                 "App Check の公開サイトキーがまだ設定されていません。"
             }
-            Some("authentication_failed") => "安全な接続を確認できませんでした。再度お試しください。",
+            Some("authentication_failed") => {
+                "安全な接続を確認できませんでした。再度お試しください。"
+            }
             Some("answer_not_evaluable") => "回答を評価できませんでした。内容を確認してください。",
             Some("rate_limited") => "短時間の利用上限に達しました。少し待って再度お試しください。",
             Some("firebase_project_mismatch") => "接続先のFirebaseプロジェクトが一致しません。",

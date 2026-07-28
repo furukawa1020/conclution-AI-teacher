@@ -149,8 +149,7 @@ pub fn open(
 }
 
 pub fn build_manifest(chunks: &[EncryptedRecording]) -> Result<TrackManifest, VaultError> {
-    let total_chunks =
-        u32::try_from(chunks.len()).map_err(|_| VaultError::InvalidChunkSequence)?;
+    let total_chunks = u32::try_from(chunks.len()).map_err(|_| VaultError::InvalidChunkSequence)?;
     let mut total_ciphertext_bytes = 0_u64;
     let mut chain = [0_u8; 32];
 
@@ -235,8 +234,8 @@ mod tests {
     #[test]
     fn round_trip_and_redacted_debug_key() {
         let key = RecordingKey::from_bytes([3; KEY_BYTES]);
-        let encrypted = seal(&key, [4; NONCE_BYTES], b"private voice", &binding())
-            .expect("encrypt recording");
+        let encrypted =
+            seal(&key, [4; NONCE_BYTES], b"private voice", &binding()).expect("encrypt recording");
         let plaintext = open(&key, &encrypted, &binding()).expect("decrypt recording");
 
         assert_eq!(&*plaintext, b"private voice");
@@ -279,8 +278,8 @@ mod tests {
 
         let mut second_binding = binding();
         second_binding.chunk_index = 1;
-        let second =
-            seal(&key, [5; NONCE_BYTES], b"second", &second_binding).expect("second encrypted chunk");
+        let second = seal(&key, [5; NONCE_BYTES], b"second", &second_binding)
+            .expect("second encrypted chunk");
 
         let chunks = vec![first, second];
         let manifest = build_manifest(&chunks).expect("valid manifest");

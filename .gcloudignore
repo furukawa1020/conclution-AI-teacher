@@ -1,0 +1,26 @@
+# Cloud Run source upload: only the Go service and its build metadata are needed.
+.gcloudignore
+.git
+.gitignore
+.tools
+.cache
+target
+dist
+apps
+crates
+docs
+scripts
+.firebase
+.firebaserc
+.env
+.env.*
+*.log
+*.test
+coverage.out
+
+# Firebase configuration is deployed separately from the Hosting CLI.
+firebase.json
+firestore.rules
+firestore.indexes.json
+storage.rules
+README.md

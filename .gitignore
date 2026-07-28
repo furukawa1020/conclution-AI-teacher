@@ -1,0 +1,31 @@
+# Local tools and generated artifacts
+.tools/
+bin/
+coverage.out
+*.test
+
+# Local Firebase state
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
+application_default_credentials.json
+
+# Frontend runtime values generated for a local environment
+web/runtime-config.local.js
+web/app-check-debug-token.txt
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

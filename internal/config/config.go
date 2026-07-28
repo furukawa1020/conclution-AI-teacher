@@ -1,0 +1,104 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	defaultPort           = "8080"
+	defaultVertexLocation = "global"
+	defaultFastModel      = "vertexai/gemini-2.5-flash"
+)
+
+type Config struct {
+	AppEnv           string
+	Port             string
+	ProjectID        string
+	VertexLocation   string
+	FastModel        string
+	RequestTimeout   time.Duration
+	MaxRequestBytes  int64
+	AllowInsecureDev bool
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		AppEnv:           envOr("KOTAE_ENV", "production"),
+		Port:             envOr("PORT", defaultPort),
+		ProjectID:        firstNonEmpty(os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GCLOUD_PROJECT")),
+		VertexLocation:   envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
+		FastModel:        envOr("KOTAE_FAST_MODEL", defaultFastModel),
+		RequestTimeout:   envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
+		MaxRequestBytes:  envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
+		AllowInsecureDev: envBool("KOTAE_ALLOW_INSECURE_DEV"),
+	}
+
+	if strings.TrimSpace(cfg.Port) == "" {
+		return Config{}, errors.New("PORT must not be empty")
+	}
+	if cfg.AllowInsecureDev && cfg.AppEnv != "local" && cfg.AppEnv != "test" {
+		return Config{}, errors.New("KOTAE_ALLOW_INSECURE_DEV is only allowed when KOTAE_ENV is local or test")
+	}
+	if !cfg.AllowInsecureDev && strings.TrimSpace(cfg.ProjectID) == "" {
+		return Config{}, errors.New("GOOGLE_CLOUD_PROJECT is required")
+	}
+	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 55*time.Second {
+		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 55s")
+	}
+	if cfg.MaxRequestBytes < 1024 || cfg.MaxRequestBytes > 1024*1024 {
+		return Config{}, fmt.Errorf("KOTAE_MAX_REQUEST_BYTES must be between 1 KiB and 1 MiB")
+	}
+
+	return cfg, nil
+}
+
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func envBool(key string) bool {
+	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
+	return err == nil && value
+}
+
+func envDurationOr(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt64Or(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+

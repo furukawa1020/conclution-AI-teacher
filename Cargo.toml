@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "apps/client",
+    "crates/audio_core",
+    "crates/audio_vault",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.93"
+version = "0.1.0"
+
+[workspace.dependencies]
+aes-gcm = { version = "=0.11.0", features = ["aes", "zeroize"] }
+dioxus = { version = "=0.7.9", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.17"
+zeroize = "1.9.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

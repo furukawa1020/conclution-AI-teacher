@@ -75,6 +75,12 @@ if ($LASTEXITCODE -ne 0 -or $wasmBindgenVersion -notmatch 'wasm-bindgen\s+0\.2\.
 }
 
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+if (
+    ((Get-Item -LiteralPath $targetRoot -Force).Attributes -band
+        [System.IO.FileAttributes]::ReparsePoint) -ne 0
+) {
+    throw "Cargo target directory must not be a reparse point."
+}
 $previousTargetDirectory = $env:CARGO_TARGET_DIR
 try {
     $env:CARGO_TARGET_DIR = $targetRoot
@@ -170,6 +176,17 @@ try {
         throw "bootstrap.js must initialize Firebase before Rust/Wasm."
     }
 
+    $index = [System.IO.File]::ReadAllText(
+        (Join-Path $stagingRoot "index.html"),
+        [System.Text.Encoding]::UTF8
+    )
+    if (
+        [regex]::Matches($index, '<script\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -ne 1 -or
+        $index -notmatch '<script\s+type="module"\s+src="/bootstrap\.js"></script>'
+    ) {
+        throw "index.html must contain only the external bootstrap.js module script."
+    }
+
     $totalBytes = 0L
     foreach ($entry in @(Get-ChildItem -LiteralPath $stagingRoot -Recurse -Force)) {
         if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -208,6 +225,14 @@ try {
         throw "Generated web artifacts exceed the 25 MiB aggregate safety limit."
     }
 
+    $distParent = Split-Path -Parent $distRoot
+    New-Item -ItemType Directory -Force -Path $distParent | Out-Null
+    if (
+        ((Get-Item -LiteralPath $distParent -Force).Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    ) {
+        throw "Web distribution parent must not be a reparse point."
+    }
     if (Test-Path -LiteralPath $distRoot) {
         if (
             ((Get-Item -LiteralPath $distRoot -Force).Attributes -band
@@ -217,7 +242,6 @@ try {
         }
         Remove-Item -LiteralPath $distRoot -Recurse -Force
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $distRoot) | Out-Null
     Move-Item -LiteralPath $stagingRoot -Destination $distRoot
     Write-Output "WEB_DIST=$distRoot"
 } finally {

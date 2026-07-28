@@ -306,6 +306,43 @@ func TestEvaluationRateLimitStopsBeforeModelInvocation(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedEvaluationDoesNotConsumeRateLimit(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	rateLimiter := &fakeLimiter{}
+	evaluator := &fakeEvaluator{}
+	evaluationStore := &fakeStore{}
+	handler := New(
+		logger,
+		fakeVerifier{err: identity.ErrUnauthenticated},
+		rateLimiter,
+		evaluator,
+		evaluationStore,
+		2*time.Second,
+		4*1024,
+	)
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/evaluations",
+		`{"question":"実施しますか","answer":"実施します。","mode":"decision"}`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d; want %d", response.Code, http.StatusUnauthorized)
+	}
+	if rateLimiter.calls != 0 {
+		t.Fatalf("limiter calls = %d; want 0", rateLimiter.calls)
+	}
+	if evaluator.calls != 0 {
+		t.Fatalf("evaluator calls = %d; want 0", evaluator.calls)
+	}
+}
+
 func TestSecurityHeadersAreApplied(t *testing.T) {
 	t.Parallel()
 

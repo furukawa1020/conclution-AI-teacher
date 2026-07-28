@@ -708,22 +708,28 @@
     color: var(--ink-soft);
   }
 
-  .track-segment {
-    min-width: 7px;
+  .timing-bucket {
+    flex: 1 1 2.5%;
+    min-width: 0;
     border-right: 1px solid var(--paper);
   }
 
-  .track-segment--initial,
-  .track-segment--trailing {
+  .timing-bucket:last-child {
+    border-right: 0;
+  }
+
+  .timing-bucket--empty,
+  .timing-bucket--initial,
+  .timing-bucket--trailing {
     background: var(--paper-deep);
   }
 
-  .track-segment--unclassified {
+  .timing-bucket--unclassified {
     background:
       repeating-linear-gradient(135deg, var(--ink) 0 3px, var(--paper) 3px 7px);
   }
 
-  .track-segment--voice {
+  .timing-bucket--voice {
     background: var(--action-blue);
   }
 
@@ -731,6 +737,12 @@
     padding: 10px;
     font-size: 0.72rem;
     text-align: center;
+  }
+
+  .answer-print__ratio-note {
+    margin-top: 7px;
+    color: var(--ink-soft);
+    font-size: 0.62rem;
   }
 
   .timing-metrics {

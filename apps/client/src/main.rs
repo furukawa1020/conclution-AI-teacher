@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 const QUESTION: &str = "今週金曜までに、試作版を公開できますか。";
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloudState {
     Connecting,
@@ -73,6 +74,38 @@ fn format_first_voice(milliseconds: Option<u64>) -> String {
         .unwrap_or_else(|| "未検出".to_owned())
 }
 
+fn timing_bucket_class(index: usize, features: TimingFeatures) -> &'static str {
+    const BUCKETS: usize = 40;
+
+    if features.elapsed_ms == 0 {
+        return "timing-bucket timing-bucket--empty";
+    }
+
+    let total = u128::from(features.elapsed_ms);
+    let proportional =
+        |milliseconds: u64| ((u128::from(milliseconds) * BUCKETS as u128) / total) as usize;
+    let initial = proportional(
+        features
+            .first_voice_ms
+            .unwrap_or(features.elapsed_ms)
+            .min(features.elapsed_ms),
+    )
+    .min(BUCKETS);
+    let voice = proportional(features.voiced_ms).min(BUCKETS - initial);
+    let trailing = proportional(features.trailing_silence_ms).min(BUCKETS - initial - voice);
+    let unclassified = BUCKETS - initial - voice - trailing;
+
+    if index < initial {
+        "timing-bucket timing-bucket--initial"
+    } else if index < initial + voice {
+        "timing-bucket timing-bucket--voice"
+    } else if index < initial + voice + unclassified {
+        "timing-bucket timing-bucket--unclassified"
+    } else {
+        "timing-bucket timing-bucket--trailing"
+    }
+}
+
 fn stop_microphone(
     mut session: Signal<Option<MicrophoneSession>>,
     mut timing: Signal<TimingFeatures>,
@@ -131,6 +164,7 @@ struct EvaluationResult {
     model_logical_id: String,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct BridgeStatus {
     state: String,
@@ -212,6 +246,7 @@ fn main() {
 fn App() -> Element {
     let mut answer = use_signal(String::new);
     let mut evaluation_state = use_signal(|| EvaluationState::Idle);
+    let mut evaluation_generation = use_signal(|| 0_u64);
     let mut cloud_verification = use_signal(|| None::<bool>);
     let mut recording_state = use_signal(|| RecordingState::Idle);
     let mut recording_generation = use_signal(|| 0_u64);
@@ -230,18 +265,6 @@ fn App() -> Element {
         timing_snapshot.elapsed_ms > 0 || recording_snapshot == RecordingState::Complete;
     let remaining_seconds =
         10_u64.saturating_sub(timing_snapshot.elapsed_ms.min(10_000).div_ceil(1_000));
-    let initial_silence_ms = timing_snapshot
-        .first_voice_ms
-        .unwrap_or(timing_snapshot.elapsed_ms);
-    let unclassified_ms = timing_snapshot
-        .elapsed_ms
-        .saturating_sub(initial_silence_ms)
-        .saturating_sub(timing_snapshot.voiced_ms)
-        .saturating_sub(timing_snapshot.trailing_silence_ms);
-    let initial_style = format!("flex: {}", initial_silence_ms.max(1));
-    let voice_style = format!("flex: {}", timing_snapshot.voiced_ms.max(1));
-    let unclassified_style = format!("flex: {}", unclassified_ms.max(1));
-    let trailing_style = format!("flex: {}", timing_snapshot.trailing_silence_ms.max(1));
     let prepared_cloud_state = cloud_status
         .read()
         .as_ref()
@@ -378,17 +401,22 @@ fn App() -> Element {
                                 match recording_snapshot {
                                     RecordingState::Idle => {
                                         "音声は保存・送信せず、発話の時間特徴だけをRustで計算します。"
+                                            .to_owned()
                                     }
                                     RecordingState::Starting => {
                                         "ブラウザの確認画面で、この測定に使うマイクを選んでください。"
+                                            .to_owned()
                                     }
                                     RecordingState::Recording => {
-                                        "残り約{remaining_seconds}秒。いつでも停止できます。"
+                                        format!(
+                                            "残り約{remaining_seconds}秒。いつでも停止できます。"
+                                        )
                                     }
                                     RecordingState::Complete => {
                                         "下の実測値を確認できます。元の音声データは残していません。"
+                                            .to_owned()
                                     }
-                                    RecordingState::Error(message) => message,
+                                    RecordingState::Error(message) => message.to_owned(),
                                 }
                             }
                         }
@@ -505,9 +533,9 @@ fn App() -> Element {
                                 r#type: "button",
                                 onclick: move |_| {
                                     let current = *recording_state.peek();
-                                    recording_generation.set(
-                                        recording_generation.peek().wrapping_add(1),
-                                    );
+                                    let next_generation =
+                                        recording_generation.peek().wrapping_add(1);
+                                    recording_generation.set(next_generation);
                                     match current {
                                         RecordingState::Starting => {
                                             recording_state.set(RecordingState::Idle);
@@ -546,10 +574,14 @@ fn App() -> Element {
                         class: "answer-input",
                         rows: 4,
                         maxlength: 8000,
+                        disabled: evaluation_running,
                         value: "{answer_value}",
                         placeholder: "例：はい、金曜までに試作版を公開できます。理由は…",
                         oninput: move |event| {
                             answer.set(event.value());
+                            let next_generation =
+                                evaluation_generation.peek().wrapping_add(1);
+                            evaluation_generation.set(next_generation);
                             evaluation_state.set(EvaluationState::Idle);
                         }
                     }
@@ -564,9 +596,17 @@ fn App() -> Element {
                             disabled: answer_is_empty || evaluation_running,
                             onclick: move |_| {
                                 let submitted_answer = answer.read().clone();
+                                let request_generation =
+                                    evaluation_generation.peek().wrapping_add(1);
+                                evaluation_generation.set(request_generation);
                                 evaluation_state.set(EvaluationState::Loading);
                                 spawn(async move {
-                                    let next_state = match cloud::evaluate(QUESTION, &submitted_answer).await {
+                                    let result =
+                                        cloud::evaluate(QUESTION, &submitted_answer).await;
+                                    if *evaluation_generation.peek() != request_generation {
+                                        return;
+                                    }
+                                    let next_state = match result {
                                         Ok(result) => {
                                             cloud_verification.set(Some(true));
                                             EvaluationState::Success(result)
@@ -692,28 +732,20 @@ fn App() -> Element {
                             "まだ測定されていません"
                         },
                         if has_timing_measurement {
-                            span {
-                                class: "track-segment track-segment--initial",
-                                style: "{initial_style}",
-                                title: "発話開始まで"
-                            }
-                            span {
-                                class: "track-segment track-segment--voice",
-                                style: "{voice_style}",
-                                title: "発話判定"
-                            }
-                            span {
-                                class: "track-segment track-segment--unclassified",
-                                style: "{unclassified_style}",
-                                title: "区間内の無音"
-                            }
-                            span {
-                                class: "track-segment track-segment--trailing",
-                                style: "{trailing_style}",
-                                title: "末尾の無音"
+                            for bucket in 0..40 {
+                                span {
+                                    key: "{bucket}",
+                                    class: timing_bucket_class(bucket, timing_snapshot),
+                                    aria_hidden: "true"
+                                }
                             }
                         } else {
                             span { class: "track-empty-label", "マイクで測ると、ここに実測線が現れます" }
+                        }
+                    }
+                    if has_timing_measurement {
+                        p { class: "answer-print__ratio-note",
+                            "40セルは集計比率です。発話内の順序や内容を復元する表示ではありません。"
                         }
                     }
                     dl { class: "timing-metrics", aria_live: "polite",
@@ -795,5 +827,31 @@ fn App() -> Element {
                 span { "RAW VOICE ≠ IDENTITY" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timing_buckets_use_measured_proportions_without_inline_styles() {
+        let features = TimingFeatures {
+            elapsed_ms: 10_000,
+            first_voice_ms: Some(1_000),
+            voiced_ms: 5_000,
+            trailing_silence_ms: 2_000,
+            speech_segments: 2,
+        };
+
+        assert!(timing_bucket_class(0, features).ends_with("--initial"));
+        assert!(timing_bucket_class(4, features).ends_with("--voice"));
+        assert!(timing_bucket_class(25, features).ends_with("--unclassified"));
+        assert!(timing_bucket_class(39, features).ends_with("--trailing"));
+    }
+
+    #[test]
+    fn timing_buckets_are_empty_before_measurement() {
+        assert!(timing_bucket_class(0, TimingFeatures::default()).ends_with("--empty"));
     }
 }

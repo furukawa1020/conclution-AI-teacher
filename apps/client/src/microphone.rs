@@ -8,6 +8,7 @@
 use core::fmt;
 use kotae_audio_core::TimingFeatures;
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicrophoneError {
     Unsupported,
@@ -85,7 +86,7 @@ mod platform {
     use wasm_bindgen::{JsCast, JsValue, closure::Closure};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
-        AnalyserNode, AudioContext, AudioNode, MediaStream, MediaStreamAudioSourceNode,
+        AnalyserNode, AudioContext, MediaStream, MediaStreamAudioSourceNode,
         MediaStreamConstraints, MediaStreamTrack, Window,
     };
 
@@ -98,19 +99,40 @@ mod platform {
         error: Option<MicrophoneError>,
     }
 
-    pub(super) struct Session {
+    #[derive(Clone)]
+    struct CaptureResources {
         window: Window,
         context: AudioContext,
         source: MediaStreamAudioSourceNode,
         analyser: AnalyserNode,
         tracks: Rc<RefCell<Vec<MediaStreamTrack>>>,
         pcm: Rc<RefCell<Vec<f32>>>,
-        analysis: Rc<RefCell<AnalysisState>>,
         interval_id: Rc<Cell<Option<i32>>>,
+        active: Rc<Cell<bool>>,
+    }
+
+    impl CaptureResources {
+        fn release(&self) {
+            if let Some(interval_id) = self.interval_id.take() {
+                self.window.clear_interval_with_handle(interval_id);
+            }
+            if self.active.replace(false) {
+                stop_tracks(&self.tracks.borrow());
+                self.tracks.borrow_mut().clear();
+                let _ = self.source.disconnect();
+                let _ = self.analyser.disconnect();
+                let _ = self.context.close();
+            }
+            self.pcm.borrow_mut().fill(0.0);
+        }
+    }
+
+    pub(super) struct Session {
+        resources: CaptureResources,
+        analysis: Rc<RefCell<AnalysisState>>,
         interval: Option<Closure<dyn FnMut()>>,
         deadline_id: Option<i32>,
         deadline: Option<Closure<dyn FnMut()>>,
-        active: Rc<Cell<bool>>,
     }
 
     impl Session {
@@ -241,29 +263,23 @@ mod platform {
             let interval_id = Rc::new(Cell::new(Some(interval_id)));
             let tracks = Rc::new(RefCell::new(tracks));
             let active = Rc::new(Cell::new(true));
+            let resources = CaptureResources {
+                window: window.clone(),
+                context,
+                source,
+                analyser,
+                tracks,
+                pcm,
+                interval_id,
+                active,
+            };
 
             // Capture has its own hard upper bound. The UI also observes this
             // state, but the microphone is released here even if that UI task
             // is cancelled or fails to render.
-            let deadline_window = window.clone();
-            let deadline_context = context.clone();
-            let deadline_source = source.clone();
-            let deadline_analyser = analyser.clone();
-            let deadline_tracks = Rc::clone(&tracks);
-            let deadline_pcm = Rc::clone(&pcm);
-            let deadline_interval_id = Rc::clone(&interval_id);
-            let deadline_active = Rc::clone(&active);
+            let deadline_resources = resources.clone();
             let deadline = Closure::wrap(Box::new(move || {
-                release_capture(
-                    &deadline_window,
-                    &deadline_context,
-                    &deadline_source,
-                    &deadline_analyser,
-                    &deadline_tracks,
-                    &deadline_pcm,
-                    &deadline_interval_id,
-                    &deadline_active,
-                );
+                deadline_resources.release();
             }) as Box<dyn FnMut()>);
             let deadline_id = window
                 .set_timeout_with_callback_and_timeout_and_arguments_0(
@@ -271,37 +287,21 @@ mod platform {
                     10_000,
                 )
                 .map_err(|_| {
-                    release_capture(
-                        &window,
-                        &context,
-                        &source,
-                        &analyser,
-                        &tracks,
-                        &pcm,
-                        &interval_id,
-                        &active,
-                    );
+                    resources.release();
                     MicrophoneError::AudioGraphFailed
                 })?;
 
             Ok(Self {
-                window,
-                context,
-                source,
-                analyser,
-                tracks,
-                pcm,
+                resources,
                 analysis,
-                interval_id,
                 interval: Some(interval),
                 deadline_id: Some(deadline_id),
                 deadline: Some(deadline),
-                active,
             })
         }
 
         pub(super) fn is_active(&self) -> bool {
-            self.active.get()
+            self.resources.active.get()
         }
 
         pub(super) fn features(&self) -> TimingFeatures {
@@ -314,19 +314,10 @@ mod platform {
 
         pub(super) fn stop(&mut self) -> TimingFeatures {
             if let Some(deadline_id) = self.deadline_id.take() {
-                self.window.clear_timeout_with_handle(deadline_id);
+                self.resources.window.clear_timeout_with_handle(deadline_id);
             }
             self.deadline.take();
-            release_capture(
-                &self.window,
-                &self.context,
-                &self.source,
-                &self.analyser,
-                &self.tracks,
-                &self.pcm,
-                &self.interval_id,
-                &self.active,
-            );
+            self.resources.release();
             self.interval.take();
             self.features()
         }
@@ -374,29 +365,6 @@ mod platform {
         for track in tracks {
             track.stop();
         }
-    }
-
-    fn release_capture(
-        window: &Window,
-        context: &AudioContext,
-        source: &MediaStreamAudioSourceNode,
-        analyser: &AnalyserNode,
-        tracks: &Rc<RefCell<Vec<MediaStreamTrack>>>,
-        pcm: &Rc<RefCell<Vec<f32>>>,
-        interval_id: &Rc<Cell<Option<i32>>>,
-        active: &Rc<Cell<bool>>,
-    ) {
-        if let Some(interval_id) = interval_id.take() {
-            window.clear_interval_with_handle(interval_id);
-        }
-        if active.replace(false) {
-            stop_tracks(&tracks.borrow());
-            tracks.borrow_mut().clear();
-            let _ = source.disconnect();
-            let _ = analyser.disconnect();
-            let _ = context.close();
-        }
-        pcm.borrow_mut().fill(0.0);
     }
 
     fn classify_capture_error(error: JsValue) -> MicrophoneError {

@@ -21,6 +21,7 @@ Add-Type -AssemblyName System.Net.Http
 
 $expectedProjectId = "kotae-ai-u22-2026"
 $expectedProjectNumber = "551920539470"
+$expectedAppId = "1:551920539470:web:6518baf6d84d7ab89eb01f"
 $expectedSiteId = "kotae-ai"
 $expectedDefaultUrl = "https://kotae-ai.web.app"
 $expectedRunService = "kotae-api"
@@ -250,6 +251,7 @@ function Assert-HostingArtifact {
     }
     if (
         $bridge -notmatch [regex]::Escape("const EXPECTED_PROJECT_ID = `"$expectedProjectId`";") -or
+        $bridge -notmatch [regex]::Escape("const EXPECTED_APP_ID = `"$expectedAppId`";") -or
         $bridge -notmatch [regex]::Escape("const EXPECTED_MESSAGING_SENDER_ID = `"$expectedProjectNumber`";")
     ) {
         throw "firebase-bridge.js is not bound to the expected Firebase project."
@@ -263,6 +265,17 @@ function Assert-HostingArtifact {
     $wasmImport = $bootstrap.IndexOf('import("/wasm/kotae_client.js")', [System.StringComparison]::Ordinal)
     if ($bridgeImport -lt 0 -or $wasmImport -lt 0 -or $bridgeImport -gt $wasmImport) {
         throw "bootstrap.js must load firebase-bridge.js before the Rust/Wasm module."
+    }
+
+    $index = [System.IO.File]::ReadAllText(
+        (Join-Path $Root "index.html"),
+        [System.Text.Encoding]::UTF8
+    )
+    if (
+        [regex]::Matches($index, '<script\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -ne 1 -or
+        $index -notmatch '<script\s+type="module"\s+src="/bootstrap\.js"></script>'
+    ) {
+        throw "index.html must contain only the external bootstrap.js module script."
     }
 }
 
@@ -310,7 +323,7 @@ try {
 
     $fileHashes = [ordered]@{}
     $gzipByHash = @{}
-    $files = @(Get-ChildItem -LiteralPath $publicRoot -Recurse -File | Sort-Object FullName)
+    $files = @(Get-ChildItem -LiteralPath $publicRoot -Recurse -File -Force | Sort-Object FullName)
     if ($files.Count -eq 0) {
         throw "Hosting public directory is empty."
     }
@@ -364,7 +377,7 @@ try {
             -Bytes $gzipByHash[$hash]
     }
 
-    $csp = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com/firebasejs/12.16.0/ https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.googleapis.com https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; frame-src https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
+    $csp = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com/firebasejs/12.16.0/ https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-hashes' 'sha256-biLFinpqYMtWHmXfkA1BPeCY0/fNt46SAZ+BBk5YUog=' 'sha256-aqNNdDLnnrDOnTNdkJpYlAxKVJtLt9CtFLklmInuUAE=' 'sha256-ZdHxw9eWtnxUb3mk6tBS+gIiVUPE3pGM470keHPDFlE='; img-src 'self' data:; font-src 'self'; connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://content-firebaseappcheck.googleapis.com https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; frame-src https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
     $hostingConfig = @{
         cleanUrls = $true
         trailingSlashBehavior = "REMOVE"
@@ -378,7 +391,7 @@ try {
                     "Permissions-Policy" = "camera=(), geolocation=(), microphone=(self), payment=(), usb=()"
                     "Referrer-Policy" = "no-referrer"
                     "X-Content-Type-Options" = "nosniff"
-                    "Cache-Control" = "no-cache"
+                    "Cache-Control" = "no-store"
                 }
             }
         )

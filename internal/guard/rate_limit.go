@@ -61,6 +61,13 @@ func (s *counterState) advance(now time.Time, limits Limits) error {
 	if s.MinuteCount < 0 || s.DayCount < 0 {
 		return errors.New("invalid negative rate-limit counter")
 	}
+	if s.Schema == 1 &&
+		(s.MinuteStart.IsZero() ||
+			s.DayStart.IsZero() ||
+			s.MinuteStart.After(minuteStart) ||
+			s.DayStart.After(dayStart)) {
+		return errors.New("invalid rate-limit window")
+	}
 	if !s.MinuteStart.Equal(minuteStart) {
 		s.MinuteStart = minuteStart
 		s.MinuteCount = 0
@@ -120,6 +127,9 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 			if decodeErr := snapshot.DataTo(&state); decodeErr != nil {
 				return fmt.Errorf("decode rate-limit counter: %w", decodeErr)
 			}
+			if state.Schema != 1 {
+				return errors.New("unsupported persisted rate-limit schema")
+			}
 		case status.Code(getErr) != codes.NotFound:
 			return fmt.Errorf("read rate-limit counter: %w", getErr)
 		}
@@ -134,7 +144,7 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 			"dayCount":      state.DayCount,
 			"schemaVersion": 1,
 			"updatedAt":     firestore.ServerTimestamp,
-		}, firestore.MergeAll)
+		})
 	})
 	if errors.Is(err, ErrRateLimitExceeded) {
 		return ErrRateLimitExceeded

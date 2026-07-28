@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/firebase/genkit/go/core"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
@@ -340,6 +342,26 @@ func TestUnauthenticatedEvaluationDoesNotConsumeRateLimit(t *testing.T) {
 	}
 	if evaluator.calls != 0 {
 		t.Fatalf("evaluator calls = %d; want 0", evaluator.calls)
+	}
+}
+
+func TestEvaluationProviderStatusIsFiniteAndDoesNotExposeMessage(t *testing.T) {
+	t.Parallel()
+
+	sensitive := "answer text must not appear"
+	err := fmt.Errorf(
+		"wrapped: %w",
+		core.NewError(core.NOT_FOUND, "%s", sensitive),
+	)
+	status := evaluationProviderStatus(err)
+	if status != "not_found" {
+		t.Fatalf("provider status = %q; want not_found", status)
+	}
+	if strings.Contains(status, sensitive) {
+		t.Fatal("provider status must not expose an error message")
+	}
+	if got := evaluationProviderStatus(errors.New(sensitive)); got != "internal" {
+		t.Fatalf("plain error status = %q; want internal", got)
 	}
 }
 

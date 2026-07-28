@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/firebase/genkit/go/core"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
@@ -145,6 +146,7 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 			"uid_hash", shortHash(principal.UID),
 			"duration_ms", time.Since(started).Milliseconds(),
 			"error_class", "model_or_schema_failure",
+			"provider_status", evaluationProviderStatus(err),
 		)
 		writeProblem(w, http.StatusBadGateway, "evaluation_unavailable", "The evaluation service is temporarily unavailable.")
 		return
@@ -173,6 +175,34 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 		"attemptId":  attemptID,
 		"evaluation": result,
 	})
+}
+
+func evaluationProviderStatus(err error) string {
+	var genkitError *core.GenkitError
+	if !errors.As(err, &genkitError) {
+		return "internal"
+	}
+	switch genkitError.Status {
+	case core.CANCELLED,
+		core.UNKNOWN,
+		core.INVALID_ARGUMENT,
+		core.DEADLINE_EXCEEDED,
+		core.NOT_FOUND,
+		core.ALREADY_EXISTS,
+		core.PERMISSION_DENIED,
+		core.UNAUTHENTICATED,
+		core.RESOURCE_EXHAUSTED,
+		core.FAILED_PRECONDITION,
+		core.ABORTED,
+		core.OUT_OF_RANGE,
+		core.UNIMPLEMENTED,
+		core.INTERNAL,
+		core.UNAVAILABLE,
+		core.DATA_LOSS:
+		return strings.ToLower(string(genkitError.Status))
+	default:
+		return "internal"
+	}
 }
 
 func (s *Server) requireIdentity(next http.Handler) http.Handler {

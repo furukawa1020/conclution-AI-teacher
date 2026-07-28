@@ -121,4 +121,3 @@ func allowedIssue(issue string) bool {
 		return false
 	}
 }
-

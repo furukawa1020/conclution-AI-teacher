@@ -77,4 +77,3 @@ func (MemoryEvaluationStore) Save(
 ) (string, error) {
 	return fmt.Sprintf("local-%d", time.Now().UnixNano()), nil
 }
-

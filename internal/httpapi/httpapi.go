@@ -139,7 +139,7 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"attemptId": attemptID,
+		"attemptId":  attemptID,
 		"evaluation": result,
 	})
 }

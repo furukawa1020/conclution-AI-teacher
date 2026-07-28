@@ -82,7 +82,7 @@ mod platform {
     use kotae_audio_core::{DetectorConfig, TimingFeatures, VoiceDetector};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
-    use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+    use wasm_bindgen::{JsCast, JsValue, closure::Closure};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
         AnalyserNode, AudioContext, AudioNode, MediaStream, MediaStreamAudioSourceNode,

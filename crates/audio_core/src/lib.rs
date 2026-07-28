@@ -203,9 +203,10 @@ impl VoiceDetector {
                 } else {
                     1
                 };
-                self.features.voiced_ms = self.features.voiced_ms.saturating_add(
-                    self.frame_duration_ms().saturating_mul(confirmed_frames),
-                );
+                self.features.voiced_ms = self
+                    .features
+                    .voiced_ms
+                    .saturating_add(self.frame_duration_ms().saturating_mul(confirmed_frames));
                 self.features.trailing_silence_ms = 0;
             }
         } else {
@@ -268,8 +269,7 @@ impl VoiceDetector {
             Some(previous) => {
                 previous
                     + self.config.noise_learning_rate
-                        * (rms_dbfs.clamp(SILENCE_DBFS, self.config.minimum_voice_dbfs)
-                            - previous)
+                        * (rms_dbfs.clamp(SILENCE_DBFS, self.config.minimum_voice_dbfs) - previous)
             }
         });
     }
@@ -313,7 +313,10 @@ mod tests {
             detector.process_frame(&silence).expect("silence frame");
         }
         assert_eq!(
-            detector.process_frame(&voice).expect("voice candidate").state,
+            detector
+                .process_frame(&voice)
+                .expect("voice candidate")
+                .state,
             VoiceState::PossibleSpeech
         );
         assert_eq!(

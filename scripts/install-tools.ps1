@@ -52,8 +52,16 @@ function Invoke-VerifiedDownload {
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $gcloudInstallRoot "google-cloud-sdk\bin\gcloud.cmd"))) {
-    $archivePath = Join-Path $toolRoot "$gcloudArchiveName.download"
-    Invoke-VerifiedDownload -Uri $gcloudUri -Destination $archivePath -ExpectedSha256 $gcloudSha256
+    $archivePath = Join-Path $toolRoot "$gcloudArchiveName.partial.zip"
+    $legacyArchivePath = Join-Path $toolRoot "$gcloudArchiveName.download"
+    if ((Test-Path -LiteralPath $legacyArchivePath) -and -not (Test-Path -LiteralPath $archivePath)) {
+        Move-Item -LiteralPath $legacyArchivePath -Destination $archivePath
+    }
+    if (Test-Path -LiteralPath $archivePath) {
+        Assert-Sha256 -Path $archivePath -Expected $gcloudSha256
+    } else {
+        Invoke-VerifiedDownload -Uri $gcloudUri -Destination $archivePath -ExpectedSha256 $gcloudSha256
+    }
     New-Item -ItemType Directory -Force -Path $gcloudInstallRoot | Out-Null
     Expand-Archive -LiteralPath $archivePath -DestinationPath $gcloudInstallRoot -Force
     Remove-Item -LiteralPath $archivePath -Force

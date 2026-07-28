@@ -48,7 +48,8 @@ function Get-GzipBytes {
         } finally {
             $gzip.Dispose()
         }
-        return $output.ToArray()
+        # Prevent PowerShell from unrolling byte[] into an object pipeline.
+        return ,$output.ToArray()
     } finally {
         $output.Dispose()
     }
@@ -93,6 +94,54 @@ function Invoke-FirebaseJson {
         $parameters.Body = $Body | ConvertTo-Json -Depth 20 -Compress
     }
     return Invoke-RestMethod @parameters
+}
+
+function Invoke-BinaryUpload {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Uri,
+
+        [Parameter(Mandatory)]
+        [string] $AccessToken,
+
+        [Parameter(Mandatory)]
+        [string] $QuotaProject,
+
+        [Parameter(Mandatory)]
+        [byte[]] $Bytes
+    )
+
+    $client = [System.Net.Http.HttpClient]::new()
+    $request = [System.Net.Http.HttpRequestMessage]::new(
+        [System.Net.Http.HttpMethod]::Post,
+        $Uri
+    )
+    $content = [System.Net.Http.ByteArrayContent]::new($Bytes)
+    $response = $null
+    try {
+        $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new(
+            "Bearer",
+            $AccessToken
+        )
+        $request.Headers.Add("x-goog-user-project", $QuotaProject)
+        $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new(
+            "application/octet-stream"
+        )
+        $request.Content = $content
+
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            $detail = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            throw "Firebase Hosting upload failed with HTTP $([int]$response.StatusCode): $detail"
+        }
+    } finally {
+        $content.Dispose()
+        $request.Dispose()
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+        $client.Dispose()
+    }
 }
 
 $token = ((& $gcloud auth print-access-token) | Out-String).Trim()
@@ -157,16 +206,11 @@ try {
             throw "Firebase requested an unknown file hash."
         }
         $uploadUri = "$($populate.uploadUrl.TrimEnd("/"))/$hash"
-        $response = Invoke-WebRequest `
-            -UseBasicParsing `
-            -Method Post `
+        Invoke-BinaryUpload `
             -Uri $uploadUri `
-            -Headers $headers `
-            -ContentType "application/octet-stream" `
-            -Body $gzipByHash[$hash]
-        if ($response.StatusCode -ne 200) {
-            throw "Firebase Hosting upload failed with HTTP $($response.StatusCode)."
-        }
+            -AccessToken $token `
+            -QuotaProject $ProjectId `
+            -Bytes $gzipByHash[$hash]
     }
 
     $csp = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.googleapis.com; frame-src https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests"

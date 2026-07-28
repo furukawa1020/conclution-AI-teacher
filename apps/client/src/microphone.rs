@@ -53,9 +53,7 @@ impl MicrophoneSession {
     /// This must be called from a user gesture on browsers that enforce
     /// autoplay restrictions.
     pub async fn start() -> Result<Self, MicrophoneError> {
-        platform::Session::start()
-            .await
-            .map(|inner| Self { inner })
+        platform::Session::start().await.map(|inner| Self { inner })
     }
 
     pub fn is_active(&self) -> bool {
@@ -162,8 +160,14 @@ mod platform {
             stream: MediaStream,
             tracks: Vec<MediaStreamTrack>,
         ) -> Result<Self, MicrophoneError> {
-            if let Ok(resume) = context.resume() {
-                if JsFuture::from(resume).await.is_err() {
+            match context.resume() {
+                Ok(resume) => {
+                    if JsFuture::from(resume).await.is_err() {
+                        stop_tracks(&tracks);
+                        return Err(MicrophoneError::AudioGraphFailed);
+                    }
+                }
+                Err(_) => {
                     stop_tracks(&tracks);
                     return Err(MicrophoneError::AudioGraphFailed);
                 }
@@ -187,12 +191,10 @@ mod platform {
                 MicrophoneError::AudioGraphFailed
             })?;
             analyser.set_fft_size(frame_samples as u32);
-            source
-                .connect_with_audio_node(&analyser)
-                .map_err(|_| {
-                    stop_tracks(&tracks);
-                    MicrophoneError::AudioGraphFailed
-                })?;
+            source.connect_with_audio_node(&analyser).map_err(|_| {
+                stop_tracks(&tracks);
+                MicrophoneError::AudioGraphFailed
+            })?;
 
             let detector = VoiceDetector::new(DetectorConfig {
                 sample_rate_hz: sample_rate,

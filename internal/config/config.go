@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 )
 
 const (
@@ -24,10 +26,30 @@ type Config struct {
 	FastModel        string
 	RequestTimeout   time.Duration
 	MaxRequestBytes  int64
+	RateLimits       guard.Limits
 	AllowInsecureDev bool
 }
 
 func Load() (Config, error) {
+	perMinute, err := envBoundedInt(
+		"KOTAE_RATE_LIMIT_PER_MINUTE",
+		guard.DefaultPerMinute,
+		guard.MinPerMinute,
+		guard.MaxPerMinute,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	perDay, err := envBoundedInt(
+		"KOTAE_RATE_LIMIT_PER_DAY",
+		guard.DefaultPerDay,
+		guard.MinPerDay,
+		guard.MaxPerDay,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		AppEnv:           envOr("KOTAE_ENV", "production"),
 		Port:             envOr("PORT", defaultPort),
@@ -37,6 +59,7 @@ func Load() (Config, error) {
 		FastModel:        envOr("KOTAE_FAST_MODEL", defaultFastModel),
 		RequestTimeout:   envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
 		MaxRequestBytes:  envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
+		RateLimits:       guard.Limits{PerMinute: perMinute, PerDay: perDay},
 		AllowInsecureDev: envBool("KOTAE_ALLOW_INSECURE_DEV"),
 	}
 
@@ -57,6 +80,9 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxRequestBytes < 1024 || cfg.MaxRequestBytes > 1024*1024 {
 		return Config{}, fmt.Errorf("KOTAE_MAX_REQUEST_BYTES must be between 1 KiB and 1 MiB")
+	}
+	if err := cfg.RateLimits.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid rate limits: %w", err)
 	}
 
 	return cfg, nil
@@ -105,6 +131,18 @@ func envInt64Or(key string, fallback int64) int64 {
 		return fallback
 	}
 	return parsed
+}
+
+func envBoundedInt(key string, fallback, minimum, maximum int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", key, minimum, maximum)
+	}
+	return parsed, nil
 }
 
 func csvValues(raw string) []string {

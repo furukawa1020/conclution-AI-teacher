@@ -14,6 +14,7 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/config"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
@@ -36,6 +37,7 @@ func main() {
 
 	var evaluator evaluation.Evaluator
 	var verifier identity.Verifier
+	var rateLimiter guard.Limiter
 	var evaluationStore store.EvaluationStore
 	var closeFirestore func() error
 
@@ -43,6 +45,11 @@ func main() {
 		logger.Warn("local authentication bypass is enabled")
 		evaluator = evaluation.DevelopmentEvaluator{}
 		verifier = identity.DevelopmentVerifier{}
+		rateLimiter, err = guard.NewMemoryLimiter(cfg.RateLimits)
+		if err != nil {
+			logger.Error("initialize development rate limiter", "error", err)
+			os.Exit(1)
+		}
 		evaluationStore = store.MemoryEvaluationStore{}
 		closeFirestore = func() error { return nil }
 	} else {
@@ -74,6 +81,11 @@ func main() {
 		}
 
 		verifier = identity.NewFirebaseVerifier(authClient, appCheckClient, cfg.AllowedAppIDs)
+		rateLimiter, err = guard.NewFirestoreLimiter(firestoreClient, cfg.RateLimits)
+		if err != nil {
+			logger.Error("initialize evaluation rate limiter", "error", err)
+			os.Exit(1)
+		}
 		evaluationStore = store.NewFirestoreEvaluationStore(firestoreClient)
 		closeFirestore = firestoreClient.Close
 	}
@@ -86,6 +98,7 @@ func main() {
 	handler := httpapi.New(
 		logger,
 		verifier,
+		rateLimiter,
 		evaluator,
 		evaluationStore,
 		cfg.RequestTimeout,

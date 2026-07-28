@@ -19,12 +19,42 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.Net.Http
 
+$expectedProjectId = "kotae-ai-u22-2026"
+$expectedProjectNumber = "551920539470"
+$expectedSiteId = "kotae-ai"
+$expectedDefaultUrl = "https://kotae-ai.web.app"
+$expectedRunService = "kotae-api"
+$expectedRunRegion = "asia-northeast1"
+
 $workspace = Split-Path -Parent $PSScriptRoot
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace $PublicDirectory))
+$expectedPublicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dist\web"))
 $gcloud = [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
 
+if ($ProjectId -cne $expectedProjectId) {
+    throw "Refusing to deploy project '$ProjectId'; expected '$expectedProjectId'."
+}
+if ($SiteId -cne $expectedSiteId) {
+    throw "Refusing to deploy Hosting site '$SiteId'; expected '$expectedSiteId'."
+}
+if ($RunService -cne $expectedRunService -or $RunRegion -cne $expectedRunRegion) {
+    throw "Refusing an unexpected Cloud Run target; expected $expectedRunService in $expectedRunRegion."
+}
+if (-not [string]::Equals(
+        $publicRoot.TrimEnd("\", "/"),
+        $expectedPublicRoot.TrimEnd("\", "/"),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Refusing to publish outside the generated dist/web directory."
+}
 if (-not (Test-Path -LiteralPath $publicRoot -PathType Container)) {
     throw "Hosting public directory does not exist: $publicRoot"
+}
+if (
+    ((Get-Item -LiteralPath $publicRoot -Force).Attributes -band
+        [System.IO.FileAttributes]::ReparsePoint) -ne 0
+) {
+    throw "Hosting public directory must not be a reparse point."
 }
 if (-not (Test-Path -LiteralPath $gcloud -PathType Leaf)) {
     throw "Google Cloud CLI does not exist: $gcloud"
@@ -145,6 +175,99 @@ function Invoke-BinaryUpload {
     }
 }
 
+function Assert-HostingArtifact {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root
+    )
+
+    $requiredFiles = @(
+        "index.html",
+        "bootstrap.js",
+        "firebase-bridge.js",
+        "assets\main.css",
+        "wasm\kotae_client.js",
+        "wasm\kotae_client_bg.wasm"
+    )
+    foreach ($relativePath in $requiredFiles) {
+        $requiredPath = Join-Path $Root $relativePath
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw "Required Hosting artifact is missing: $relativePath"
+        }
+    }
+
+    $totalBytes = 0L
+    $entries = @(Get-ChildItem -LiteralPath $Root -Recurse -Force)
+    foreach ($entry in $entries) {
+        if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Hosting artifacts must not contain reparse points: $($entry.FullName)"
+        }
+        if ($entry.PSIsContainer) {
+            continue
+        }
+        $relativePath = $entry.FullName.
+            Substring($Root.TrimEnd("\", "/").Length).
+            TrimStart("\", "/").
+            Replace("\", "/")
+        $allowedPath = (
+            $relativePath -in @(
+                "index.html",
+                "bootstrap.js",
+                "firebase-bridge.js",
+                "assets/main.css",
+                "wasm/kotae_client.js",
+                "wasm/kotae_client_bg.wasm"
+            ) -or
+            $relativePath -match '^wasm/snippets/[A-Za-z0-9._/-]+\.js$'
+        )
+        if (-not $allowedPath) {
+            throw "Unexpected Hosting artifact: $relativePath"
+        }
+        if ($entry.Length -gt 15MB) {
+            throw "Hosting artifact exceeds the 15 MiB safety limit: $($entry.FullName)"
+        }
+        if ($entry.Length -gt ([long]::MaxValue - $totalBytes)) {
+            throw "Hosting artifact size overflow."
+        }
+        $totalBytes += $entry.Length
+    }
+    if ($totalBytes -gt 25MB) {
+        throw "Hosting artifacts exceed the 25 MiB aggregate safety limit."
+    }
+
+    $bridgePath = Join-Path $Root "firebase-bridge.js"
+    $bridge = [System.IO.File]::ReadAllText($bridgePath, [System.Text.Encoding]::UTF8)
+    $siteKeyMatch = [regex]::Match(
+        $bridge,
+        '(?m)^\s*const\s+RECAPTCHA_SITE_KEY\s*=\s*"(?<key>[^"]+)";\s*$'
+    )
+    if (
+        -not $siteKeyMatch.Success -or
+        $siteKeyMatch.Groups["key"].Value -eq "__RECAPTCHA_SITE_KEY__" -or
+        $siteKeyMatch.Groups["key"].Value.Length -lt 20
+    ) {
+        throw "firebase-bridge.js does not contain a configured reCAPTCHA Enterprise site key."
+    }
+    if (
+        $bridge -notmatch [regex]::Escape("const EXPECTED_PROJECT_ID = `"$expectedProjectId`";") -or
+        $bridge -notmatch [regex]::Escape("const EXPECTED_MESSAGING_SENDER_ID = `"$expectedProjectNumber`";")
+    ) {
+        throw "firebase-bridge.js is not bound to the expected Firebase project."
+    }
+
+    $bootstrap = [System.IO.File]::ReadAllText(
+        (Join-Path $Root "bootstrap.js"),
+        [System.Text.Encoding]::UTF8
+    )
+    $bridgeImport = $bootstrap.IndexOf('import("/firebase-bridge.js")', [System.StringComparison]::Ordinal)
+    $wasmImport = $bootstrap.IndexOf('import("/wasm/kotae_client.js")', [System.StringComparison]::Ordinal)
+    if ($bridgeImport -lt 0 -or $wasmImport -lt 0 -or $bridgeImport -gt $wasmImport) {
+        throw "bootstrap.js must load firebase-bridge.js before the Rust/Wasm module."
+    }
+}
+
+Assert-HostingArtifact -Root $publicRoot
+
 $token = ((& $gcloud auth print-access-token) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
     throw "Could not obtain a Google Cloud access token."
@@ -158,10 +281,32 @@ $apiRoot = "https://firebasehosting.googleapis.com/v1beta1"
 $versionName = $null
 
 try {
+    $cloudProject = Invoke-RestMethod `
+        -Method Get `
+        -Uri "https://cloudresourcemanager.googleapis.com/v3/projects/$ProjectId" `
+        -Headers $headers
+    if (
+        $cloudProject.projectId -cne $expectedProjectId -or
+        $cloudProject.name -cne "projects/$expectedProjectNumber" -or
+        $cloudProject.state -cne "ACTIVE"
+    ) {
+        throw "Google Cloud project identity check failed."
+    }
+
     $site = Invoke-FirebaseJson `
         -Method Get `
         -Uri "$apiRoot/projects/$ProjectId/sites/$SiteId" `
         -Headers $headers
+    $validSiteNames = @(
+        "projects/$expectedProjectId/sites/$expectedSiteId",
+        "projects/$expectedProjectNumber/sites/$expectedSiteId"
+    )
+    if (
+        $validSiteNames -notcontains $site.name -or
+        $site.defaultUrl.TrimEnd("/") -cne $expectedDefaultUrl
+    ) {
+        throw "Firebase Hosting site identity check failed."
+    }
 
     $fileHashes = [ordered]@{}
     $gzipByHash = @{}

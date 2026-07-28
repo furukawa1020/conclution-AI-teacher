@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 )
 
@@ -70,7 +71,28 @@ func (s *fakeStore) Save(
 	return "attempt-123", nil
 }
 
+type fakeLimiter struct {
+	calls int
+	err   error
+}
+
+func (l *fakeLimiter) Consume(_ context.Context, uid string, _ time.Time) error {
+	l.calls++
+	if uid != "user-123" {
+		return errors.New("unexpected uid")
+	}
+	return l.err
+}
+
 func testHandler(evaluator *fakeEvaluator, evaluationStore *fakeStore) http.Handler {
+	return testHandlerWithLimiter(evaluator, evaluationStore, &fakeLimiter{})
+}
+
+func testHandlerWithLimiter(
+	evaluator *fakeEvaluator,
+	evaluationStore *fakeStore,
+	rateLimiter *fakeLimiter,
+) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return New(
 		logger,
@@ -79,6 +101,7 @@ func testHandler(evaluator *fakeEvaluator, evaluationStore *fakeStore) http.Hand
 			AppID: "app-123",
 			Roles: map[string]bool{"user": true},
 		}},
+		rateLimiter,
 		evaluator,
 		evaluationStore,
 		2*time.Second,
@@ -226,6 +249,60 @@ func TestCrossSiteWriteIsRejectedBeforeAuthentication(t *testing.T) {
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d; want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestEvaluationRateLimitStopsBeforeModelInvocation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		limiterErr error
+		wantStatus int
+	}{
+		{
+			name:       "quota exceeded",
+			limiterErr: guard.ErrRateLimitExceeded,
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:       "counter store unavailable",
+			limiterErr: errors.New("firestore unavailable"),
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			evaluator := &fakeEvaluator{}
+			evaluationStore := &fakeStore{}
+			rateLimiter := &fakeLimiter{err: test.limiterErr}
+			handler := testHandlerWithLimiter(evaluator, evaluationStore, rateLimiter)
+			request := authenticatedRequest(
+				http.MethodPost,
+				"/api/v1/evaluations",
+				`{"question":"実施しますか","answer":"実施します。","mode":"decision"}`,
+			)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d; want %d; body = %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if rateLimiter.calls != 1 {
+				t.Fatalf("limiter calls = %d; want 1", rateLimiter.calls)
+			}
+			if evaluator.calls != 0 {
+				t.Fatalf("evaluator calls = %d; want 0", evaluator.calls)
+			}
+			if evaluationStore.calls != 0 {
+				t.Fatalf("store calls = %d; want 0", evaluationStore.calls)
+			}
+		})
 	}
 }
 

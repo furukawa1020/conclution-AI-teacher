@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
 )
@@ -22,6 +24,7 @@ import (
 type Server struct {
 	logger          *slog.Logger
 	verifier        identity.Verifier
+	rateLimiter     guard.Limiter
 	evaluator       evaluation.Evaluator
 	store           store.EvaluationStore
 	requestTimeout  time.Duration
@@ -31,6 +34,7 @@ type Server struct {
 func New(
 	logger *slog.Logger,
 	verifier identity.Verifier,
+	rateLimiter guard.Limiter,
 	evaluator evaluation.Evaluator,
 	evaluationStore store.EvaluationStore,
 	requestTimeout time.Duration,
@@ -39,6 +43,7 @@ func New(
 	server := &Server{
 		logger:          logger,
 		verifier:        verifier,
+		rateLimiter:     rateLimiter,
 		evaluator:       evaluator,
 		store:           evaluationStore,
 		requestTimeout:  requestTimeout,
@@ -114,6 +119,25 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	started := time.Now()
+	if err := s.rateLimiter.Consume(ctx, principal.UID, started.UTC()); err != nil {
+		if errors.Is(err, guard.ErrRateLimitExceeded) {
+			s.logger.WarnContext(ctx, "evaluation rate limit exceeded",
+				"request_id", requestIDFromContext(ctx),
+				"uid_hash", shortHash(principal.UID),
+				"error_class", "rate_limit_exceeded",
+			)
+			writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The evaluation rate limit has been reached.")
+			return
+		}
+		s.logger.ErrorContext(ctx, "evaluation rate-limit guard failed",
+			"request_id", requestIDFromContext(ctx),
+			"uid_hash", shortHash(principal.UID),
+			"error_class", "rate_limit_store_failure",
+		)
+		writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The evaluation service cannot safely accept this request.")
+		return
+	}
+
 	result, err := s.evaluator.Evaluate(ctx, input)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "evaluation failed",

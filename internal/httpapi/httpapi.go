@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -85,6 +86,12 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeProblem(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json.")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxRequestBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -153,17 +160,21 @@ func (s *Server) requireIdentity(next http.Handler) http.Handler {
 			return
 		}
 
-		authHeader := strings.TrimSpace(authHeaders[0])
+		authFields := strings.Fields(authHeaders[0])
 		appCheckHeader := strings.TrimSpace(appCheckHeaders[0])
-		const bearer = "Bearer "
-		if !strings.HasPrefix(authHeader, bearer) || len(authHeader) <= len(bearer) || appCheckHeader == "" {
+		if len(authFields) != 2 ||
+			!strings.EqualFold(authFields[0], "Bearer") ||
+			authFields[1] == "" ||
+			len(authFields[1]) > 8*1024 ||
+			appCheckHeader == "" ||
+			len(appCheckHeader) > 8*1024 {
 			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
 			return
 		}
 
 		principal, err := s.verifier.Verify(
 			r.Context(),
-			strings.TrimSpace(strings.TrimPrefix(authHeader, bearer)),
+			authFields[1],
 			appCheckHeader,
 		)
 		if err != nil {
@@ -186,7 +197,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)

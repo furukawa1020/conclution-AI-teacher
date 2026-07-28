@@ -1,13 +1,11 @@
+mod microphone;
+
 use dioxus::prelude::*;
+use kotae_audio_core::TimingFeatures;
+use microphone::{MicrophoneError, MicrophoneSession};
 use serde::Deserialize;
 
 const QUESTION: &str = "今週金曜までに、試作版を公開できますか。";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HistoryMode {
-    Managed,
-    Vault,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloudState {
@@ -36,6 +34,66 @@ impl CloudState {
             Self::Unavailable => "stamp stamp--cloud-error",
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordingState {
+    Idle,
+    Starting,
+    Recording,
+    Complete,
+    Error(&'static str),
+}
+
+fn microphone_error_message(error: MicrophoneError) -> &'static str {
+    match error {
+        MicrophoneError::Unsupported => "このブラウザではマイク測定を利用できません。",
+        MicrophoneError::PermissionDenied => {
+            "マイクの使用が許可されませんでした。ブラウザの権限設定を確認してください。"
+        }
+        MicrophoneError::DeviceUnavailable => {
+            "利用できるマイクを確認できませんでした。接続状態を確認してください。"
+        }
+        MicrophoneError::CaptureFailed => {
+            "マイクを開始できませんでした。ページを再読み込みしてお試しください。"
+        }
+        MicrophoneError::AudioGraphFailed | MicrophoneError::DetectorFailed => {
+            "端末内の音声解析を開始できませんでした。ページを再読み込みしてお試しください。"
+        }
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    format!("{:.2}秒", milliseconds as f64 / 1_000.0)
+}
+
+fn format_first_voice(milliseconds: Option<u64>) -> String {
+    milliseconds
+        .map(format_duration)
+        .unwrap_or_else(|| "未検出".to_owned())
+}
+
+fn stop_microphone(
+    mut session: Signal<Option<MicrophoneSession>>,
+    mut timing: Signal<TimingFeatures>,
+) {
+    let final_features = session
+        .write()
+        .take()
+        .map(|mut active_session| active_session.stop());
+    if let Some(final_features) = final_features {
+        timing.set(final_features);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn wait_for_recording_tick() {
+    gloo_timers::future::TimeoutFuture::new(100).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_recording_tick() {
+    std::future::pending::<()>().await;
 }
 
 #[derive(Clone, PartialEq)]

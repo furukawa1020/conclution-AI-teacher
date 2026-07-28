@@ -1719,10 +1719,12 @@ name = "kotae-client"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "getrandom 0.4.3",
  "kotae-answer-print",
  "kotae-audio-core",
  "kotae-audio-vault",
  "serde",
+ "web-sys",
 ]
 
 [[package]]

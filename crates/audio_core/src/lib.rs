@@ -292,8 +292,8 @@ mod tests {
 
     fn detector() -> VoiceDetector {
         VoiceDetector::new(DetectorConfig {
-            sample_rate_hz: 1_000,
-            frame_samples: 10,
+            sample_rate_hz: 10_000,
+            frame_samples: 100,
             onset_frames: 2,
             offset_frames: 3,
             minimum_voice_dbfs: -40.0,
@@ -306,8 +306,8 @@ mod tests {
     #[test]
     fn extracts_first_voice_and_segment_without_retaining_pcm() {
         let mut detector = detector();
-        let silence = [0.001; 10];
-        let voice = [0.25; 10];
+        let silence = [0.001; 100];
+        let voice = [0.25; 100];
 
         for _ in 0..5 {
             detector.process_frame(&silence).expect("silence frame");
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn requires_sustained_silence_before_closing_a_segment() {
         let mut detector = detector();
-        let voice = [0.25; 10];
-        let silence = [0.0; 10];
+        let voice = [0.25; 100];
+        let silence = [0.0; 100];
 
         detector.process_frame(&voice).expect("candidate");
         detector.process_frame(&voice).expect("onset");
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn rejects_non_finite_samples() {
         let mut detector = detector();
-        let mut frame = [0.0; 10];
+        let mut frame = [0.0; 100];
         frame[3] = f32::NAN;
         assert_eq!(
             detector.process_frame(&frame),

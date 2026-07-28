@@ -1,9 +1,8 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import {
   browserSessionPersistence,
-  getAuth,
   getIdToken,
-  setPersistence,
+  initializeAuth,
   signInAnonymously,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 import {
@@ -14,7 +13,11 @@ import {
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
-const RECAPTCHA_SITE_KEY = "__RECAPTCHA_SITE_KEY__";
+const EXPECTED_AUTH_DOMAIN = "kotae-ai-u22-2026.firebaseapp.com";
+const EXPECTED_MESSAGING_SENDER_ID = "551920539470";
+// reCAPTCHA Enterprise site keys are public identifiers. The matching secret
+// configuration and verification remain in Firebase App Check.
+const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
 const API_ENDPOINT = "/api/v1/evaluations";
 const QUESTION = "今週金曜までに、試作版を公開できますか。";
 
@@ -22,14 +25,13 @@ const ALLOWED_CONFIG_KEYS = Object.freeze([
   "apiKey",
   "appId",
   "authDomain",
-  "databaseURL",
-  "measurementId",
   "messagingSenderId",
   "projectId",
-  "storageBucket",
 ]);
 
-let servicesPromise;
+let appServicesPromise;
+let authenticatedUserPromise;
+let evaluationPromise;
 
 function fail(code) {
   throw new Error(code);
@@ -53,8 +55,8 @@ function verifiedConfig(raw) {
   if (
     typeof raw.apiKey !== "string" ||
     raw.apiKey.length < 20 ||
-    typeof raw.authDomain !== "string" ||
-    !raw.authDomain.endsWith(".firebaseapp.com")
+    raw.authDomain !== EXPECTED_AUTH_DOMAIN ||
+    raw.messagingSenderId !== EXPECTED_MESSAGING_SENDER_ID
   ) {
     fail("firebase_config_invalid");
   }
@@ -89,7 +91,7 @@ function siteKeyConfigured() {
   );
 }
 
-async function initializeServices() {
+async function initializeAppServices() {
   if (!siteKeyConfigured()) {
     fail("app_check_not_configured");
   }
@@ -103,26 +105,38 @@ async function initializeServices() {
     fail("firebase_project_mismatch");
   }
 
-  const auth = getAuth(app);
-  await setPersistence(auth, browserSessionPersistence);
-  const credential = auth.currentUser
-    ? { user: auth.currentUser }
-    : await signInAnonymously(auth);
   const appCheck = initializeAppCheck(app, {
     provider: new ReCaptchaEnterpriseProvider(RECAPTCHA_SITE_KEY),
     isTokenAutoRefreshEnabled: true,
   });
 
   return Object.freeze({
+    app,
     appCheck,
-    auth,
+  });
+}
+
+function appServices() {
+  appServicesPromise ??= initializeAppServices();
+  return appServicesPromise;
+}
+
+async function initializeAuthenticatedUser() {
+  const { app } = await appServices();
+  const auth = initializeAuth(app, {
+    persistence: browserSessionPersistence,
+  });
+  const credential = auth.currentUser
+    ? { user: auth.currentUser }
+    : await signInAnonymously(auth);
+  return Object.freeze({
     user: credential.user,
   });
 }
 
-function services() {
-  servicesPromise ??= initializeServices();
-  return servicesPromise;
+function authenticatedUser() {
+  authenticatedUserPromise ??= initializeAuthenticatedUser();
+  return authenticatedUserPromise;
 }
 
 function safeEvaluation(payload) {
@@ -163,7 +177,7 @@ async function getStatus() {
     });
   }
   try {
-    await services();
+    await appServices();
     return Object.freeze({
       state: "ready",
       label: "CLOUD 接続済み",
@@ -176,19 +190,11 @@ async function getStatus() {
   }
 }
 
-async function evaluate(question, answer) {
-  if (question !== QUESTION) {
-    fail("question_mismatch");
-  }
-  if (
-    typeof answer !== "string" ||
-    answer.trim().length === 0 ||
-    Array.from(answer).length > 8000
-  ) {
-    fail("answer_invalid");
-  }
-
-  const { appCheck, user } = await services();
+async function performEvaluation(question, answer) {
+  const [{ appCheck }, { user }] = await Promise.all([
+    appServices(),
+    authenticatedUser(),
+  ]);
   const [idToken, appCheckResult] = await Promise.all([
     getIdToken(user, false),
     getAppCheckToken(appCheck, false),
@@ -219,6 +225,34 @@ async function evaluate(question, answer) {
     fail("evaluation_unavailable");
   }
   return safeEvaluation(await response.json());
+}
+
+async function evaluate(question, answer) {
+  if (question !== QUESTION) {
+    fail("question_mismatch");
+  }
+  if (
+    typeof answer !== "string" ||
+    answer.trim().length === 0 ||
+    Array.from(answer).length > 8000
+  ) {
+    fail("answer_invalid");
+  }
+
+  if (evaluationPromise) {
+    return evaluationPromise;
+  }
+  evaluationPromise = performEvaluation(question, answer).then(
+    (result) => {
+      evaluationPromise = undefined;
+      return result;
+    },
+    (error) => {
+      evaluationPromise = undefined;
+      throw error;
+    },
+  );
+  return evaluationPromise;
 }
 
 const publicBridge = Object.freeze({

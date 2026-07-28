@@ -24,12 +24,20 @@ type Verifier interface {
 type FirebaseVerifier struct {
 	authClient     *auth.Client
 	appCheckClient *appcheck.Client
+	allowedAppIDs  map[string]struct{}
 }
 
-func NewFirebaseVerifier(authClient *auth.Client, appCheckClient *appcheck.Client) *FirebaseVerifier {
+func NewFirebaseVerifier(authClient *auth.Client, appCheckClient *appcheck.Client, allowedAppIDs []string) *FirebaseVerifier {
+	allowed := make(map[string]struct{}, len(allowedAppIDs))
+	for _, appID := range allowedAppIDs {
+		if appID = strings.TrimSpace(appID); appID != "" {
+			allowed[appID] = struct{}{}
+		}
+	}
 	return &FirebaseVerifier{
 		authClient:     authClient,
 		appCheckClient: appCheckClient,
+		allowedAppIDs:  allowed,
 	}
 }
 
@@ -46,10 +54,13 @@ func (v *FirebaseVerifier) Verify(ctx context.Context, idToken, appCheckToken st
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
+	if _, allowed := v.allowedAppIDs[appToken.AppID]; !allowed {
+		return Principal{}, ErrUnauthenticated
+	}
 
 	return Principal{
 		UID:   authToken.UID,
-		AppID: appToken.Subject,
+		AppID: appToken.AppID,
 		Roles: extractRoles(authToken.Claims),
 	}, nil
 }
@@ -80,4 +91,3 @@ func (DevelopmentVerifier) Verify(_ context.Context, _, _ string) (Principal, er
 		Roles: map[string]bool{"user": true},
 	}, nil
 }
-

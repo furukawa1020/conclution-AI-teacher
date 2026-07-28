@@ -3,9 +3,10 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -93,7 +94,7 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "invalid_request", "The request body is invalid.")
 		return
 	}
-	if decoder.Decode(&struct{}{}) == nil {
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeProblem(w, http.StatusBadRequest, "invalid_request", "Only one JSON value is allowed.")
 		return
 	}
@@ -145,9 +146,17 @@ func (s *Server) evaluate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) requireIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		authHeaders := r.Header.Values("Authorization")
+		appCheckHeaders := r.Header.Values("X-Firebase-AppCheck")
+		if len(authHeaders) != 1 || len(appCheckHeaders) != 1 {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
+			return
+		}
+
+		authHeader := strings.TrimSpace(authHeaders[0])
+		appCheckHeader := strings.TrimSpace(appCheckHeaders[0])
 		const bearer = "Bearer "
-		if !strings.HasPrefix(authHeader, bearer) {
+		if !strings.HasPrefix(authHeader, bearer) || len(authHeader) <= len(bearer) || appCheckHeader == "" {
 			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
 			return
 		}
@@ -155,7 +164,7 @@ func (s *Server) requireIdentity(next http.Handler) http.Handler {
 		principal, err := s.verifier.Verify(
 			r.Context(),
 			strings.TrimSpace(strings.TrimPrefix(authHeader, bearer)),
-			strings.TrimSpace(r.Header.Get("X-Firebase-AppCheck")),
+			appCheckHeader,
 		)
 		if err != nil {
 			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
@@ -249,10 +258,6 @@ func newRequestID() string {
 }
 
 func shortHash(value string) string {
-	var sum [16]byte
-	copy(sum[:], []byte(value))
+	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:8])
 }
-
-var _ = errors.Is
-

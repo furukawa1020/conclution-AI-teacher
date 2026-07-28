@@ -71,7 +71,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		verifier = identity.NewFirebaseVerifier(authClient, appCheckClient)
+		verifier = identity.NewFirebaseVerifier(authClient, appCheckClient, cfg.AllowedAppIDs)
 		evaluationStore = store.NewFirestoreEvaluationStore(firestoreClient)
 		closeFirestore = firestoreClient.Close
 	}
@@ -119,4 +119,3 @@ func main() {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
 }
-

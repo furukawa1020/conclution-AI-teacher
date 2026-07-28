@@ -19,6 +19,7 @@ type Config struct {
 	AppEnv           string
 	Port             string
 	ProjectID        string
+	AllowedAppIDs    []string
 	VertexLocation   string
 	FastModel        string
 	RequestTimeout   time.Duration
@@ -31,6 +32,7 @@ func Load() (Config, error) {
 		AppEnv:           envOr("KOTAE_ENV", "production"),
 		Port:             envOr("PORT", defaultPort),
 		ProjectID:        firstNonEmpty(os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GCLOUD_PROJECT")),
+		AllowedAppIDs:    csvValues(os.Getenv("KOTAE_ALLOWED_APP_IDS")),
 		VertexLocation:   envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
 		FastModel:        envOr("KOTAE_FAST_MODEL", defaultFastModel),
 		RequestTimeout:   envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
@@ -46,6 +48,9 @@ func Load() (Config, error) {
 	}
 	if !cfg.AllowInsecureDev && strings.TrimSpace(cfg.ProjectID) == "" {
 		return Config{}, errors.New("GOOGLE_CLOUD_PROJECT is required")
+	}
+	if !cfg.AllowInsecureDev && len(cfg.AllowedAppIDs) == 0 {
+		return Config{}, errors.New("KOTAE_ALLOWED_APP_IDS must contain at least one Firebase App ID")
 	}
 	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 55*time.Second {
 		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 55s")
@@ -102,3 +107,19 @@ func envInt64Or(key string, fallback int64) int64 {
 	return parsed
 }
 
+func csvValues(raw string) []string {
+	seen := make(map[string]struct{})
+	values := make([]string, 0)
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
+}

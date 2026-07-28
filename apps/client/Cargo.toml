@@ -28,7 +28,6 @@ web-sys = { version = "=0.3.103", features = [
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "=0.4.3", features = ["wasm_js"] }
-gloo-timers = { version = "=0.3.0", features = ["futures"] }
 js-sys = "=0.3.103"
 serde-wasm-bindgen = "=0.6.5"
 wasm-bindgen = "=0.2.126"

@@ -7,7 +7,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-dioxus = { workspace = true, features = ["web"] }
+dioxus = { workspace = true, features = ["web", "lib", "launch"] }
 kotae-answer-print = { path = "../../crates/answer_print" }
 kotae-audio-core = { path = "../../crates/audio_core" }
 kotae-audio-vault = { path = "../../crates/audio_vault" }

@@ -1,0 +1,15 @@
+[package]
+name = "kotae-audio-vault"
+description = "Client-side audio envelope encryption for KOTAE AI"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

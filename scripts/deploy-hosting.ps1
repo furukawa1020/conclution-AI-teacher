@@ -199,7 +199,12 @@ try {
         -Headers $headers `
         -Body @{ files = $fileHashes }
 
-    foreach ($hash in @($populate.uploadRequiredHashes)) {
+    $requiredHashes = @()
+    $requiredHashesProperty = $populate.PSObject.Properties["uploadRequiredHashes"]
+    if ($null -ne $requiredHashesProperty) {
+        $requiredHashes = @($requiredHashesProperty.Value)
+    }
+    foreach ($hash in $requiredHashes) {
         if ([string]::IsNullOrWhiteSpace($hash)) {
             continue
         }
@@ -228,17 +233,6 @@ try {
                     "Permissions-Policy" = "camera=(), geolocation=(), microphone=(self), payment=(), usb=()"
                     "Referrer-Policy" = "no-referrer"
                     "X-Content-Type-Options" = "nosniff"
-                }
-            },
-            @{
-                glob = "**/*.@(wasm|js|css)"
-                headers = @{
-                    "Cache-Control" = "public,max-age=31536000,immutable"
-                }
-            },
-            @{
-                glob = "/index.html"
-                headers = @{
                     "Cache-Control" = "no-cache"
                 }
             }

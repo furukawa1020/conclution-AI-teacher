@@ -243,6 +243,15 @@
     color: var(--proof-red);
   }
 
+  .stamp--cloud-ready {
+    color: var(--local-green);
+  }
+
+  .stamp--cloud-error {
+    background: var(--proof-red);
+    color: white;
+  }
+
   .stamp__dot {
     width: 7px;
     height: 7px;
@@ -569,6 +578,48 @@
     padding: 24px;
   }
 
+  .proof-result--loading {
+    border-color: var(--action-blue);
+    background: color-mix(in oklab, var(--action-blue) 8%, var(--paper));
+    box-shadow: 7px 7px 0 var(--action-blue);
+  }
+
+  .proof-result--loading .proof-result__score {
+    border-right-color: var(--action-blue);
+  }
+
+  .proof-result--loading .proof-result__stamp {
+    background: var(--action-blue);
+  }
+
+  .loading-mark {
+    color: var(--action-blue);
+    font: 800 3rem/1 var(--mono);
+    animation: proof-spin 900ms steps(8, end) infinite;
+  }
+
+  .proof-result--error {
+    background:
+      repeating-linear-gradient(
+        -45deg,
+        transparent 0 8px,
+        color-mix(in oklab, var(--proof-red) 8%, transparent) 8px 16px
+      ),
+      var(--paper);
+  }
+
+  .retry-instruction {
+    padding-left: 11px;
+    border-left: 3px solid var(--proof-red);
+  }
+
+  .model-label {
+    color: var(--ink-soft);
+    font: 600 0.59rem/1.4 var(--mono);
+    letter-spacing: 0.05em;
+    overflow-wrap: anywhere;
+  }
+
   .proof-result__stamp {
     width: fit-content;
     padding: 3px 7px;
@@ -592,6 +643,10 @@
     margin-top: 18px;
     background: var(--proof-red);
     font-size: 0.78rem;
+  }
+
+  @keyframes proof-spin {
+    to { rotate: 1turn; }
   }
 
   .prototype-badge {

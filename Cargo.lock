@@ -1720,10 +1720,14 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "getrandom 0.4.3",
+ "js-sys",
  "kotae-answer-print",
  "kotae-audio-core",
  "kotae-audio-vault",
  "serde",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

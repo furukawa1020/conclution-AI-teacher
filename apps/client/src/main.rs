@@ -1,9 +1,132 @@
 use dioxus::prelude::*;
+use serde::Deserialize;
+
+const QUESTION: &str = "今週金曜までに、試作版を公開できますか。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistoryMode {
     Managed,
     Vault,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloudState {
+    Connecting,
+    Ready,
+    ConfigurationRequired,
+    Unavailable,
+}
+
+impl CloudState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "CLOUD 接続確認中",
+            Self::Ready => "CLOUD 接続済み",
+            Self::ConfigurationRequired => "CLOUD 設定待ち",
+            Self::Unavailable => "CLOUD 接続エラー",
+        }
+    }
+
+    fn class_name(self) -> &'static str {
+        match self {
+            Self::Ready => "stamp stamp--cloud-ready",
+            Self::Connecting | Self::ConfigurationRequired => "stamp stamp--pending",
+            Self::Unavailable => "stamp stamp--cloud-error",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum EvaluationState {
+    Idle,
+    Loading,
+    Success(EvaluationResult),
+    Error(&'static str),
+}
+
+#[derive(Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EvaluationResult {
+    score: u8,
+    feedback: String,
+    retry_instruction: String,
+    model_logical_id: String,
+}
+
+#[derive(Deserialize)]
+struct BridgeStatus {
+    state: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+mod cloud {
+    use super::{BridgeStatus, CloudState, EvaluationResult};
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = getStatus)]
+        async fn get_status_js() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = evaluate)]
+        async fn evaluate_js(question: &str, answer: &str) -> Result<JsValue, JsValue>;
+    }
+
+    pub async fn status() -> CloudState {
+        let Ok(value) = get_status_js().await else {
+            return CloudState::Unavailable;
+        };
+        let Ok(status) = serde_wasm_bindgen::from_value::<BridgeStatus>(value) else {
+            return CloudState::Unavailable;
+        };
+        match status.state.as_str() {
+            "ready" => CloudState::Ready,
+            "configuration-required" => CloudState::ConfigurationRequired,
+            _ => CloudState::Unavailable,
+        }
+    }
+
+    pub async fn evaluate(
+        question: &str,
+        answer: &str,
+    ) -> Result<EvaluationResult, &'static str> {
+        let value = evaluate_js(question, answer)
+            .await
+            .map_err(|error| {
+                let message = js_sys::Error::from(error).message();
+                user_message(message.as_string().as_deref())
+            })?;
+        serde_wasm_bindgen::from_value(value).map_err(|_| "評価結果の形式を確認できませんでした。")
+    }
+
+    fn user_message(code: Option<&str>) -> &'static str {
+        match code {
+            Some("app_check_not_configured") => {
+                "App Check の公開サイトキーがまだ設定されていません。"
+            }
+            Some("authentication_failed") => "安全な接続を確認できませんでした。再度お試しください。",
+            Some("answer_not_evaluable") => "回答を評価できませんでした。内容を確認してください。",
+            Some("rate_limited") => "短時間の利用上限に達しました。少し待って再度お試しください。",
+            Some("firebase_project_mismatch") => "接続先のFirebaseプロジェクトが一致しません。",
+            _ => "クラウド評価に接続できませんでした。時間をおいて再度お試しください。",
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod cloud {
+    use super::{CloudState, EvaluationResult};
+
+    pub async fn status() -> CloudState {
+        CloudState::Unavailable
+    }
+
+    pub async fn evaluate(
+        _question: &str,
+        _answer: &str,
+    ) -> Result<EvaluationResult, &'static str> {
+        Err("WebAssembly版で利用してください。")
+    }
 }
 
 fn main() {
@@ -13,12 +136,20 @@ fn main() {
 #[component]
 fn App() -> Element {
     let mut answer = use_signal(String::new);
-    let mut show_feedback = use_signal(|| false);
+    let mut evaluation_state = use_signal(|| EvaluationState::Idle);
     let mut history_mode = use_signal(|| HistoryMode::Managed);
+    let cloud_status = use_resource(|| async { cloud::status().await });
 
     let answer_value = answer.read().clone();
     let answer_is_empty = answer_value.trim().is_empty();
     let character_count = answer_value.chars().count();
+    let evaluation_snapshot = evaluation_state.read().clone();
+    let evaluation_running = evaluation_snapshot == EvaluationState::Loading;
+    let cloud_state = cloud_status
+        .read()
+        .as_ref()
+        .copied()
+        .unwrap_or(CloudState::Connecting);
 
     rsx! {
         div { class: "app-shell",
@@ -36,7 +167,12 @@ fn App() -> Element {
                         span { class: "stamp__dot" }
                         "LOCAL / RUST"
                     }
-                    span { class: "stamp stamp--pending", "CLOUD 未接続" }
+                    span { class: cloud_state.class_name(),
+                        if cloud_state == CloudState::Ready {
+                            span { class: "stamp__dot" }
+                        }
+                        {cloud_state.label()}
+                    }
                 }
             }
 
@@ -131,7 +267,7 @@ fn App() -> Element {
                         placeholder: "例：はい、金曜までに試作版を公開できます。理由は…",
                         oninput: move |event| {
                             answer.set(event.value());
-                            show_feedback.set(false);
+                            evaluation_state.set(EvaluationState::Idle);
                         }
                     }
                     div { class: "answer-actions",
@@ -142,33 +278,96 @@ fn App() -> Element {
                         button {
                             class: "primary-action",
                             r#type: "button",
-                            disabled: answer_is_empty,
-                            onclick: move |_| show_feedback.set(true),
-                            span { "この答えを校正" }
+                            disabled: answer_is_empty || evaluation_running,
+                            onclick: move |_| {
+                                let submitted_answer = answer.read().clone();
+                                evaluation_state.set(EvaluationState::Loading);
+                                spawn(async move {
+                                    let next_state = match cloud::evaluate(QUESTION, &submitted_answer).await {
+                                        Ok(result) => EvaluationState::Success(result),
+                                        Err(message) => EvaluationState::Error(message),
+                                    };
+                                    evaluation_state.set(next_state);
+                                });
+                            },
+                            span {
+                                if evaluation_running {
+                                    "校正しています…"
+                                } else {
+                                    "この答えを校正"
+                                }
+                            }
                             span { aria_hidden: "true", "↗" }
                         }
                     }
                 }
 
-                if *show_feedback.read() {
-                    section {
-                        class: "proof-result",
-                        aria_live: "polite",
-                        aria_labelledby: "proof-result-heading",
-                        div { class: "proof-result__score",
-                            span { class: "score-value", "—" }
-                            span { class: "score-unit", "未採点" }
-                            span { class: "score-caption", "先出し度" }
-                        }
-                        div { class: "proof-result__body",
-                            p { class: "proof-result__stamp", "LOCAL PREVIEW / 未評価" }
-                            h2 { id: "proof-result-heading", "判断を、最初の句点までに。" }
-                            p {
-                                "現在は体験確認用の固定赤入れです。Firebase接続後は、Go＋Genkitの構造化判定だけをここへ表示します。"
+                match evaluation_snapshot {
+                    EvaluationState::Idle => rsx! {},
+                    EvaluationState::Loading => rsx! {
+                        section {
+                            class: "proof-result proof-result--loading",
+                            aria_live: "polite",
+                            aria_busy: "true",
+                            div { class: "proof-result__score",
+                                span { class: "loading-mark", aria_hidden: "true", "◌" }
+                                span { class: "score-unit", "評価中" }
                             }
-                            button { class: "retry-action", r#type: "button", "一文目だけ言い直す →" }
+                            div { class: "proof-result__body",
+                                p { class: "proof-result__stamp", "CLOUD / GENKIT" }
+                                h2 { "答えの構造を校正しています。" }
+                                p { "認証・App Checkを確認し、必要な本文だけを評価APIへ送信しています。" }
+                            }
                         }
-                    }
+                    },
+                    EvaluationState::Error(message) => rsx! {
+                        section {
+                            class: "proof-result proof-result--error",
+                            aria_live: "assertive",
+                            div { class: "proof-result__score",
+                                span { class: "score-value", "!" }
+                                span { class: "score-unit", "未完了" }
+                            }
+                            div { class: "proof-result__body",
+                                p { class: "proof-result__stamp", "CONNECTION ERROR" }
+                                h2 { "校正を完了できませんでした。" }
+                                p { "{message}" }
+                                button {
+                                    class: "retry-action",
+                                    r#type: "button",
+                                    onclick: move |_| evaluation_state.set(EvaluationState::Idle),
+                                    "回答を確認して再試行 →"
+                                }
+                            }
+                        }
+                    },
+                    EvaluationState::Success(result) => rsx! {
+                        section {
+                            class: "proof-result proof-result--success",
+                            aria_live: "polite",
+                            aria_labelledby: "proof-result-heading",
+                            div { class: "proof-result__score",
+                                span { class: "score-value", "{result.score}" }
+                                span { class: "score-unit", "/ 100" }
+                                span { class: "score-caption", "校正スコア" }
+                            }
+                            div { class: "proof-result__body",
+                                p { class: "proof-result__stamp", "CLOUD EVALUATION" }
+                                h2 { id: "proof-result-heading", "{result.feedback}" }
+                                p { class: "retry-instruction",
+                                    strong { "次の一手：" }
+                                    " {result.retry_instruction}"
+                                }
+                                p { class: "model-label", "MODEL / {result.model_logical_id}" }
+                                button {
+                                    class: "retry-action",
+                                    r#type: "button",
+                                    onclick: move |_| evaluation_state.set(EvaluationState::Idle),
+                                    "{result.retry_instruction} →"
+                                }
+                            }
+                        }
+                    },
                 }
 
                 section { class: "answer-print", aria_labelledby: "answer-print-heading",

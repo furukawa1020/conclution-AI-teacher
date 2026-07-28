@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-const MAIN_CSS: Asset = asset!("/assets/main.css");
+// Keep the stylesheet at a fixed, reviewable path. This avoids runtime asset
+// discovery and lets Hosting apply an exact CSP and cache policy.
+const MAIN_CSS: &str = "/assets/main.css";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistoryMode {

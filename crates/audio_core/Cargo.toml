@@ -1,0 +1,13 @@
+[package]
+name = "kotae-audio-core"
+description = "Raw-audio-free timing feature extraction for KOTAE AI"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints.rust]
+unsafe_code = "forbid"

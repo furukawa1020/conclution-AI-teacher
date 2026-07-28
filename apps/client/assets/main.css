@@ -422,6 +422,11 @@
     background: var(--proof-red-soft);
   }
 
+  .ruler-tick--elapsed {
+    background: var(--proof-red);
+    color: white;
+  }
+
   .ruler-tick__number {
     padding-left: 5px;
     font: 600 0.62rem/1 var(--mono);
@@ -454,6 +459,16 @@
     font-size: 1.15rem;
   }
 
+  .engine-notice--recording {
+    border: 2px solid var(--proof-red);
+    background: var(--proof-red-soft);
+  }
+
+  .engine-notice--recording .engine-notice__icon {
+    color: var(--proof-red);
+    animation: recording-pulse 1s steps(2, end) infinite;
+  }
+
   .engine-notice strong {
     font-size: 0.8rem;
   }
@@ -471,6 +486,24 @@
     background: transparent;
     color: var(--ink-soft);
     font-size: 0.72rem;
+  }
+
+  .text-button--start {
+    border-color: var(--action-blue);
+    background: var(--action-blue);
+    color: white;
+    font-weight: 800;
+  }
+
+  .text-button--stop {
+    border-color: var(--proof-red);
+    background: var(--proof-red);
+    color: white;
+    font-weight: 800;
+  }
+
+  @keyframes recording-pulse {
+    50% { opacity: 0.3; }
   }
 
   .answer-panel {
@@ -661,10 +694,18 @@
 
   .answer-print__track {
     display: flex;
+    align-items: stretch;
     min-height: 62px;
     margin-top: 22px;
     border: 2px solid var(--ink);
     overflow: hidden;
+  }
+
+  .answer-print__track--empty {
+    align-items: center;
+    justify-content: center;
+    border-style: dashed;
+    color: var(--ink-soft);
   }
 
   .track-segment {
@@ -672,54 +713,60 @@
     border-right: 1px solid var(--paper);
   }
 
-  .track-segment--silence {
+  .track-segment--initial,
+  .track-segment--trailing {
     background: var(--paper-deep);
   }
 
-  .track-segment--preamble {
+  .track-segment--unclassified {
     background:
       repeating-linear-gradient(135deg, var(--ink) 0 3px, var(--paper) 3px 7px);
   }
 
-  .track-segment--conclusion {
-    display: grid;
-    place-items: center;
-    background: var(--proof-red);
-    color: white;
-    font: 800 0.65rem/1 var(--mono);
-    letter-spacing: 0.1em;
-  }
-
-  .track-segment--evidence {
+  .track-segment--voice {
     background: var(--action-blue);
   }
 
-  .track-legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px 18px;
+  .track-empty-label {
+    padding: 10px;
+    font-size: 0.72rem;
+    text-align: center;
+  }
+
+  .timing-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 14px 0 0;
+    border: 1px solid var(--rule);
+  }
+
+  .timing-metrics > div {
+    min-width: 0;
+    padding: 11px;
+    border-right: 1px solid var(--rule);
+  }
+
+  .timing-metrics > div:last-child {
+    border-right: 0;
+  }
+
+  .timing-metrics dt {
+    color: var(--ink-soft);
+    font-size: 0.62rem;
+  }
+
+  .timing-metrics dd {
+    margin: 4px 0 0;
+    font: 700 0.82rem/1.2 var(--mono);
+  }
+
+  .answer-print__privacy-note {
     margin-top: 12px;
-    padding: 0;
-    list-style: none;
+    padding-left: 10px;
+    border-left: 3px solid var(--local-green);
+    color: var(--ink-soft);
     font-size: 0.68rem;
   }
-
-  .track-legend li {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .legend-chip {
-    width: 12px;
-    height: 12px;
-    border: 1px solid var(--ink);
-  }
-
-  .legend-chip--silence { background: var(--paper-deep); }
-  .legend-chip--preamble { background: var(--ink); }
-  .legend-chip--conclusion { background: var(--proof-red); }
-  .legend-chip--evidence { background: var(--action-blue); }
 
   .privacy-drawer {
     display: grid;
@@ -750,18 +797,15 @@
     text-align: left;
   }
 
-  .mode-card--selected {
-    border: 2px solid var(--action-blue);
-    background: color-mix(in oklab, var(--action-blue) 8%, var(--paper));
+  .mode-card--planned {
+    position: relative;
+    border-style: dashed;
   }
 
   .mode-card__check {
     grid-row: 1 / span 2;
-    color: var(--rule);
-  }
-
-  .mode-card--selected .mode-card__check {
     color: var(--action-blue);
+    font: 700 0.62rem/1 var(--mono);
   }
 
   .mode-card strong {
@@ -771,6 +815,16 @@
   .mode-card small {
     color: var(--ink-soft);
     font-size: 0.65rem;
+  }
+
+  .mode-card__status {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    padding: 2px 5px;
+    border: 1px solid var(--proof-red);
+    color: var(--proof-red);
+    font: 700 0.55rem/1.3 var(--mono);
   }
 
   .privacy-drawer__truth {
@@ -875,6 +929,18 @@
 
     .score-value {
       font-size: 2.25rem;
+    }
+
+    .timing-metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .timing-metrics > div:nth-child(2) {
+      border-right: 0;
+    }
+
+    .timing-metrics > div:nth-child(-n + 2) {
+      border-bottom: 1px solid var(--rule);
     }
 
     .privacy-drawer {

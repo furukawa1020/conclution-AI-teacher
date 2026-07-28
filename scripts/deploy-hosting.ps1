@@ -17,6 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.Net.Http
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace $PublicDirectory))

@@ -1,9 +1,5 @@
 use dioxus::prelude::*;
 
-// Keep the stylesheet at a fixed, reviewable path. This avoids runtime asset
-// discovery and lets Hosting apply an exact CSP and cache policy.
-const MAIN_CSS: &str = "/assets/main.css";
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistoryMode {
     Managed,
@@ -25,18 +21,11 @@ fn App() -> Element {
     let character_count = answer_value.chars().count();
 
     rsx! {
-        document::Link { rel: "stylesheet", href: MAIN_CSS }
-        document::Meta { name: "theme-color", content: "#f3f0e8" }
-        document::Meta {
-            name: "description",
-            content: "話し始めの十秒を校正する、結論先出しトレーニング。"
-        }
-
         div { class: "app-shell",
             header { class: "masthead",
                 a {
                     class: "wordmark",
-                    href: "#main",
+                    href: "#workspace",
                     aria_label: "コタエーAI ホーム",
                     span { class: "wordmark__latin", "KOTAE" }
                     span { class: "wordmark__ja", "コタエーAI" }
@@ -77,7 +66,7 @@ fn App() -> Element {
                 }
             }
 
-            main { id: "main", class: "workbench",
+            main { id: "workspace", class: "workbench",
                 section { class: "question-sheet", aria_labelledby: "question-heading",
                     div { class: "sheet-kicker",
                         span { "TODAY / DECISION" }

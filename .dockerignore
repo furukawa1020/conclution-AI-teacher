@@ -1,0 +1,15 @@
+.git
+.cache
+.firebase
+.tools
+apps
+crates
+dist
+docs
+target
+*.md
+*.log
+.env*
+firebase.json
+firestore.*
+storage.rules

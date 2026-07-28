@@ -54,7 +54,9 @@ impl fmt::Display for PrintError {
             Self::Empty => formatter.write_str("an answer print requires at least one mark"),
             Self::ZeroDuration => formatter.write_str("mark duration must be greater than zero"),
             Self::TooLong => formatter.write_str("answer print exceeds the maximum duration"),
-            Self::InvalidBinWidth => formatter.write_str("bin width must be between 20ms and 1000ms"),
+            Self::InvalidBinWidth => {
+                formatter.write_str("bin width must be between 20ms and 1000ms")
+            }
         }
     }
 }
@@ -229,10 +231,11 @@ mod tests {
     use super::*;
 
     fn print(marks: &[(MarkKind, u32)]) -> AnswerPrint {
-        AnswerPrint::new(marks.iter().map(|&(kind, duration_ms)| TimedMark {
-            kind,
-            duration_ms,
-        }))
+        AnswerPrint::new(
+            marks
+                .iter()
+                .map(|&(kind, duration_ms)| TimedMark { kind, duration_ms }),
+        )
         .expect("valid answer print")
     }
 
@@ -271,10 +274,7 @@ mod tests {
 
     #[test]
     fn detects_preamble_before_conclusion() {
-        let baseline = print(&[
-            (MarkKind::Conclusion, 400),
-            (MarkKind::Evidence, 800),
-        ]);
+        let baseline = print(&[(MarkKind::Conclusion, 400), (MarkKind::Evidence, 800)]);
         let preamble_first = print(&[
             (MarkKind::Preamble, 900),
             (MarkKind::Conclusion, 400),

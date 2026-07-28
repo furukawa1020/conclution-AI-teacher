@@ -7,6 +7,7 @@
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
+    aes::cipher::consts::U12,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -99,9 +100,10 @@ pub fn seal(
     let cipher =
         Aes256Gcm::new_from_slice(key.expose()).map_err(|_| VaultError::EncryptionFailed)?;
     let aad = encode_aad(binding);
+    let nonce = Nonce::<U12>::from(nonce);
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad: &aad,
@@ -130,9 +132,10 @@ pub fn open(
     let cipher =
         Aes256Gcm::new_from_slice(key.expose()).map_err(|_| VaultError::AuthenticationFailed)?;
     let aad = encode_aad(binding);
+    let nonce = Nonce::<U12>::from(encrypted.nonce);
     let mut plaintext = cipher
         .decrypt(
-            Nonce::from_slice(&encrypted.nonce),
+            &nonce,
             Payload {
                 msg: &encrypted.ciphertext,
                 aad: &aad,

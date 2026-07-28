@@ -1,26 +1,26 @@
 # Firebase / Google Cloud 接続手順
 
-## 先に確定する三項目
+## 現在の専用環境
 
-1. 専用Google CloudプロジェクトID  
-   例: `kotae-ai-dev-任意の短い識別子`。プロジェクトIDは後から変更できません。
-2. 課金アカウント  
-   Cloud Run、Vertex AI、Cloud KMSを使うためBlaze相当の課金接続が必要です。
-3. Firestoreロケーション  
-   日本利用を前提に `asia-northeast1` を推奨します。作成後の変更は簡単ではないため、既存の無関係なプロジェクトでは作りません。
+- 公開URL: `https://kotae-ai.web.app`
+- Firebase / Google Cloud project ID: `kotae-ai-u22-2026`
+- Firestore: `(default)`、`asia-northeast1`、削除保護あり
+- Cloud Run: `kotae-api`、`asia-northeast1`
+- Firebase Web App ID: `1:551920539470:web:6518baf6d84d7ab89eb01f`
+
+Google Cloudのproject IDは作成後に変更できません。コンテスト名をブランドへ露出させないため、Hosting site IDを別に `kotae-ai` とし、project IDは内部識別子としてだけ使います。
 
 FirebaseとGoogle Cloudは別プロジェクトを「接続」するものではありません。FirebaseプロジェクトはFirebase機能が追加されたGoogle Cloudプロジェクトそのものです。同一project IDをHosting、Auth、Firestore、Cloud Run、Vertex AIで使います。
 
 現在このPCに残っているgcloud既定プロジェクト `improve-production-management` は別用途と判断し、変更対象にしません。
 
-## ユーザーがブラウザで行う操作
+## 今後ユーザーがブラウザで行う操作
 
-1. [Firebase Console](https://console.firebase.google.com/) を開き、Firebase利用規約を確認・同意する。
-2. [Google Cloud Billing](https://console.cloud.google.com/billing) で利用可能な課金アカウントIDを確認する。
-3. 新しい専用project IDを決める。
-4. Google認証のOAuth同意画面に表示するアプリ名とサポートメールを決める。
+1. Google認証のOAuth同意画面に表示するアプリ名とサポートメールを確定する。
+2. reCAPTCHA Enterpriseの課金・利用条件を確認してApp Checkを有効化する。
+3. 音声保存、後日再評価、共有、品質改善を分離した同意文面を承認する。
 
-この四点が揃ったら、CLIによる作成・接続・API有効化を進められます。Firebase CLIの `projects:addfirebase` は既存Google CloudプロジェクトへFirebaseを追加する公式コマンドです。
+Firebase利用規約、課金接続、専用project作成、Firebase追加、必要API有効化までは完了しています。
 
 ## CLI
 

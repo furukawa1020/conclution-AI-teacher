@@ -2,6 +2,8 @@
 
 質問に対して「最初の一文で答える」力を、発話の時間構造と文章の意味の両方から鍛える対話コーチです。
 
+公開版: [https://kotae-ai.web.app](https://kotae-ai.web.app)
+
 U-22プログラミング・コンテスト向けに、一般的なチャットUIではなく次の独自技術を核にします。
 
 - Rust/Wasmでマイク音声から発話開始、沈黙、言い直しの時間特徴を端末内抽出
@@ -34,7 +36,7 @@ Web版はDioxus CLI 0.7.9を使います。
 dx serve --package kotae-client --platform web
 ```
 
-クラウドを作る前に [クラウド接続手順](docs/cloud-setup.md) を読み、専用プロジェクトID、課金先、Firestoreロケーションを確定してください。既存の無関係なGoogle Cloudプロジェクトへは接続しません。
+クラウド構成と再配備手順は [クラウド接続手順](docs/cloud-setup.md) に記録しています。既存の無関係なGoogle Cloudプロジェクトには接続しません。
 
 ## セキュリティ原則
 

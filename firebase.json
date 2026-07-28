@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "site": "kotae-ai",
     "public": "dist/web",
     "cleanUrls": true,
     "trailingSlash": false,

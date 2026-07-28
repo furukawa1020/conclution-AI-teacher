@@ -4,7 +4,7 @@ param(
     [ValidatePattern("^[a-z][a-z0-9-]{4,28}[a-z0-9]$")]
     [string] $ProjectId,
 
-    [string] $SiteId = $ProjectId,
+    [string] $SiteId = "kotae-ai",
 
     [string] $PublicDirectory = "dist/web",
 

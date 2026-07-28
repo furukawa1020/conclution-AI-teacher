@@ -103,12 +103,14 @@ mod platform {
         context: AudioContext,
         source: MediaStreamAudioSourceNode,
         analyser: AnalyserNode,
-        tracks: Vec<MediaStreamTrack>,
+        tracks: Rc<RefCell<Vec<MediaStreamTrack>>>,
         pcm: Rc<RefCell<Vec<f32>>>,
         analysis: Rc<RefCell<AnalysisState>>,
-        interval_id: Option<i32>,
+        interval_id: Rc<Cell<Option<i32>>>,
         interval: Option<Closure<dyn FnMut()>>,
-        active: Cell<bool>,
+        deadline_id: Option<i32>,
+        deadline: Option<Closure<dyn FnMut()>>,
+        active: Rc<Cell<bool>>,
     }
 
     impl Session {
@@ -236,6 +238,51 @@ mod platform {
                     let _ = source.disconnect();
                     MicrophoneError::AudioGraphFailed
                 })?;
+            let interval_id = Rc::new(Cell::new(Some(interval_id)));
+            let tracks = Rc::new(RefCell::new(tracks));
+            let active = Rc::new(Cell::new(true));
+
+            // Capture has its own hard upper bound. The UI also observes this
+            // state, but the microphone is released here even if that UI task
+            // is cancelled or fails to render.
+            let deadline_window = window.clone();
+            let deadline_context = context.clone();
+            let deadline_source = source.clone();
+            let deadline_analyser = analyser.clone();
+            let deadline_tracks = Rc::clone(&tracks);
+            let deadline_pcm = Rc::clone(&pcm);
+            let deadline_interval_id = Rc::clone(&interval_id);
+            let deadline_active = Rc::clone(&active);
+            let deadline = Closure::wrap(Box::new(move || {
+                release_capture(
+                    &deadline_window,
+                    &deadline_context,
+                    &deadline_source,
+                    &deadline_analyser,
+                    &deadline_tracks,
+                    &deadline_pcm,
+                    &deadline_interval_id,
+                    &deadline_active,
+                );
+            }) as Box<dyn FnMut()>);
+            let deadline_id = window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    deadline.as_ref().unchecked_ref(),
+                    10_000,
+                )
+                .map_err(|_| {
+                    release_capture(
+                        &window,
+                        &context,
+                        &source,
+                        &analyser,
+                        &tracks,
+                        &pcm,
+                        &interval_id,
+                        &active,
+                    );
+                    MicrophoneError::AudioGraphFailed
+                })?;
 
             Ok(Self {
                 window,
@@ -245,9 +292,11 @@ mod platform {
                 tracks,
                 pcm,
                 analysis,
-                interval_id: Some(interval_id),
+                interval_id,
                 interval: Some(interval),
-                active: Cell::new(true),
+                deadline_id: Some(deadline_id),
+                deadline: Some(deadline),
+                active,
             })
         }
 
@@ -264,18 +313,21 @@ mod platform {
         }
 
         pub(super) fn stop(&mut self) -> TimingFeatures {
-            if self.active.replace(false) {
-                if let Some(interval_id) = self.interval_id.take() {
-                    self.window.clear_interval_with_handle(interval_id);
-                }
-                self.interval.take();
-                stop_tracks(&self.tracks);
-                self.tracks.clear();
-                let _ = self.source.disconnect();
-                let _ = self.analyser.disconnect();
-                let _ = self.context.close();
-                self.pcm.borrow_mut().fill(0.0);
+            if let Some(deadline_id) = self.deadline_id.take() {
+                self.window.clear_timeout_with_handle(deadline_id);
             }
+            self.deadline.take();
+            release_capture(
+                &self.window,
+                &self.context,
+                &self.source,
+                &self.analyser,
+                &self.tracks,
+                &self.pcm,
+                &self.interval_id,
+                &self.active,
+            );
+            self.interval.take();
             self.features()
         }
     }
@@ -322,6 +374,29 @@ mod platform {
         for track in tracks {
             track.stop();
         }
+    }
+
+    fn release_capture(
+        window: &Window,
+        context: &AudioContext,
+        source: &MediaStreamAudioSourceNode,
+        analyser: &AnalyserNode,
+        tracks: &Rc<RefCell<Vec<MediaStreamTrack>>>,
+        pcm: &Rc<RefCell<Vec<f32>>>,
+        interval_id: &Rc<Cell<Option<i32>>>,
+        active: &Rc<Cell<bool>>,
+    ) {
+        if let Some(interval_id) = interval_id.take() {
+            window.clear_interval_with_handle(interval_id);
+        }
+        if active.replace(false) {
+            stop_tracks(&tracks.borrow());
+            tracks.borrow_mut().clear();
+            let _ = source.disconnect();
+            let _ = analyser.disconnect();
+            let _ = context.close();
+        }
+        pcm.borrow_mut().fill(0.0);
     }
 
     fn classify_capture_error(error: JsValue) -> MicrophoneError {

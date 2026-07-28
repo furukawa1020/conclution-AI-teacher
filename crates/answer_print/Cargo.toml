@@ -1,0 +1,10 @@
+[package]
+name = "kotae-answer-print"
+description = "Privacy-preserving answer-structure timelines and comparison"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

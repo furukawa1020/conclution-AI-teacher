@@ -10,6 +10,8 @@ import (
 const (
 	MaxQuestionRunes = 1_000
 	MaxAnswerRunes   = 8_000
+	MaxExcerptRunes  = 200
+	MaxFeedbackRunes = 500
 )
 
 type EvaluationInput struct {
@@ -90,6 +92,27 @@ func (out EvaluationResult) Validate(answer string) error {
 	}
 	if strings.TrimSpace(out.Feedback) == "" || strings.TrimSpace(out.RetryInstruction) == "" {
 		return errors.New("feedback and retryInstruction are required")
+	}
+	if utf8.RuneCountInString(out.Feedback) > MaxFeedbackRunes ||
+		utf8.RuneCountInString(out.RetryInstruction) > MaxFeedbackRunes {
+		return errors.New("feedback or retryInstruction is too long")
+	}
+	if utf8.RuneCountInString(out.EstimatedConclusion) > MaxFeedbackRunes {
+		return errors.New("estimatedConclusion is too long")
+	}
+	if utf8.RuneCountInString(out.EvidenceExcerpt) > MaxExcerptRunes {
+		return errors.New("evidenceExcerpt is too long")
+	}
+	if out.EvidenceExcerpt != "" && !strings.Contains(answer, out.EvidenceExcerpt) {
+		return errors.New("evidenceExcerpt is not present in the answer")
+	}
+	if len(out.SecondaryIssues) > 4 {
+		return errors.New("too many secondaryIssues")
+	}
+	for _, issue := range out.SecondaryIssues {
+		if !allowedIssue(issue) || issue == "none" {
+			return errors.New("unsupported secondaryIssue")
+		}
 	}
 	return nil
 }

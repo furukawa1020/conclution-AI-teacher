@@ -45,6 +45,11 @@ impl DetectorConfig {
                 "frame_samples must not be zero",
             ));
         }
+        if (self.frame_samples as u64).saturating_mul(1_000) < u64::from(self.sample_rate_hz) {
+            return Err(DetectorError::InvalidConfiguration(
+                "PCM frames must cover at least one millisecond",
+            ));
+        }
         if self.onset_frames == 0 || self.offset_frames == 0 {
             return Err(DetectorError::InvalidConfiguration(
                 "onset_frames and offset_frames must not be zero",
@@ -181,8 +186,10 @@ impl VoiceDetector {
             self.candidate_silence_frames = 0;
             self.candidate_voice_frames = self.candidate_voice_frames.saturating_add(1);
 
+            let mut onset_confirmed = false;
             if !self.speaking && self.candidate_voice_frames >= self.config.onset_frames {
                 self.speaking = true;
+                onset_confirmed = true;
                 self.features.speech_segments = self.features.speech_segments.saturating_add(1);
                 let onset_frame = self
                     .processed_frames
@@ -191,10 +198,14 @@ impl VoiceDetector {
                 self.features.first_voice_ms.get_or_insert(onset_ms);
             }
             if self.speaking {
-                self.features.voiced_ms = self
-                    .features
-                    .voiced_ms
-                    .saturating_add(self.frame_duration_ms());
+                let confirmed_frames = if onset_confirmed {
+                    u64::from(self.config.onset_frames)
+                } else {
+                    1
+                };
+                self.features.voiced_ms = self.features.voiced_ms.saturating_add(
+                    self.frame_duration_ms().saturating_mul(confirmed_frames),
+                );
                 self.features.trailing_silence_ms = 0;
             }
         } else {
@@ -232,6 +243,7 @@ impl VoiceDetector {
         self.processed_frames = 0;
         self.candidate_voice_frames = 0;
         self.candidate_silence_frames = 0;
+        self.noise_floor_dbfs = None;
         self.speaking = false;
         self.features = TimingFeatures::default();
     }

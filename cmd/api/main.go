@@ -34,22 +34,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	evaluator, err := evaluation.NewGenkitEvaluator(ctx, cfg.ProjectID, cfg.VertexLocation, cfg.FastModel)
-	if err != nil {
-		logger.Error("initialize Genkit", "error", err)
-		os.Exit(1)
-	}
-
+	var evaluator evaluation.Evaluator
 	var verifier identity.Verifier
 	var evaluationStore store.EvaluationStore
 	var closeFirestore func() error
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
+		evaluator = evaluation.DevelopmentEvaluator{}
 		verifier = identity.DevelopmentVerifier{}
 		evaluationStore = store.MemoryEvaluationStore{}
 		closeFirestore = func() error { return nil }
 	} else {
+		evaluator, err = evaluation.NewGenkitEvaluator(ctx, cfg.ProjectID, cfg.VertexLocation, cfg.FastModel)
+		if err != nil {
+			logger.Error("initialize Genkit", "error", err)
+			os.Exit(1)
+		}
+
 		app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: cfg.ProjectID})
 		if err != nil {
 			logger.Error("initialize Firebase Admin", "error", err)

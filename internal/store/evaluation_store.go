@@ -37,21 +37,27 @@ func (s *FirestoreEvaluationStore) Save(
 		return "", fmt.Errorf("create attempt id: %w", err)
 	}
 
-	answerDigest := sha256.Sum256([]byte(input.Answer))
-	_, err = s.client.Collection("evaluations").Doc(attemptID).Create(ctx, map[string]any{
-		"uid":             uid,
-		"requestId":       requestID,
-		"mode":            input.Mode,
-		"questionRunes":   len([]rune(input.Question)),
-		"answerRunes":     len([]rune(input.Answer)),
-		"answerSha256":    hex.EncodeToString(answerDigest[:]),
-		"result":          result,
-		"rawTextStored":   false,
-		"storageMode":     "metrics_only",
-		"createdAt":       firestore.ServerTimestamp,
-		"schemaVersion":   1,
-		"retentionPolicy": "user_controlled",
-	})
+	userDigest := sha256.Sum256([]byte(uid))
+	userDocumentID := hex.EncodeToString(userDigest[:])
+	_, err = s.client.
+		Collection("users").
+		Doc(userDocumentID).
+		Collection("evaluations").
+		Doc(attemptID).
+		Create(ctx, map[string]any{
+			"requestId":             requestID,
+			"mode":                  input.Mode,
+			"questionRunes":         len([]rune(input.Question)),
+			"answerRunes":           len([]rune(input.Answer)),
+			"result":                result,
+			"rawQuestionStored":     false,
+			"rawAnswerStored":       false,
+			"containsAnswerExcerpt": result.EvidenceExcerpt != "",
+			"storageMode":           "evaluation_with_optional_excerpt",
+			"createdAt":             firestore.ServerTimestamp,
+			"schemaVersion":         1,
+			"retentionPolicy":       "user_controlled",
+		})
 	if err != nil {
 		return "", fmt.Errorf("save evaluation: %w", err)
 	}

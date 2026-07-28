@@ -165,8 +165,8 @@ fn App() -> Element {
                         aria_live: "polite",
                         aria_labelledby: "proof-result-heading",
                         div { class: "proof-result__score",
-                            span { class: "score-value", "82" }
-                            span { class: "score-unit", "/ 100" }
+                            span { class: "score-value", "—" }
+                            span { class: "score-unit", "未採点" }
                             span { class: "score-caption", "先出し度" }
                         }
                         div { class: "proof-result__body",

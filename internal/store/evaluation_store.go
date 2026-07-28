@@ -37,6 +37,7 @@ func (s *FirestoreEvaluationStore) Save(
 		return "", fmt.Errorf("create attempt id: %w", err)
 	}
 
+	storedResult := resultWithoutAnswerText(result)
 	userDigest := sha256.Sum256([]byte(uid))
 	userDocumentID := hex.EncodeToString(userDigest[:])
 	_, err = s.client.
@@ -49,11 +50,11 @@ func (s *FirestoreEvaluationStore) Save(
 			"mode":                  input.Mode,
 			"questionRunes":         len([]rune(input.Question)),
 			"answerRunes":           len([]rune(input.Answer)),
-			"result":                result,
+			"result":                storedResult,
 			"rawQuestionStored":     false,
 			"rawAnswerStored":       false,
-			"containsAnswerExcerpt": result.EvidenceExcerpt != "",
-			"storageMode":           "evaluation_with_optional_excerpt",
+			"containsAnswerExcerpt": false,
+			"storageMode":           "evaluation_without_answer_text",
 			"createdAt":             firestore.ServerTimestamp,
 			"schemaVersion":         1,
 			"retentionPolicy":       "user_controlled",
@@ -62,6 +63,15 @@ func (s *FirestoreEvaluationStore) Save(
 		return "", fmt.Errorf("save evaluation: %w", err)
 	}
 	return attemptID, nil
+}
+
+// resultWithoutAnswerText keeps the structured coaching result while removing
+// fields that can contain verbatim user input. The complete result is returned
+// to the active browser session, but Firestore never receives those excerpts.
+func resultWithoutAnswerText(result contracts.EvaluationResult) contracts.EvaluationResult {
+	result.EstimatedConclusion = ""
+	result.EvidenceExcerpt = ""
+	return result
 }
 
 func randomID() (string, error) {

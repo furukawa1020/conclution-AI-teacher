@@ -497,7 +497,7 @@
   }
 
   .voice-status h1 {
-    max-width: 14ch;
+    max-width: 20em;
     margin-top: 12px;
     font: 600 clamp(1.85rem, 3.2vw, 3.35rem)/1.38 var(--display);
     letter-spacing: 0.045em;
@@ -986,7 +986,7 @@
     }
 
     .voice-status h1 {
-      font-size: clamp(1.8rem, 8.5vw, 2.55rem);
+      font-size: clamp(1.75rem, 7.8vw, 2.35rem);
     }
 
     .voice-status__hint {

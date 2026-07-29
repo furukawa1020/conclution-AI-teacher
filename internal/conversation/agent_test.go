@@ -290,6 +290,29 @@ func TestAgentAmbientLowEVIAndSelfRepairStaySilent(t *testing.T) {
 	}
 }
 
+func TestAgentAmbientUrgentSafetyIntervenes(t *testing.T) {
+	plan := validModelPlan()
+	plan.InterventionPolicy = "safety"
+	plan.SpokenReply = "今は安全を優先して、すぐに緊急窓口へ連絡してください。"
+	plan.Intervention = modelArbiter{
+		Benefit: 0, InterruptionCost: 1, Urgency: 0.9,
+		Confidence: 1, Act: "reflect",
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	agent := newTestAgent(t, fake)
+	result, err := agent.Process(context.Background(), "uid-s", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "危険が迫っている",
+		Ambient:       true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Intervention.Act == "silent" || result.SpokenReply == "" {
+		t.Fatalf("urgent safety intervention was suppressed: %#v", result)
+	}
+}
+
 func TestAgentPDFIsInlineThenZeroizedAndOnlySummaryEntersState(t *testing.T) {
 	utterance := "この秘密の逐語発話XYZをそのまま保存しないで"
 	pdf := []byte("%PDF-1.7\nRAW-PDF-SECRET")

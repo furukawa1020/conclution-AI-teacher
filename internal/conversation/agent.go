@@ -146,12 +146,12 @@ func (agent *vertexAgent) Process(
 	if ctx == nil || !validUID(uid) {
 		return VoiceTurnResult{}, ErrInvalidTurn
 	}
+	if turn.PDF != nil {
+		defer wipe(turn.PDF.Data)
+	}
 	normalized, err := normalizeTurn(turn)
 	if err != nil {
 		return VoiceTurnResult{}, err
-	}
-	if normalized.PDF != nil {
-		defer wipe(normalized.PDF.Data)
 	}
 
 	state := conversationState{
@@ -211,7 +211,10 @@ func (agent *vertexAgent) Process(
 	ambiguous := finalPlan.Confidence < PrecisionConfidenceThreshold ||
 		finalPlan.InterventionPolicy == "clarify" ||
 		decision.Act == "clarify"
+	urgentSafety := finalPlan.InterventionPolicy == "safety" &&
+		decision.Urgency >= 0.8
 	forceAmbientSilence := normalized.Ambient &&
+		!urgentSafety &&
 		(decision.Score < AmbientEVIThreshold ||
 			(finalPlan.SelfCorrectionGrace && decision.Urgency < 0.85))
 
@@ -227,6 +230,7 @@ func (agent *vertexAgent) Process(
 		interventionPolicy = "clarify"
 	} else if decision.Act == "silent" {
 		spokenReply = ""
+		interventionPolicy = "wait"
 	}
 
 	graph := mergeGraph(state.Graph, finalPlan.ThoughtStateDelta, normalized.Utterance)

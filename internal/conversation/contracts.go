@@ -120,6 +120,8 @@ func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 	if turn.PDF == nil {
 		return turn, nil
 	}
+	pdf := *turn.PDF
+	turn.PDF = &pdf
 	turn.PDF.MIMEType = strings.ToLower(strings.TrimSpace(turn.PDF.MIMEType))
 	if turn.PDF.MIMEType != "application/pdf" ||
 		len(turn.PDF.Data) == 0 ||

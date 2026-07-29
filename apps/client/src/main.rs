@@ -693,7 +693,12 @@ fn App() -> Element {
                             aria_label: state_snapshot.orb_action(),
                             disabled: state_snapshot.orb_disabled(),
                             onclick: move |_| {
-                                match *voice_state.peek() {
+                                // Copy the state before entering the match. Matching
+                                // directly on peek() keeps its read guard alive
+                                // through the selected arm, which makes the
+                                // RequestingPermission write panic in Wasm.
+                                let current_state = *voice_state.peek();
+                                match current_state {
                                     VoiceState::Ready | VoiceState::Error(_) => {
                                         start_or_resume(
                                             voice_state,
@@ -791,7 +796,8 @@ fn App() -> Element {
                                 class: "control-button",
                                 r#type: "button",
                                 onclick: move |_| {
-                                    if *voice_state.peek() == VoiceState::Paused {
+                                    let current_state = *voice_state.peek();
+                                    if current_state == VoiceState::Paused {
                                         start_or_resume(
                                             voice_state,
                                             generation,

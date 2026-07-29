@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,10 @@ const (
 	defaultPort           = "8080"
 	defaultVertexLocation = "global"
 	defaultFastModel      = "vertexai/gemini-3.6-flash"
+	defaultPrecisionModel = "vertexai/gemini-3.1-pro-preview"
+	defaultSpeechLocation = "asia-northeast1"
+	defaultSpeechModel    = "chirp_3"
+	defaultSpeechVoice    = "ja-JP-Chirp3-HD-Kore"
 )
 
 type Config struct {
@@ -24,9 +29,17 @@ type Config struct {
 	AllowedAppIDs    []string
 	VertexLocation   string
 	FastModel        string
+	PrecisionModel   string
+	SpeechLocation   string
+	SpeechModel      string
+	SpeechVoice      string
+	StateKey         []byte
 	RequestTimeout   time.Duration
+	VoiceTimeout     time.Duration
 	MaxRequestBytes  int64
+	MaxVoiceBytes    int64
 	RateLimits       guard.Limits
+	VoiceRateLimits  guard.Limits
 	AllowInsecureDev bool
 }
 
@@ -49,6 +62,29 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	voicePerMinute, err := envBoundedInt(
+		"KOTAE_VOICE_RATE_LIMIT_PER_MINUTE",
+		12,
+		guard.MinPerMinute,
+		guard.MaxPerMinute,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	voicePerDay, err := envBoundedInt(
+		"KOTAE_VOICE_RATE_LIMIT_PER_DAY",
+		120,
+		guard.MinPerDay,
+		guard.MaxPerDay,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	stateKey, err := decodeStateKey(os.Getenv("KOTAE_STATE_KEY_BASE64"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		AppEnv:           envOr("KOTAE_ENV", "production"),
@@ -57,9 +93,17 @@ func Load() (Config, error) {
 		AllowedAppIDs:    csvValues(os.Getenv("KOTAE_ALLOWED_APP_IDS")),
 		VertexLocation:   envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
 		FastModel:        envOr("KOTAE_FAST_MODEL", defaultFastModel),
+		PrecisionModel:   envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
+		SpeechLocation:   envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
+		SpeechModel:      envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
+		SpeechVoice:      envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
+		StateKey:         stateKey,
 		RequestTimeout:   envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
+		VoiceTimeout:     envDurationOr("KOTAE_VOICE_TIMEOUT", 50*time.Second),
 		MaxRequestBytes:  envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
+		MaxVoiceBytes:    envInt64Or("KOTAE_MAX_VOICE_BYTES", 12*1024*1024),
 		RateLimits:       guard.Limits{PerMinute: perMinute, PerDay: perDay},
+		VoiceRateLimits:  guard.Limits{PerMinute: voicePerMinute, PerDay: voicePerDay},
 		AllowInsecureDev: envBool("KOTAE_ALLOW_INSECURE_DEV"),
 	}
 
@@ -75,17 +119,47 @@ func Load() (Config, error) {
 	if !cfg.AllowInsecureDev && len(cfg.AllowedAppIDs) == 0 {
 		return Config{}, errors.New("KOTAE_ALLOWED_APP_IDS must contain at least one Firebase App ID")
 	}
+	if !cfg.AllowInsecureDev && len(cfg.StateKey) != 32 {
+		return Config{}, errors.New("KOTAE_STATE_KEY_BASE64 must decode to exactly 32 bytes")
+	}
+	if cfg.SpeechLocation != defaultSpeechLocation {
+		return Config{}, fmt.Errorf("KOTAE_SPEECH_LOCATION must be %s", defaultSpeechLocation)
+	}
+	if strings.TrimSpace(cfg.SpeechModel) == "" || strings.TrimSpace(cfg.SpeechVoice) == "" {
+		return Config{}, errors.New("speech model and voice must not be empty")
+	}
 	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 55*time.Second {
 		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 55s")
+	}
+	if cfg.VoiceTimeout < 5*time.Second || cfg.VoiceTimeout > 55*time.Second {
+		return Config{}, fmt.Errorf("KOTAE_VOICE_TIMEOUT must be between 5s and 55s")
 	}
 	if cfg.MaxRequestBytes < 1024 || cfg.MaxRequestBytes > 1024*1024 {
 		return Config{}, fmt.Errorf("KOTAE_MAX_REQUEST_BYTES must be between 1 KiB and 1 MiB")
 	}
+	if cfg.MaxVoiceBytes < 256*1024 || cfg.MaxVoiceBytes > 12*1024*1024 {
+		return Config{}, fmt.Errorf("KOTAE_MAX_VOICE_BYTES must be between 256 KiB and 12 MiB")
+	}
 	if err := cfg.RateLimits.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid rate limits: %w", err)
 	}
+	if err := cfg.VoiceRateLimits.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid voice rate limits: %w", err)
+	}
 
 	return cfg, nil
+}
+
+func decodeStateKey(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(decoded) != 32 {
+		return nil, errors.New("KOTAE_STATE_KEY_BASE64 must be standard base64 for exactly 32 bytes")
+	}
+	return decoded, nil
 }
 
 func envOr(key, fallback string) string {

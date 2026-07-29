@@ -99,18 +99,40 @@ func userDocumentID(uid string) (string, error) {
 }
 
 type FirestoreLimiter struct {
-	client *firestore.Client
-	limits Limits
+	client     *firestore.Client
+	limits     Limits
+	collection string
 }
 
 func NewFirestoreLimiter(client *firestore.Client, limits Limits) (*FirestoreLimiter, error) {
+	return NewFirestoreLimiterForScope(client, limits, "evaluation")
+}
+
+func NewFirestoreLimiterForScope(
+	client *firestore.Client,
+	limits Limits,
+	scope string,
+) (*FirestoreLimiter, error) {
 	if client == nil {
 		return nil, errors.New("firestore client is required")
 	}
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
-	return &FirestoreLimiter{client: client, limits: limits}, nil
+	collection := ""
+	switch scope {
+	case "evaluation":
+		collection = "evaluationRateLimits"
+	case "voice":
+		collection = "voiceRateLimits"
+	default:
+		return nil, errors.New("unsupported rate-limit scope")
+	}
+	return &FirestoreLimiter{
+		client:     client,
+		limits:     limits,
+		collection: collection,
+	}, nil
 }
 
 func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Time) error {
@@ -118,7 +140,7 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 	if err != nil {
 		return err
 	}
-	ref := l.client.Collection("evaluationRateLimits").Doc(documentID)
+	ref := l.client.Collection(l.collection).Doc(documentID)
 	err = l.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
 		state := counterState{}
 		snapshot, getErr := tx.Get(ref)
@@ -151,7 +173,7 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 		return ErrRateLimitExceeded
 	}
 	if err != nil {
-		return fmt.Errorf("consume evaluation quota: %w", err)
+		return fmt.Errorf("consume request quota: %w", err)
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,47 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
 )
 
+const (
+	maxAudioBytes    = 2 * 1024 * 1024
+	maxDocumentBytes = 8 * 1024 * 1024
+	maxStateBytes    = 64 * 1024
+)
+
+type VoiceDocument struct {
+	MIMEType string
+	Data     []byte
+}
+
+type VoiceTurnInput struct {
+	Audio        []byte
+	MIMEType     string
+	StateToken   string
+	Ambient      bool
+	Document     *VoiceDocument
+	STTLocale    string
+	SchemaVersion int
+}
+
+type VoiceTurnResult struct {
+	Audio          []byte
+	AudioMIMEType  string
+	StateToken     string
+	DetectedDomain string
+	Route          string
+	NeedsPaper     bool
+}
+
+type VoiceTurnService interface {
+	Process(ctx context.Context, uid string, input VoiceTurnInput) (VoiceTurnResult, error)
+}
+
+type VoiceOptions struct {
+	Service         VoiceTurnService
+	RateLimiter     guard.Limiter
+	RequestTimeout  time.Duration
+	MaxRequestBytes int64
+}
+
 type Server struct {
 	logger          *slog.Logger
 	verifier        identity.Verifier
@@ -30,6 +72,7 @@ type Server struct {
 	store           store.EvaluationStore
 	requestTimeout  time.Duration
 	maxRequestBytes int64
+	voice           VoiceOptions
 }
 
 func New(
@@ -41,6 +84,28 @@ func New(
 	requestTimeout time.Duration,
 	maxRequestBytes int64,
 ) http.Handler {
+	return NewWithVoice(
+		logger,
+		verifier,
+		rateLimiter,
+		evaluator,
+		evaluationStore,
+		requestTimeout,
+		maxRequestBytes,
+		VoiceOptions{},
+	)
+}
+
+func NewWithVoice(
+	logger *slog.Logger,
+	verifier identity.Verifier,
+	rateLimiter guard.Limiter,
+	evaluator evaluation.Evaluator,
+	evaluationStore store.EvaluationStore,
+	requestTimeout time.Duration,
+	maxRequestBytes int64,
+	voice VoiceOptions,
+) http.Handler {
 	server := &Server{
 		logger:          logger,
 		verifier:        verifier,
@@ -49,12 +114,14 @@ func New(
 		store:           evaluationStore,
 		requestTimeout:  requestTimeout,
 		maxRequestBytes: maxRequestBytes,
+		voice:           voice,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.health)
 	mux.Handle("GET /api/v1/me", server.requireIdentity(http.HandlerFunc(server.me)))
 	mux.Handle("POST /api/v1/evaluations", server.requireIdentity(http.HandlerFunc(server.evaluate)))
+	mux.Handle("POST /api/v1/voice/turns", server.requireIdentity(http.HandlerFunc(server.voiceTurn)))
 
 	return server.recoverPanic(
 		server.securityHeaders(
@@ -63,6 +130,215 @@ func New(
 			),
 		),
 	)
+}
+
+type voiceTurnRequest struct {
+	AudioBase64  string                `json:"audioBase64"`
+	MIMEType     string                `json:"mimeType"`
+	SessionState string                `json:"sessionState"`
+	Document     *voiceDocumentRequest `json:"document,omitempty"`
+}
+
+type voiceDocumentRequest struct {
+	Base64   string `json:"base64"`
+	MIMEType string `json:"mimeType"`
+	Name     string `json:"name"`
+}
+
+func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok {
+		writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
+		return
+	}
+	if s.voice.Service == nil || s.voice.RateLimiter == nil ||
+		s.voice.RequestTimeout <= 0 || s.voice.MaxRequestBytes <= 0 {
+		writeProblem(w, http.StatusServiceUnavailable, "voice_unavailable", "Voice conversation is not configured.")
+		return
+	}
+
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeProblem(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json.")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, s.voice.MaxRequestBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request voiceTurnRequest
+	if err := decoder.Decode(&request); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request", "The voice request is invalid.")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeProblem(w, http.StatusBadRequest, "invalid_request", "Only one JSON value is allowed.")
+		return
+	}
+
+	input, err := decodeVoiceTurn(request)
+	if err != nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid_voice_turn", "The voice turn could not be accepted.")
+		return
+	}
+	defer clearVoiceInput(&input)
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.voice.RequestTimeout)
+	defer cancel()
+	started := time.Now()
+	if err := s.voice.RateLimiter.Consume(ctx, principal.UID, started.UTC()); err != nil {
+		if errors.Is(err, guard.ErrRateLimitExceeded) {
+			writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The voice conversation limit has been reached.")
+			return
+		}
+		s.logger.ErrorContext(ctx, "voice rate-limit guard failed",
+			"request_id", requestIDFromContext(ctx),
+			"uid_hash", shortHash(principal.UID),
+			"error_class", "voice_rate_limit_store_failure",
+		)
+		writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
+		return
+	}
+
+	result, err := s.voice.Service.Process(ctx, principal.UID, input)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "voice turn failed",
+			"request_id", requestIDFromContext(ctx),
+			"uid_hash", shortHash(principal.UID),
+			"duration_ms", time.Since(started).Milliseconds(),
+			"error_class", "voice_pipeline_failure",
+		)
+		writeProblem(w, http.StatusBadGateway, "voice_turn_unavailable", "The voice turn could not be completed.")
+		return
+	}
+	defer clear(result.Audio)
+
+	if err := validateVoiceResult(result); err != nil {
+		s.logger.ErrorContext(ctx, "voice result rejected",
+			"request_id", requestIDFromContext(ctx),
+			"uid_hash", shortHash(principal.UID),
+			"error_class", "invalid_voice_result",
+		)
+		writeProblem(w, http.StatusBadGateway, "voice_turn_unavailable", "The voice turn could not be completed.")
+		return
+	}
+
+	s.logger.InfoContext(ctx, "voice turn completed",
+		"request_id", requestIDFromContext(ctx),
+		"uid_hash", shortHash(principal.UID),
+		"domain", result.DetectedDomain,
+		"route", result.Route,
+		"spoke", len(result.Audio) > 0,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"audioBase64":    base64.StdEncoding.EncodeToString(result.Audio),
+		"audioMimeType":  result.AudioMIMEType,
+		"sessionState":   result.StateToken,
+		"detectedDomain": result.DetectedDomain,
+		"route":          result.Route,
+		"needsPaper":     result.NeedsPaper,
+	})
+}
+
+func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
+	mimeType := normalizedAudioMIME(request.MIMEType)
+	if mimeType == "" || len(request.SessionState) > maxStateBytes {
+		return VoiceTurnInput{}, errors.New("invalid voice metadata")
+	}
+	audio, err := decodeBoundedBase64(request.AudioBase64, maxAudioBytes)
+	if err != nil || len(audio) == 0 {
+		clear(audio)
+		return VoiceTurnInput{}, errors.New("invalid audio")
+	}
+
+	input := VoiceTurnInput{
+		Audio:         audio,
+		MIMEType:      mimeType,
+		StateToken:    request.SessionState,
+		Ambient:       true,
+		STTLocale:     "ja-JP",
+		SchemaVersion: 1,
+	}
+	if request.Document == nil {
+		return input, nil
+	}
+	if request.Document.MIMEType != "application/pdf" ||
+		len([]rune(request.Document.Name)) > 180 {
+		clearVoiceInput(&input)
+		return VoiceTurnInput{}, errors.New("invalid document metadata")
+	}
+	document, err := decodeBoundedBase64(request.Document.Base64, maxDocumentBytes)
+	if err != nil || len(document) == 0 {
+		clear(document)
+		clearVoiceInput(&input)
+		return VoiceTurnInput{}, errors.New("invalid document")
+	}
+	input.Document = &VoiceDocument{
+		MIMEType: "application/pdf",
+		Data:     document,
+	}
+	return input, nil
+}
+
+func decodeBoundedBase64(value string, maximum int) ([]byte, error) {
+	if value == "" || len(value) > base64.StdEncoding.EncodedLen(maximum) {
+		return nil, errors.New("encoded data is outside bounds")
+	}
+	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(value)))
+	n, err := base64.StdEncoding.Strict().Decode(decoded, []byte(value))
+	if err != nil || n > maximum {
+		clear(decoded)
+		return nil, errors.New("invalid base64 data")
+	}
+	return decoded[:n], nil
+}
+
+func normalizedAudioMIME(value string) string {
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return ""
+	}
+	switch strings.ToLower(mediaType) {
+	case "audio/webm", "audio/ogg", "audio/mp4", "audio/wav", "audio/x-wav":
+		return strings.ToLower(mediaType)
+	default:
+		return ""
+	}
+}
+
+func validateVoiceResult(result VoiceTurnResult) error {
+	if len(result.Audio) > maxAudioBytes ||
+		len(result.StateToken) == 0 ||
+		len(result.StateToken) > maxStateBytes ||
+		len(result.DetectedDomain) == 0 ||
+		len(result.DetectedDomain) > 40 ||
+		len(result.Route) == 0 ||
+		len(result.Route) > 80 {
+		return errors.New("voice result is outside bounds")
+	}
+	if len(result.Audio) == 0 {
+		if result.AudioMIMEType != "" {
+			return errors.New("silent result has an audio MIME type")
+		}
+		return nil
+	}
+	if result.AudioMIMEType != "audio/mpeg" && result.AudioMIMEType != "audio/ogg" {
+		return errors.New("unsupported synthesized audio type")
+	}
+	return nil
+}
+
+func clearVoiceInput(input *VoiceTurnInput) {
+	if input == nil {
+		return
+	}
+	clear(input.Audio)
+	input.Audio = nil
+	if input.Document != nil {
+		clear(input.Document.Data)
+		input.Document.Data = nil
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

@@ -1,167 +1,120 @@
-mod microphone;
-
 use dioxus::prelude::*;
-use kotae_audio_core::TimingFeatures;
-use microphone::{MicrophoneError, MicrophoneSession};
 use serde::Deserialize;
 
-const QUESTION: &str = "今週金曜までに、試作版を公開できますか。";
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoiceState {
+    Ready,
+    RequestingPermission,
+    Listening,
+    Thinking,
+    Speaking,
+    Paused,
+    Error(&'static str),
+}
 
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl VoiceState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "タップして、会話をひらく",
+            Self::RequestingPermission => "マイクを準備しています",
+            Self::Listening => "聴いています",
+            Self::Thinking => "背景まで読んでいます",
+            Self::Speaking => "言葉で返しています",
+            Self::Paused => "会話を止めています",
+            Self::Error(_) => "接続を続けられませんでした",
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Ready => "ぼやきでも、研究の話でも。テーマを決めずに、そのまま話してください。",
+            Self::RequestingPermission => {
+                "この会話に使うマイクを、ブラウザの確認画面で選んでください。"
+            }
+            Self::Listening => "言い終えて約一秒すると、自動で応答します。操作はいりません。",
+            Self::Thinking => "意図・前提・論点を推論し、次に返すべき一言を組み立てています。",
+            Self::Speaking => "返答が終わると、自動でまた聴き始めます。",
+            Self::Paused => "マイクは解放されています。再開するまで、音声は取り込みません。",
+            Self::Error(message) => message,
+        }
+    }
+
+    const fn class_name(self) -> &'static str {
+        match self {
+            Self::Ready => "is-ready",
+            Self::RequestingPermission => "is-requesting",
+            Self::Listening => "is-listening",
+            Self::Thinking => "is-thinking",
+            Self::Speaking => "is-speaking",
+            Self::Paused => "is-paused",
+            Self::Error(_) => "is-error",
+        }
+    }
+
+    const fn orb_action(self) -> &'static str {
+        match self {
+            Self::Ready => "会話を始める",
+            Self::Listening => "自動で聴き取り中",
+            Self::Paused => "一時停止中",
+            Self::Error(_) => "もう一度接続する",
+            Self::RequestingPermission | Self::Thinking | Self::Speaking => "処理中",
+        }
+    }
+
+    const fn orb_disabled(self) -> bool {
+        !matches!(self, Self::Ready | Self::Error(_))
+    }
+
+    const fn session_active(self) -> bool {
+        !matches!(self, Self::Ready)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloudState {
     Connecting,
     Ready,
-    Verified,
     ConfigurationRequired,
     Unavailable,
 }
 
 impl CloudState {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Connecting => "CLOUD 接続確認中",
-            Self::Ready => "CLOUD 準備済み",
-            Self::Verified => "CLOUD 検証済み",
-            Self::ConfigurationRequired => "CLOUD 設定待ち",
-            Self::Unavailable => "CLOUD 要確認",
+            Self::Connecting => "SECURE LINK / …",
+            Self::Ready => "SECURE LINK / READY",
+            Self::ConfigurationRequired => "SECURE LINK / SETUP",
+            Self::Unavailable => "SECURE LINK / OFFLINE",
         }
     }
 
-    fn class_name(self) -> &'static str {
+    const fn class_name(self) -> &'static str {
         match self {
-            Self::Ready | Self::Verified => "stamp stamp--cloud-ready",
-            Self::Connecting | Self::ConfigurationRequired => "stamp stamp--pending",
-            Self::Unavailable => "stamp stamp--cloud-error",
+            Self::Connecting | Self::ConfigurationRequired => "cloud-pill is-pending",
+            Self::Ready => "cloud-pill is-ready",
+            Self::Unavailable => "cloud-pill is-offline",
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RecordingState {
-    Idle,
-    Starting,
-    Recording,
-    Complete,
-    Error(&'static str),
-}
-
-fn microphone_error_message(error: MicrophoneError) -> &'static str {
-    match error {
-        MicrophoneError::Unsupported => "このブラウザではマイク測定を利用できません。",
-        MicrophoneError::PermissionDenied => {
-            "マイクの使用が許可されませんでした。ブラウザの権限設定を確認してください。"
-        }
-        MicrophoneError::DeviceUnavailable => {
-            "利用できるマイクを確認できませんでした。接続状態を確認してください。"
-        }
-        MicrophoneError::CaptureFailed => {
-            "マイクを開始できませんでした。ページを再読み込みしてお試しください。"
-        }
-        MicrophoneError::AudioGraphFailed | MicrophoneError::DetectorFailed => {
-            "端末内の音声解析を開始できませんでした。ページを再読み込みしてお試しください。"
-        }
-    }
-}
-
-fn format_duration(milliseconds: u64) -> String {
-    format!("{:.2}秒", milliseconds as f64 / 1_000.0)
-}
-
-fn format_first_voice(milliseconds: Option<u64>) -> String {
-    milliseconds
-        .map(format_duration)
-        .unwrap_or_else(|| "未検出".to_owned())
-}
-
-fn timing_bucket_class(index: usize, features: TimingFeatures) -> &'static str {
-    const BUCKETS: usize = 40;
-
-    if features.elapsed_ms == 0 {
-        return "timing-bucket timing-bucket--empty";
-    }
-
-    let total = u128::from(features.elapsed_ms);
-    let proportional =
-        |milliseconds: u64| ((u128::from(milliseconds) * BUCKETS as u128) / total) as usize;
-    let initial = proportional(
-        features
-            .first_voice_ms
-            .unwrap_or(features.elapsed_ms)
-            .min(features.elapsed_ms),
-    )
-    .min(BUCKETS);
-    let voice = proportional(features.voiced_ms).min(BUCKETS - initial);
-    let trailing = proportional(features.trailing_silence_ms).min(BUCKETS - initial - voice);
-    let unclassified = BUCKETS - initial - voice - trailing;
-
-    if index < initial {
-        "timing-bucket timing-bucket--initial"
-    } else if index < initial + voice {
-        "timing-bucket timing-bucket--voice"
-    } else if index < initial + voice + unclassified {
-        "timing-bucket timing-bucket--unclassified"
-    } else {
-        "timing-bucket timing-bucket--trailing"
-    }
-}
-
-fn stop_microphone(
-    mut session: Signal<Option<MicrophoneSession>>,
-    mut timing: Signal<TimingFeatures>,
-) {
-    let final_features = session
-        .write()
-        .take()
-        .map(|mut active_session| active_session.stop());
-    if let Some(final_features) = final_features {
-        timing.set(final_features);
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn wait_for_recording_tick() {
-    use wasm_bindgen::{JsCast, JsValue, closure::Closure};
-    use wasm_bindgen_futures::JsFuture;
-
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let fallback = resolve.clone();
-        let callback = Closure::once_into_js(move || {
-            let _ = resolve.call0(&JsValue::UNDEFINED);
-        });
-        if window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), 100)
-            .is_err()
-        {
-            let _ = fallback.call0(&JsValue::UNDEFINED);
-        }
-    });
-    let _ = JsFuture::from(promise).await;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn wait_for_recording_tick() {
-    std::future::pending::<()>().await;
-}
-
-#[derive(Clone, PartialEq)]
-enum EvaluationState {
-    Idle,
-    Loading,
-    Success(EvaluationResult),
-    Error(&'static str),
 }
 
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EvaluationResult {
-    score: u8,
-    feedback: String,
-    retry_instruction: String,
-    model_logical_id: String,
+struct VoiceTurnResult {
+    audio_base64: String,
+    audio_mime_type: String,
+    session_state: String,
+    detected_domain: String,
+    route: String,
+    needs_paper: bool,
+    #[serde(default)]
+    caption: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentInfo {
+    name: String,
+    size_bytes: u64,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -171,8 +124,15 @@ struct BridgeStatus {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnEnd {
+    has_speech: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
 mod cloud {
-    use super::{BridgeStatus, CloudState, EvaluationResult};
+    use super::{BridgeStatus, CloudState, DocumentInfo, TurnEnd, VoiceTurnResult};
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen]
@@ -180,8 +140,26 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = getStatus)]
         async fn get_status_js() -> Result<JsValue, JsValue>;
 
-        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = evaluate)]
-        async fn evaluate_js(question: &str, answer: &str) -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = beginTurn)]
+        async fn begin_turn_js() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = waitForTurnEnd)]
+        async fn wait_for_turn_end_js() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = finishTurn)]
+        async fn finish_turn_js(session_state: &str) -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = playResponse)]
+        async fn play_response_js(
+            audio_base64: &str,
+            audio_mime_type: &str,
+        ) -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = attachDocument)]
+        async fn attach_document_js(input_id: &str) -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = stopSession)]
+        fn stop_session_js() -> Result<(), JsValue>;
     }
 
     pub async fn status() -> CloudState {
@@ -198,660 +176,626 @@ mod cloud {
         }
     }
 
-    pub async fn evaluate(question: &str, answer: &str) -> Result<EvaluationResult, &'static str> {
-        let value = evaluate_js(question, answer).await.map_err(|error| {
-            let message = js_sys::Error::from(error).message();
-            user_message(message.as_string().as_deref())
-        })?;
-        serde_wasm_bindgen::from_value(value).map_err(|_| "評価結果の形式を確認できませんでした。")
+    pub async fn begin_turn() -> Result<(), &'static str> {
+        begin_turn_js().await.map(|_| ()).map_err(user_message)
     }
 
-    fn user_message(code: Option<&str>) -> &'static str {
-        match code {
+    pub async fn wait_for_turn_end() -> Result<bool, &'static str> {
+        let value = wait_for_turn_end_js().await.map_err(user_message)?;
+        serde_wasm_bindgen::from_value::<TurnEnd>(value)
+            .map(|result| result.has_speech)
+            .map_err(|_| "マイクの状態を確認できませんでした。")
+    }
+
+    pub async fn finish_turn(session_state: &str) -> Result<VoiceTurnResult, &'static str> {
+        let value = finish_turn_js(session_state).await.map_err(user_message)?;
+        serde_wasm_bindgen::from_value(value)
+            .map_err(|_| "音声応答の形式を確認できませんでした。もう一度お試しください。")
+    }
+
+    pub async fn play_response(
+        audio_base64: &str,
+        audio_mime_type: &str,
+    ) -> Result<(), &'static str> {
+        play_response_js(audio_base64, audio_mime_type)
+            .await
+            .map(|_| ())
+            .map_err(user_message)
+    }
+
+    pub async fn attach_document(input_id: &str) -> Result<DocumentInfo, &'static str> {
+        let value = attach_document_js(input_id)
+            .await
+            .map_err(document_message)?;
+        serde_wasm_bindgen::from_value(value)
+            .map_err(|_| "PDFの情報を確認できませんでした。")
+    }
+
+    pub fn stop_session() {
+        let _ = stop_session_js();
+    }
+
+    fn error_code(error: JsValue) -> Option<String> {
+        js_sys::Error::from(error).message().as_string()
+    }
+
+    fn user_message(error: JsValue) -> &'static str {
+        match error_code(error).as_deref() {
+            Some("microphone_unsupported") => {
+                "このブラウザは音声会話に対応していません。最新版でお試しください。"
+            }
+            Some("microphone_permission_denied") => {
+                "マイクが許可されていません。ブラウザの権限設定を確認してください。"
+            }
+            Some("microphone_unavailable") => {
+                "利用できるマイクが見つかりません。接続を確認してください。"
+            }
+            Some("no_speech") => "声を確認できませんでした。少し近づいて、もう一度話してください。",
+            Some("authentication_failed") => {
+                "安全な接続を確認できませんでした。もう一度お試しください。"
+            }
             Some("app_check_not_configured") => {
                 "App Check の公開サイトキーがまだ設定されていません。"
             }
-            Some("authentication_failed") => {
-                "安全な接続を確認できませんでした。再度お試しください。"
+            Some("voice_turn_too_large") => "発話が長すぎました。少し短く区切ってください。",
+            Some("voice_turn_invalid") => "音声を確認できませんでした。もう一度お試しください。",
+            Some("rate_limited") => "短時間の利用上限に達しました。少し待って再開してください。",
+            Some("request_cancelled") => "会話を一時停止しました。",
+            Some("audio_playback_blocked") => {
+                "音声を再生できませんでした。端末の消音設定を確認してください。"
             }
-            Some("answer_not_evaluable") => "回答を評価できませんでした。内容を確認してください。",
-            Some("rate_limited") => "短時間の利用上限に達しました。少し待って再度お試しください。",
-            Some("firebase_project_mismatch") => "接続先のFirebaseプロジェクトが一致しません。",
-            _ => "クラウド評価に接続できませんでした。時間をおいて再度お試しください。",
+            Some("voice_api_unavailable") => {
+                "音声エージェントを準備中です。少し待ってからお試しください。"
+            }
+            _ => "音声エージェントに接続できませんでした。もう一度お試しください。",
+        }
+    }
+
+    fn document_message(error: JsValue) -> &'static str {
+        match error_code(error).as_deref() {
+            Some("document_not_selected") => "PDFを選択してください。",
+            Some("document_type_invalid") => "PDF形式の資料だけを添付できます。",
+            Some("document_too_large") => "PDFは8MB以下にしてください。",
+            Some("document_read_failed") => "PDFを読み取れませんでした。別のファイルをお試しください。",
+            _ => "PDFを添付できませんでした。",
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
-    use super::{CloudState, EvaluationResult};
+    use super::{CloudState, DocumentInfo, VoiceTurnResult};
 
     pub async fn status() -> CloudState {
         CloudState::Unavailable
     }
 
-    pub async fn evaluate(
-        _question: &str,
-        _answer: &str,
-    ) -> Result<EvaluationResult, &'static str> {
+    pub async fn begin_turn() -> Result<(), &'static str> {
         Err("WebAssembly版で利用してください。")
     }
+
+    pub async fn wait_for_turn_end() -> Result<bool, &'static str> {
+        Err("WebAssembly版で利用してください。")
+    }
+
+    pub async fn finish_turn(_session_state: &str) -> Result<VoiceTurnResult, &'static str> {
+        Err("WebAssembly版で利用してください。")
+    }
+
+    pub async fn play_response(
+        _audio_base64: &str,
+        _audio_mime_type: &str,
+    ) -> Result<(), &'static str> {
+        Err("WebAssembly版で利用してください。")
+    }
+
+    pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
+        Err("WebAssembly版で利用してください。")
+    }
+
+    pub fn stop_session() {}
 }
 
 fn main() {
     dioxus::launch(App);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn arm_listening(
+    operation: u64,
+    announce_permission: bool,
+    mut voice_state: Signal<VoiceState>,
+    generation: Signal<u64>,
+    session_state: Signal<String>,
+    detected_domain: Signal<String>,
+    route: Signal<String>,
+    needs_paper: Signal<bool>,
+    document_info: Signal<Option<DocumentInfo>>,
+    caption: Signal<Option<String>>,
+) {
+    if announce_permission {
+        voice_state.set(VoiceState::RequestingPermission);
+    }
+
+    spawn(async move {
+        if let Err(message) = cloud::begin_turn().await {
+            if *generation.peek() == operation {
+                voice_state.set(VoiceState::Error(message));
+            }
+            return;
+        }
+        if *generation.peek() != operation {
+            cloud::stop_session();
+            return;
+        }
+
+        voice_state.set(VoiceState::Listening);
+        let has_speech = match cloud::wait_for_turn_end().await {
+            Ok(has_speech) => has_speech,
+            Err(message) => {
+                if *generation.peek() == operation
+                    && *voice_state.peek() == VoiceState::Listening
+                {
+                    voice_state.set(VoiceState::Error(message));
+                }
+                return;
+            }
+        };
+
+        if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
+            if has_speech {
+                submit_turn(
+                    operation,
+                    voice_state,
+                    generation,
+                    session_state,
+                    detected_domain,
+                    route,
+                    needs_paper,
+                    document_info,
+                    caption,
+                );
+            } else {
+                arm_listening(
+                    operation,
+                    false,
+                    voice_state,
+                    generation,
+                    session_state,
+                    detected_domain,
+                    route,
+                    needs_paper,
+                    document_info,
+                    caption,
+                );
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_turn(
+    operation: u64,
+    mut voice_state: Signal<VoiceState>,
+    generation: Signal<u64>,
+    mut session_state: Signal<String>,
+    mut detected_domain: Signal<String>,
+    mut route: Signal<String>,
+    mut needs_paper: Signal<bool>,
+    mut document_info: Signal<Option<DocumentInfo>>,
+    mut caption: Signal<Option<String>>,
+) {
+    if *generation.peek() != operation || *voice_state.peek() != VoiceState::Listening {
+        return;
+    }
+
+    let state_snapshot = session_state.peek().clone();
+    let consumed_document = document_info.peek().is_some();
+    voice_state.set(VoiceState::Thinking);
+
+    spawn(async move {
+        let result = cloud::finish_turn(&state_snapshot).await;
+        if *generation.peek() != operation {
+            return;
+        }
+
+        let result = match result {
+            Ok(result) => result,
+            Err(message) => {
+                voice_state.set(VoiceState::Error(message));
+                return;
+            }
+        };
+
+        session_state.set(result.session_state.clone());
+        detected_domain.set(result.detected_domain.clone());
+        route.set(result.route.clone());
+        needs_paper.set(result.needs_paper);
+        caption.set(result.caption.clone());
+        if consumed_document {
+            document_info.set(None);
+        }
+
+        voice_state.set(VoiceState::Speaking);
+        if let Err(message) =
+            cloud::play_response(&result.audio_base64, &result.audio_mime_type).await
+        {
+            if *generation.peek() == operation {
+                voice_state.set(VoiceState::Error(message));
+            }
+            return;
+        }
+        if *generation.peek() != operation {
+            return;
+        }
+
+        arm_listening(
+            operation,
+            false,
+            voice_state,
+            generation,
+            session_state,
+            detected_domain,
+            route,
+            needs_paper,
+            document_info,
+            caption,
+        );
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_or_resume(
+    mut voice_state: Signal<VoiceState>,
+    mut generation: Signal<u64>,
+    session_state: Signal<String>,
+    detected_domain: Signal<String>,
+    route: Signal<String>,
+    needs_paper: Signal<bool>,
+    document_info: Signal<Option<DocumentInfo>>,
+    caption: Signal<Option<String>>,
+) {
+    let operation = generation.peek().wrapping_add(1);
+    generation.set(operation);
+    arm_listening(
+        operation,
+        true,
+        voice_state,
+        generation,
+        session_state,
+        detected_domain,
+        route,
+        needs_paper,
+        document_info,
+        caption,
+    );
+}
+
+fn human_file_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1_024.0)
+    }
+}
+
 #[component]
 fn App() -> Element {
-    let mut answer = use_signal(String::new);
-    let mut evaluation_state = use_signal(|| EvaluationState::Idle);
-    let mut evaluation_generation = use_signal(|| 0_u64);
-    let mut cloud_verification = use_signal(|| None::<bool>);
-    let mut recording_state = use_signal(|| RecordingState::Idle);
-    let mut recording_generation = use_signal(|| 0_u64);
-    let mut microphone_session = use_signal(|| None::<MicrophoneSession>);
-    let mut timing_features = use_signal(TimingFeatures::default);
+    let mut voice_state = use_signal(|| VoiceState::Ready);
+    let mut generation = use_signal(|| 0_u64);
+    let mut session_state = use_signal(|| "{}".to_owned());
+    let mut detected_domain = use_signal(String::new);
+    let mut route = use_signal(String::new);
+    let mut needs_paper = use_signal(|| false);
+    let mut document_info = use_signal(|| None::<DocumentInfo>);
+    let mut document_error = use_signal(|| None::<&'static str>);
+    let mut caption = use_signal(|| None::<String>);
+    let mut captions_visible = use_signal(|| false);
     let cloud_status = use_resource(|| async { cloud::status().await });
 
-    let answer_value = answer.read().clone();
-    let answer_is_empty = answer_value.trim().is_empty();
-    let character_count = answer_value.chars().count();
-    let evaluation_snapshot = evaluation_state.read().clone();
-    let evaluation_running = evaluation_snapshot == EvaluationState::Loading;
-    let recording_snapshot = *recording_state.read();
-    let timing_snapshot = *timing_features.read();
-    let has_timing_measurement =
-        timing_snapshot.elapsed_ms > 0 || recording_snapshot == RecordingState::Complete;
-    let remaining_seconds =
-        10_u64.saturating_sub(timing_snapshot.elapsed_ms.min(10_000).div_ceil(1_000));
+    let state_snapshot = *voice_state.read();
+    let generation_snapshot = *generation.read();
+    let captions_are_visible = *captions_visible.read();
+    let document_snapshot = document_info.read().clone();
+    let document_is_busy = matches!(
+        state_snapshot,
+        VoiceState::RequestingPermission | VoiceState::Thinking | VoiceState::Speaking
+    );
     let prepared_cloud_state = cloud_status
         .read()
         .as_ref()
         .copied()
         .unwrap_or(CloudState::Connecting);
-    let cloud_state = match *cloud_verification.read() {
-        Some(true) => CloudState::Verified,
-        Some(false) => CloudState::Unavailable,
-        None => prepared_cloud_state,
-    };
+    let orb_class = format!("voice-orb {}", state_snapshot.class_name());
 
     rsx! {
-        div { class: "app-shell",
-            header { class: "masthead",
+        div { class: "ambient-shell",
+            div { class: "aurora aurora--one", aria_hidden: "true" }
+            div { class: "aurora aurora--two", aria_hidden: "true" }
+            div { class: "noise-field", aria_hidden: "true" }
+
+            header { class: "topline",
                 a {
-                    class: "wordmark",
-                    href: "#workspace",
-                    aria_label: "コタエーAI ホーム",
-                    span { class: "wordmark__latin", "KOTAE" }
-                    span { class: "wordmark__ja", "コタエーAI" }
+                    class: "identity",
+                    href: "#conversation",
+                    aria_label: "コタエーAI 会話画面",
+                    span { class: "identity__mark", "K" }
+                    span { class: "identity__type",
+                        strong { "KOTAE" }
+                        small { "AMBIENT REASONING VOICE" }
+                    }
                 }
-                p { class: "masthead__manifesto", "答えを、先に。" }
-                div { class: "system-stamps", aria_label: "システム状態",
-                    span { class: "stamp stamp--local",
-                        span { class: "stamp__dot" }
-                        "LOCAL / RUST"
-                    }
-                    span { class: cloud_state.class_name(),
-                        if matches!(cloud_state, CloudState::Ready | CloudState::Verified) {
-                            span { class: "stamp__dot" }
-                        }
-                        {cloud_state.label()}
-                    }
+                div { class: prepared_cloud_state.class_name(),
+                    span { class: "cloud-pill__dot", aria_hidden: "true" }
+                    {prepared_cloud_state.label()}
                 }
             }
 
-            aside { class: "index-rail", aria_label: "練習の進行",
-                ol { class: "index-rail__list",
-                    li { class: "index-rail__item index-rail__item--active",
-                        span { class: "index-rail__number", "01" }
-                        span { "問い" }
-                    }
-                    li { class: "index-rail__item",
-                        span { class: "index-rail__number", "02" }
-                        span { "発話" }
-                    }
-                    li { class: "index-rail__item",
-                        span { class: "index-rail__number", "03" }
-                        span { "赤入れ" }
-                    }
-                    li { class: "index-rail__item",
-                        span { class: "index-rail__number", "04" }
-                        span { "言い直す" }
-                    }
-                }
-                p { class: "index-rail__note",
-                    "音声ではなく、"
-                    br {}
-                    "答え方の構造を測る。"
-                }
-            }
+            main { id: "conversation", class: "conversation-stage",
+                section {
+                    class: "voice-space",
+                    aria_labelledby: "voice-heading",
+                    "data-voice-state": state_snapshot.class_name(),
 
-            main { id: "workspace", class: "workbench",
-                section { class: "question-sheet", aria_labelledby: "question-heading",
-                    div { class: "sheet-kicker",
-                        span { "TODAY / DECISION" }
-                        span { "制限 10秒" }
-                    }
-                    h1 { id: "question-heading",
-                        "今週金曜までに、"
-                        br {}
-                        "試作版を公開できますか。"
-                    }
-                    p { class: "question-sheet__instruction",
-                        span { class: "proof-mark", "※" }
-                        "一文目で「判断」を置く。理由は、そのあと。"
-                    }
-                }
-
-                section { class: "ruler-panel", aria_labelledby: "ruler-heading",
-                    div { class: "section-heading",
-                        div {
-                            p { class: "eyebrow", "ANSWER RULER / 00—10 SEC" }
-                            h2 { id: "ruler-heading", "結論までの距離" }
-                        }
-                        span { class: "local-only-label", "端末内で解析" }
-                    }
-
-                    div { class: "proof-ruler", aria_label: "十秒の校正定規",
-                        for second in 0..10 {
-                            div {
-                                key: "{second}",
-                                class: if timing_snapshot.elapsed_ms >= second * 1_000 {
-                                    "ruler-tick ruler-tick--elapsed"
-                                } else if second < 2 {
-                                    "ruler-tick ruler-tick--focus"
-                                } else {
-                                    "ruler-tick"
-                                },
-                                span { class: "ruler-tick__number", "{second + 1}" }
-                                span { class: "ruler-tick__line" }
+                    div { class: "context-line", aria_live: "polite",
+                        if !detected_domain.read().is_empty() {
+                            span { class: "context-chip",
+                                "CONTEXT / "
+                                {detected_domain.read().clone()}
                             }
+                        } else {
+                            span { class: "context-chip context-chip--quiet", "CONTEXT / AUTO" }
+                        }
+                        if !route.read().is_empty() {
+                            span { class: "route-chip", {route.read().clone()} }
+                        }
+                    }
+
+                    div { class: "orb-field",
+                        div { class: "orb-orbit orb-orbit--outer", aria_hidden: "true" }
+                        div { class: "orb-orbit orb-orbit--inner", aria_hidden: "true" }
+                        button {
+                            class: orb_class,
+                            r#type: "button",
+                            aria_label: state_snapshot.orb_action(),
+                            disabled: state_snapshot.orb_disabled(),
+                            onclick: move |_| {
+                                match *voice_state.peek() {
+                                    VoiceState::Ready | VoiceState::Error(_) => {
+                                        start_or_resume(
+                                            voice_state,
+                                            generation,
+                                            session_state,
+                                            detected_domain,
+                                            route,
+                                            needs_paper,
+                                            document_info,
+                                            caption,
+                                        );
+                                    }
+                                    VoiceState::Listening | VoiceState::Paused => {}
+                                    VoiceState::RequestingPermission
+                                    | VoiceState::Thinking
+                                    | VoiceState::Speaking => {}
+                                }
+                            },
+                            span { class: "voice-orb__surface", aria_hidden: "true",
+                                span { class: "voice-orb__wave",
+                                    for index in 0..7 {
+                                        i { key: "{index}" }
+                                    }
+                                }
+                            }
+                            span { class: "sr-only", {state_snapshot.orb_action()} }
                         }
                     }
 
                     div {
-                        class: if recording_snapshot == RecordingState::Recording {
-                            "engine-notice engine-notice--recording"
-                        } else {
-                            "engine-notice"
-                        },
+                        class: "voice-status",
                         role: "status",
                         aria_live: "polite",
                         aria_busy: matches!(
-                            recording_snapshot,
-                            RecordingState::Starting | RecordingState::Recording
+                            state_snapshot,
+                            VoiceState::RequestingPermission | VoiceState::Thinking
                         ),
-                        span {
-                            class: "engine-notice__icon",
-                            aria_hidden: "true",
-                            if recording_snapshot == RecordingState::Recording { "●" } else { "◉" }
-                        }
-                        div {
-                            strong {
-                                match recording_snapshot {
-                                    RecordingState::Idle => "10秒の端末内測定",
-                                    RecordingState::Starting => "マイクの許可を確認しています",
-                                    RecordingState::Recording => "録音中 — 端末内だけで解析",
-                                    RecordingState::Complete => "測定を終了しました",
-                                    RecordingState::Error(_) => "マイク測定を開始できませんでした",
-                                }
+                        p { class: "voice-status__eyebrow",
+                            if state_snapshot == VoiceState::Listening {
+                                span { class: "live-dot", aria_hidden: "true" }
                             }
-                            p {
-                                match recording_snapshot {
-                                    RecordingState::Idle => {
-                                        "音声は保存・送信せず、発話の時間特徴だけをRustで計算します。"
-                                            .to_owned()
-                                    }
-                                    RecordingState::Starting => {
-                                        "ブラウザの確認画面で、この測定に使うマイクを選んでください。"
-                                            .to_owned()
-                                    }
-                                    RecordingState::Recording => {
-                                        format!(
-                                            "残り約{remaining_seconds}秒。いつでも停止できます。"
-                                        )
-                                    }
-                                    RecordingState::Complete => {
-                                        "下の実測値を確認できます。元の音声データは残していません。"
-                                            .to_owned()
-                                    }
-                                    RecordingState::Error(message) => message.to_owned(),
-                                }
+                            {state_snapshot.label()}
+                        }
+                        h1 { id: "voice-heading",
+                            if state_snapshot == VoiceState::Ready {
+                                "ただ話す。"
+                                br {}
+                                "考えは、あとから整う。"
+                            } else {
+                                {state_snapshot.label()}
                             }
                         }
-                        if matches!(
-                            recording_snapshot,
-                            RecordingState::Idle
-                                | RecordingState::Complete
-                                | RecordingState::Error(_)
-                        ) {
+                        p { class: "voice-status__hint", {state_snapshot.hint()} }
+                    }
+
+                    if *needs_paper.read() && document_snapshot.is_none() {
+                        p { class: "paper-request", role: "status",
+                            span { "↳" }
+                            "論文の中身まで検討するには、下からPDFを今回だけ渡してください。"
+                        }
+                    }
+
+                    nav { class: "session-controls", aria_label: "会話の操作",
+                        if state_snapshot.session_active() {
                             button {
-                                class: "text-button text-button--start",
+                                class: "control-button",
                                 r#type: "button",
                                 onclick: move |_| {
-                                    if matches!(
-                                        *recording_state.peek(),
-                                        RecordingState::Starting | RecordingState::Recording
-                                    ) {
-                                        return;
+                                    if *voice_state.peek() == VoiceState::Paused {
+                                        start_or_resume(
+                                            voice_state,
+                                            generation,
+                                            session_state,
+                                            detected_domain,
+                                            route,
+                                            needs_paper,
+                                            document_info,
+                                            caption,
+                                        );
+                                    } else {
+                                        let next = generation.peek().wrapping_add(1);
+                                        generation.set(next);
+                                        voice_state.set(VoiceState::Paused);
+                                        cloud::stop_session();
                                     }
-
-                                    stop_microphone(microphone_session, timing_features);
-                                    timing_features.set(TimingFeatures::default());
-                                    let operation = recording_generation
-                                        .peek()
-                                        .wrapping_add(1);
-                                    recording_generation.set(operation);
-                                    recording_state.set(RecordingState::Starting);
-
-                                    spawn(async move {
-                                        let started = MicrophoneSession::start().await;
-                                        let operation_is_current =
-                                            *recording_generation.peek() == operation
-                                                && *recording_state.peek()
-                                                    == RecordingState::Starting;
-                                        if !operation_is_current {
-                                            if let Ok(mut stale_session) = started {
-                                                stale_session.stop();
-                                            }
-                                            return;
-                                        }
-
-                                        match started {
-                                            Ok(session) => {
-                                                timing_features.set(session.features());
-                                                microphone_session.set(Some(session));
-                                                recording_state.set(RecordingState::Recording);
-
-                                                loop {
-                                                    wait_for_recording_tick().await;
-                                                    if *recording_generation.peek() != operation {
-                                                        return;
-                                                    }
-
-                                                    let snapshot = microphone_session
-                                                        .read()
-                                                        .as_ref()
-                                                        .map(|session| {
-                                                            (
-                                                                session.is_active(),
-                                                                session.features(),
-                                                                session.analysis_error(),
-                                                            )
-                                                        });
-                                                    let Some((active, features, analysis_error)) =
-                                                        snapshot
-                                                    else {
-                                                        return;
-                                                    };
-                                                    timing_features.set(features);
-
-                                                    if let Some(error) = analysis_error {
-                                                        recording_generation
-                                                            .set(operation.wrapping_add(1));
-                                                        stop_microphone(
-                                                            microphone_session,
-                                                            timing_features,
-                                                        );
-                                                        recording_state.set(
-                                                            RecordingState::Error(
-                                                                microphone_error_message(error),
-                                                            ),
-                                                        );
-                                                        return;
-                                                    }
-
-                                                    if !active {
-                                                        stop_microphone(
-                                                            microphone_session,
-                                                            timing_features,
-                                                        );
-                                                        recording_state
-                                                            .set(RecordingState::Complete);
-                                                        return;
-                                                    }
-                                                }
-                                            }
-                                            Err(error) => {
-                                                recording_state.set(RecordingState::Error(
-                                                    microphone_error_message(error),
-                                                ));
-                                            }
-                                        }
-                                    });
                                 },
-                                if recording_snapshot == RecordingState::Complete {
-                                    "もう一度測る"
+                                if state_snapshot == VoiceState::Paused {
+                                    span { aria_hidden: "true", "▶" }
+                                    "再開"
                                 } else {
-                                    "マイクで測る"
+                                    span { aria_hidden: "true", "Ⅱ" }
+                                    "一時停止"
                                 }
                             }
-                        } else {
                             button {
-                                class: "text-button text-button--stop",
+                                class: "control-button control-button--end",
                                 r#type: "button",
                                 onclick: move |_| {
-                                    let current = *recording_state.peek();
-                                    let next_generation =
-                                        recording_generation.peek().wrapping_add(1);
-                                    recording_generation.set(next_generation);
-                                    match current {
-                                        RecordingState::Starting => {
-                                            recording_state.set(RecordingState::Idle);
-                                        }
-                                        RecordingState::Recording => {
-                                            stop_microphone(
-                                                microphone_session,
-                                                timing_features,
-                                            );
-                                            recording_state.set(RecordingState::Complete);
-                                        }
-                                        _ => {}
-                                    }
+                                    generation.set(generation.peek().wrapping_add(1));
+                                    voice_state.set(VoiceState::Ready);
+                                    session_state.set("{}".to_owned());
+                                    detected_domain.set(String::new());
+                                    route.set(String::new());
+                                    needs_paper.set(false);
+                                    document_info.set(None);
+                                    caption.set(None);
+                                    document_error.set(None);
+                                    cloud::stop_session();
                                 },
-                                if recording_snapshot == RecordingState::Starting {
-                                    "キャンセル"
-                                } else {
-                                    "測定を停止"
-                                }
+                                span { aria_hidden: "true", "×" }
+                                "終了"
                             }
-                        }
-                    }
-                }
-
-                section { class: "answer-panel", aria_labelledby: "answer-heading",
-                    div { class: "section-heading section-heading--answer",
-                        div {
-                            p { class: "eyebrow", "DRAFT / KEYBOARD PREVIEW" }
-                            h2 { id: "answer-heading", "まず文字で答える" }
-                        }
-                        span { class: "character-count", "{character_count} 字" }
-                    }
-                    label { class: "sr-only", r#for: "answer-input", "回答" }
-                    textarea {
-                        id: "answer-input",
-                        class: "answer-input",
-                        rows: 4,
-                        maxlength: 8000,
-                        disabled: evaluation_running,
-                        value: "{answer_value}",
-                        placeholder: "例：はい、金曜までに試作版を公開できます。理由は…",
-                        oninput: move |event| {
-                            answer.set(event.value());
-                            let next_generation =
-                                evaluation_generation.peek().wrapping_add(1);
-                            evaluation_generation.set(next_generation);
-                            evaluation_state.set(EvaluationState::Idle);
-                        }
-                    }
-                    div { class: "answer-actions",
-                        p {
-                            span { class: "shortcut", "⌘ ↵" }
-                            " で校正"
                         }
                         button {
-                            class: "primary-action",
+                            class: if captions_are_visible {
+                                "control-button is-active"
+                            } else {
+                                "control-button"
+                            },
                             r#type: "button",
-                            disabled: answer_is_empty || evaluation_running,
+                            aria_pressed: captions_are_visible,
                             onclick: move |_| {
-                                let submitted_answer = answer.read().clone();
-                                let request_generation =
-                                    evaluation_generation.peek().wrapping_add(1);
-                                evaluation_generation.set(request_generation);
-                                evaluation_state.set(EvaluationState::Loading);
+                                let next = !*captions_visible.peek();
+                                captions_visible.set(next);
+                            },
+                            span { aria_hidden: "true", "CC" }
+                            if captions_are_visible { "字幕を隠す" } else { "字幕" }
+                        }
+                    }
+
+                    if captions_are_visible {
+                        section {
+                            class: "caption-panel",
+                            aria_label: "会話の字幕",
+                            aria_live: "polite",
+                            p { class: "caption-panel__speaker", "KOTAE / AUDIO" }
+                            p {
+                                if let Some(current_caption) = caption.read().as_ref() {
+                                    {current_caption.clone()}
+                                } else {
+                                    "字幕が届くと、ここにだけ表示します。既定では非表示です。"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                aside { class: "utility-dock", aria_label: "資料とプライバシー",
+                    section { class: "paper-drop",
+                        div { class: "paper-drop__heading",
+                            span { class: "utility-index", "01" }
+                            div {
+                                h2 { "論文を、今回だけ" }
+                                p { "PDF / 最大8MB / 送信後に端末メモリから破棄" }
+                            }
+                        }
+                        input {
+                            id: "paper-input",
+                            class: "sr-only",
+                            r#type: "file",
+                            accept: "application/pdf,.pdf",
+                            disabled: document_is_busy,
+                            onchange: move |_| {
+                                document_error.set(None);
                                 spawn(async move {
-                                    let result =
-                                        cloud::evaluate(QUESTION, &submitted_answer).await;
-                                    if *evaluation_generation.peek() != request_generation {
-                                        return;
+                                    match cloud::attach_document("paper-input").await {
+                                        Ok(info) => {
+                                            document_info.set(Some(info));
+                                            needs_paper.set(false);
+                                        }
+                                        Err(message) => document_error.set(Some(message)),
                                     }
-                                    let next_state = match result {
-                                        Ok(result) => {
-                                            cloud_verification.set(Some(true));
-                                            EvaluationState::Success(result)
-                                        }
-                                        Err(message) => {
-                                            cloud_verification.set(Some(false));
-                                            EvaluationState::Error(message)
-                                        }
-                                    };
-                                    evaluation_state.set(next_state);
                                 });
                             },
-                            span {
-                                if evaluation_running {
-                                    "校正しています…"
-                                } else {
-                                    "この答えを校正"
-                                }
-                            }
-                            span { aria_hidden: "true", "↗" }
                         }
-                    }
-                }
-
-                match evaluation_snapshot {
-                    EvaluationState::Idle => rsx! {},
-                    EvaluationState::Loading => rsx! {
-                        section {
-                            class: "proof-result proof-result--loading",
-                            aria_live: "polite",
-                            aria_busy: "true",
-                            div { class: "proof-result__score",
-                                span { class: "loading-mark", aria_hidden: "true", "◌" }
-                                span { class: "score-unit", "評価中" }
-                            }
-                            div { class: "proof-result__body",
-                                p { class: "proof-result__stamp", "CLOUD / GENKIT" }
-                                h2 { "答えの構造を校正しています。" }
-                                p { "認証・App Checkを確認し、必要な本文だけを評価APIへ送信しています。" }
-                            }
-                        }
-                    },
-                    EvaluationState::Error(message) => rsx! {
-                        section {
-                            class: "proof-result proof-result--error",
-                            aria_live: "assertive",
-                            div { class: "proof-result__score",
-                                span { class: "score-value", "!" }
-                                span { class: "score-unit", "未完了" }
-                            }
-                            div { class: "proof-result__body",
-                                p { class: "proof-result__stamp", "CONNECTION ERROR" }
-                                h2 { "校正を完了できませんでした。" }
-                                p { "{message}" }
-                                button {
-                                    class: "retry-action",
-                                    r#type: "button",
-                                    onclick: move |_| evaluation_state.set(EvaluationState::Idle),
-                                    "回答を確認して再試行 →"
-                                }
-                            }
-                        }
-                    },
-                    EvaluationState::Success(result) => rsx! {
-                        section {
-                            class: "proof-result proof-result--success",
-                            aria_live: "polite",
-                            aria_labelledby: "proof-result-heading",
-                            div { class: "proof-result__score",
-                                span { class: "score-value", "{result.score}" }
-                                span { class: "score-unit", "/ 100" }
-                                span { class: "score-caption", "校正スコア" }
-                            }
-                            div { class: "proof-result__body",
-                                p { class: "proof-result__stamp", "CLOUD EVALUATION" }
-                                h2 { id: "proof-result-heading", "{result.feedback}" }
-                                p { class: "retry-instruction",
-                                    strong { "次の一手：" }
-                                    " {result.retry_instruction}"
-                                }
-                                p { class: "model-label", "MODEL / {result.model_logical_id}" }
-                                button {
-                                    class: "retry-action",
-                                    r#type: "button",
-                                    onclick: move |_| evaluation_state.set(EvaluationState::Idle),
-                                    "{result.retry_instruction} →"
-                                }
-                            }
-                        }
-                    },
-                }
-
-                section { class: "answer-print", aria_labelledby: "answer-print-heading",
-                    div { class: "section-heading",
-                        div {
-                            p { class: "eyebrow", "LOCAL TIMING / 実測" }
-                            h2 { id: "answer-print-heading", "声を残さず、間を測る" }
-                        }
-                        span {
-                            class: "prototype-badge",
-                            if recording_snapshot == RecordingState::Recording {
-                                "LIVE"
-                            } else if has_timing_measurement {
-                                "測定済み"
+                        label {
+                            class: if document_is_busy {
+                                "paper-picker is-disabled"
                             } else {
-                                "未測定"
-                            }
-                        }
-                    }
-                    p { class: "answer-print__lead",
-                        "文字起こしや話者識別は行いません。マイクの波形は短いメモリ領域で解析後に上書きし、時間特徴だけを画面に表示します。"
-                    }
-                    div {
-                        class: if has_timing_measurement {
-                            "answer-print__track answer-print__track--measured"
-                        } else {
-                            "answer-print__track answer-print__track--empty"
-                        },
-                        role: "img",
-                        aria_label: if has_timing_measurement {
-                            "端末内で測定した発話タイミング"
-                        } else {
-                            "まだ測定されていません"
-                        },
-                        if has_timing_measurement {
-                            for bucket in 0..40 {
+                                "paper-picker"
+                            },
+                            r#for: "paper-input",
+                            span { class: "paper-picker__icon", aria_hidden: "true", "＋" }
+                            if let Some(info) = document_snapshot.as_ref() {
                                 span {
-                                    key: "{bucket}",
-                                    class: timing_bucket_class(bucket, timing_snapshot),
-                                    aria_hidden: "true"
+                                    strong { {info.name.clone()} }
+                                    small { "{human_file_size(info.size_bytes)} / 次の応答だけに使用" }
+                                }
+                            } else {
+                                span {
+                                    strong { "PDFを渡す" }
+                                    small { "保存せず、文脈を読む" }
                                 }
                             }
-                        } else {
-                            span { class: "track-empty-label", "マイクで測ると、ここに実測線が現れます" }
+                        }
+                        if let Some(message) = *document_error.read() {
+                            p { class: "document-error", role: "alert", {message} }
                         }
                     }
-                    if has_timing_measurement {
-                        p { class: "answer-print__ratio-note",
-                            "40セルは集計比率です。発話内の順序や内容を復元する表示ではありません。"
-                        }
-                    }
-                    dl { class: "timing-metrics", aria_live: "polite",
-                        div {
-                            dt { "発話開始" }
-                            dd {
-                                if has_timing_measurement {
-                                    "{format_first_voice(timing_snapshot.first_voice_ms)}"
-                                } else {
-                                    "—"
-                                }
-                            }
-                        }
-                        div {
-                            dt { "発話判定" }
-                            dd {
-                                if has_timing_measurement {
-                                    "{format_duration(timing_snapshot.voiced_ms)}"
-                                } else {
-                                    "—"
-                                }
-                            }
-                        }
-                        div {
-                            dt { "末尾の無音" }
-                            dd {
-                                if has_timing_measurement {
-                                    "{format_duration(timing_snapshot.trailing_silence_ms)}"
-                                } else {
-                                    "—"
-                                }
-                            }
-                        }
-                        div {
-                            dt { "発話区間" }
-                            dd {
-                                if has_timing_measurement {
-                                    "{timing_snapshot.speech_segments} 回"
-                                } else {
-                                    "—"
-                                }
-                            }
-                        }
-                    }
-                    p { class: "answer-print__privacy-note",
-                        "この測定では音声の保存・再生・送信は行いません。表示値はページを閉じると失われます。"
-                    }
-                }
 
-                section { class: "privacy-drawer", aria_labelledby: "privacy-heading",
-                    div { class: "privacy-drawer__intro",
-                        p { class: "eyebrow", "VOICE VAULT / DESIGN" }
-                        h2 { id: "privacy-heading", "履歴機能は、まだ設計段階。" }
-                        p { "現在の測定は保存しません。次の二方式は、履歴を実装する際の設計候補です。" }
-                    }
-                    div { class: "mode-switch", aria_label: "検討中の音声履歴方式",
-                        article { class: "mode-card mode-card--planned",
-                            span { class: "mode-card__check", aria_hidden: "true", "01" }
-                            strong { "管理型セキュア履歴" }
-                            small { "設計案：監査付きの復号で再評価に対応" }
-                            span { class: "mode-card__status", "未実装" }
+                    details { class: "privacy-fold",
+                        summary {
+                            span { class: "utility-index", "02" }
+                            span {
+                                strong { "VOICE PRIVACY" }
+                                small { "いま何が送られるか" }
+                            }
+                            i { aria_hidden: "true" }
                         }
-                        article { class: "mode-card mode-card--planned",
-                            span { class: "mode-card__check", aria_hidden: "true", "02" }
-                            strong { "本人解除 Vault" }
-                            small { "設計案：本人の解除なしでは復号しない" }
-                            span { class: "mode-card__status", "未実装" }
+                        div { class: "privacy-fold__body",
+                            p {
+                                strong { "音声" }
+                                "発話ターンの間だけブラウザのメモリに保持し、応答生成のため暗号化通信でクラウドへ送ります。永続ストレージには書き込みません。"
+                            }
+                            p {
+                                strong { "PDF" }
+                                "選んだ場合だけ次の応答へ添付し、送信完了後にブラウザ側の参照を破棄します。"
+                            }
+                            p {
+                                strong { "本人性" }
+                                "Firebase Authentication と App Check を毎リクエスト検証します。"
+                            }
+                            p { class: "privacy-fold__stop",
+                                "一時停止・終了を押すと、マイクトラックと再生をすぐ停止します。"
+                            }
                         }
-                    }
-                    p { class: "privacy-drawer__truth",
-                        "今使えるのは、音声を保存しない10秒の端末内タイミング測定だけです。"
                     }
                 }
             }
 
-            footer { class: "footer-line",
-                span { "KOTAE AI / PROTOTYPE 01" }
-                span { "RUST · WASM · GO · FIREBASE · VERTEX AI" }
-                span { "RAW VOICE ≠ IDENTITY" }
+            footer { class: "bottomline",
+                span { "NO PROMPT REQUIRED" }
+                span { "VOICE IN · REASONING IN BETWEEN · VOICE OUT" }
+                span { "KOTAE / 2026" }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn timing_buckets_use_measured_proportions_without_inline_styles() {
-        let features = TimingFeatures {
-            elapsed_ms: 10_000,
-            first_voice_ms: Some(1_000),
-            voiced_ms: 5_000,
-            trailing_silence_ms: 2_000,
-            speech_segments: 2,
-        };
-
-        assert!(timing_bucket_class(0, features).ends_with("--initial"));
-        assert!(timing_bucket_class(4, features).ends_with("--voice"));
-        assert!(timing_bucket_class(25, features).ends_with("--unclassified"));
-        assert!(timing_bucket_class(39, features).ends_with("--trailing"));
-    }
-
-    #[test]
-    fn timing_buckets_are_empty_before_measurement() {
-        assert!(timing_bucket_class(0, TimingFeatures::default()).ends_with("--empty"));
     }
 }

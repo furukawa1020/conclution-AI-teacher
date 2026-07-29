@@ -63,15 +63,15 @@ type VoiceTurnInput struct {
 }
 
 type VoiceTurnResult struct {
-	Audio          []byte
-	AudioMIMEType  string
-	StateToken     string
-	DetectedDomain string
+	Audio            []byte
+	AudioMIMEType    string
+	StateToken       string
+	DetectedDomain   string
 	AssistanceTarget string
 	RespondentStage  string
-	Route          string
-	NeedsPaper     bool
-	Caption        string
+	Route            string
+	NeedsPaper       bool
+	Caption          string
 }
 
 type VoiceTurnService interface {
@@ -270,15 +270,15 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		caption = result.Caption
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"audioBase64":    base64.StdEncoding.EncodeToString(result.Audio),
-		"audioMimeType":  result.AudioMIMEType,
-		"caption":        caption,
-		"sessionState":   result.StateToken,
-		"detectedDomain": result.DetectedDomain,
+		"audioBase64":      base64.StdEncoding.EncodeToString(result.Audio),
+		"audioMimeType":    result.AudioMIMEType,
+		"caption":          caption,
+		"sessionState":     result.StateToken,
+		"detectedDomain":   result.DetectedDomain,
 		"assistanceTarget": result.AssistanceTarget,
 		"respondentStage":  result.RespondentStage,
-		"route":          result.Route,
-		"needsPaper":     result.NeedsPaper,
+		"route":            result.Route,
+		"needsPaper":       result.NeedsPaper,
 	})
 }
 

@@ -2,7 +2,10 @@ package research
 
 import (
 	"context"
+	"net/url"
+	"reflect"
 	"time"
+	"unicode/utf8"
 )
 
 // DiscoveryVerifier coordinates reviewed sources while preserving the
@@ -19,14 +22,11 @@ func NewDiscoveryVerifier(sources ...Source) (*DiscoveryVerifier, error) {
 	seen := make(map[SourceID]struct{}, len(sources))
 	copied := make([]Source, 0, len(sources))
 	for _, source := range sources {
-		if source == nil {
+		if nilSource(source) {
 			return nil, ErrInvalidSource
 		}
 		descriptor := source.Descriptor()
-		if descriptor.ID == "" ||
-			descriptor.Name == "" ||
-			descriptor.Authority == "" ||
-			descriptor.Role != RoleDiscoveryMetadata {
+		if !validSourceDescriptor(descriptor) {
 			return nil, ErrInvalidSource
 		}
 		if _, duplicate := seen[descriptor.ID]; duplicate {
@@ -66,8 +66,14 @@ func (v *DiscoveryVerifier) Verify(
 		descriptor := source.Descriptor()
 		if result.Source != descriptor ||
 			result.Role != RoleDiscoveryMetadata ||
-			result.QueryKind != query.Kind {
+			result.QueryKind != query.Kind ||
+			result.RetrievedAt.IsZero() {
 			return Verification{}, ErrInvalidSourceResult
+		}
+		for _, record := range result.Records {
+			if !validSourceRecord(descriptor, record) {
+				return Verification{}, ErrInvalidSourceResult
+			}
 		}
 		sources = append(sources, descriptor)
 		allRecords = append(allRecords, result.Records...)
@@ -82,6 +88,68 @@ func (v *DiscoveryVerifier) Verify(
 		Sources:     sources,
 		Records:     records,
 	}, nil
+}
+
+func nilSource(source Source) bool {
+	if source == nil {
+		return true
+	}
+	value := reflect.ValueOf(source)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func validSourceDescriptor(descriptor SourceDescriptor) bool {
+	if descriptor.ID == "" ||
+		descriptor.Name == "" ||
+		descriptor.Authority == "" ||
+		descriptor.Role != RoleDiscoveryMetadata {
+		return false
+	}
+	authority, err := url.Parse(descriptor.Authority)
+	return err == nil &&
+		authority.Scheme == "https" &&
+		authority.Hostname() != "" &&
+		authority.User == nil &&
+		authority.RawQuery == "" &&
+		authority.Fragment == ""
+}
+
+func validSourceRecord(descriptor SourceDescriptor, record Record) bool {
+	doi, err := NormalizeDOI(record.DOI)
+	if err != nil ||
+		doi != record.DOI ||
+		record.CanonicalID != "doi:"+doi ||
+		record.LandingURL != canonicalDOIURL(doi) ||
+		record.AbstractRights == "" ||
+		!utf8.ValidString(record.AbstractText) ||
+		len([]rune(record.AbstractText)) > MaxAbstractRunes {
+		return false
+	}
+
+	metadataURL, err := url.Parse(record.MetadataURL)
+	authority, authorityErr := url.Parse(descriptor.Authority)
+	if err != nil ||
+		authorityErr != nil ||
+		metadataURL.Scheme != "https" ||
+		metadataURL.Hostname() == "" ||
+		metadataURL.User != nil ||
+		metadataURL.Fragment != "" ||
+		metadataURL.Hostname() != authority.Hostname() {
+		return false
+	}
+	for _, update := range record.Updates {
+		updateDOI, err := NormalizeDOI(update.DOI)
+		if err != nil || updateDOI != update.DOI || update.Type == "" {
+			return false
+		}
+	}
+	return true
 }
 
 var _ Source = (*CrossrefSource)(nil)

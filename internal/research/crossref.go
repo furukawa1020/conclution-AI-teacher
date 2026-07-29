@@ -54,7 +54,7 @@ func NewCrossrefSource(options CrossrefOptions) (*CrossrefSource, error) {
 
 	contactEmail := strings.TrimSpace(options.ContactEmail)
 	if contactEmail != "" &&
-		(!emailPattern.MatchString(contactEmail) ||
+		(emailPattern.FindString(contactEmail) != contactEmail ||
 			!safeHeaderValue(contactEmail, 254)) {
 		return nil, ErrInvalidSource
 	}
@@ -127,6 +127,10 @@ func (s *CrossrefSource) Search(
 	records, err := decodeCrossref(query.Kind, payload)
 	if err != nil {
 		return Result{}, err
+	}
+	if query.Kind == QueryDOI &&
+		(len(records) != 1 || records[0].DOI != query.DOI) {
+		return Result{}, ErrUnexpectedResponse
 	}
 	records, duplicates := deduplicateRecords(records)
 	result := Result{

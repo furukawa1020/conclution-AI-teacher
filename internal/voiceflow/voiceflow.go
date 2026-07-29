@@ -45,11 +45,11 @@ func (p *Pipeline) Process(
 	}
 	if transcriptConfidenceTooLow(confidence) {
 		result := httpapi.VoiceTurnResult{
-			StateToken:     input.StateToken,
-			DetectedDomain: "unknown",
+			StateToken:       input.StateToken,
+			DetectedDomain:   "unknown",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
-			Route:          "stt-silent",
+			Route:            "stt-silent",
 		}
 		if input.Ambient {
 			return result, nil
@@ -93,11 +93,11 @@ func (p *Pipeline) Process(
 	}
 
 	result := httpapi.VoiceTurnResult{
-		StateToken:     decision.StateToken,
-		DetectedDomain: decision.Domain,
+		StateToken:       decision.StateToken,
+		DetectedDomain:   decision.Domain,
 		AssistanceTarget: decision.AssistanceTarget,
 		RespondentStage:  decision.RespondentStage,
-		Route:          decision.Route,
+		Route:            decision.Route,
 		NeedsPaper: decision.Intervention.Act == "paper_check" &&
 			input.Document == nil,
 	}

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 	"google.golang.org/genai"
 )
 
@@ -23,6 +24,9 @@ const (
 	PrecisionConfidenceThreshold = 0.78
 	AmbientEVIThreshold          = 0.35
 	maxModelResponseBytes        = 64 * 1024
+	maxRespondentEvidence        = 8
+	maxRespondentProtected       = 16
+	maxRespondentProtectedRunes  = 160
 	criticTimeout                = 12 * time.Second
 	criticRecoveryTimeout        = 18 * time.Second
 )
@@ -66,6 +70,8 @@ type modelPlan struct {
 	AssistanceTarget    string                  `json:"assistance_target"`
 	RespondentStage     string                  `json:"respondent_stage"`
 	AnswerAttempt       string                  `json:"answer_attempt"`
+	RespondentEvidence  []modelSlotEvidence     `json:"respondent_slot_evidence"`
+	RespondentProtected []string                `json:"respondent_protected_spans"`
 	LatentQuestion      string                  `json:"latent_question"`
 	ArgumentStructure   string                  `json:"argument_structure"`
 	InterventionPolicy  string                  `json:"intervention_policy"`
@@ -81,6 +87,11 @@ type modelPlan struct {
 	answerAssessment answercontract.Assessment
 }
 
+type modelSlotEvidence struct {
+	Slot answercontract.RequiredSlot `json:"slot"`
+	Span string                      `json:"span"`
+}
+
 type modelArbiter struct {
 	Benefit          float64 `json:"benefit"`
 	InterruptionCost float64 `json:"interruption_cost"`
@@ -90,13 +101,13 @@ type modelArbiter struct {
 }
 
 type promptState struct {
-	Turn                int               `json:"turn"`
-	ThoughtStateGraph   ThoughtStateGraph `json:"thought_state_graph"`
+	Turn                int                `json:"turn"`
+	ThoughtStateGraph   ThoughtStateGraph  `json:"thought_state_graph"`
 	PendingAnswer       PendingAnswerFrame `json:"pending_answer"`
-	ConversationSummary string            `json:"conversation_summary,omitempty"`
-	DocumentSummary     string            `json:"document_summary,omitempty"`
-	SelfCorrectionGrace bool              `json:"self_correction_grace"`
-	LastIntervention    ArbiterDecision   `json:"last_intervention"`
+	ConversationSummary string             `json:"conversation_summary,omitempty"`
+	DocumentSummary     string             `json:"document_summary,omitempty"`
+	SelfCorrectionGrace bool               `json:"self_correction_grace"`
+	LastIntervention    ArbiterDecision    `json:"last_intervention"`
 }
 
 type inferencePayload struct {
@@ -289,6 +300,22 @@ func (agent *vertexAgent) Process(
 		}
 	}
 
+	respondentGuardBlocked := false
+	respondentResolved := false
+	if !verificationUnavailable &&
+		finalPlan.AssistanceTarget == "respondent" &&
+		finalPlan.RespondentStage == "restructure" {
+		gate := respondent.Gate(respondentGateInput(
+			finalPlan,
+			finalPlan.answerAssessment.Ambiguous,
+		))
+		respondentResolved =
+			finalPlan.answerAssessment.Outcome == answercontract.OutcomeKeep &&
+				(gate.Outcome == respondent.OutcomeKeep ||
+					gate.Outcome == respondent.OutcomeRestructure)
+		respondentGuardBlocked = !respondentResolved
+	}
+
 	decision := arbitrate(finalPlan)
 	lacBlocksAnswer := finalPlan.answerAssessment.Outcome == answercontract.OutcomeClarify ||
 		finalPlan.answerAssessment.Outcome == answercontract.OutcomeReject
@@ -320,11 +347,16 @@ func (agent *vertexAgent) Process(
 		decision.Act = "clarify"
 		spokenReply = "回答の意味を安全に確認できませんでした。もう一度試してもらえますか？"
 		interventionPolicy = "clarify"
+	} else if respondentGuardBlocked {
+		decision.Act = "clarify"
+		spokenReply = "意味を変えずに整えたいので、いちばん先に伝えたいことはどれですか？"
+		interventionPolicy = "clarify"
 	} else if forceAmbientSilence {
 		decision.Act = "silent"
 		spokenReply = ""
 		interventionPolicy = "wait"
 	} else if !urgentSafety &&
+		finalPlan.AssistanceTarget != "respondent" &&
 		finalPlan.answerAssessment.Outcome == answercontract.OutcomeRestructure {
 		decision.Act = "restructure"
 		spokenReply = finalPlan.answerAssessment.ReconstructedAnswer
@@ -354,10 +386,13 @@ func (agent *vertexAgent) Process(
 			pendingAnswer = pendingAnswerFromPlan(finalPlan, normalized.Utterance)
 		case finalPlan.AssistanceTarget == "respondent" &&
 			finalPlan.RespondentStage == "restructure" &&
-			spokenReply != "":
+			respondentResolved:
 			pendingAnswer = PendingAnswerFrame{
 				RequiredSlots: []answercontract.RequiredSlot{},
 			}
+		case finalPlan.AssistanceTarget == "respondent" &&
+			finalPlan.RespondentStage == "restructure":
+			pendingAnswer = pendingAnswerFromPlan(finalPlan, normalized.Utterance)
 		case finalPlan.AssistanceTarget == "assistant":
 			pendingAnswer = PendingAnswerFrame{
 				RequiredSlots: []answercontract.RequiredSlot{},
@@ -368,6 +403,8 @@ func (agent *vertexAgent) Process(
 		switch {
 		case finalPlan.RespondentStage == "awaiting_answer":
 			route = "respondent-awaiting-" + route
+		case respondentGuardBlocked:
+			route = "respondent-meaning-clarify-" + route
 		case spokenReply == "":
 			route = "respondent-wait-" + route
 		default:
@@ -406,6 +443,38 @@ func (agent *vertexAgent) Process(
 		NeedsClarification:  decision.Act == "clarify",
 		StateToken:          stateToken,
 	}, nil
+}
+
+func respondentGateInput(
+	plan modelPlan,
+	ambiguous bool,
+) respondent.Input {
+	frame := respondent.QuestionFrame{
+		Operator: respondent.Operator(plan.AnswerContract.QuestionFrame.Operator),
+		Subject:  plan.AnswerContract.QuestionFrame.Subject,
+		RequiredSlots: make([]respondent.Slot, 0,
+			len(plan.AnswerContract.QuestionFrame.RequiredSlots)),
+		Ambiguous: ambiguous,
+	}
+	for _, slot := range plan.AnswerContract.QuestionFrame.RequiredSlots {
+		frame.RequiredSlots = append(frame.RequiredSlots, respondent.Slot(slot))
+	}
+	evidence := make([]respondent.SlotBinding, 0, len(plan.RespondentEvidence))
+	for _, item := range plan.RespondentEvidence {
+		evidence = append(evidence, respondent.SlotBinding{
+			Slot: respondent.Slot(item.Slot),
+			Span: item.Span,
+		})
+	}
+	return respondent.Input{
+		Frame: frame,
+		Attempt: respondent.AnswerAttempt{
+			Text:           plan.AnswerAttempt,
+			SlotEvidence:   evidence,
+			ProtectedSpans: append([]string(nil), plan.RespondentProtected...),
+		},
+		Reconstruction: plan.SpokenReply,
+	}
 }
 
 func pendingAnswerFromPlan(plan modelPlan, utterance string) PendingAnswerFrame {
@@ -918,6 +987,14 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 	plan.AssistanceTarget = strings.TrimSpace(plan.AssistanceTarget)
 	plan.RespondentStage = strings.TrimSpace(plan.RespondentStage)
 	plan.AnswerAttempt = collapseSpace(plan.AnswerAttempt)
+	for index := range plan.RespondentEvidence {
+		plan.RespondentEvidence[index].Span = collapseSpace(
+			plan.RespondentEvidence[index].Span,
+		)
+	}
+	for index := range plan.RespondentProtected {
+		plan.RespondentProtected[index] = collapseSpace(plan.RespondentProtected[index])
+	}
 	plan.ArgumentStructure = strings.TrimSpace(plan.ArgumentStructure)
 	plan.InterventionPolicy = strings.TrimSpace(plan.InterventionPolicy)
 	plan.LatentQuestion = collapseSpace(plan.LatentQuestion)
@@ -947,20 +1024,26 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 	}
 	switch plan.AssistanceTarget {
 	case "assistant":
-		if plan.RespondentStage != "none" || plan.AnswerAttempt != "" {
+		if plan.RespondentStage != "none" ||
+			plan.AnswerAttempt != "" ||
+			len(plan.RespondentEvidence) != 0 ||
+			len(plan.RespondentProtected) != 0 {
 			return ErrModelOutputInvalid
 		}
 	case "respondent":
 		switch plan.RespondentStage {
 		case "awaiting_answer":
 			if plan.AnswerAttempt != "" ||
+				len(plan.RespondentEvidence) != 0 ||
+				len(plan.RespondentProtected) != 0 ||
 				plan.InterventionPolicy != "clarify" ||
 				plan.Intervention.Act != "clarify" {
 				return ErrModelOutputInvalid
 			}
 		case "restructure":
 			if plan.AnswerAttempt == "" ||
-				!containsNormalized(utterance, plan.AnswerAttempt) {
+				!strings.Contains(collapseSpace(utterance), plan.AnswerAttempt) ||
+				!validRespondentEvidence(plan) {
 				return ErrModelOutputInvalid
 			}
 		default:
@@ -1002,6 +1085,47 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 	}
 	plan.ThoughtStateDelta = delta
 	return nil
+}
+
+func validRespondentEvidence(plan *modelPlan) bool {
+	if plan == nil ||
+		len(plan.RespondentEvidence) == 0 ||
+		len(plan.RespondentEvidence) > maxRespondentEvidence ||
+		len(plan.RespondentProtected) > maxRespondentProtected {
+		return false
+	}
+	required := make(map[answercontract.RequiredSlot]struct{},
+		len(plan.AnswerContract.QuestionFrame.RequiredSlots))
+	for _, slot := range plan.AnswerContract.QuestionFrame.RequiredSlots {
+		required[slot] = struct{}{}
+	}
+	seenSlots := make(map[answercontract.RequiredSlot]struct{},
+		len(plan.RespondentEvidence))
+	for _, evidence := range plan.RespondentEvidence {
+		if _, ok := required[evidence.Slot]; !ok ||
+			evidence.Span == "" ||
+			utf8.RuneCountInString(evidence.Span) > answercontract.MaxFirstCommitmentRunes ||
+			!strings.Contains(plan.AnswerAttempt, evidence.Span) {
+			return false
+		}
+		if _, duplicate := seenSlots[evidence.Slot]; duplicate {
+			return false
+		}
+		seenSlots[evidence.Slot] = struct{}{}
+	}
+	seenProtected := make(map[string]struct{}, len(plan.RespondentProtected))
+	for _, span := range plan.RespondentProtected {
+		if span == "" ||
+			utf8.RuneCountInString(span) > maxRespondentProtectedRunes ||
+			!strings.Contains(plan.AnswerAttempt, span) {
+			return false
+		}
+		if _, duplicate := seenProtected[span]; duplicate {
+			return false
+		}
+		seenProtected[span] = struct{}{}
+	}
+	return true
 }
 
 func needsPrecision(plan modelPlan) bool {
@@ -1254,14 +1378,16 @@ func modelResponseSchema() map[string]any {
 		"additionalProperties": false,
 		"propertyOrdering": []string{
 			"domain", "intent", "assistance_target", "respondent_stage",
-			"answer_attempt", "latent_question", "argument_structure",
+			"answer_attempt", "respondent_slot_evidence",
+			"respondent_protected_spans", "latent_question", "argument_structure",
 			"intervention_policy", "spoken_reply", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
 			"self_correction_grace", "intervention", "answer_contract",
 		},
 		"required": []string{
 			"domain", "intent", "assistance_target", "respondent_stage",
-			"answer_attempt", "latent_question", "argument_structure",
+			"answer_attempt", "respondent_slot_evidence",
+			"respondent_protected_spans", "latent_question", "argument_structure",
 			"intervention_policy", "spoken_reply", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
 			"self_correction_grace", "intervention", "answer_contract",
@@ -1289,7 +1415,33 @@ func modelResponseSchema() map[string]any {
 				"type": "string",
 				"enum": []string{"none", "awaiting_answer", "restructure"},
 			},
-			"answer_attempt":  map[string]any{"type": "string"},
+			"answer_attempt": map[string]any{"type": "string"},
+			"respondent_slot_evidence": map[string]any{
+				"type":     "array",
+				"maxItems": maxRespondentEvidence,
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"slot", "span"},
+					"properties": map[string]any{
+						"slot": map[string]any{
+							"type": "string",
+							"enum": []string{
+								"polarity", "selection", "quantity", "state", "cause",
+								"purpose", "procedure", "definition", "comparison",
+								"evidence", "position", "unit", "condition",
+								"uncertainty", "scope",
+							},
+						},
+						"span": map[string]any{"type": "string"},
+					},
+				},
+			},
+			"respondent_protected_spans": map[string]any{
+				"type":     "array",
+				"maxItems": maxRespondentProtected,
+				"items":    map[string]any{"type": "string"},
+			},
 			"latent_question": map[string]any{"type": "string"},
 			"argument_structure": map[string]any{
 				"type": "string",
@@ -1389,7 +1541,10 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - previous_state.pending_answer.active=trueなら、今の発話をその保留質問への回答試行としてまず検討する。ただし明確に話題を変えた時はassistantへ戻す。
 - 他者の質問は分かるが本人の回答内容がまだない時はrespondent_stage=awaiting_answerにし、answer_attempt=""、clarifyを選ぶ。「まとまっていなくていいから、今の答えをそのまま話して」のような非難のない一問だけを返す。
 - 本人の回答内容が今の発話にある時だけrespondent_stage=restructureにする。answer_attemptは今のutteranceに実際に連続して含まれる本人の回答部分を一字も創作せず抜き出す。
-- restructureのspoken_replyは本人のanswer_attemptにある結論・理由・条件・留保だけを使い、質問が要求するtargetを最初へ移した短い受け答えにする。新しい答え、一般知識、助言、診断、励ましを足さない。
+- restructureのspoken_replyはanswer_attempt内の意味節を一字も書き換えず、句読点で区切られた既存節の順序だけを変える。質問が要求するtarget節を最初へ移し、新しい答え、一般知識、助言、診断、励ましを足さず、既存節も落とさない。
+- respondent_slot_evidenceは、required_slotsを満たすanswer_attempt内の連続した一つの意味節をslotごとに正確に抜き出す。推論で補えるが発話にはないslotを埋めない。
+- respondent_protected_spansには、表層規則だけでは守りにくい日本語の人名、組織名、製品名、研究名などがanswer_attemptにある時だけ、その完全一致spanを入れる。
+- assistantまたはawaiting_answerではrespondent_slot_evidenceとrespondent_protected_spansを空配列にする。
 - respondentではanswer_contract.question_frameを「他者から本人へ向けられた質問」に合わせ、spoken_replyがそれへA先出しで答えるか監査する。
 
 介入判定:

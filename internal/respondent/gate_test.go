@@ -134,6 +134,34 @@ func TestGateJapaneseHardCases(t *testing.T) {
 			wantIssue:    IssueConditionChanged,
 		},
 		{
+			name: "compound protected meaning survives clause reordering",
+			input: Input{
+				Frame: QuestionFrame{
+					Operator: OperatorBoolean,
+					Subject:  "A案の採用",
+					RequiredSlots: []Slot{
+						SlotPolarity,
+						SlotCondition,
+						SlotUncertainty,
+					},
+				},
+				Attempt: AnswerAttempt{
+					Text: "費用は約3万円です。雨ならA案は採用しません。",
+					SlotEvidence: []SlotBinding{
+						{Slot: SlotPolarity, Span: "A案は採用しません"},
+						{Slot: SlotCondition, Span: "雨ならA案は採用しません"},
+						{Slot: SlotUncertainty, Span: "費用は約3万円です"},
+					},
+				},
+				Reconstruction: "雨ならA案は採用しません。費用は約3万円です。",
+			},
+			wantOutcome:     OutcomeRestructure,
+			wantPosition:    PositionFirst,
+			wantCoverage:    1,
+			wantMeaning:     true,
+			targetSatisfied: true,
+		},
+		{
 			name: "removed uncertainty is rejected",
 			input: booleanInput(
 				"たぶん成功します。小規模試験では改善しました。",

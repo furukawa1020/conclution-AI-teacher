@@ -30,16 +30,16 @@ type StateCodec struct {
 }
 
 type conversationState struct {
-	Version             int               `json:"v"`
-	IssuedAt            int64             `json:"iat"`
-	ExpiresAt           int64             `json:"exp"`
-	Turn                int               `json:"turn"`
-	Graph               ThoughtStateGraph `json:"thought_state_graph"`
-	ConversationSummary string            `json:"conversation_summary,omitempty"`
-	DocumentSummary     string            `json:"document_summary,omitempty"`
+	Version             int                `json:"v"`
+	IssuedAt            int64              `json:"iat"`
+	ExpiresAt           int64              `json:"exp"`
+	Turn                int                `json:"turn"`
+	Graph               ThoughtStateGraph  `json:"thought_state_graph"`
+	ConversationSummary string             `json:"conversation_summary,omitempty"`
+	DocumentSummary     string             `json:"document_summary,omitempty"`
 	PendingAnswer       PendingAnswerFrame `json:"pending_answer"`
-	SelfCorrectionGrace bool              `json:"self_correction_grace"`
-	LastIntervention    ArbiterDecision   `json:"last_intervention"`
+	SelfCorrectionGrace bool               `json:"self_correction_grace"`
+	LastIntervention    ArbiterDecision    `json:"last_intervention"`
 }
 
 func NewStateCodec(key []byte) (*StateCodec, error) {

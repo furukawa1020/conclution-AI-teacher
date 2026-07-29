@@ -623,7 +623,8 @@ function boundedString(value, maxLength) {
   return typeof value === "string" && Array.from(value).length <= maxLength;
 }
 
-function clearPendingDocument() {
+function clearPendingDocument(reason = "cleared") {
+  const hadPendingDocument = pendingDocument !== undefined;
   pendingDocument = undefined;
   if (pendingDocumentTimer !== undefined) {
     clearTimeout(pendingDocumentTimer);
@@ -632,6 +633,13 @@ function clearPendingDocument() {
   const input = document.getElementById("paper-input");
   if (input instanceof HTMLInputElement) {
     input.value = "";
+  }
+  if (hadPendingDocument) {
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:document-cleared", {
+        detail: Object.freeze({ reason }),
+      }),
+    );
   }
 }
 
@@ -645,7 +653,7 @@ function armPendingDocumentExpiry(documentForExpiry, attachedAt) {
       pendingDocument === documentForExpiry &&
       isPendingDocumentExpired(attachedAt, performance.now())
     ) {
-      clearPendingDocument();
+      clearPendingDocument("expired");
     }
   }, VOICE_SESSION_LIMITS.pendingDocumentLimitMs);
 }
@@ -734,7 +742,7 @@ async function finishTurn(serializedSessionState, turnMode) {
 
     documentForTurn = pendingDocument;
     if (documentForTurn) {
-      clearPendingDocument();
+      clearPendingDocument("consumed");
     }
     audioBase64 = arrayBufferToBase64(await capture.blob.arrayBuffer());
     const [{ appCheck }, { user }] = await Promise.all([
@@ -905,7 +913,7 @@ async function attachDocument(inputId) {
   }
 
   const name = safeDocumentName(file.name);
-  clearPendingDocument();
+  clearPendingDocument("replaced");
   const attachedAt = performance.now();
   pendingDocument = Object.freeze({
     base64,
@@ -941,7 +949,7 @@ function stopSession() {
   releaseMicrophone();
   sessionClock.reset();
 
-  clearPendingDocument();
+  clearPendingDocument("session-stopped");
 }
 
 function hasActiveVoiceSession() {

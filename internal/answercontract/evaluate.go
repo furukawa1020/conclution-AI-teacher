@@ -55,9 +55,12 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 
 	targetSlot, _ := TargetSlot(question.Operator)
 	targetFilled := containsSlot(commitment.FilledSlots, targetSlot)
+	commitmentAnchored := commitment.PositionClass == PositionAbsent ||
+		containsNormalized(originalAnswer, commitment.FirstCommitment)
 	targetSatisfied := targetFilled &&
 		commitment.FillsTarget &&
-		coverage >= TargetCoverageThreshold &&
+		coverage == 1 &&
+		commitmentAnchored &&
 		commitment.PositionClass != PositionAbsent
 
 	meaningPreserved := preservesMeaning(
@@ -100,6 +103,8 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 	switch {
 	case ambiguous:
 		outcome = OutcomeClarify
+	case !commitmentAnchored:
+		outcome = OutcomeReject
 	case shouldRestructure:
 		outcome = OutcomeRestructure
 	case highGainRepair && !repairAccepted:
@@ -129,6 +134,12 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 		RepairAccepted:      repairAccepted,
 		ReconstructedAnswer: repair.ReconstructedAnswer,
 	}, nil
+}
+
+func containsNormalized(container, value string) bool {
+	container = collapseSpace(container)
+	value = collapseSpace(value)
+	return value != "" && strings.Contains(container, value)
 }
 
 func validateAndNormalize(contract Contract) (Contract, float64, error) {

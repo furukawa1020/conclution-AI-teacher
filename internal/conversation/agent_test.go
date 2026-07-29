@@ -114,6 +114,11 @@ func defaultCriticBody(prompt string) (string, error) {
 }
 
 func validCriticContract(candidate string) answercontract.Contract {
+	firstCommitment := candidate
+	firstRunes := []rune(firstCommitment)
+	if len(firstRunes) > answercontract.MaxFirstCommitmentRunes {
+		firstCommitment = string(firstRunes[:answercontract.MaxFirstCommitmentRunes])
+	}
 	commitment := answercontract.CommitmentFront{
 		PositionClass: answercontract.PositionAbsent,
 		Calibration:   answercontract.CalibrationAbstain,
@@ -122,7 +127,7 @@ func validCriticContract(candidate string) answercontract.Contract {
 	}
 	if candidate != "" {
 		commitment = answercontract.CommitmentFront{
-			FirstCommitment: "verified current answer",
+			FirstCommitment: firstCommitment,
 			FillsTarget:     true,
 			TargetCoverage:  1,
 			FilledSlots:     []answercontract.RequiredSlot{answercontract.SlotPosition},
@@ -143,7 +148,7 @@ func validCriticContract(candidate string) answercontract.Contract {
 		},
 		CommitmentFront: commitment,
 		CounterfactualRepair: answercontract.CounterfactualRepair{
-			MinimalAnswer:                 candidate,
+			MinimalAnswer:                 firstCommitment,
 			ReconstructedAnswer:           candidate,
 			MeaningPreservationConfidence: 1,
 			RepairGain:                    0,

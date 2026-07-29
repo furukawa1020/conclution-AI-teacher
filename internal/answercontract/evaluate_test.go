@@ -99,6 +99,44 @@ func TestEvaluateLowSingleHypothesisIsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestEvaluateRejectsFabricatedFirstCommitment(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.FirstCommitment = "反対です"
+	assessment, err := Evaluate(contract, "前置きだけで結論は述べていません。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject || assessment.TargetSatisfied {
+		t.Fatalf("fabricated commitment passed: %+v", assessment)
+	}
+}
+
+func TestEvaluateNeverKeepsPartialRequiredSlotCoverage(t *testing.T) {
+	contract := validContract()
+	contract.QuestionFrame.RequiredSlots = []RequiredSlot{
+		SlotPolarity,
+		SlotCause,
+		SlotCondition,
+		SlotUncertainty,
+		SlotScope,
+	}
+	contract.CommitmentFront.FilledSlots = []RequiredSlot{
+		SlotPolarity,
+		SlotCause,
+		SlotCondition,
+		SlotUncertainty,
+	}
+	contract.CommitmentFront.TargetCoverage = 0.8
+	contract.CommitmentFront.Issue = IssueMissingRequiredSlot
+	assessment, err := Evaluate(contract, "賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome == OutcomeKeep || assessment.TargetSatisfied {
+		t.Fatalf("partial slot coverage was treated as complete: %+v", assessment)
+	}
+}
+
 func TestEvaluateDeterministicMeaningPreservationGate(t *testing.T) {
 	tests := []struct {
 		name          string

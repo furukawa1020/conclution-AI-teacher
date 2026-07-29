@@ -13,6 +13,7 @@ import {
 import {
   advanceVad,
   createCaptureBuffer,
+  createCapturePhase,
   createSessionClock,
   createTurnGate,
   createVadState,
@@ -239,6 +240,9 @@ function stopTracks(stream) {
 function releaseMicrophone() {
   if (activeRecording) {
     activeRecording.discard = true;
+    activeRecording.captureBuffer.clear();
+    activeRecording.capturePhase.reset();
+    activeRecording.totalBytes = 0;
     requestRecordingStop(activeRecording, "cancelled");
     activeRecording = undefined;
   }
@@ -406,9 +410,27 @@ function armVad(recording) {
     }
     const rms = Math.sqrt(sumSquares / pcm.length);
     const now = performance.now();
+    const hadSpeech = recording.hasSpeech;
     vadState = advanceVad(vadState, { now, peak, rms });
     recording.hasSpeech = vadState.hasSpeech;
     recording.lastVoiceAt = vadState.lastVoiceAt ?? 0;
+    if (!hadSpeech && recording.hasSpeech) {
+      recording.capturePhase.confirmSpeech();
+      if (typeof recording.recorder.requestData !== "function") {
+        recording.discard = true;
+        recording.captureBuffer.clear();
+        requestRecordingStop(recording, "boundary-failed");
+        return;
+      }
+      try {
+        recording.recorder.requestData();
+      } catch {
+        recording.discard = true;
+        recording.captureBuffer.clear();
+        requestRecordingStop(recording, "boundary-failed");
+        return;
+      }
+    }
     if (vadState.action !== null) {
       requestRecordingStop(recording, vadState.action);
     }
@@ -434,6 +456,7 @@ function createRecording(stream) {
   void endPromise.catch(() => {});
   const recording = {
     captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
+    capturePhase: createCapturePhase(),
     discard: false,
     endPromise,
     hasSpeech: false,
@@ -451,9 +474,15 @@ function createRecording(stream) {
     if (recording.discard || !event.data || event.data.size === 0) {
       return;
     }
+    const disposition = recording.capturePhase.classifyChunk();
+    if (disposition === "discard-boundary") {
+      recording.captureBuffer.clear();
+      recording.totalBytes = 0;
+      return;
+    }
     const captureState = recording.captureBuffer.append(
       event.data,
-      recording.hasSpeech,
+      disposition === "retain",
     );
     recording.totalBytes = captureState.totalBytes;
     if (captureState.tooLarge) {
@@ -468,6 +497,7 @@ function createRecording(stream) {
       stopVad(recording);
       setStreamTracksEnabled(stream, false);
       recording.captureBuffer.clear();
+      recording.capturePhase.reset();
       recording.rejectEnd(new Error("voice_turn_invalid"));
     },
     { once: true },
@@ -480,6 +510,7 @@ function createRecording(stream) {
       setStreamTracksEnabled(stream, false);
       if (recording.discard) {
         recording.captureBuffer.clear();
+        recording.capturePhase.reset();
         recording.rejectEnd(
           new Error(
             recording.stopReason === "too-large"

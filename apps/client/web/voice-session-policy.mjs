@@ -260,6 +260,35 @@ export function createCaptureBuffer({
   });
 }
 
+export function createCapturePhase() {
+  let boundaryPending = false;
+  let speechConfirmed = false;
+
+  return Object.freeze({
+    classifyChunk() {
+      if (!speechConfirmed) return "pre-roll";
+      if (boundaryPending) {
+        boundaryPending = false;
+        return "discard-boundary";
+      }
+      return "retain";
+    },
+    confirmSpeech() {
+      if (speechConfirmed) return false;
+      speechConfirmed = true;
+      boundaryPending = true;
+      return true;
+    },
+    reset() {
+      boundaryPending = false;
+      speechConfirmed = false;
+    },
+    snapshot() {
+      return Object.freeze({ boundaryPending, speechConfirmed });
+    },
+  });
+}
+
 export function isValidTurnMode(turnMode) {
   return turnMode === "intentional" || turnMode === "ambient";
 }

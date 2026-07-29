@@ -250,19 +250,19 @@ type crossrefList struct {
 }
 
 type crossrefWork struct {
-	DOI            string           `json:"DOI"`
-	Title          []string         `json:"title"`
-	Abstract       string           `json:"abstract"`
-	Author         []crossrefAuthor `json:"author"`
-	Publisher      string           `json:"publisher"`
-	ContainerTitle []string         `json:"container-title"`
-	Type           string           `json:"type"`
-	Published      crossrefDate     `json:"published"`
-	PublishedPrint crossrefDate     `json:"published-print"`
-	PublishedOnline crossrefDate    `json:"published-online"`
-	Created        crossrefDate     `json:"created"`
-	Indexed        crossrefDate     `json:"indexed"`
-	UpdateTo       []crossrefUpdate `json:"update-to"`
+	DOI             string           `json:"DOI"`
+	Title           []string         `json:"title"`
+	Abstract        string           `json:"abstract"`
+	Author          []crossrefAuthor `json:"author"`
+	Publisher       string           `json:"publisher"`
+	ContainerTitle  []string         `json:"container-title"`
+	Type            string           `json:"type"`
+	Published       crossrefDate     `json:"published"`
+	PublishedPrint  crossrefDate     `json:"published-print"`
+	PublishedOnline crossrefDate     `json:"published-online"`
+	Created         crossrefDate     `json:"created"`
+	Indexed         crossrefDate     `json:"indexed"`
+	UpdateTo        []crossrefUpdate `json:"update-to"`
 }
 
 type crossrefAuthor struct {

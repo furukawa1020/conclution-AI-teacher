@@ -92,9 +92,9 @@ type NormalizedDate struct {
 }
 
 type Author struct {
-	Given string `json:"given,omitempty"`
+	Given  string `json:"given,omitempty"`
 	Family string `json:"family,omitempty"`
-	ORCID string `json:"orcid,omitempty"`
+	ORCID  string `json:"orcid,omitempty"`
 }
 
 type Update struct {
@@ -107,22 +107,22 @@ type Update struct {
 // copyrighted; it is plain text only and must not be persisted or redistributed
 // without a separate rights decision.
 type Record struct {
-	CanonicalID      string         `json:"canonical_id"`
-	DOI              string         `json:"doi"`
-	Title            string         `json:"title,omitempty"`
-	Authors          []Author       `json:"authors,omitempty"`
-	AbstractText     string         `json:"abstract_text,omitempty"`
-	AbstractTruncated bool          `json:"abstract_truncated,omitempty"`
-	AbstractRights  string         `json:"abstract_rights"`
-	Publisher        string         `json:"publisher,omitempty"`
-	ContainerTitle   string         `json:"container_title,omitempty"`
-	WorkType         string         `json:"work_type,omitempty"`
-	LandingURL       string         `json:"landing_url"`
-	MetadataURL      string         `json:"metadata_url"`
-	Published        NormalizedDate `json:"published,omitempty"`
-	Created          NormalizedDate `json:"created,omitempty"`
-	Indexed          NormalizedDate `json:"indexed,omitempty"`
-	Updates          []Update       `json:"updates,omitempty"`
+	CanonicalID       string         `json:"canonical_id"`
+	DOI               string         `json:"doi"`
+	Title             string         `json:"title,omitempty"`
+	Authors           []Author       `json:"authors,omitempty"`
+	AbstractText      string         `json:"abstract_text,omitempty"`
+	AbstractTruncated bool           `json:"abstract_truncated,omitempty"`
+	AbstractRights    string         `json:"abstract_rights"`
+	Publisher         string         `json:"publisher,omitempty"`
+	ContainerTitle    string         `json:"container_title,omitempty"`
+	WorkType          string         `json:"work_type,omitempty"`
+	LandingURL        string         `json:"landing_url"`
+	MetadataURL       string         `json:"metadata_url"`
+	Published         NormalizedDate `json:"published,omitempty"`
+	Created           NormalizedDate `json:"created,omitempty"`
+	Indexed           NormalizedDate `json:"indexed,omitempty"`
+	Updates           []Update       `json:"updates,omitempty"`
 }
 
 type Coverage struct {

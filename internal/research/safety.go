@@ -15,7 +15,7 @@ import (
 
 var (
 	doiPrefixPattern = regexp.MustCompile(`(?i)^10\.[0-9]{4,9}/`)
-	emailPattern = regexp.MustCompile(
+	emailPattern     = regexp.MustCompile(
 		`(?i)\b[a-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\b`,
 	)
 	credentialAssignmentPattern = regexp.MustCompile(

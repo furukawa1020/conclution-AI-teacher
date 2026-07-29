@@ -385,6 +385,10 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool) error {
 	if err := validateArbiter(decision); err != nil {
 		return ErrModelOutputInvalid
 	}
+	if plan.InterventionPolicy == "safety" &&
+		(decision.Urgency < 0.8 || decision.Act == "silent") {
+		return ErrModelOutputInvalid
+	}
 	if decision.Act != "silent" && plan.SpokenReply == "" {
 		return ErrModelOutputInvalid
 	}
@@ -402,6 +406,9 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool) error {
 func needsPrecision(plan modelPlan) bool {
 	return plan.Domain == "research" ||
 		plan.Domain == "technical" ||
+		plan.Domain == "health" ||
+		plan.Domain == "legal" ||
+		plan.Domain == "finance" ||
 		plan.Confidence < PrecisionConfidenceThreshold
 }
 
@@ -676,4 +683,6 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 音声出力:
 - spoken_replyは自然で簡潔な日本語の話し言葉にする。
 - Markdown、箇条書き、URL、SSML、コードブロックを含めない。
-- research、technical、paper_checkでは不確実性と根拠の限界を明示し、PDFにない事実をPDF由来と断定しない。`
+- research、technical、paper_checkでは不確実性と根拠の限界を明示し、PDFにない事実をPDF由来と断定しない。
+- health、legal、financeでは断定的な診断・法的判断・投資判断をしない。不確実性、最新情報を確認する必要、適切な専門家の境界を短く示す。
+- safetyとして会話へ割り込むのは、生命・身体・重大な権利や資産への緊急性が高い場合だけにする。`

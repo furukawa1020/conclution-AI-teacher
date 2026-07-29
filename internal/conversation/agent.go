@@ -724,7 +724,7 @@ var (
 	stateEmailPattern = regexp.MustCompile(
 		`(?i)[a-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+`,
 	)
-	stateLongNumberPattern = regexp.MustCompile(`\d(?:[\s().+_-]*\d){6,}`)
+	stateLongNumberPattern  = regexp.MustCompile(`\d(?:[\s().+_-]*\d){6,}`)
 	stateOpaqueTokenPattern = regexp.MustCompile(`(?:[A-Za-z0-9_-]{24,}|[A-Fa-f0-9]{32,})`)
 )
 

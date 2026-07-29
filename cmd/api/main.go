@@ -42,6 +42,7 @@ func main() {
 	var verifier identity.Verifier
 	var rateLimiter guard.Limiter
 	var voiceRateLimiter guard.Limiter
+	var voiceAppRateLimiter guard.Limiter
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
 	var closeFirestore func() error
@@ -105,6 +106,15 @@ func main() {
 			logger.Error("initialize voice rate limiter", "error", err)
 			os.Exit(1)
 		}
+		voiceAppRateLimiter, err = guard.NewFirestoreLimiterForScope(
+			firestoreClient,
+			cfg.VoiceAppRateLimits,
+			"voice",
+		)
+		if err != nil {
+			logger.Error("initialize voice app rate limiter", "error", err)
+			os.Exit(1)
+		}
 		conversationAgent, err := conversation.NewVertexAgent(
 			ctx,
 			cfg.ProjectID,
@@ -157,6 +167,7 @@ func main() {
 		httpapi.VoiceOptions{
 			Service:         voiceService,
 			RateLimiter:     voiceRateLimiter,
+			AppRateLimiter:  voiceAppRateLimiter,
 			RequestTimeout:  cfg.VoiceTimeout,
 			MaxRequestBytes: cfg.MaxVoiceBytes,
 		},

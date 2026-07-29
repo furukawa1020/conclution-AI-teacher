@@ -12,6 +12,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app-check.js";
 import {
   advanceVad,
+  createCaptureBuffer,
   createSessionClock,
   createTurnGate,
   createVadState,
@@ -414,7 +415,7 @@ function createRecording(stream) {
     rejectEnd = reject;
   });
   const recording = {
-    chunks: [],
+    captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
     discard: false,
     endPromise,
     hasSpeech: false,
@@ -432,13 +433,15 @@ function createRecording(stream) {
     if (recording.discard || !event.data || event.data.size === 0) {
       return;
     }
-    recording.totalBytes += event.data.size;
-    if (recording.totalBytes > AUDIO_MAX_BYTES) {
+    const captureState = recording.captureBuffer.append(
+      event.data,
+      recording.hasSpeech,
+    );
+    recording.totalBytes = captureState.totalBytes;
+    if (captureState.tooLarge) {
       recording.discard = true;
       requestRecordingStop(recording, "too-large");
-      return;
     }
-    recording.chunks.push(event.data);
   });
 
   recorder.addEventListener(
@@ -446,6 +449,7 @@ function createRecording(stream) {
     () => {
       stopVad(recording);
       setStreamTracksEnabled(stream, false);
+      recording.captureBuffer.clear();
       recording.rejectEnd(new Error("voice_turn_invalid"));
     },
     { once: true },
@@ -457,7 +461,7 @@ function createRecording(stream) {
       stopVad(recording);
       setStreamTracksEnabled(stream, false);
       if (recording.discard) {
-        recording.chunks.length = 0;
+        recording.captureBuffer.clear();
         recording.rejectEnd(
           new Error(
             recording.stopReason === "too-large"
@@ -470,10 +474,14 @@ function createRecording(stream) {
 
       const mimeType =
         recorder.mimeType ||
-        recording.chunks[0]?.type ||
         "audio/webm";
-      const blob = new Blob(recording.chunks, { type: mimeType });
-      recording.chunks.length = 0;
+      const captured = recording.captureBuffer.take();
+      const mimeTypeFromCapture =
+        captured.chunks[0]?.type ||
+        "audio/webm";
+      const blob = new Blob(captured.chunks, {
+        type: recorder.mimeType || mimeTypeFromCapture || mimeType,
+      });
       recording.resolveEnd(
         Object.freeze({
           blob,

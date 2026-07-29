@@ -23,24 +23,25 @@ const (
 )
 
 type Config struct {
-	AppEnv           string
-	Port             string
-	ProjectID        string
-	AllowedAppIDs    []string
-	VertexLocation   string
-	FastModel        string
-	PrecisionModel   string
-	SpeechLocation   string
-	SpeechModel      string
-	SpeechVoice      string
-	StateKey         []byte
-	RequestTimeout   time.Duration
-	VoiceTimeout     time.Duration
-	MaxRequestBytes  int64
-	MaxVoiceBytes    int64
-	RateLimits       guard.Limits
-	VoiceRateLimits  guard.Limits
-	AllowInsecureDev bool
+	AppEnv             string
+	Port               string
+	ProjectID          string
+	AllowedAppIDs      []string
+	VertexLocation     string
+	FastModel          string
+	PrecisionModel     string
+	SpeechLocation     string
+	SpeechModel        string
+	SpeechVoice        string
+	StateKey           []byte
+	RequestTimeout     time.Duration
+	VoiceTimeout       time.Duration
+	MaxRequestBytes    int64
+	MaxVoiceBytes      int64
+	RateLimits         guard.Limits
+	VoiceRateLimits    guard.Limits
+	VoiceAppRateLimits guard.Limits
+	AllowInsecureDev   bool
 }
 
 func Load() (Config, error) {
@@ -80,6 +81,24 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	voiceAppPerMinute, err := envBoundedInt(
+		"KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE",
+		guard.MaxPerMinute,
+		guard.MinPerMinute,
+		guard.MaxPerMinute,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	voiceAppPerDay, err := envBoundedInt(
+		"KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY",
+		guard.MaxPerDay,
+		guard.MinPerDay,
+		guard.MaxPerDay,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 
 	stateKey, err := decodeStateKey(os.Getenv("KOTAE_STATE_KEY_BASE64"))
 	if err != nil {
@@ -87,23 +106,27 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		AppEnv:           envOr("KOTAE_ENV", "production"),
-		Port:             envOr("PORT", defaultPort),
-		ProjectID:        firstNonEmpty(os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GCLOUD_PROJECT")),
-		AllowedAppIDs:    csvValues(os.Getenv("KOTAE_ALLOWED_APP_IDS")),
-		VertexLocation:   envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
-		FastModel:        envOr("KOTAE_FAST_MODEL", defaultFastModel),
-		PrecisionModel:   envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
-		SpeechLocation:   envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
-		SpeechModel:      envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
-		SpeechVoice:      envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
-		StateKey:         stateKey,
-		RequestTimeout:   envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
-		VoiceTimeout:     envDurationOr("KOTAE_VOICE_TIMEOUT", 50*time.Second),
-		MaxRequestBytes:  envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
-		MaxVoiceBytes:    envInt64Or("KOTAE_MAX_VOICE_BYTES", 12*1024*1024),
-		RateLimits:       guard.Limits{PerMinute: perMinute, PerDay: perDay},
-		VoiceRateLimits:  guard.Limits{PerMinute: voicePerMinute, PerDay: voicePerDay},
+		AppEnv:          envOr("KOTAE_ENV", "production"),
+		Port:            envOr("PORT", defaultPort),
+		ProjectID:       firstNonEmpty(os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GCLOUD_PROJECT")),
+		AllowedAppIDs:   csvValues(os.Getenv("KOTAE_ALLOWED_APP_IDS")),
+		VertexLocation:  envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
+		FastModel:       envOr("KOTAE_FAST_MODEL", defaultFastModel),
+		PrecisionModel:  envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
+		SpeechLocation:  envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
+		SpeechModel:     envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
+		SpeechVoice:     envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
+		StateKey:        stateKey,
+		RequestTimeout:  envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
+		VoiceTimeout:    envDurationOr("KOTAE_VOICE_TIMEOUT", 50*time.Second),
+		MaxRequestBytes: envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
+		MaxVoiceBytes:   envInt64Or("KOTAE_MAX_VOICE_BYTES", 12*1024*1024),
+		RateLimits:      guard.Limits{PerMinute: perMinute, PerDay: perDay},
+		VoiceRateLimits: guard.Limits{PerMinute: voicePerMinute, PerDay: voicePerDay},
+		VoiceAppRateLimits: guard.Limits{
+			PerMinute: voiceAppPerMinute,
+			PerDay:    voiceAppPerDay,
+		},
 		AllowInsecureDev: envBool("KOTAE_ALLOW_INSECURE_DEV"),
 	}
 
@@ -145,6 +168,9 @@ func Load() (Config, error) {
 	}
 	if err := cfg.VoiceRateLimits.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid voice rate limits: %w", err)
+	}
+	if err := cfg.VoiceAppRateLimits.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid voice app rate limits: %w", err)
 	}
 
 	return cfg, nil

@@ -13,6 +13,10 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_ALLOW_INSECURE_DEV", "true")
 	t.Setenv("KOTAE_RATE_LIMIT_PER_MINUTE", "")
 	t.Setenv("KOTAE_RATE_LIMIT_PER_DAY", "")
+	t.Setenv("KOTAE_VOICE_RATE_LIMIT_PER_MINUTE", "")
+	t.Setenv("KOTAE_VOICE_RATE_LIMIT_PER_DAY", "")
+	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", "")
+	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", "")
 }
 
 func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
@@ -27,6 +31,12 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.RateLimits.PerDay != guard.DefaultPerDay {
 		t.Fatalf("daily limit = %d; want %d", cfg.RateLimits.PerDay, guard.DefaultPerDay)
+	}
+	if cfg.VoiceAppRateLimits != (guard.Limits{
+		PerMinute: guard.MaxPerMinute,
+		PerDay:    guard.MaxPerDay,
+	}) {
+		t.Fatalf("voice app rate limits = %+v", cfg.VoiceAppRateLimits)
 	}
 }
 
@@ -56,6 +66,8 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "day malformed", key: "KOTAE_RATE_LIMIT_PER_DAY", value: "many"},
 		{name: "day disabled", key: "KOTAE_RATE_LIMIT_PER_DAY", value: "0"},
 		{name: "day too high", key: "KOTAE_RATE_LIMIT_PER_DAY", value: "201"},
+		{name: "voice app minute too high", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", value: "21"},
+		{name: "voice app day disabled", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", value: "0"},
 	}
 
 	for _, test := range tests {

@@ -188,7 +188,7 @@ func (agent *vertexAgent) Process(
 	finalPlan := fastPlan
 	route := "fast"
 	if needsPrecision(fastPlan) {
-		finalPlan, err = agent.infer(
+		precisionPlan, precisionErr := agent.infer(
 			ctx,
 			agent.precisionModel,
 			genai.ThinkingLevelHigh,
@@ -196,10 +196,15 @@ func (agent *vertexAgent) Process(
 			state,
 			&fastPlan,
 		)
-		if err != nil {
-			return VoiceTurnResult{}, err
+		if precisionErr != nil {
+			// The fast plan has already passed the same strict schema and safety
+			// validation. A preview precision model must not make the whole voice
+			// turn unavailable.
+			route = "fast-fallback"
+		} else {
+			finalPlan = precisionPlan
+			route = "precision"
 		}
-		route = "precision"
 	}
 
 	decision := arbitrate(finalPlan)

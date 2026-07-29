@@ -37,6 +37,7 @@ type conversationState struct {
 	Graph               ThoughtStateGraph `json:"thought_state_graph"`
 	ConversationSummary string            `json:"conversation_summary,omitempty"`
 	DocumentSummary     string            `json:"document_summary,omitempty"`
+	PendingAnswer       PendingAnswerFrame `json:"pending_answer"`
 	SelfCorrectionGrace bool              `json:"self_correction_grace"`
 	LastIntervention    ArbiterDecision   `json:"last_intervention"`
 }
@@ -157,6 +158,10 @@ func normalizeConversationState(state conversationState) (conversationState, err
 	state.DocumentSummary = collapseSpace(state.DocumentSummary)
 	if utf8.RuneCountInString(state.ConversationSummary) > maxConversationSummaryRunes ||
 		utf8.RuneCountInString(state.DocumentSummary) > maxDocumentSummaryRunes {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	state.PendingAnswer, err = normalizePendingAnswer(state.PendingAnswer)
+	if err != nil {
 		return conversationState{}, ErrInvalidStateToken
 	}
 	if err := validateArbiter(state.LastIntervention); err != nil {

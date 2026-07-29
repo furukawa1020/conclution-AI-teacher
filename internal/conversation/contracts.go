@@ -19,11 +19,13 @@ const (
 	MaxInlinePDFBytes      = 7 * 1024 * 1024
 	MaxSpokenReplyRunes    = 480
 	MaxLatentQuestionRunes = 240
+	MaxAnswerAttemptRunes  = 1_600
 
 	maxConversationSummaryRunes = 320
 	maxDocumentSummaryRunes     = 480
 	maxGraphNodesPerKind        = 3
 	maxGraphNodeRunes           = 100
+	maxPendingSubjectRunes      = 100
 )
 
 var (
@@ -53,6 +55,8 @@ type VoiceTurnResult struct {
 	SchemaVersion       int                    `json:"schemaVersion"`
 	Domain              string                 `json:"domain"`
 	Intent              string                 `json:"intent"`
+	AssistanceTarget    string                 `json:"assistance_target"`
+	RespondentStage     string                 `json:"respondent_stage"`
 	LatentQuestion      string                 `json:"latent_question"`
 	ArgumentStructure   string                 `json:"argument_structure"`
 	InterventionPolicy  string                 `json:"intervention_policy"`
@@ -78,9 +82,11 @@ type ArbiterDecision struct {
 // ThoughtStateGraph contains short semantic abstractions only. It deliberately
 // has no transcript or document-content field.
 type ThoughtStateGraph struct {
+	Goals          []string `json:"goals"`
 	Claims         []string `json:"claims"`
 	Grounds        []string `json:"grounds"`
 	Assumptions    []string `json:"assumptions"`
+	Constraints    []string `json:"constraints"`
 	OpenLoops      []string `json:"open_loops"`
 	Contradictions []string `json:"contradictions"`
 	Decisions      []string `json:"decisions"`
@@ -89,12 +95,24 @@ type ThoughtStateGraph struct {
 // ThoughtStateDelta is the bounded increment emitted for one turn and merged
 // into the encrypted ThoughtStateGraph.
 type ThoughtStateDelta struct {
+	Goals          []string `json:"goals"`
 	Claims         []string `json:"claims"`
 	Grounds        []string `json:"grounds"`
 	Assumptions    []string `json:"assumptions"`
+	Constraints    []string `json:"constraints"`
 	OpenLoops      []string `json:"open_loops"`
 	Contradictions []string `json:"contradictions"`
 	Decisions      []string `json:"decisions"`
+}
+
+// PendingAnswerFrame is the minimum cross-turn state needed to help a person
+// answer someone else's question. It intentionally stores no transcript,
+// answer attempt, hypothesis prose, or reconstructed reply.
+type PendingAnswerFrame struct {
+	Active        bool                          `json:"active"`
+	Operator      answercontract.Operator       `json:"operator,omitempty"`
+	Subject       string                        `json:"subject,omitempty"`
+	RequiredSlots []answercontract.RequiredSlot `json:"required_slots,omitempty"`
 }
 
 func (turn VoiceTurn) Validate() error {
@@ -137,6 +155,9 @@ func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 
 func normalizeGraph(graph ThoughtStateGraph) (ThoughtStateGraph, error) {
 	var err error
+	if graph.Goals, err = normalizeNodes(graph.Goals); err != nil {
+		return ThoughtStateGraph{}, err
+	}
 	if graph.Claims, err = normalizeNodes(graph.Claims); err != nil {
 		return ThoughtStateGraph{}, err
 	}
@@ -144,6 +165,9 @@ func normalizeGraph(graph ThoughtStateGraph) (ThoughtStateGraph, error) {
 		return ThoughtStateGraph{}, err
 	}
 	if graph.Assumptions, err = normalizeNodes(graph.Assumptions); err != nil {
+		return ThoughtStateGraph{}, err
+	}
+	if graph.Constraints, err = normalizeNodes(graph.Constraints); err != nil {
 		return ThoughtStateGraph{}, err
 	}
 	if graph.OpenLoops, err = normalizeNodes(graph.OpenLoops); err != nil {
@@ -161,6 +185,41 @@ func normalizeGraph(graph ThoughtStateGraph) (ThoughtStateGraph, error) {
 func normalizeDelta(delta ThoughtStateDelta) (ThoughtStateDelta, error) {
 	graph, err := normalizeGraph(ThoughtStateGraph(delta))
 	return ThoughtStateDelta(graph), err
+}
+
+func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error) {
+	if !frame.Active {
+		return PendingAnswerFrame{RequiredSlots: []answercontract.RequiredSlot{}}, nil
+	}
+	frame.Subject = collapseSpace(frame.Subject)
+	target, ok := answercontract.TargetSlot(frame.Operator)
+	if !ok ||
+		!utf8.ValidString(frame.Subject) ||
+		frame.Subject == "" ||
+		utf8.RuneCountInString(frame.Subject) > maxPendingSubjectRunes ||
+		containsSensitiveStateText(frame.Subject) ||
+		len(frame.RequiredSlots) == 0 ||
+		len(frame.RequiredSlots) > answercontract.MaxRequiredSlots {
+		return PendingAnswerFrame{}, ErrInvalidStateToken
+	}
+	seen := make(map[answercontract.RequiredSlot]struct{}, len(frame.RequiredSlots))
+	slots := make([]answercontract.RequiredSlot, 0, len(frame.RequiredSlots))
+	hasTarget := false
+	for _, slot := range frame.RequiredSlots {
+		if _, duplicate := seen[slot]; duplicate {
+			return PendingAnswerFrame{}, ErrInvalidStateToken
+		}
+		seen[slot] = struct{}{}
+		slots = append(slots, slot)
+		if slot == target {
+			hasTarget = true
+		}
+	}
+	if !hasTarget {
+		return PendingAnswerFrame{}, ErrInvalidStateToken
+	}
+	frame.RequiredSlots = slots
+	return frame, nil
 }
 
 func normalizeNodes(nodes []string) ([]string, error) {
@@ -247,6 +306,19 @@ func allowedArgumentStructure(structure string) bool {
 func allowedInterventionPolicy(policy string) bool {
 	switch policy {
 	case "answer", "coach", "clarify", "safety", "wait", "paper_check":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedAssistanceTarget(target string) bool {
+	return target == "assistant" || target == "respondent"
+}
+
+func allowedRespondentStage(stage string) bool {
+	switch stage {
+	case "none", "awaiting_answer", "restructure":
 		return true
 	default:
 		return false

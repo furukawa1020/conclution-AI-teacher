@@ -40,6 +40,7 @@ const (
 	OperatorDefinition Operator = "definition"
 	OperatorComparison Operator = "comparison"
 	OperatorEvidence   Operator = "evidence"
+	OperatorPurpose    Operator = "purpose"
 	OperatorOpen       Operator = "open"
 )
 
@@ -55,6 +56,7 @@ const (
 	SlotDefinition  RequiredSlot = "definition"
 	SlotComparison  RequiredSlot = "comparison"
 	SlotEvidence    RequiredSlot = "evidence"
+	SlotPurpose     RequiredSlot = "purpose"
 	SlotPosition    RequiredSlot = "position"
 	SlotUnit        RequiredSlot = "unit"
 	SlotCondition   RequiredSlot = "condition"
@@ -179,6 +181,8 @@ func TargetSlot(operator Operator) (RequiredSlot, bool) {
 		return SlotComparison, true
 	case OperatorEvidence:
 		return SlotEvidence, true
+	case OperatorPurpose:
+		return SlotPurpose, true
 	case OperatorOpen:
 		return SlotPosition, true
 	default:

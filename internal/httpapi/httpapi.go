@@ -67,6 +67,8 @@ type VoiceTurnResult struct {
 	AudioMIMEType  string
 	StateToken     string
 	DetectedDomain string
+	AssistanceTarget string
+	RespondentStage  string
 	Route          string
 	NeedsPaper     bool
 	Caption        string
@@ -273,6 +275,8 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"caption":        caption,
 		"sessionState":   result.StateToken,
 		"detectedDomain": result.DetectedDomain,
+		"assistanceTarget": result.AssistanceTarget,
+		"respondentStage":  result.RespondentStage,
 		"route":          result.Route,
 		"needsPaper":     result.NeedsPaper,
 	})
@@ -363,6 +367,13 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		len(result.StateToken) > maxStateBytes ||
 		len(result.DetectedDomain) == 0 ||
 		len(result.DetectedDomain) > 40 ||
+		(result.AssistanceTarget != "assistant" &&
+			result.AssistanceTarget != "respondent" &&
+			!preInferenceRecognitionResult) ||
+		(result.RespondentStage != "none" &&
+			result.RespondentStage != "awaiting_answer" &&
+			result.RespondentStage != "restructure" &&
+			!preInferenceRecognitionResult) ||
 		len(result.Route) == 0 ||
 		len(result.Route) > 80 ||
 		!utf8.ValidString(result.Caption) ||

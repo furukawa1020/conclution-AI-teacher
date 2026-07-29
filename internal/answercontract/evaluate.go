@@ -502,7 +502,8 @@ func validSlot(slot RequiredSlot) bool {
 	switch slot {
 	case SlotPolarity, SlotSelection, SlotQuantity, SlotState, SlotCause,
 		SlotProcedure, SlotDefinition, SlotComparison, SlotEvidence,
-		SlotPosition, SlotUnit, SlotCondition, SlotUncertainty, SlotScope:
+		SlotPurpose, SlotPosition, SlotUnit, SlotCondition, SlotUncertainty,
+		SlotScope:
 		return true
 	default:
 		return false

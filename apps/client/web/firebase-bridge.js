@@ -727,6 +727,11 @@ function safeVoiceResponse(payload) {
     typeof payload.sessionState !== "string" ||
     payload.sessionState.length > SESSION_STATE_MAX_CHARS ||
     !boundedString(payload.detectedDomain, 100) ||
+    (payload.assistanceTarget !== "assistant" &&
+      payload.assistanceTarget !== "respondent") ||
+    !["none", "awaiting_answer", "restructure"].includes(
+      payload.respondentStage,
+    ) ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
     (payload.caption !== undefined &&
@@ -741,6 +746,8 @@ function safeVoiceResponse(payload) {
     audioMimeType: hasAudio ? payload.audioMimeType : "",
     caption: typeof payload.caption === "string" ? payload.caption : null,
     detectedDomain: payload.detectedDomain,
+    assistanceTarget: payload.assistanceTarget,
+    respondentStage: payload.respondentStage,
     needsPaper: payload.needsPaper,
     route: payload.route,
     sessionState: payload.sessionState,

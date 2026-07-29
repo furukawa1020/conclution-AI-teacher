@@ -553,7 +553,10 @@ function safeVoiceResponse(payload) {
     (hasAudio &&
       (!boundedString(payload.audioMimeType, 100) ||
         !payload.audioMimeType.startsWith("audio/"))) ||
-    (!hasAudio && payload.audioMimeType !== "") ||
+    (!hasAudio &&
+      payload.audioMimeType !== "" &&
+      (!boundedString(payload.audioMimeType, 100) ||
+        !payload.audioMimeType.startsWith("audio/"))) ||
     typeof payload.sessionState !== "string" ||
     payload.sessionState.length > SESSION_STATE_MAX_CHARS ||
     !boundedString(payload.detectedDomain, 100) ||
@@ -568,7 +571,7 @@ function safeVoiceResponse(payload) {
 
   return Object.freeze({
     audioBase64: payload.audioBase64,
-    audioMimeType: payload.audioMimeType,
+    audioMimeType: hasAudio ? payload.audioMimeType : "",
     caption: typeof payload.caption === "string" ? payload.caption : null,
     detectedDomain: payload.detectedDomain,
     needsPaper: payload.needsPaper,
@@ -684,7 +687,7 @@ async function finishTurn(serializedSessionState) {
 
 async function playResponse(audioBase64, audioMimeType) {
   setTracksEnabled(false);
-  if (audioBase64 === "" && audioMimeType === "") {
+  if (audioBase64 === "") {
     return Object.freeze({ state: "silent" });
   }
   if (

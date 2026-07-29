@@ -70,6 +70,7 @@ impl VoiceState {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CloudState {
     Connecting,
@@ -401,6 +402,9 @@ fn submit_turn(
         let result = match result {
             Ok(result) => result,
             Err(message) => {
+                if consumed_document {
+                    document_info.set(None);
+                }
                 voice_state.set(VoiceState::Error(message));
                 return;
             }
@@ -445,7 +449,7 @@ fn submit_turn(
 
 #[allow(clippy::too_many_arguments)]
 fn start_or_resume(
-    mut voice_state: Signal<VoiceState>,
+    voice_state: Signal<VoiceState>,
     mut generation: Signal<u64>,
     session_state: Signal<String>,
     detected_domain: Signal<String>,
@@ -493,7 +497,6 @@ fn App() -> Element {
     let cloud_status = use_resource(|| async { cloud::status().await });
 
     let state_snapshot = *voice_state.read();
-    let generation_snapshot = *generation.read();
     let captions_are_visible = *captions_visible.read();
     let document_snapshot = document_info.read().clone();
     let document_is_busy = matches!(
@@ -643,6 +646,8 @@ fn App() -> Element {
                                         let next = generation.peek().wrapping_add(1);
                                         generation.set(next);
                                         voice_state.set(VoiceState::Paused);
+                                        document_info.set(None);
+                                        document_error.set(None);
                                         cloud::stop_session();
                                     }
                                 },
@@ -658,7 +663,8 @@ fn App() -> Element {
                                 class: "control-button control-button--end",
                                 r#type: "button",
                                 onclick: move |_| {
-                                    generation.set(generation.peek().wrapping_add(1));
+                                    let next = generation.peek().wrapping_add(1);
+                                    generation.set(next);
                                     voice_state.set(VoiceState::Ready);
                                     session_state.set(String::new());
                                     detected_domain.set(String::new());

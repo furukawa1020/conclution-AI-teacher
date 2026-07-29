@@ -12,10 +12,10 @@ import (
 const (
 	SchemaVersion = 1
 
-	MaxUtteranceRunes     = 2_000
-	MaxStateTokenBytes    = 16 * 1024
-	MaxInlinePDFBytes     = 7 * 1024 * 1024
-	MaxSpokenReplyRunes   = 480
+	MaxUtteranceRunes      = 2_000
+	MaxStateTokenBytes     = 16 * 1024
+	MaxInlinePDFBytes      = 7 * 1024 * 1024
+	MaxSpokenReplyRunes    = 480
 	MaxLatentQuestionRunes = 240
 
 	maxConversationSummaryRunes = 320

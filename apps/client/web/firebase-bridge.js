@@ -320,21 +320,36 @@ function createAudioContext() {
   }
 }
 
-async function ensureAudioGraph(stream) {
-  if (!audioContext || audioContext.state === "closed") {
-    audioContext = createAudioContext();
+async function ensureAudioGraph(stream, expectedEpoch) {
+  let context = audioContext;
+  if (!context || context.state === "closed") {
+    context = createAudioContext();
+    audioContext = context;
     analyser = undefined;
     analyserSource = undefined;
   }
-  if (audioContext.state === "suspended") {
-    await audioContext.resume();
+  if (context.state === "suspended") {
+    await context.resume();
+  }
+  if (expectedEpoch !== sessionEpoch || audioContext !== context) {
+    if (audioContext === context) {
+      audioContext = undefined;
+      analyser = undefined;
+      analyserSource = undefined;
+    }
+    if (context.state !== "closed") {
+      void context.close();
+    }
+    fail("request_cancelled");
   }
   if (!analyser || !analyserSource) {
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.18;
-    analyserSource = audioContext.createMediaStreamSource(stream);
-    analyserSource.connect(analyser);
+    const nextAnalyser = context.createAnalyser();
+    nextAnalyser.fftSize = 1024;
+    nextAnalyser.smoothingTimeConstant = 0.18;
+    const nextSource = context.createMediaStreamSource(stream);
+    nextSource.connect(nextAnalyser);
+    analyser = nextAnalyser;
+    analyserSource = nextSource;
   }
 }
 
@@ -414,6 +429,9 @@ function createRecording(stream) {
     resolveEnd = resolve;
     rejectEnd = reject;
   });
+  // A stop can race the Rust caller before it starts awaiting the turn.
+  // Mark the rejection handled without changing what later awaiters observe.
+  void endPromise.catch(() => {});
   const recording = {
     captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
     discard: false,
@@ -472,15 +490,13 @@ function createRecording(stream) {
         return;
       }
 
+      const captured = recording.captureBuffer.take();
       const mimeType =
         recorder.mimeType ||
-        "audio/webm";
-      const captured = recording.captureBuffer.take();
-      const mimeTypeFromCapture =
         captured.chunks[0]?.type ||
         "audio/webm";
       const blob = new Blob(captured.chunks, {
-        type: recorder.mimeType || mimeTypeFromCapture || mimeType,
+        type: mimeType,
       });
       recording.resolveEnd(
         Object.freeze({
@@ -527,7 +543,7 @@ async function beginTurn() {
     return await initializeWithCleanup(
       async () => {
         const stream = await ensureMediaStream(expectedEpoch);
-        await ensureAudioGraph(stream);
+      await ensureAudioGraph(stream, expectedEpoch);
         if (expectedEpoch !== sessionEpoch) {
           fail("request_cancelled");
         }
@@ -931,7 +947,6 @@ async function attachDocument(inputId) {
 function stopSession() {
   sessionEpoch += 1;
   documentEpoch += 1;
-  beginGate.reset();
   finishGate.reset();
 
   if (activeRequestController) {

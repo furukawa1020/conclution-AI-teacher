@@ -161,7 +161,7 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 	plan.ThoughtStateDelta.Claims = []string{"検証可能性を優先する"}
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, plan)},
-		{body: encodeContract(t, plan.AnswerContract)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
 	}}
 	agent := newTestAgent(t, fake)
 
@@ -712,7 +712,7 @@ func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, plan)},
 		{body: encodePlan(t, plan)},
-		{body: encodeContract(t, plan.AnswerContract)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
 	}}
 	agent := newTestAgent(t, fake)
 

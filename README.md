@@ -26,7 +26,7 @@ Rust / Dioxus / Wasm UI
 
 マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、音声を同一オリジンAPIへ送ります。Cloud Speech-to-Textで得た文字列と、利用者が今回だけ添付したPDFはVertex AIへ送られる場合があります。応答する価値が低ければ音声を返さず、そのまま聞き続けます。
 
-音声、文字起こし、モデル応答、PDFはアプリのFirestore、Cloud Storage、ログへ保存しません。会話を続けるための短い意味要約だけをAES-256-GCMで暗号化した不透明な状態トークンとしてブラウザメモリへ返します。これはE2EEではなく、Cloud Run、Speech-to-Text、Vertex AI、Text-to-Speechの処理中には各サービスが必要な平文を扱います。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
+音声、文字起こし、モデル応答、PDFはアプリのFirestore、Cloud Storage、ログへ保存しません。会話を続ける状態には自由文要約を入れず、検出できたemail・電話番号らしい長い数列・credentialらしいtoken・現在発話との高い重複を除いた短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返します。氏名など未検出の機微情報がnodeへ残る可能性はあり、これはE2EEでもありません。Cloud Run、Speech-to-Text、Vertex AI、Text-to-Speechの処理中には各サービスが必要な平文を扱います。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
 
 ## 構成
 
@@ -57,11 +57,12 @@ powershell -ExecutionPolicy Bypass -File scripts/build-web.ps1
 
 ## セキュリティ原則
 
-- Firebase ID token、Firebase App Check、同一Originをすべて検証する
+- Firebase ID token、Firebase App Check、`https://kotae-ai.web.app`と完全一致するOriginをすべて検証する
+- `turnMode`を各turnで明示し、UID単位とFirebase App単位のquotaを本文デコード前に消費する
 - サービスアカウントJSON鍵を作らず、Cloud Runの専用サービスIDを使う
 - 音声、文字起こし、モデル応答、PDF、token、秘密鍵をアプリログへ出さない
 - STT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する
 - Vertex AIは`global`であり、文字起こしと添付PDFが日本リージョン内に限定されるとは説明しない
-- PDFは一つのターンだけ送信し、原文ではなく短い意味要約だけが暗号化状態へ残り得る
+- PDFは一つのターンだけ送信し、本文も資料要約も暗号化状態へ残さない
 - 状態鍵はSecret Managerで管理し、状態トークンはFirebase UIDへ束縛して15分で失効させる
 - 音声履歴、再生履歴、無人の後日再評価、保存音声Vaultは現在の公開経路に実装していない

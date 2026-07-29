@@ -663,6 +663,10 @@ func TestVoiceTurnConsumesQuotaBeforeDecodingMalformedPayload(t *testing.T) {
 			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional","document":{"base64":"YQ==","mimeType":"text/plain","name":"paper.txt"}}`,
 		},
 		{
+			name: "PDF MIME with invalid magic",
+			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional","document":{"base64":"bm90LWEtcGRm","mimeType":"application/pdf","name":"paper.pdf"}}`,
+		},
+		{
 			name: "unknown field",
 			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional","transcript":"secret"}`,
 		},

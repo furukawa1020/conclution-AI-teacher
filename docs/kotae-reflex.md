@@ -66,7 +66,7 @@ Cloud Run / Go（asia-northeast1）
                               └─ MP3 → ブラウザ再生
 ```
 
-raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。短い意味グラフと要約だけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。Vertex AIは`global`なので、文字起こしとPDFまで東京リージョンだけに留まるとは保証しません。
+raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。cross-turn stateには自由文要約を入れず、検出できたemail・電話番号らしい長い数列・credentialらしいtoken・原文との高い重複を除いた短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。Vertex AIは`global`なので、文字起こしとPDFまで東京リージョンだけに留まるとは保証しません。
 
 ### 現在のMVP境界
 
@@ -79,7 +79,7 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
 - WebSocket、Vertex Live、session resumption、full-duplex、barge-inを現在は使わない。
 - AI処理中と再生中はマイクを無効にし、タブ非表示、3分無発話、30分経過でsessionを止める。
-- PDFは一つのturnだけ送信し、短い資料要約だけが暗号化状態へ残り得る。
+- PDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。
 
 将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
 
@@ -252,12 +252,12 @@ CounterfactualRepair
   └─ repair_gain
 ```
 
-モデルはこの構造を提案しますが、最終判定をモデルのscoreへ丸投げしません。Go側が仮説gap、正規化entropy、必須slot coverage、commitment位置、意味保存条件を再計算します。
+draftモデル内のLACはadvisoryです。最終draftの後に、source utterance、前状態、候補返答だけを別のstructured callへ渡し、draft側のLAC自己申告を見せずに独立監査します。最終判定はその監査値も鵜呑みにせず、Go側が仮説gap、正規化entropy、必須slot coverage、commitment位置、意味保存条件を再計算します。独立監査が失敗した場合は未監査draftを読まず、intentional turnなら短い確認一問、ambient turnなら沈黙にします。
 
 ### AからAへ答える不変条件
 
 1. 潜在問いの上位仮説が近い、またはentropyが高い場合は、勝手に一つへ固定せず`clarify`にする。
-2. 問いのoperatorに対応するtarget slotが回答にない時は、説明の流暢さだけで`keep`にしない。
+2. 問いのoperatorに対応するtarget slotが回答にない時、必須slotが一つでも欠ける時、または`first_commitment`が候補返答内に実在しない時は、説明の流暢さだけで`keep`にしない。
 3. targetが満たされてもcommitmentが後ろにある場合は、repair gainが十分な時だけ前へ移す。
 4. 再構成で元の条件、留保、不確実性が変わる場合は`reject`する。
 5. targetを原文から安全に推定できない場合は、もっともらしい答えを捏造せず`clarify`または`silence`にする。
@@ -265,7 +265,7 @@ CounterfactualRepair
 
 内部metricsは`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservation`です。これらはUIに採点文として並べるためではなく、A→Aのhard case、過剰修正、条件消失を回帰テストするために使います。
 
-現実装の意味保存guardは、日本語の条件markerと不確実性markerを含む決定論的検査です。意味同値性を完全に判定できるものではないため、閾値以上でも誤修復率を人手評価し、operator別・domain別に校正する必要があります。
+現実装の意味保存guardは、日本語の条件・因果marker、boolean極性、数値と単位、Latin / 選択肢label / 引用anchor、不確実性の段階を比較する決定論的検査です。これは意味同値性を完全に判定する証明ではないため、閾値以上でも誤修復率を人手評価し、operator別・domain別に校正する必要があります。
 
 ## Think-Verbalize-Speak
 
@@ -289,7 +289,7 @@ Reasonerが生成する構造化判断を、そのまま読み上げません。
 
 ## 研究・論文モード
 
-現在のMVPが受け取る資料は、利用者がそのturnに明示添付したPDFだけです。PDFはVertex AI `global`へinline送信し、原本を保存せず、短い資料要約だけを暗号化状態へ残し得ます。DOI / URLの取得、世界中の新着論文の自動検索、引用付きの独立Research Verifierはまだ実装していません。
+現在のMVPが受け取る資料は、利用者がそのturnに明示添付したPDFだけです。PDFはVertex AI `global`へinline送信し、原本も資料要約もcross-turn stateへ保存しません。PDF turnは必ず精密経路と独立LAC監査を通り、どちらかが使えなければ高速draftの実質回答を読み上げません。DOI / URLの取得、世界中の新着論文の自動検索、引用付きの独立Research Verifierはまだ実装していません。
 
 研究ロードマップでは、PDF、DOI、URL、引用情報を`source`ノードへ登録し、次を一般会話とは別のResearch Verifierで扱います。
 
@@ -590,6 +590,8 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 停止後に取得・送信された音声byteが0である
 - raw audio、transcript、prompt/responseがログへ現れない
 - Firebase ID token、App Check、Originのどれかが不正なrequestでモデル呼び出しが0である
+- missing / unknown `turnMode`を拒否し、状態tokenの有無でambientを推測しない
+- 認証済み音声requestは本文decode前にUID quotaとFirebase App quotaを消費する
 - 状態tokenの改ざん、期限切れ、別UID利用の成功率が0である
 - session停止後にマイクtrackが終了し、新しい音声送信が起きない
 - Storage、Firestoreへ音声・transcript・PDF本文が作成されない
@@ -670,14 +672,16 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 ### A. Voice-first MVP — 実装済み
 
 - 明示開始されたブラウザsessionと端末側VAD
-- 一発話ごとのHTTPS request、Firebase Auth、App Check、Origin検証
+- 一発話ごとのHTTPS request、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
 - 東京リージョンSTT → `global` Vertex AI structured reasoner → 東京リージョンTTS
 - raw audio、文字起こし、応答文、PDFをアプリ側で永続化しない
-- AES-256-GCM、UID-bound、15分TTLの短い意味状態
+- AES-256-GCM、UID-bound、15分TTL、自由文要約なしのフィルタ済み意味状態
 - Thought State Graph、規則とモデル判定を併用したEVI
 - LACのQuestionFrame、CommitmentFront、CounterfactualRepair
+- draftから独立したLAC criticとGoの決定論的authoritative evaluator
 - 曖昧な問いでのclarify、低EVIと自己修正中のsilence
 - 一つのturnだけのPDF添付とPDF本文の非永続化
+- PDF・高リスクdomainのprecision fail-closed
 
 ### B. LAC評価 — 実装中
 

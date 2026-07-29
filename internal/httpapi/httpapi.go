@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -313,7 +314,9 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		return VoiceTurnInput{}, errors.New("invalid document metadata")
 	}
 	document, err := decodeBoundedBase64(request.Document.Base64, maxDocumentBytes)
-	if err != nil || len(document) == 0 {
+	if err != nil ||
+		len(document) == 0 ||
+		!bytes.HasPrefix(document, []byte("%PDF-")) {
 		clear(document)
 		clearVoiceInput(&input)
 		return VoiceTurnInput{}, errors.New("invalid document")

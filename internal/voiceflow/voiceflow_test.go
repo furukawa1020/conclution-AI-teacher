@@ -68,7 +68,7 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Audio) != 0 || result.AudioMIMEType != "" {
+	if len(result.Audio) != 0 || result.AudioMIMEType != "" || result.Caption != "" {
 		t.Fatalf("silent result contains audio: %+v", result)
 	}
 	if speech.synthesizeCalls != 0 {
@@ -107,7 +107,9 @@ func TestPipelineSynthesizesOnlySelectedIntervention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result.Audio) != "speech" || result.AudioMIMEType != "audio/mpeg" {
+	if string(result.Audio) != "speech" ||
+		result.AudioMIMEType != "audio/mpeg" ||
+		result.Caption != agent.result.SpokenReply {
 		t.Fatalf("result = %+v", result)
 	}
 	if !result.NeedsPaper {

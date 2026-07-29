@@ -3,10 +3,12 @@ import test from "node:test";
 
 import {
   advanceVad,
+  createCaptureBuffer,
   createSessionClock,
   createTurnGate,
   createVadState,
   initializeWithCleanup,
+  isPendingDocumentExpired,
   isValidTurnMode,
   shouldStopSessionForLifecycle,
   turnModeForGestureEpoch,
@@ -63,6 +65,34 @@ test("hidden documents and pagehide stop only active voice sessions", () => {
   );
   assert.equal(shouldStopSessionForLifecycle("pagehide", false, true), true);
   assert.equal(shouldStopSessionForLifecycle("pagehide", true, false), false);
+
+  const pendingPdfMakesSessionActive = Boolean({ mimeType: "application/pdf" });
+  assert.equal(
+    shouldStopSessionForLifecycle(
+      "visibilitychange",
+      true,
+      pendingPdfMakesSessionActive,
+    ),
+    true,
+  );
+});
+
+test("an unsent PDF expires at five minutes, not before", () => {
+  const attachedAt = 50_000;
+  assert.equal(
+    isPendingDocumentExpired(
+      attachedAt,
+      attachedAt + VOICE_SESSION_LIMITS.pendingDocumentLimitMs - 1,
+    ),
+    false,
+  );
+  assert.equal(
+    isPendingDocumentExpired(
+      attachedAt,
+      attachedAt + VOICE_SESSION_LIMITS.pendingDocumentLimitMs,
+    ),
+    true,
+  );
 });
 
 test("idle and absolute session expiries are checked at their boundaries", () => {
@@ -168,6 +198,96 @@ test("turn gate rejects double finish and ignores stale releases", () => {
   gate.reset();
   assert.equal(gate.release(second), false);
   assert.equal(gate.isBusy(), false);
+});
+
+test("an in-flight initialization gate remains held until cleanup finishes", async () => {
+  const gate = createTurnGate();
+  const token = gate.acquire();
+  let rejectInitialization;
+  let cleanupCalls = 0;
+  const initialization = (async () => {
+    try {
+      return await initializeWithCleanup(
+        () =>
+          new Promise((_, reject) => {
+            rejectInitialization = reject;
+          }),
+        () => {
+          cleanupCalls += 1;
+        },
+      );
+    } finally {
+      gate.release(token);
+    }
+  })();
+
+  await Promise.resolve();
+  assert.equal(gate.acquire(), null);
+  rejectInitialization(new Error("request_cancelled"));
+  await assert.rejects(initialization, /request_cancelled/);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(gate.isBusy(), false);
+  assert.notEqual(gate.acquire(), null);
+});
+
+test("pre-roll retains at most four recent chunks and never sends silence alone", () => {
+  const capture = createCaptureBuffer({
+    maximumBytes: 1_000,
+    preRollByteLimit: 100,
+    preRollChunkLimit: 4,
+  });
+  for (let id = 1; id <= 6; id += 1) {
+    capture.append({ id, size: 10 }, false);
+  }
+  assert.deepEqual(capture.snapshot(), {
+    preRollBytes: 40,
+    preRollChunks: 4,
+    promoted: false,
+    retainedBytes: 0,
+    retainedChunks: 0,
+    tooLarge: false,
+    totalBytes: 40,
+  });
+  assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
+});
+
+test("speech promotes only bounded pre-roll plus subsequent voice chunks", () => {
+  const capture = createCaptureBuffer({
+    maximumBytes: 1_000,
+    preRollByteLimit: 100,
+    preRollChunkLimit: 4,
+  });
+  for (let id = 1; id <= 6; id += 1) {
+    capture.append({ id, size: 10 }, false);
+  }
+  capture.append({ id: 7, size: 20 }, true);
+  capture.append({ id: 8, size: 30 }, true);
+
+  const payload = capture.take();
+  assert.deepEqual(
+    payload.chunks.map(({ id }) => id),
+    [3, 4, 5, 6, 7, 8],
+  );
+  assert.equal(payload.totalBytes, 90);
+  assert.equal(capture.snapshot().totalBytes, 0);
+});
+
+test("pre-roll and promoted payload enforce independent byte ceilings", () => {
+  const capture = createCaptureBuffer({
+    maximumBytes: 100,
+    preRollByteLimit: 60,
+    preRollChunkLimit: 4,
+  });
+  capture.append({ id: 1, size: 40 }, false);
+  capture.append({ id: 2, size: 40 }, false);
+  assert.equal(capture.snapshot().preRollBytes, 40);
+
+  capture.append({ id: 3, size: 40 }, true);
+  assert.equal(capture.snapshot().retainedBytes, 80);
+  const overflow = capture.append({ id: 4, size: 21 }, true);
+  assert.equal(overflow.tooLarge, true);
+  assert.equal(overflow.totalBytes, 0);
+  assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
 });
 
 test("gesture epoch, not session state, selects explicit versus ambient mode", () => {

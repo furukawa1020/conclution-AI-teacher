@@ -27,18 +27,19 @@ Cloud Run kotae-api（asia-northeast1）
 | データ | 処理先 | アプリ側の永続化 | セッション継続に残るもの |
 |---|---|---|---|
 | マイク音声 | ブラウザ、Cloud Run、東京リージョンSTT | なし | なし |
-| 文字起こし | Cloud Run、Vertex AI `global` | なし | 原文ではなく短い意味要約が暗号化状態に入り得る |
+| 文字起こし | Cloud Run、Vertex AI `global` | なし | 自由文要約は残さない。検出できたemail・電話番号らしい長い数列・credential token・原文との高いn-gram重複を除いた短いgraph nodeだけが入り得る |
 | モデル応答文 | Cloud Run、東京リージョンTTS | なし | 原文は状態へ保存しない |
 | 合成音声 | Cloud Run、ブラウザ | なし | 再生後は参照を解放する |
-| PDF | Cloud Run、Vertex AI `global` | なし | PDF本文ではなく短い資料要約が暗号化状態に入り得る |
-| 会話状態 | ブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | 暗号化した意味グラフと短い要約、15分TTL |
-| 音声レート制限 | Firestore | 48時間TTL | UIDのSHA-256由来document IDと回数・時刻 |
+| PDF | Cloud Run、Vertex AI `global` | なし | 本文も資料要約もcross-turn stateへ残さない |
+| 会話状態 | ブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | フィルタ済み意味グラフと制御メタデータ、15分TTL |
+| 音声レート制限 | Firestore | 48時間TTL | UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻 |
 
 STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
 
 ## マイクとセッション制御
 
 - 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
+- 各requestは`turnMode: intentional | ambient`を必須とし、状態tokenの有無からambientを推測しない
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
 - AI処理中と合成音声の再生中はマイクトラックを無効にする
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
@@ -55,11 +56,13 @@ JavaScriptのガベージコレクションや文字列の複製は完全には�
 - Firebase ID token
 - Firebase App Check token
 - 許可済みFirebase App ID
-- 同一サイトのOrigin
+- 完全一致する`Origin: https://kotae-ai.web.app`。missing、`null`、別origin、重複Originを拒否
 - `application/json`と許可済み音声MIME
 - サイズ上限、strict Base64、未知JSON fieldの拒否
-- 音声用の独立したユーザーレート制限
+- JSON本文とBase64を読む前に消費するUID単位とFirebase App単位の二段階レート制限
 - request timeout
+
+レスポンスの`caption`は、実際にTTSへ渡した最終`SpokenReply`だけです。文字起こし、内部推論、LAC本文は返しません。意図的な沈黙では音声を空、`caption`を`null`にします。
 
 PDFは`application/pdf`、サイズ上限、`%PDF-` magicを確認します。PDF内の文章は命令ではなく信頼できない資料としてモデルへ渡し、外部ツール実行や権限変更に使いません。
 
@@ -73,9 +76,10 @@ PDFは`application/pdf`、サイズ上限、`%PDF-` magicを確認します。PD
 - 発行から15分で失効
 - schema、長さ、turn数を復号後にも検証
 - 暗号鍵は32 byteで、Cloud RunへSecret Managerから注入
-- tokenへ逐語録、PDF本文、モデルのchain-of-thoughtを入れない
+- tokenへ逐語録、会話・資料の自由文要約、PDF本文、モデルのchain-of-thoughtを入れない
+- graph nodeはemail、電話番号、長い数列、credentialらしいtokenを含む場合、または現在発話との4-gram重複が高い場合にnodeごと破棄する
 
-tokenには会話と資料の短い意味要約が含まれるため、秘密でないデータとは扱いません。また、Cloud RunはSecret Managerの鍵を使って復号できるためE2EEではありません。秘密へのアクセスはCloud Runの実行サービスIDだけに限定します。
+tokenにはフィルタ済みでも会話由来の意味nodeが含まれ得るため、秘密でないデータとは扱いません。また、Cloud RunはSecret Managerの鍵を使って復号できるためE2EEではありません。秘密へのアクセスはCloud Runの実行サービスIDだけに限定します。
 
 ## PDFの「今回だけ」
 
@@ -84,8 +88,9 @@ PDFは利用者が選択した後の一つの音声ターンにだけ添付し�
 ただし、次を明示します。
 
 - PDF本文は推論のためVertex AI `global`へ送られる
-- 同じターンで高速経路と精密経路の両方を使う場合がある
-- 資料の短い意味要約は暗号化状態tokenへ残り、後続ターンの文脈に使われ得る
+- PDF turnは高速draftのdomain判定に依存せず必ず精密経路と独立LAC監査を通す
+- 精密経路または独立監査が使えない場合、実質回答を高速draftへfallbackせず、intentionalなら短い確認一問、ambientなら沈黙にする
+- 資料本文と資料要約は暗号化状態tokenへ残さない
 - JavaScript、Go runtime、管理されたGoogle Cloudサービス内部の一時コピーまで物理消去を証明するものではない
 
 ## ログと永続データ
@@ -93,12 +98,10 @@ PDFは利用者が選択した後の一つの音声ターンにだけ添付し�
 音声、文字起こし、モデルprompt/response、PDF、Firebase token、App Check token、状態token、秘密鍵をアプリログへ出しません。音声APIの運用ログは次に限定します。
 
 - request ID
-- UIDの短い不可逆hash
-- 推定domain
 - fast / precisionなどのroute
 - 音声を返したかどうか
 - 処理時間
-- 列挙したerror class
+- 列挙したerror classと、rate-limit障害時の`uid` / `app`というscope区分
 
 既存の`/api/v1/evaluations`は評価メタデータを30日TTLで保存しますが、音声会話経路はこのevaluation storeへ本文を書きません。音声レート制限counterは別collectionへ保存し、48時間TTLを設定します。
 
@@ -107,11 +110,13 @@ PDFは利用者が選択した後の一つの音声ターンにだけ添付し�
 KOTAE ReflexとLatent Answer Contract（LAC）はプロジェクト独自の実験的な制御機構であり、医療機器や安全認証済みの判断機構ではありません。
 
 - 潜在問いの上位候補が近く曖昧なら、勝手に一つへ固定せず確認または沈黙を選ぶ
+- 最終draftの後に、draft側のLAC自己申告を渡さない別のstructured model callで回答を監査する
 - 答えが問いの必須slotを満たすか、最初のコミットメントがどこにあるかを決定論的に再検証する
-- 再構成で条件や不確実性が変わる場合は、その修復案を拒否する
+- first commitmentが候補回答内に実在することと、keepに必要な必須slotの完全充足を決定論的に確認する
+- 再構成で条件、因果、boolean極性、数値・単位、選択肢label、引用anchor、不確実性が変わる場合は、その修復案を拒否する
 - 自己修正の兆候がある時は、AIの訂正より本人の言い直しを優先する
 - 日常のぼやきや感情表現を、常に論理誤りとして矯正しない
-- 医療、法律、金融は高リスク経路として扱い、音声だけで最終判断を確定しない
+- PDF、医療、法律、金融、研究根拠は高リスク経路として扱い、精密経路が使えない時は実質回答を読み上げない
 
 LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservation`は内部の制御・評価指標であり、モデルの自己申告だけを正解とはしません。現在は研究的な仮説であり、実際の会話データによる精度、誤介入率、校正の検証が必要です。
 
@@ -131,10 +136,14 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 ## 最低限の検証
 
 - ID token、App Check、Originのどれかが不正ならモデルを呼ばない
+- missing / unknown `turnMode`を拒否し、intentionalとambientを状態tokenから推測しない
+- 不正本文でも認証後はUID枠とApp枠が先に消費される
 - 未知field、不正MIME、過大音声、過大PDF、PDF magic不正を拒否する
 - 状態tokenの改ざん、期限切れ、別UIDでの利用を拒否する
 - 曖昧な潜在問いで断定的な再構成をしない
 - 条件、不確実性、留保を変える再構成を拒否する
+- draft自身のLACを偽装しても、独立監査と決定論的判定を迂回できない
+- PDF・高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
 - タブ非表示、session停止、error時にマイクを解放する
 - ログ、Firestore、Cloud Storageへ音声、逐語録、PDF本文が作られない

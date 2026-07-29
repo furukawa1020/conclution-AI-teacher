@@ -68,13 +68,11 @@ Cloud STTにはraw audioだけ、Vertex AIには文字起こしと任意のPDF�
 ```text
 AES-256-GCM token
   ├─ schema / issuedAt / expiresAt / turn
-  ├─ short Thought State Graph
-  ├─ short conversation summary
-  ├─ optional short document summary
+  ├─ 検出できたemail・電話番号らしい数列・token・高い原文重複を除いたshort Thought State Graph
   └─ last intervention metadata
 ```
 
-tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret ManagerからCloud Runへ注入します。逐語録、PDF本文、chain-of-thoughtは入れません。ただし意味要約は機微情報になり得て、Cloud Runは復号できるためE2EEではありません。
+tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret ManagerからCloud Runへ注入します。逐語録、会話・PDFの自由文要約、PDF本文、chain-of-thoughtは入れません。ただしフィルタ済みの意味nodeも機微情報になり得て、Cloud Runは復号できるためE2EEではありません。
 
 ## 技術境界
 
@@ -94,13 +92,13 @@ TypeScriptは使いません。ブラウザAPIとFirebase Web SDKを直接呼ぶ
 
 ## 推論経路
 
-1. Gemini 3.6 Flashの高速経路が、domain、潜在問い、Thought State Graph差分、介入候補、LACを構造化出力する。
-2. 研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。
-3. モデル出力をJSON schemaと上限で検証する。
-4. LACが仮説gap、entropy、必須slot coverage、commitment位置、意味保存を決定論的に再計算する。
-5. 潜在問いが曖昧ならclarifyまたはsilence、答えの核が欠けていて意味保存できる時だけrestructureする。
-6. Self-repair graceとEVIで、モデルが話したがっても介入価値が低ければsilenceへ落とす。
-7. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送る。
+1. Gemini 3.6 Flashの高速経路が、domain、潜在問い、Thought State Graph差分、介入候補、advisory LACを構造化出力する。
+2. PDF、研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。PDF・医療・法律・金融・研究根拠では精密経路の失敗時に実質回答へfallbackしない。
+3. 最終draftの後に、draft側のLACを入力しない独立structured callでLACを監査する。
+4. モデル出力をJSON schemaと上限で検証し、Go側が仮説gap、entropy、必須slotの完全充足、回答内に実在するcommitment、意味保存を決定論的に再計算する。
+5. 潜在問いが曖昧ならclarifyまたはsilence、答えの核が欠けていて意味保存できる時だけrestructureする。独立監査が使えない場合も未監査draftは話さない。
+6. Self-repair graceとEVIで、モデルが話したがっても介入価値が低ければsilenceへ落とす。ただし緊急安全介入を曖昧判定で消さない。
+7. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送り、同じ最終文だけをbounded captionとして返す。
 
 LACの指標は内部評価用で、画面へ分析文を大量表示しません。モデルの非公開chain-of-thoughtを保存または表示する設計でもありません。
 

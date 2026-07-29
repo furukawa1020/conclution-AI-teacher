@@ -147,6 +147,16 @@ func authenticatedRequest(method, target, body string) *http.Request {
 	return request
 }
 
+func testCrossrefResearchRecord() ResearchRecord {
+	return ResearchRecord{
+		Title:     "KOTAEの回答支援に関する研究",
+		DOI:       "10.1234/kotae.2026",
+		URL:       "https://doi.org/10.1234/kotae.2026",
+		Published: "2026-07-29",
+		Source:    "Crossref",
+	}
+}
+
 func testVoiceHandler(service *fakeVoiceService, limiter *fakeLimiter) http.Handler {
 	return testVoiceHandlerWithAppLimiter(
 		service,
@@ -481,12 +491,16 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 
 	service := &fakeVoiceService{
 		result: VoiceTurnResult{
-			Audio:          []byte("mp3"),
-			AudioMIMEType:  "audio/mpeg",
-			Caption:        "音声と同じ最終回答です。",
-			StateToken:     "opaque-encrypted-state",
-			DetectedDomain: "casual",
-			Route:          "fast",
+			Audio:            []byte("mp3"),
+			AudioMIMEType:    "audio/mpeg",
+			Caption:          "音声と同じ最終回答です。",
+			StateToken:       "opaque-encrypted-state",
+			DetectedDomain:   "casual",
+			AssistanceTarget: "respondent",
+			RespondentStage:  "restructure",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "fast",
 		},
 	}
 	limiter := &fakeLimiter{}
@@ -518,6 +532,59 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"caption":"音声と同じ最終回答です。"`) {
 		t.Fatalf("response caption = %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"assistanceTarget":"respondent"`) ||
+		!strings.Contains(response.Body.String(), `"respondentStage":"restructure"`) {
+		t.Fatalf("response assistance metadata = %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"researchStatus":"none"`) ||
+		!strings.Contains(response.Body.String(), `"researchRecords":[]`) {
+		t.Fatalf("response research metadata = %s", response.Body.String())
+	}
+}
+
+func TestVoiceTurnReturnsValidatedResearchMetadata(t *testing.T) {
+	t.Parallel()
+
+	record := testCrossrefResearchRecord()
+	service := &fakeVoiceService{
+		result: VoiceTurnResult{
+			Audio:            []byte("mp3"),
+			AudioMIMEType:    "audio/mpeg",
+			Caption:          "候補を1件見つけました。内容の検証には一次資料が必要です。",
+			StateToken:       "opaque-encrypted-state",
+			DetectedDomain:   "research",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "needs_primary_evidence",
+			ResearchRecords:  []ResearchRecord{record},
+			Route:            "research-metadata",
+		},
+	}
+	handler := testVoiceHandler(service, &fakeLimiter{})
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/voice/turns",
+		`{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional"}`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+	for _, expected := range []string{
+		`"researchStatus":"needs_primary_evidence"`,
+		`"researchRecords":[{`,
+		`"doi":"10.1234/kotae.2026"`,
+		`"url":"https://doi.org/10.1234/kotae.2026"`,
+		`"source":"Crossref"`,
+	} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("research response missing %s: %s", expected, response.Body.String())
+		}
 	}
 }
 
@@ -746,9 +813,13 @@ func TestVoiceTurnAllowsDeliberateSilence(t *testing.T) {
 
 	service := &fakeVoiceService{
 		result: VoiceTurnResult{
-			StateToken:     "opaque-encrypted-state",
-			DetectedDomain: "planning",
-			Route:          "silent",
+			StateToken:       "opaque-encrypted-state",
+			DetectedDomain:   "planning",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "silent",
 		},
 	}
 	handler := testVoiceHandler(service, &fakeLimiter{})
@@ -777,12 +848,16 @@ func TestVoiceResultCaptionMustMatchSpokenShapeAndStayBounded(t *testing.T) {
 	t.Parallel()
 
 	base := VoiceTurnResult{
-		Audio:          []byte("audio"),
-		AudioMIMEType:  "audio/mpeg",
-		Caption:        "最終回答",
-		StateToken:     "state",
-		DetectedDomain: "general",
-		Route:          "fast",
+		Audio:            []byte("audio"),
+		AudioMIMEType:    "audio/mpeg",
+		Caption:          "最終回答",
+		StateToken:       "state",
+		DetectedDomain:   "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "fast",
 	}
 	if err := validateVoiceResult(base); err != nil {
 		t.Fatalf("valid spoken result: %v", err)
@@ -790,6 +865,8 @@ func TestVoiceResultCaptionMustMatchSpokenShapeAndStayBounded(t *testing.T) {
 	for _, mutate := range []func(*VoiceTurnResult){
 		func(result *VoiceTurnResult) { result.Caption = "" },
 		func(result *VoiceTurnResult) { result.Caption = strings.Repeat("あ", maxCaptionRunes+1) },
+		func(result *VoiceTurnResult) { result.AssistanceTarget = "operator" },
+		func(result *VoiceTurnResult) { result.RespondentStage = "drafting" },
 		func(result *VoiceTurnResult) {
 			result.Audio = nil
 			result.AudioMIMEType = ""
@@ -803,29 +880,191 @@ func TestVoiceResultCaptionMustMatchSpokenShapeAndStayBounded(t *testing.T) {
 	}
 }
 
+func TestVoiceResultRejectsInconsistentAssistanceMetadata(t *testing.T) {
+	t.Parallel()
+
+	base := VoiceTurnResult{
+		Audio:            []byte("audio"),
+		AudioMIMEType:    "audio/mpeg",
+		Caption:          "回答です。",
+		StateToken:       "state",
+		DetectedDomain:   "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "fast",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*VoiceTurnResult)
+	}{
+		{
+			name: "assistant cannot use respondent restructure stage",
+			mutate: func(result *VoiceTurnResult) {
+				result.RespondentStage = "restructure"
+			},
+		},
+		{
+			name: "respondent requires a respondent stage",
+			mutate: func(result *VoiceTurnResult) {
+				result.AssistanceTarget = "respondent"
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			result := base
+			test.mutate(&result)
+			if err := validateVoiceResult(result); err == nil {
+				t.Fatalf("inconsistent assistance metadata accepted: %+v", result)
+			}
+		})
+	}
+}
+
+func TestVoiceResultValidatesCrossrefResearchRecords(t *testing.T) {
+	t.Parallel()
+
+	record := testCrossrefResearchRecord()
+	base := VoiceTurnResult{
+		Audio:            []byte("audio"),
+		AudioMIMEType:    "audio/mpeg",
+		Caption:          "一次資料の確認が必要です。",
+		StateToken:       "state",
+		DetectedDomain:   "research",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "needs_primary_evidence",
+		ResearchRecords:  []ResearchRecord{record},
+		Route:            "research-metadata",
+	}
+	if err := validateVoiceResult(base); err != nil {
+		t.Fatalf("valid Crossref record rejected: %v", err)
+	}
+
+	for _, status := range []string{"none", "unavailable"} {
+		status := status
+		t.Run("records rejected with status "+status, func(t *testing.T) {
+			t.Parallel()
+			result := base
+			result.ResearchStatus = status
+			if err := validateVoiceResult(result); err == nil {
+				t.Fatalf("records accepted with research status %q", status)
+			}
+		})
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ResearchRecord)
+	}{
+		{
+			name: "malformed DOI",
+			mutate: func(record *ResearchRecord) {
+				record.DOI = "10.1234/contains space"
+			},
+		},
+		{
+			name: "non DOI URL",
+			mutate: func(record *ResearchRecord) {
+				record.URL = "https://example.com/10.1234/kotae.2026"
+			},
+		},
+		{
+			name: "mismatched DOI URL",
+			mutate: func(record *ResearchRecord) {
+				record.URL = "https://doi.org/10.1234/different"
+			},
+		},
+		{
+			name: "HTTP DOI URL is not canonical",
+			mutate: func(record *ResearchRecord) {
+				record.URL = "http://doi.org/10.1234/kotae.2026"
+			},
+		},
+		{
+			name: "legacy DOI host is not canonical",
+			mutate: func(record *ResearchRecord) {
+				record.URL = "https://dx.doi.org/10.1234/kotae.2026"
+			},
+		},
+		{
+			name: "invalid publication date",
+			mutate: func(record *ResearchRecord) {
+				record.Published = "2026-99-99"
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			result := base
+			malformed := record
+			test.mutate(&malformed)
+			result.ResearchRecords = []ResearchRecord{malformed}
+			if err := validateVoiceResult(result); err == nil {
+				t.Fatalf("malformed research record accepted: %+v", malformed)
+			}
+		})
+	}
+	nilRecords := base
+	nilRecords.ResearchStatus = "none"
+	nilRecords.ResearchRecords = nil
+	if err := validateVoiceResult(nilRecords); err == nil {
+		t.Fatal("nil research records accepted; JSON would serialize null")
+	}
+}
+
 func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 	t.Parallel()
 
 	for _, result := range []VoiceTurnResult{
 		{
-			DetectedDomain: "unknown",
-			Route:          "stt-silent",
+			DetectedDomain:   "unknown",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "stt-silent",
 		},
 		{
-			Audio:          []byte("audio"),
-			AudioMIMEType:  "audio/mpeg",
-			Caption:        "もう一度話してもらえますか？",
-			DetectedDomain: "unknown",
-			Route:          "stt-clarify",
+			Audio:            []byte("audio"),
+			AudioMIMEType:    "audio/mpeg",
+			Caption:          "もう一度話してもらえますか？",
+			DetectedDomain:   "unknown",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "stt-clarify",
 		},
 	} {
 		if err := validateVoiceResult(result); err != nil {
 			t.Fatalf("safe pre-inference fallback rejected: %+v: %v", result, err)
 		}
 	}
+	invalidFallback := VoiceTurnResult{
+		DetectedDomain:   "unknown",
+		AssistanceTarget: "untrusted",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "stt-silent",
+	}
+	if err := validateVoiceResult(invalidFallback); err == nil {
+		t.Fatal("STT fallback bypassed assistance enum validation")
+	}
 	normal := VoiceTurnResult{
-		DetectedDomain: "general",
-		Route:          "fast",
+		DetectedDomain:   "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "fast",
 	}
 	if err := validateVoiceResult(normal); err == nil {
 		t.Fatal("normal model result without encrypted state was accepted")

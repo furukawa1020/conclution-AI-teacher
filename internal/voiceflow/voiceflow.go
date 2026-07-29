@@ -49,6 +49,8 @@ func (p *Pipeline) Process(
 			DetectedDomain:   "unknown",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []httpapi.ResearchRecord{},
 			Route:            "stt-silent",
 		}
 		if input.Ambient {
@@ -97,6 +99,8 @@ func (p *Pipeline) Process(
 		DetectedDomain:   decision.Domain,
 		AssistanceTarget: decision.AssistanceTarget,
 		RespondentStage:  decision.RespondentStage,
+		ResearchStatus:   decision.ResearchStatus,
+		ResearchRecords:  researchRecords(decision.ResearchRecords),
 		Route:            decision.Route,
 		NeedsPaper: decision.Intervention.Act == "paper_check" &&
 			input.Document == nil,
@@ -113,6 +117,20 @@ func (p *Pipeline) Process(
 	result.AudioMIMEType = audioMIME
 	result.Caption = decision.SpokenReply
 	return result, nil
+}
+
+func researchRecords(records []conversation.ResearchRecord) []httpapi.ResearchRecord {
+	result := make([]httpapi.ResearchRecord, 0, len(records))
+	for _, record := range records {
+		result = append(result, httpapi.ResearchRecord{
+			Title:     record.Title,
+			DOI:       record.DOI,
+			URL:       record.URL,
+			Published: record.Published,
+			Source:    record.Source,
+		})
+	}
+	return result
 }
 
 func transcriptConfidenceTooLow(confidence float32) bool {

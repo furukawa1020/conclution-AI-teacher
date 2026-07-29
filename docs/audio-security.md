@@ -20,6 +20,8 @@ Cloud Run kotae-api（asia-northeast1）
   ├─ transcript + 今回だけのPDF ──→ Vertex AI（global）
   │                                    ├─ KOTAE Reflex / LAC
   │                                    └─ silence または短い応答文
+  ├─ 明示したDOI / 新着topic ──→ Crossref REST API
+  │                                  └─ 書誌候補（claim evidenceではない）
   └─ 応答文 ──→ Cloud Text-to-Speech（asia-northeast1）
                     └─ MP3 ──→ ブラウザ再生
 ```
@@ -31,6 +33,8 @@ Cloud Run kotae-api（asia-northeast1）
 | モデル応答文 | Cloud Run、東京リージョンTTS | なし | 原文は状態へ保存しない |
 | 合成音声 | Cloud Run、ブラウザ | なし | 再生後は参照を解放する |
 | PDF | Cloud Run、Vertex AI `global` | なし | 本文も資料要約もcross-turn stateへ残さない |
+| 明示した研究query | Cloud Run、Crossref | なし | DOI、topic、候補をcross-turn stateへ残さない |
+| 研究候補 | Cloud Run、ブラウザ | なし | title、DOI、日付、sourceを現在のresponseだけへ返す |
 | 会話状態 | ブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | フィルタ済み意味グラフと制御メタデータ、15分TTL |
 | 音声レート制限 | Firestore | 48時間TTL | UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻 |
 
@@ -50,6 +54,22 @@ STTは`chirp_3`をprimaryにします。ただしlive APIが、このproject・`
 - 会話状態とPDFはJavaScript変数にだけ保持し、localStorageへ保存しない。Firebaseの匿名認証だけは`browserSessionPersistence`を使う
 
 JavaScriptのガベージコレクションや文字列の複製は完全には制御できません。クライアントは使用後に参照を解放し、Go側は受信byte sliceを可能な範囲でclearしますが、これを暗号学的なRAM消去保証とは表現しません。
+
+現在のVADは発話区間だけを見ており、話者本人認証ではありません。同席者、テレビ、合成音声を利用者本人だと安全に識別する機能もありません。そのため公開UIは、周囲の質問を常時取り込む使い方ではなく、利用者自身が「こう聞かれた」と質問を言い直してから回答を話す使い方に限定して案内します。
+
+## 研究queryの境界
+
+- 外部探索は、現在のintentional turn全体が「外部検索で『テーマ』の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ。自然文から同意を推測せず、追記、取消し、複数命令、ambient turnには外部送信権限を与えない
+- `assistant`経路だけで許可し、本人回答の`respondent`経路から外部queryを作らない
+- topicは固定形式のかぎ括弧内全体、DOIは空白で区切ったbare DOI全体だけを使い、PDF、過去state、別文、推測した個人情報から作らない。発話から決定論的に抽出した値、モデルの値、取得結果を完全一致で結ぶ
+- email、電話番号らしい値、郵便番号、長い番号、API key、token、credential assignment、氏名と健康情報の組合せらしいqueryを送信前に保守的に拒否する。percent encodingも復号して再検査する
+- 接続先は`https://api.crossref.org`へ固定し、redirectを拒否する
+- Crossref source requestは8秒、会話側tool-policyは7秒で打ち切り、responseは2 MiB、返却候補は5件を上限にする
+- abstractはcopyright状態が不明なため、音声応答や画面へ再配布しない
+- 結果は常に`discovery_metadata_not_claim_evidence`かつ`needs_primary_evidence`とし、「検証済み」というstatusを型として持たない
+- 現在のtopic探索はCrossrefのindex date filterを使うため、「新しく発表された論文」ではなく「Crossrefの索引日が指定期間内の書誌候補」と表示する
+
+このscreenは完全なPII検出ではありません。意味的に機微なtopicや氏名をすべて検出できるとは保証しないため、任意Web巡回、PDF由来の自動query、バックグラウンド定期収集は現在の公開経路へ接続しません。
 
 ## API境界
 

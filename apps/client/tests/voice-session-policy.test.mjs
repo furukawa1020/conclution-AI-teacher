@@ -11,10 +11,103 @@ import {
   initializeWithCleanup,
   isPendingDocumentExpired,
   isValidTurnMode,
+  normalizeResearchDiscovery,
   shouldStopSessionForLifecycle,
   turnModeForGestureEpoch,
   VOICE_SESSION_LIMITS,
 } from "../web/voice-session-policy.mjs";
+
+const researchRecord = Object.freeze({
+  title: "A-first responses under working-memory load",
+  doi: "10.1234/kotae.2026.1",
+  url: "https://doi.org/10.1234/kotae.2026.1",
+  published: "2026-07-29",
+  source: "Crossref",
+});
+
+test("research discovery stays bounded, immutable, and explicitly unverified", () => {
+  const discovery = normalizeResearchDiscovery("needs_primary_evidence", [
+    researchRecord,
+    {
+      title: "Partial publication dates remain partial",
+      doi: "10.5678/kotae.2025.2",
+      url: "https://doi.org/10.5678/kotae.2025.2",
+      published: "2025",
+      source: "Crossref",
+    },
+  ]);
+
+  assert.equal(discovery.status, "needs_primary_evidence");
+  assert.equal(discovery.records.length, 2);
+  assert.equal(discovery.records[0].doi, researchRecord.doi);
+  assert.equal(Object.isFrozen(discovery), true);
+  assert.equal(Object.isFrozen(discovery.records), true);
+  assert.equal(Object.isFrozen(discovery.records[0]), true);
+  assert.equal(
+    normalizeResearchDiscovery("needs_primary_evidence", [
+      { ...researchRecord, title: "" },
+    ]).records[0].title,
+    "",
+  );
+  assert.deepEqual(normalizeResearchDiscovery("none", []), {
+    status: "none",
+    records: [],
+  });
+  assert.deepEqual(normalizeResearchDiscovery("unavailable", []), {
+    status: "unavailable",
+    records: [],
+  });
+});
+
+test("research discovery rejects verified claims, unsafe links, and surplus data", () => {
+  assert.throws(
+    () => normalizeResearchDiscovery("verified", []),
+    /research_discovery_invalid/,
+  );
+  assert.throws(
+    () => normalizeResearchDiscovery("none", [researchRecord]),
+    /research_discovery_invalid/,
+  );
+  assert.throws(
+    () =>
+      normalizeResearchDiscovery("needs_primary_evidence", [
+        { ...researchRecord, url: "https://example.com/paper" },
+      ]),
+    /research_discovery_invalid/,
+  );
+  assert.throws(
+    () =>
+      normalizeResearchDiscovery("needs_primary_evidence", [
+        {
+          ...researchRecord,
+          url: "https://doi.org/10.1234/a-different-record",
+        },
+      ]),
+    /research_discovery_invalid/,
+  );
+  assert.throws(
+    () =>
+      normalizeResearchDiscovery("needs_primary_evidence", [
+        { ...researchRecord, source: "Unreviewed crawler" },
+      ]),
+    /research_discovery_invalid/,
+  );
+  assert.throws(
+    () =>
+      normalizeResearchDiscovery("needs_primary_evidence", [
+        { ...researchRecord, abstract: "must not cross this UI boundary" },
+      ]),
+    /research_discovery_invalid/,
+  );
+  assert.throws(
+    () =>
+      normalizeResearchDiscovery(
+        "needs_primary_evidence",
+        Array.from({ length: 6 }, () => researchRecord),
+      ),
+    /research_discovery_invalid/,
+  );
+});
 
 test("permission or initialization failure releases every acquired resource once", async () => {
   const permissionError = Object.assign(new Error("permission denied"), {

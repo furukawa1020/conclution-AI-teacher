@@ -11,6 +11,139 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   preRollChunkLimit: 4,
 });
 
+const RESEARCH_STATUSES = Object.freeze([
+  "none",
+  "needs_primary_evidence",
+  "unavailable",
+]);
+const RESEARCH_RECORD_KEYS = Object.freeze([
+  "doi",
+  "published",
+  "source",
+  "title",
+  "url",
+]);
+const MAX_RESEARCH_RECORDS = 5;
+
+function isPlainRecord(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function boundedCleanString(value, maximumLength, allowEmpty = false) {
+  if (typeof value !== "string") return false;
+  const characters = Array.from(value);
+  if (
+    characters.length > maximumLength ||
+    (!allowEmpty && characters.length === 0)
+  ) {
+    return false;
+  }
+  return characters.every(
+    (character) =>
+      character !== "\u0000" &&
+      character !== "\r" &&
+      character !== "\n" &&
+      character !== "\u2028" &&
+      character !== "\u2029",
+  );
+}
+
+function validCanonicalDoi(doi) {
+  if (
+    !boundedCleanString(doi, 256) ||
+    doi !== doi.toLowerCase() ||
+    !/^10\.\d{4,9}\/\S+$/u.test(doi)
+  ) {
+    return false;
+  }
+  return !Array.from(doi).some(
+    (character) =>
+      /\s/u.test(character) ||
+      character === "?" ||
+      character === "#" ||
+      character === "\\",
+  );
+}
+
+function validCanonicalDoiUrl(rawUrl, doi) {
+  if (!boundedCleanString(rawUrl, 2_048)) return false;
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "doi.org" ||
+    parsed.port !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    return false;
+  }
+  try {
+    return decodeURIComponent(parsed.pathname.slice(1)) === doi;
+  } catch {
+    return false;
+  }
+}
+
+function validPublicationDate(value) {
+  return (
+    boundedCleanString(value, 40, true) &&
+    (value === "" ||
+      /^\d{4}(?:-\d{2}(?:-\d{2})?)?(?:T[0-9:.+-]+Z?)?$/u.test(value))
+  );
+}
+
+// Research metadata is deliberately normalized separately from the spoken
+// answer. It identifies material worth checking; it never represents
+// claim-level verification.
+export function normalizeResearchDiscovery(status, records) {
+  if (
+    !RESEARCH_STATUSES.includes(status) ||
+    !Array.isArray(records) ||
+    records.length > MAX_RESEARCH_RECORDS ||
+    (status !== "needs_primary_evidence" && records.length !== 0)
+  ) {
+    throw new TypeError("research_discovery_invalid");
+  }
+
+  const normalizedRecords = records.map((record) => {
+    if (
+      !isPlainRecord(record) ||
+      Object.keys(record).sort().join("\u0000") !==
+        RESEARCH_RECORD_KEYS.join("\u0000") ||
+      !boundedCleanString(record.title, 300, true) ||
+      !validCanonicalDoi(record.doi) ||
+      !validCanonicalDoiUrl(record.url, record.doi) ||
+      !validPublicationDate(record.published) ||
+      record.source !== "Crossref"
+    ) {
+      throw new TypeError("research_discovery_invalid");
+    }
+    return Object.freeze({
+      title: record.title,
+      doi: record.doi,
+      url: record.url,
+      published: record.published,
+      source: record.source,
+    });
+  });
+
+  return Object.freeze({
+    status,
+    records: Object.freeze(normalizedRecords),
+  });
+}
+
 function finiteTimestamp(value, name) {
   if (!Number.isFinite(value) || value < 0) {
     throw new TypeError(`${name}_invalid`);

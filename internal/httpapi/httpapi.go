@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
 )
 
@@ -69,9 +71,19 @@ type VoiceTurnResult struct {
 	DetectedDomain   string
 	AssistanceTarget string
 	RespondentStage  string
+	ResearchStatus   string
+	ResearchRecords  []ResearchRecord
 	Route            string
 	NeedsPaper       bool
 	Caption          string
+}
+
+type ResearchRecord struct {
+	Title     string `json:"title"`
+	DOI       string `json:"doi"`
+	URL       string `json:"url"`
+	Published string `json:"published"`
+	Source    string `json:"source"`
 }
 
 type VoiceTurnService interface {
@@ -259,17 +271,11 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.InfoContext(ctx, "voice turn completed",
-		"request_id", requestIDFromContext(ctx),
-		"route", result.Route,
-		"spoke", len(result.Audio) > 0,
-		"duration_ms", time.Since(started).Milliseconds(),
-	)
 	var caption any
 	if result.Caption != "" {
 		caption = result.Caption
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	if err := writeJSON(w, http.StatusCreated, map[string]any{
 		"audioBase64":      base64.StdEncoding.EncodeToString(result.Audio),
 		"audioMimeType":    result.AudioMIMEType,
 		"caption":          caption,
@@ -277,9 +283,24 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"detectedDomain":   result.DetectedDomain,
 		"assistanceTarget": result.AssistanceTarget,
 		"respondentStage":  result.RespondentStage,
+		"researchStatus":   result.ResearchStatus,
+		"researchRecords":  result.ResearchRecords,
 		"route":            result.Route,
 		"needsPaper":       result.NeedsPaper,
-	})
+	}); err != nil {
+		s.logger.WarnContext(ctx, "voice response write failed",
+			"request_id", requestIDFromContext(ctx),
+			"route", result.Route,
+			"error_class", "response_write_failure",
+		)
+		return
+	}
+	s.logger.InfoContext(ctx, "voice turn completed",
+		"request_id", requestIDFromContext(ctx),
+		"route", result.Route,
+		"spoke", len(result.Audio) > 0,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
 }
 
 func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
@@ -368,17 +389,28 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		len(result.DetectedDomain) == 0 ||
 		len(result.DetectedDomain) > 40 ||
 		(result.AssistanceTarget != "assistant" &&
-			result.AssistanceTarget != "respondent" &&
-			!preInferenceRecognitionResult) ||
+			result.AssistanceTarget != "respondent") ||
 		(result.RespondentStage != "none" &&
 			result.RespondentStage != "awaiting_answer" &&
-			result.RespondentStage != "restructure" &&
-			!preInferenceRecognitionResult) ||
+			result.RespondentStage != "restructure") ||
+		(result.ResearchStatus != "none" &&
+			result.ResearchStatus != "needs_primary_evidence" &&
+			result.ResearchStatus != "unavailable") ||
 		len(result.Route) == 0 ||
 		len(result.Route) > 80 ||
 		!utf8.ValidString(result.Caption) ||
 		utf8.RuneCountInString(result.Caption) > maxCaptionRunes {
 		return errors.New("voice result is outside bounds")
+	}
+	if (result.AssistanceTarget == "assistant" &&
+		result.RespondentStage != "none") ||
+		(result.AssistanceTarget == "respondent" &&
+			result.RespondentStage == "none") ||
+		(result.ResearchStatus != "none" &&
+			(result.AssistanceTarget != "assistant" ||
+				result.RespondentStage != "none")) ||
+		!validResearchRecords(result.ResearchStatus, result.ResearchRecords) {
+		return errors.New("voice result has inconsistent metadata")
 	}
 	if len(result.Audio) == 0 {
 		if result.AudioMIMEType != "" || result.Caption != "" {
@@ -393,6 +425,57 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		return errors.New("unsupported synthesized audio type")
 	}
 	return nil
+}
+
+func validResearchRecords(status string, records []ResearchRecord) bool {
+	if records == nil || len(records) > conversation.MaxResearchRecords {
+		return false
+	}
+	if status != "needs_primary_evidence" && len(records) != 0 {
+		return false
+	}
+	for _, record := range records {
+		normalizedDOI, err := research.NormalizeDOI(record.DOI)
+		if err != nil ||
+			normalizedDOI != record.DOI ||
+			record.URL == "" ||
+			record.Source != "Crossref" ||
+			!utf8.ValidString(record.Title) ||
+			utf8.RuneCountInString(record.Title) > 300 ||
+			!utf8.ValidString(record.URL) ||
+			len(record.URL) > 600 ||
+			!utf8.ValidString(record.Published) ||
+			len(record.Published) > 40 ||
+			!validPublicationValue(record.Published) {
+			return false
+		}
+		expectedURL := (&url.URL{
+			Scheme: "https",
+			Host:   "doi.org",
+			Path:   "/" + record.DOI,
+		}).String()
+		if record.URL != expectedURL {
+			return false
+		}
+	}
+	return true
+}
+
+func validPublicationValue(value string) bool {
+	if value == "" {
+		return true
+	}
+	for _, layout := range []string{
+		"2006",
+		"2006-01",
+		time.DateOnly,
+		time.RFC3339Nano,
+	} {
+		if _, err := time.Parse(layout, value); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func clearVoiceInput(input *VoiceTurnInput) {
@@ -632,10 +715,10 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 	})
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
+func writeJSON(w http.ResponseWriter, status int, payload any) error {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	return json.NewEncoder(w).Encode(payload)
 }
 
 func writeProblem(w http.ResponseWriter, status int, code, detail string) {

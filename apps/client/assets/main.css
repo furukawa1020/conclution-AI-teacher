@@ -298,7 +298,8 @@
   }
 
   .context-chip,
-  .route-chip {
+  .route-chip,
+  .research-status-chip {
     display: inline-flex;
     align-items: center;
     min-height: 28px;
@@ -315,6 +316,11 @@
   .context-chip--quiet,
   .route-chip {
     color: var(--white-faint);
+  }
+
+  .research-status-chip--unavailable {
+    border-color: oklch(66% 0.23 25 / 42%);
+    color: var(--danger);
   }
 
   .orb-field {
@@ -663,6 +669,7 @@
   }
 
   .paper-drop,
+  .research-panel,
   .privacy-fold {
     border: 1px solid var(--line);
     border-radius: 18px;
@@ -674,6 +681,96 @@
 
   .paper-drop {
     padding: 20px;
+  }
+
+  .research-panel {
+    min-width: 0;
+    padding: 17px;
+  }
+
+  .research-panel__heading {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .research-panel__heading h2 {
+    margin-top: 5px;
+    font-size: 0.82rem;
+    letter-spacing: 0.04em;
+  }
+
+  .research-panel__warning {
+    flex: 0 0 auto;
+    padding: 5px 7px;
+    border: 1px solid oklch(83% 0.17 83 / 38%);
+    border-radius: 999px;
+    color: var(--amber);
+    font: 650 0.5rem/1 var(--mono);
+  }
+
+  .research-panel__note {
+    margin-top: 9px;
+    color: var(--white-faint);
+    font-size: 0.56rem;
+    line-height: 1.65;
+  }
+
+  .research-list {
+    display: grid;
+    max-height: min(38svh, 340px);
+    margin: 12px 0 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  .research-list li {
+    min-width: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .research-card {
+    display: grid;
+    gap: 5px;
+    padding: 11px 3px;
+    color: var(--white-soft);
+    text-decoration: none;
+  }
+
+  .research-card:hover {
+    color: var(--white);
+  }
+
+  .research-card strong {
+    overflow: hidden;
+    font-size: 0.65rem;
+    font-weight: 640;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  .research-card__meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--cyan);
+    font: 600 0.5rem/1.2 var(--mono);
+  }
+
+  .research-card__meta i {
+    color: var(--white-faint);
+    font-style: normal;
+  }
+
+  .research-card small {
+    overflow: hidden;
+    color: var(--white-faint);
+    font: 500 0.48rem/1.3 var(--mono);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .paper-drop__heading {
@@ -953,6 +1050,10 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-self: auto;
       width: 100%;
+    }
+
+    .research-panel {
+      grid-column: 1 / -1;
     }
   }
 

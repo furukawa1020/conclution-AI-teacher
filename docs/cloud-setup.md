@@ -28,8 +28,9 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 | Speech-to-Text | `asia-northeast1` regional endpoint | raw audio |
 | Vertex AI | `global` | 文字起こし、短い状態要約、今回添付したPDF |
 | Text-to-Speech | `asia-northeast1` regional endpoint | 選ばれた短い応答文 |
+| Crossref | Google Cloud外の公開REST API | intentional turnで明示し、tool-policyとPII screenを通過したDOIまたは最小topicだけ |
 
-raw audioをVertex AIへ直接送るVertex Live APIは現在使いません。ただし文字起こしとPDFは`global`のVertex AIへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。
+raw audioをVertex AIへ直接送るVertex Live APIは現在使いません。ただし文字起こしとPDFは`global`のVertex AIへ送られ、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。
 
 ## 必要なAPI
 

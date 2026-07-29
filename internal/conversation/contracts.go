@@ -20,6 +20,7 @@ const (
 	MaxSpokenReplyRunes    = 480
 	MaxLatentQuestionRunes = 240
 	MaxAnswerAttemptRunes  = 1_600
+	MaxResearchRecords     = 5
 
 	maxConversationSummaryRunes = 320
 	maxDocumentSummaryRunes     = 480
@@ -57,6 +58,8 @@ type VoiceTurnResult struct {
 	Intent              string                 `json:"intent"`
 	AssistanceTarget    string                 `json:"assistance_target"`
 	RespondentStage     string                 `json:"respondent_stage"`
+	ResearchStatus      string                 `json:"research_status"`
+	ResearchRecords     []ResearchRecord       `json:"research_records"`
 	LatentQuestion      string                 `json:"latent_question"`
 	ArgumentStructure   string                 `json:"argument_structure"`
 	InterventionPolicy  string                 `json:"intervention_policy"`
@@ -68,6 +71,16 @@ type VoiceTurnResult struct {
 	Route               string                 `json:"route"`
 	NeedsClarification  bool                   `json:"needs_clarification"`
 	StateToken          string                 `json:"state_token"`
+}
+
+// ResearchRecord is bounded, current-turn discovery metadata. It deliberately
+// excludes abstracts and never represents claim-level evidence.
+type ResearchRecord struct {
+	Title     string `json:"title"`
+	DOI       string `json:"doi"`
+	URL       string `json:"url"`
+	Published string `json:"published,omitempty"`
+	Source    string `json:"source"`
 }
 
 type ArbiterDecision struct {

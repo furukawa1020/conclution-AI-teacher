@@ -310,7 +310,7 @@ insufficient_evidence
 
 `insufficient_evidence`を無理に支持・反証へ変換しません。論文が渡されていない場合は内容を推測せず、必要なら資料提供を音声で依頼します。
 
-PDFやWebページ内の命令文は資料データとして扱い、システム命令として実行しません。現在のMVPは外部取得、検索、コード実行を行いません。将来追加する場合も、別のtool policyで利用者の意図、権限、保持条件を確認します。
+PDFやWebページ内の命令文は資料データとして扱い、システム命令として実行しません。現在の公開経路で行う外部取得は、利用者が現在発話の同じ文に対象と肯定命令を明示したCrossref書誌探索だけです。任意URL取得とコード実行は行いません。機能を増やす場合も、別のtool policyで利用者の意図、権限、保持条件を確認します。
 
 将来Vertex Live APIやGoogle Search Groundingを評価する場合は、音声session、検索tool、行動toolを一つのモデル接続へ詰め込まず、独立したResearch Verifierと管理可能な検索経路へ分けます。検索の利用可否は、最新のAPI仕様とデータ保持条件を配備時に再確認します。
 
@@ -679,6 +679,10 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - Thought State Graph、規則とモデル判定を併用したEVI
 - LACのQuestionFrame、CommitmentFront、CounterfactualRepair
 - draftから独立したLAC criticとGoの決定論的authoritative evaluator
+- KOTAE自身の回答と、他者の質問へ本人が答える`respondent`経路の分離
+- purposeを含む質問operator、本人回答内のexact slot evidence、既存意味節だけを並べ替えるRespondent Meaning Gate
+- 否定、条件、数値、不確実性、固有内容を変える再構成のfail-closed拒否
+- 保留質問にはoperator、短いsubject、required slotsだけを残し、回答試行・再構成案・evidence本文を残さない
 - 曖昧な問いでのclarify、低EVIと自己修正中のsilence
 - 一つのturnだけのPDF添付とPDF本文の非永続化
 - PDF・高リスクdomainのprecision fail-closed
@@ -701,10 +705,13 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 ### D. Research Verifier — 一部実装
 
 - 一つのturnだけの明示PDF入力は実装済み
-- DOI / URL取得、新着論文survey、source / claim / evidence graphは未実装
-- 引用検証と`insufficient_evidence`の評価器を一般会話から分離する
-- 検索toolと行動toolを音声sessionから分離する
-- 検索時の保持条件を利用者へ表示する
+- intentional turn全体が固定の外部検索形式に完全一致したDOI照会・論文探索だけをCrossrefへ送るtyped discovery adapterを実装。自然文から同意を推測せず、追記、取消し、複数命令、ambientでは外部送信しない
+- 固定HTTPS host、redirect拒否、8秒timeout、2 MiB上限、PII / credential screen、percent encoding検査、DOI・日付・URL正規化、重複排除を実装
+- 返却を常に`discovery_metadata_not_claim_evidence` / `needs_primary_evidence`とし、abstractを再配布せず、最大5件のtitle・DOI・日付だけを現在turnへ返す
+- topic探索はCrossrefのindex date filterを使うため、結果を「Crossrefの索引日が指定期間内の書誌候補」と表示し、新規発表順とは呼ばない
+- 任意URL取得、世界中のWeb巡回、PDFや過去stateからの自動query、バックグラウンド定期収集は未実装
+- 論文本文の取得権限、source / claim / evidence graph、引用箇所が主張を支持するかの検証、撤回・更新・矛盾の監査は未実装
+- 今後も検索toolと行動toolを音声sessionの権限から分離し、`insufficient_evidence`を第一級statusとして評価する
 
 ### E. 個人適応 — 未実装
 

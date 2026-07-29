@@ -20,6 +20,7 @@ import {
   initializeWithCleanup,
   isPendingDocumentExpired,
   isValidTurnMode,
+  normalizeResearchDiscovery,
   shouldStopSessionForLifecycle,
   VOICE_SESSION_LIMITS,
 } from "./voice-session-policy.mjs";
@@ -741,6 +742,16 @@ function safeVoiceResponse(payload) {
     fail("voice_response_invalid");
   }
 
+  let research;
+  try {
+    research = normalizeResearchDiscovery(
+      payload.researchStatus,
+      payload.researchRecords,
+    );
+  } catch {
+    fail("voice_response_invalid");
+  }
+
   return Object.freeze({
     audioBase64: payload.audioBase64,
     audioMimeType: hasAudio ? payload.audioMimeType : "",
@@ -749,6 +760,8 @@ function safeVoiceResponse(payload) {
     assistanceTarget: payload.assistanceTarget,
     respondentStage: payload.respondentStage,
     needsPaper: payload.needsPaper,
+    researchStatus: research.status,
+    researchRecords: research.records,
     route: payload.route,
     sessionState: payload.sessionState,
   });

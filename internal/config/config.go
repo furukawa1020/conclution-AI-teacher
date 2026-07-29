@@ -163,11 +163,11 @@ func Load() (Config, error) {
 	if strings.TrimSpace(cfg.SpeechVoice) == "" {
 		return Config{}, errors.New("speech voice must not be empty")
 	}
-	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 55*time.Second {
-		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 55s")
+	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 50*time.Second {
+		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 50s")
 	}
-	if cfg.VoiceTimeout < 5*time.Second || cfg.VoiceTimeout > 55*time.Second {
-		return Config{}, fmt.Errorf("KOTAE_VOICE_TIMEOUT must be between 5s and 55s")
+	if cfg.VoiceTimeout < 5*time.Second || cfg.VoiceTimeout > 50*time.Second {
+		return Config{}, fmt.Errorf("KOTAE_VOICE_TIMEOUT must be between 5s and 50s")
 	}
 	if cfg.MaxRequestBytes < 1024 || cfg.MaxRequestBytes > 1024*1024 {
 		return Config{}, fmt.Errorf("KOTAE_MAX_REQUEST_BYTES must be between 1 KiB and 1 MiB")

@@ -676,6 +676,196 @@ func TestAgentLACRejectsMeaningChangingRepair(t *testing.T) {
 	}
 }
 
+func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
+	plan := respondentAwaitingPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+	utterance := "上司に結局何のために入れるのと聞かれたけど、うまく答えられない"
+
+	result, err := agent.Process(context.Background(), "uid-respondent-await", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "respondent-awaiting-fast" ||
+		result.AssistanceTarget != "respondent" ||
+		result.RespondentStage != "awaiting_answer" ||
+		result.Intervention.Act != "clarify" ||
+		!result.NeedsClarification ||
+		result.SpokenReply != plan.SpokenReply {
+		t.Fatalf("respondent awaiting result: %#v", result)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("awaiting answer invoked a critic or extra model: %#v", fake.calls)
+	}
+
+	state, err := agent.codec.open("uid-respondent-await", result.StateToken)
+	if err != nil {
+		t.Fatalf("open respondent state: %v", err)
+	}
+	if !state.PendingAnswer.Active ||
+		state.PendingAnswer.Operator != answercontract.OperatorPurpose ||
+		state.PendingAnswer.Subject != "導入目的" ||
+		len(state.PendingAnswer.RequiredSlots) != 1 ||
+		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotPurpose {
+		t.Fatalf("pending question frame: %#v", state.PendingAnswer)
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal respondent state: %v", err)
+	}
+	if bytes.Contains(stateJSON, []byte(utterance)) ||
+		bytes.Contains(stateJSON, []byte(plan.SpokenReply)) {
+		t.Fatalf("awaiting state retained turn prose: %s", stateJSON)
+	}
+}
+
+func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *testing.T) {
+	awaiting := respondentAwaitingPlan()
+	restructure := respondentRestructurePlan(
+		"判断のばらつきを減らします。目的は評価基準をそろえることです。",
+		"目的は評価基準をそろえることです。判断のばらつきを減らします。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, restructure)},
+		{body: encodeContract(t, validCriticContract(restructure.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+
+	first, err := agent.Process(context.Background(), "uid-respondent-flow", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "結局何のために入れるのかと聞かれたけど、答えがまとまらない",
+	})
+	if err != nil {
+		t.Fatalf("awaiting Process: %v", err)
+	}
+	secondUtterance := "今の答えは「" + restructure.AnswerAttempt + "」です"
+	second, err := agent.Process(context.Background(), "uid-respondent-flow", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     secondUtterance,
+		StateToken:    first.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("restructure Process: %v", err)
+	}
+	if second.Route != "respondent-restructure-fast" ||
+		second.SpokenReply != restructure.SpokenReply ||
+		second.Intervention.Act != "restructure" ||
+		second.NeedsClarification {
+		t.Fatalf("safe respondent restructure: %#v", second)
+	}
+	if len(fake.calls) != 3 ||
+		!strings.Contains(fake.calls[1].prompt, `"pending_answer":{"active":true`) {
+		t.Fatalf("pending frame did not reach the next planner: %#v", fake.calls)
+	}
+
+	state, err := agent.codec.open("uid-respondent-flow", second.StateToken)
+	if err != nil {
+		t.Fatalf("open resolved state: %v", err)
+	}
+	if state.PendingAnswer.Active || len(state.PendingAnswer.RequiredSlots) != 0 {
+		t.Fatalf("resolved pending frame survived: %#v", state.PendingAnswer)
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal resolved state: %v", err)
+	}
+	for _, forbidden := range []string{
+		restructure.AnswerAttempt,
+		restructure.SpokenReply,
+		secondUtterance,
+	} {
+		if bytes.Contains(stateJSON, []byte(forbidden)) {
+			t.Fatalf("resolved respondent prose entered state: %s", stateJSON)
+		}
+	}
+}
+
+func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
+	plan := respondentChoicePlan(
+		"費用は3万円です。A案を選びます。",
+		"B案を選びます。費用は4万円です。",
+		[]string{"A案"},
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-respondent-reject", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "自分の答えは「" + plan.AnswerAttempt + "」です",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "respondent-meaning-clarify-fast" ||
+		result.Intervention.Act != "clarify" ||
+		!result.NeedsClarification ||
+		result.SpokenReply == plan.SpokenReply ||
+		strings.Contains(result.SpokenReply, "B案") ||
+		strings.Contains(result.SpokenReply, "4万円") {
+		t.Fatalf("meaning-changing respondent answer escaped: %#v", result)
+	}
+}
+
+func TestAgentRespondentPendingFrameRetainsNoAnswerAttempt(t *testing.T) {
+	plan := respondentChoicePlan(
+		"田中さんの判断です。A案を選びます。",
+		"佐藤さんの判断です。B案を選びます。",
+		[]string{"田中さん", "A案"},
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	utterance := "回答としては「" + plan.AnswerAttempt + "」と伝えたい"
+
+	result, err := agent.Process(context.Background(), "uid-respondent-retention", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	state, err := agent.codec.open("uid-respondent-retention", result.StateToken)
+	if err != nil {
+		t.Fatalf("open blocked respondent state: %v", err)
+	}
+	if !state.PendingAnswer.Active ||
+		state.PendingAnswer.Operator != answercontract.OperatorChoice ||
+		state.PendingAnswer.Subject != "採用案" ||
+		len(state.PendingAnswer.RequiredSlots) != 1 ||
+		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotSelection {
+		t.Fatalf("blocked pending frame: %#v", state.PendingAnswer)
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal blocked respondent state: %v", err)
+	}
+	for _, forbidden := range []string{
+		utterance,
+		plan.AnswerAttempt,
+		plan.SpokenReply,
+		plan.RespondentEvidence[0].Span,
+		"田中さん",
+		"佐藤さん",
+		"A案",
+		"B案",
+	} {
+		if bytes.Contains(stateJSON, []byte(forbidden)) {
+			t.Fatalf("pending frame retained respondent prose %q: %s", forbidden, stateJSON)
+		}
+	}
+}
+
 func TestAgentDraftLACCannotBypassIndependentCritic(t *testing.T) {
 	plan := validModelPlan()
 	plan.SpokenReply = "前置きだけで、まだ答えは述べません。"
@@ -1107,6 +1297,13 @@ func validModelPlan() modelPlan {
 	plan := modelPlan{
 		Domain:              "general",
 		Intent:              "answer",
+		AssistanceTarget:    "assistant",
+		RespondentStage:     "none",
+		AnswerAttempt:       "",
+		RespondentEvidence:  []modelSlotEvidence{},
+		RespondentProtected: []string{},
+		ResearchAction:      "none",
+		ResearchQuery:       "",
 		LatentQuestion:      "次の一歩は何か",
 		ArgumentStructure:   "conclusion_reason",
 		InterventionPolicy:  "answer",
@@ -1115,9 +1312,11 @@ func validModelPlan() modelPlan {
 		ConversationSummary: "次の行動を選ぶため検証方法を整理中",
 		DocumentSummary:     "",
 		ThoughtStateDelta: ThoughtStateDelta{
+			Goals:          []string{},
 			Claims:         []string{},
 			Grounds:        []string{},
 			Assumptions:    []string{},
+			Constraints:    []string{},
 			OpenLoops:      []string{},
 			Contradictions: []string{},
 			Decisions:      []string{},
@@ -1155,6 +1354,143 @@ func validModelPlan() modelPlan {
 		},
 	}
 	return plan
+}
+
+func respondentAwaitingPlan() modelPlan {
+	plan := validModelPlan()
+	plan.Domain = "work"
+	plan.Intent = "practice"
+	plan.AssistanceTarget = "respondent"
+	plan.RespondentStage = "awaiting_answer"
+	plan.LatentQuestion = "導入目的に対する本人の回答は何か"
+	plan.ArgumentStructure = "clarifying_question"
+	plan.InterventionPolicy = "clarify"
+	plan.SpokenReply = "まとまっていなくていいので、今の答えをそのまま話してもらえますか？"
+	plan.Intervention = modelArbiter{
+		Benefit: 0.8, InterruptionCost: 0.1, Urgency: 0.1,
+		Confidence: 0.95, Act: "clarify",
+	}
+	plan.AnswerContract = respondentDraftContract(
+		answercontract.OperatorPurpose,
+		"導入目的",
+		[]answercontract.RequiredSlot{answercontract.SlotPurpose},
+		"",
+		"",
+	)
+	return plan
+}
+
+func respondentRestructurePlan(answerAttempt, reconstruction string) modelPlan {
+	plan := validModelPlan()
+	plan.Domain = "work"
+	plan.Intent = "practice"
+	plan.AssistanceTarget = "respondent"
+	plan.RespondentStage = "restructure"
+	plan.AnswerAttempt = answerAttempt
+	plan.RespondentEvidence = []modelSlotEvidence{{
+		Slot: answercontract.SlotPurpose,
+		Span: "目的は評価基準をそろえることです",
+	}}
+	plan.LatentQuestion = "導入目的への本人の答えを先にする"
+	plan.ArgumentStructure = "direct_answer"
+	plan.InterventionPolicy = "coach"
+	plan.SpokenReply = reconstruction
+	plan.Intervention = modelArbiter{
+		Benefit: 0.9, InterruptionCost: 0.05, Urgency: 0.1,
+		Confidence: 0.98, Act: "restructure",
+	}
+	plan.AnswerContract = respondentDraftContract(
+		answercontract.OperatorPurpose,
+		"導入目的",
+		[]answercontract.RequiredSlot{answercontract.SlotPurpose},
+		"目的は評価基準をそろえることです",
+		reconstruction,
+	)
+	return plan
+}
+
+func respondentChoicePlan(
+	answerAttempt,
+	reconstruction string,
+	protected []string,
+) modelPlan {
+	plan := validModelPlan()
+	plan.Domain = "work"
+	plan.Intent = "practice"
+	plan.AssistanceTarget = "respondent"
+	plan.RespondentStage = "restructure"
+	plan.AnswerAttempt = answerAttempt
+	plan.RespondentEvidence = []modelSlotEvidence{{
+		Slot: answercontract.SlotSelection,
+		Span: "A案を選びます",
+	}}
+	plan.RespondentProtected = append([]string(nil), protected...)
+	plan.LatentQuestion = "採用案への本人の答えを先にする"
+	plan.ArgumentStructure = "direct_answer"
+	plan.InterventionPolicy = "coach"
+	plan.SpokenReply = reconstruction
+	plan.Intervention = modelArbiter{
+		Benefit: 0.9, InterruptionCost: 0.05, Urgency: 0.1,
+		Confidence: 0.98, Act: "restructure",
+	}
+	firstCommitment := reconstruction
+	if clauses := strings.Split(reconstruction, "。"); len(clauses) > 0 {
+		firstCommitment = clauses[0]
+	}
+	plan.AnswerContract = respondentDraftContract(
+		answercontract.OperatorChoice,
+		"採用案",
+		[]answercontract.RequiredSlot{answercontract.SlotSelection},
+		firstCommitment,
+		reconstruction,
+	)
+	return plan
+}
+
+func respondentDraftContract(
+	operator answercontract.Operator,
+	subject string,
+	required []answercontract.RequiredSlot,
+	firstCommitment,
+	candidate string,
+) answercontract.Contract {
+	commitment := answercontract.CommitmentFront{
+		FillsTarget:    false,
+		TargetCoverage: 0,
+		FilledSlots:    []answercontract.RequiredSlot{},
+		PositionClass:  answercontract.PositionAbsent,
+		Calibration:    answercontract.CalibrationAbstain,
+		Issue:          answercontract.IssueTargetMissing,
+	}
+	if firstCommitment != "" {
+		commitment = answercontract.CommitmentFront{
+			FirstCommitment: firstCommitment,
+			FillsTarget:     true,
+			TargetCoverage:  1,
+			FilledSlots:     append([]answercontract.RequiredSlot(nil), required...),
+			PositionClass:   answercontract.PositionFirst,
+			Calibration:     answercontract.CalibrationCommitted,
+			Issue:           answercontract.IssueNone,
+		}
+	}
+	return answercontract.Contract{
+		QuestionFrame: answercontract.QuestionFrame{
+			Operator:      operator,
+			Subject:       subject,
+			RequiredSlots: append([]answercontract.RequiredSlot(nil), required...),
+			Hypotheses: []answercontract.Hypothesis{{
+				Interpretation: "本人が他者の質問へ答える",
+				Confidence:     1,
+			}},
+		},
+		CommitmentFront: commitment,
+		CounterfactualRepair: answercontract.CounterfactualRepair{
+			MinimalAnswer:                 firstCommitment,
+			ReconstructedAnswer:           candidate,
+			MeaningPreservationConfidence: 1,
+			RepairGain:                    0,
+		},
+	}
 }
 
 func encodePlan(t *testing.T, plan modelPlan) string {

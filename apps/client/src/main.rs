@@ -27,7 +27,7 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "相手の質問を言って　まとまらないまま自分の考えを話すだけ",
+            Self::Ready => "相手の質問をあなたが言い直して　まとまらないまま自分の考えを話すだけ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
             Self::Thinking => "あなたの意味を変えず　聞かれた答えだけを前へ出す",
@@ -107,8 +107,37 @@ struct VoiceTurnResult {
     respondent_stage: String,
     route: String,
     needs_paper: bool,
+    research_status: ResearchStatus,
+    research_records: Vec<ResearchRecord>,
     #[serde(default)]
     caption: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ResearchStatus {
+    None,
+    NeedsPrimaryEvidence,
+    Unavailable,
+}
+
+#[derive(Clone, PartialEq, Deserialize)]
+struct ResearchRecord {
+    title: String,
+    doi: String,
+    url: String,
+    published: String,
+    source: String,
+}
+
+impl ResearchRecord {
+    fn display_title(&self) -> &str {
+        if self.title.is_empty() {
+            "タイトル未収録"
+        } else {
+            &self.title
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Deserialize)]
@@ -301,6 +330,9 @@ mod cloud {
     use super::{CloudState, DocumentInfo, VoiceTurnResult};
     use dioxus::prelude::Signal;
 
+    #[derive(Clone)]
+    pub struct DocumentClearListener;
+
     pub async fn status() -> CloudState {
         CloudState::Unavailable
     }
@@ -331,7 +363,11 @@ mod cloud {
         Err("WebAssembly版で使ってみて")
     }
 
-    pub fn install_document_clear_listener(_document_info: Signal<Option<DocumentInfo>>) {}
+    pub fn install_document_clear_listener(
+        _document_info: Signal<Option<DocumentInfo>>,
+    ) -> Option<DocumentClearListener> {
+        None
+    }
 
     pub fn stop_session() {}
 }
@@ -351,6 +387,8 @@ fn arm_listening(
     detected_domain: Signal<String>,
     route: Signal<String>,
     needs_paper: Signal<bool>,
+    research_status: Signal<ResearchStatus>,
+    research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     caption: Signal<Option<String>>,
 ) {
@@ -396,6 +434,8 @@ fn arm_listening(
                     detected_domain,
                     route,
                     needs_paper,
+                    research_status,
+                    research_records,
                     document_info,
                     caption,
                 );
@@ -410,6 +450,8 @@ fn arm_listening(
                     detected_domain,
                     route,
                     needs_paper,
+                    research_status,
+                    research_records,
                     document_info,
                     caption,
                 );
@@ -428,6 +470,8 @@ fn submit_turn(
     mut detected_domain: Signal<String>,
     mut route: Signal<String>,
     mut needs_paper: Signal<bool>,
+    mut research_status: Signal<ResearchStatus>,
+    mut research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
 ) {
@@ -437,6 +481,8 @@ fn submit_turn(
 
     let state_snapshot = session_state.peek().clone();
     let consumed_document = document_info.peek().is_some();
+    research_status.set(ResearchStatus::None);
+    research_records.set(Vec::new());
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
@@ -462,6 +508,8 @@ fn submit_turn(
         detected_domain.set(result.detected_domain.clone());
         route.set(result.route.clone());
         needs_paper.set(result.needs_paper);
+        research_status.set(result.research_status);
+        research_records.set(result.research_records.clone());
         caption.set(result.caption.clone());
         if consumed_document {
             document_info.set(None);
@@ -493,6 +541,8 @@ fn submit_turn(
             detected_domain,
             route,
             needs_paper,
+            research_status,
+            research_records,
             document_info,
             caption,
         );
@@ -507,6 +557,8 @@ fn start_or_resume(
     detected_domain: Signal<String>,
     route: Signal<String>,
     needs_paper: Signal<bool>,
+    research_status: Signal<ResearchStatus>,
+    research_records: Signal<Vec<ResearchRecord>>,
     document_info: Signal<Option<DocumentInfo>>,
     caption: Signal<Option<String>>,
 ) {
@@ -522,6 +574,8 @@ fn start_or_resume(
         detected_domain,
         route,
         needs_paper,
+        research_status,
+        research_records,
         document_info,
         caption,
     );
@@ -547,6 +601,8 @@ fn App() -> Element {
     let mut detected_domain = use_signal(String::new);
     let mut route = use_signal(String::new);
     let mut needs_paper = use_signal(|| false);
+    let mut research_status = use_signal(|| ResearchStatus::None);
+    let mut research_records = use_signal(Vec::<ResearchRecord>::new);
     let mut document_info = use_signal(|| None::<DocumentInfo>);
     let mut document_error = use_signal(|| None::<&'static str>);
     let mut caption = use_signal(|| None::<String>);
@@ -558,6 +614,8 @@ fn App() -> Element {
     let state_snapshot = *voice_state.read();
     let captions_are_visible = *captions_visible.read();
     let document_snapshot = document_info.read().clone();
+    let research_status_snapshot = *research_status.read();
+    let research_snapshot = research_records.read().clone();
     let document_is_busy = matches!(
         state_snapshot,
         VoiceState::RequestingPermission | VoiceState::Thinking | VoiceState::Speaking
@@ -616,6 +674,14 @@ fn App() -> Element {
                                 span { class: "route-chip", {route.read().clone()} }
                             }
                         }
+                        if research_status_snapshot == ResearchStatus::Unavailable {
+                            span {
+                                class: "research-status-chip research-status-chip--unavailable",
+                                role: "status",
+                                aria_label: "論文探索は現在利用できません",
+                                "RESEARCH / UNAVAILABLE"
+                            }
+                        }
                     }
 
                     div { class: "orb-field",
@@ -636,6 +702,8 @@ fn App() -> Element {
                                             detected_domain,
                                             route,
                                             needs_paper,
+                                            research_status,
+                                            research_records,
                                             document_info,
                                             caption,
                                         );
@@ -696,7 +764,7 @@ fn App() -> Element {
                         div { class: "capability",
                             span { "聞かれた" }
                             i { aria_hidden: "true", "→" }
-                            strong { "相手の質問を拾う" }
+                            strong { "あなたが言い直した質問を拾う" }
                         }
                         div { class: "capability",
                             span { "まとまらない" }
@@ -731,6 +799,8 @@ fn App() -> Element {
                                             detected_domain,
                                             route,
                                             needs_paper,
+                                            research_status,
+                                            research_records,
                                             document_info,
                                             caption,
                                         );
@@ -762,6 +832,8 @@ fn App() -> Element {
                                     detected_domain.set(String::new());
                                     route.set(String::new());
                                     needs_paper.set(false);
+                                    research_status.set(ResearchStatus::None);
+                                    research_records.set(Vec::new());
                                     document_info.set(None);
                                     caption.set(None);
                                     document_error.set(None);
@@ -806,6 +878,51 @@ fn App() -> Element {
                 }
 
                 aside { class: "utility-dock", aria_label: "資料とプライバシー",
+                    if !research_snapshot.is_empty() {
+                        section {
+                            class: "research-panel",
+                            aria_label: "論文候補 / 一次資料未検証",
+                            div { class: "research-panel__heading",
+                                div {
+                                    p { class: "utility-index", "RESEARCH / DISCOVERY" }
+                                    h2 { "論文候補" }
+                                }
+                                span { class: "research-panel__warning", "一次資料未検証" }
+                            }
+                            p { class: "research-panel__note",
+                                "書誌情報から見つけた候補です。主張の正しさを確認した結果ではありません。"
+                            }
+                            ol { class: "research-list",
+                                for (index, record) in research_snapshot.iter().enumerate() {
+                                    li { key: "{record.doi}",
+                                        a {
+                                            class: "research-card",
+                                            href: record.url.clone(),
+                                            target: "_blank",
+                                            rel: "noopener noreferrer",
+                                            aria_label: format!(
+                                                "論文候補 {}: {}（一次資料未検証）",
+                                                index + 1,
+                                                record.display_title(),
+                                            ),
+                                            strong { {record.display_title()} }
+                                            span { class: "research-card__meta",
+                                                span { {record.source.clone()} }
+                                                if !record.published.is_empty() {
+                                                    i { aria_hidden: "true", "·" }
+                                                    time {
+                                                        datetime: record.published.clone(),
+                                                        {record.published.clone()}
+                                                    }
+                                                }
+                                            }
+                                            small { "DOI {record.doi}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     section { class: "paper-drop",
                         div { class: "paper-drop__heading",
                             span { class: "utility-index", "01" }
@@ -870,15 +987,23 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "発話ごとに一時処理し　暗号化通信で送る　アプリの履歴には残さない"
+                                "発話ごとにTLSで送り　アプリの履歴には残さない。ただし処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
                             }
                             p {
                                 strong { "PDF" }
-                                "選んだときだけ次の応答へ添付　応答後に参照を解除"
+                                "選んだときだけ次の応答へ添付し、応答後にブラウザ上の参照を解除します。処理中はサーバーとVertex AIが内容を扱います。"
                             }
                             p {
                                 strong { "接続" }
                                 "匿名セッションと正規アプリからのリクエストか毎回たしかめる"
+                            }
+                            p {
+                                strong { "話者" }
+                                "話者本人の認証・識別はしていません。周囲を聴かせ続けず、相手の質問はあなた自身が言い直してから答えてください。"
+                            }
+                            p {
+                                strong { "外部検索" }
+                                "Crossrefへ送るのは「外部検索で『テーマ』の最新論文を探して」と発話全体で明示したときだけ。通常の会話やPDFからは検索しません。"
                             }
                             p { class: "privacy-fold__stop",
                                 "一時停止・終了で　マイクと再生をすぐ止める"

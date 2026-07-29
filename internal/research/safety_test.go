@@ -2,6 +2,7 @@ package research
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,16 +112,34 @@ func TestSensitiveTopicIsRejectedBeforeOutboundUse(t *testing.T) {
 		"contact alice@example.org about the paper",
 		"著者の電話は 090-1234-5678",
 		"ship results to 100-0001",
+		"送付先は〒 100-0001",
 		"password = hunter2",
+		"password は 機密値です",
 		"Authorization: Bearer abcdefghijklmnop",
 		"token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureABC",
 		"key sk-abcdefghijklmnopqrstuvwxyz",
 		"card 4111 1111 1111 1111",
 		"-----BEGIN PRIVATE KEY----- abc",
+		"田中太郎のうつ病",
+		"田中太郎",
+		"小鳥遊光",
+		"小鳥遊-光",
+		"田中太郎 ADHD",
+		"田中 太郎 ADHD",
+		"田中・太郎 ADHD",
+		"John Smith depression",
+		"John Smith",
+		"john smith depression",
+		"José García depression",
+		"xavier zane",
+		"Xavier Quill research",
+		"山田はな ADHD",
+		"私の症状と治療",
+		"patient named Alice and depression",
 	}
-	for _, topic := range tests {
-		topic := topic
-		t.Run(topic[:min(16, len(topic))], func(t *testing.T) {
+	for index, topic := range tests {
+		index, topic := index, topic
+		t.Run(strconv.Itoa(index), func(t *testing.T) {
 			t.Parallel()
 			_, err := NewRecentTopicQuery(
 				topic,
@@ -138,6 +157,28 @@ func TestSensitiveTopicIsRejectedBeforeOutboundUse(t *testing.T) {
 	}
 }
 
+func TestSensitivePayloadEmbeddedInDOIIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, rawDOI := range []string{
+		"10.1234/alice@example.org",
+		"10.1234/alice%40example.org",
+		"10.1234/alice%2540example.org",
+		"10.1234/password%3Dhunter2",
+		"10.1234/john-smith-depression",
+		"10.1234/田中太郎-ADHD",
+		"10.1234/田中-太郎-adhd",
+		"10.1234/田中太郎.ADHD",
+		"10.1234/john.smith.adhd",
+		"10.1234/Xavier.Quill.depression",
+		"10.1234/sk-abcdefghijklmnopqrstuvwxyz",
+		"10.1234/eyJabcdefgh.eyJijklmnop.eyJqrstuvwx",
+	} {
+		if _, err := NewDOIQuery(rawDOI); !errors.Is(err, ErrSensitiveQuery) {
+			t.Errorf("NewDOIQuery(%q) error = %v; want ErrSensitiveQuery", rawDOI, err)
+		}
+	}
+}
+
 func TestResearchTermsAreNotMistakenForActualSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -147,6 +188,10 @@ func TestResearchTermsAreNotMistakenForActualSecrets(t *testing.T) {
 		"telephone fraud detection",
 		"OpenAI GPT-5.6 evaluation",
 		"Japan 2020-01-01 to 2024-01-01",
+		"量子エラー訂正",
+		"作業記憶",
+		"睡眠",
+		"Quantum Computing",
 	} {
 		if _, err := NewRecentTopicQuery(
 			topic,

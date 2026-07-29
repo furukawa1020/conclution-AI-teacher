@@ -79,7 +79,9 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				t.Fatalf("low-confidence transcript reached the model: %d", agent.calls)
 			}
 			if result.StateToken != "existing-state" ||
-				result.DetectedDomain != "unknown" {
+				result.DetectedDomain != "unknown" ||
+				result.ResearchStatus != "none" ||
+				len(result.ResearchRecords) != 0 {
 				t.Fatalf("recognition fallback metadata = %+v", result)
 			}
 			if ambient {
@@ -107,10 +109,14 @@ func TestPipelineTreatsZeroSTTConfidenceAsUnavailableNotLow(t *testing.T) {
 
 	speech := &fakeSpeech{transcript: "confidenceが提供されない認識結果"}
 	agent := &fakeAgent{result: conversation.VoiceTurnResult{
-		Domain:      "general",
-		Route:       "fast",
-		StateToken:  "state",
-		SpokenReply: "続けます。",
+		Domain:           "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []conversation.ResearchRecord{},
+		Route:            "fast",
+		StateToken:       "state",
+		SpokenReply:      "続けます。",
 	}}
 	pipeline, err := New(speech, agent)
 	if err != nil {
@@ -160,9 +166,13 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	speech := &fakeSpeech{transcript: "いや、なんか締切が不安で"}
 	agent := &fakeAgent{
 		result: conversation.VoiceTurnResult{
-			Domain:     "daily",
-			Route:      "fast",
-			StateToken: "encrypted-state",
+			Domain:           "daily",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []conversation.ResearchRecord{},
+			Route:            "fast",
+			StateToken:       "encrypted-state",
 			Intervention: conversation.ArbiterDecision{
 				Act: "silent",
 			},
@@ -200,10 +210,14 @@ func TestPipelineSynthesizesOnlySelectedIntervention(t *testing.T) {
 	speech := &fakeSpeech{transcript: "この論文の結果は因果関係を示したと思う"}
 	agent := &fakeAgent{
 		result: conversation.VoiceTurnResult{
-			Domain:      "research",
-			Route:       "precision",
-			StateToken:  "encrypted-state",
-			SpokenReply: "その結果だけでは相関かも。手法を一度見よう。",
+			Domain:           "research",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []conversation.ResearchRecord{},
+			Route:            "precision",
+			StateToken:       "encrypted-state",
+			SpokenReply:      "その結果だけでは相関かも。手法を一度見よう。",
 			Intervention: conversation.ArbiterDecision{
 				Act: "paper_check",
 			},
@@ -224,7 +238,9 @@ func TestPipelineSynthesizesOnlySelectedIntervention(t *testing.T) {
 	}
 	if string(result.Audio) != "speech" ||
 		result.AudioMIMEType != "audio/mpeg" ||
-		result.Caption != agent.result.SpokenReply {
+		result.Caption != agent.result.SpokenReply ||
+		result.AssistanceTarget != "assistant" ||
+		result.RespondentStage != "none" {
 		t.Fatalf("result = %+v", result)
 	}
 	if !result.NeedsPaper {
@@ -232,6 +248,95 @@ func TestPipelineSynthesizesOnlySelectedIntervention(t *testing.T) {
 	}
 	if speech.synthesizeCalls != 1 {
 		t.Fatalf("synthesis calls = %d; want 1", speech.synthesizeCalls)
+	}
+}
+
+func TestPipelinePropagatesRespondentAssistanceMetadata(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{
+		transcript: "音声AIを使っています。目的は答えの核を先に出すことです。",
+		confidence: 0.95,
+	}
+	agent := &fakeAgent{
+		result: conversation.VoiceTurnResult{
+			Domain:           "conversation",
+			AssistanceTarget: "respondent",
+			RespondentStage:  "restructure",
+			ResearchStatus:   "none",
+			ResearchRecords:  []conversation.ResearchRecord{},
+			Route:            "respondent-restructure",
+			StateToken:       "encrypted-state",
+			SpokenReply:      "目的は、答えの核を先に出すことです。音声AIを使っています。",
+		},
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{Audio: []byte("audio")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AssistanceTarget != "respondent" ||
+		result.RespondentStage != "restructure" ||
+		result.Caption != agent.result.SpokenReply ||
+		speech.synthesizedText != agent.result.SpokenReply {
+		t.Fatalf("respondent result = %+v", result)
+	}
+}
+
+func TestPipelineMapsResearchRecords(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{
+		transcript: "このDOIの論文を確認して",
+		confidence: 0.95,
+	}
+	agent := &fakeAgent{
+		result: conversation.VoiceTurnResult{
+			Domain:           "research",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "needs_primary_evidence",
+			ResearchRecords: []conversation.ResearchRecord{
+				{
+					Title:     "KOTAEの回答支援に関する研究",
+					DOI:       "10.1234/kotae.2026",
+					URL:       "https://doi.org/10.1234/kotae.2026",
+					Published: "2026-07-29",
+					Source:    "Crossref",
+				},
+			},
+			Route:       "research-metadata",
+			StateToken:  "encrypted-state",
+			SpokenReply: "候補を見つけました。内容の検証には一次資料が必要です。",
+		},
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{Audio: []byte("audio")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ResearchStatus != "needs_primary_evidence" ||
+		len(result.ResearchRecords) != 1 ||
+		result.ResearchRecords[0].DOI != "10.1234/kotae.2026" ||
+		result.ResearchRecords[0].URL != "https://doi.org/10.1234/kotae.2026" ||
+		result.ResearchRecords[0].Source != "Crossref" {
+		t.Fatalf("research result = %+v", result)
 	}
 }
 

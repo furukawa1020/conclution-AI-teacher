@@ -7,12 +7,15 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 	"google.golang.org/genai"
 )
@@ -27,6 +30,8 @@ const (
 	maxRespondentEvidence        = 8
 	maxRespondentProtected       = 16
 	maxRespondentProtectedRunes  = 160
+	maxResearchQueryRunes        = research.MaxTopicRunes
+	researchDiscoveryTimeout     = 7 * time.Second
 	criticTimeout                = 12 * time.Second
 	criticRecoveryTimeout        = 18 * time.Second
 )
@@ -42,6 +47,32 @@ var (
 	errCriticRepairBounds    = errors.New("conversation: critic repair bounds")
 	errInferenceFinishSafety = errors.New("conversation: inference safety finish")
 	errInferenceFinishLimit  = errors.New("conversation: inference output limit")
+
+	explicitJapaneseRecentResearchPattern = regexp.MustCompile(
+		`^(?:(?i:crossref)|クロスレフ|外部検索)で\s*` +
+			`「([^「」]{1,80})」` +
+			`(?:の最新|の新着|の)?(?:論文|研究|文献|プレプリント)を` +
+			`(?:探して|見つけて|調べて|調査して|検索して|サーベイして)` +
+			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?\s*$`,
+	)
+	explicitEnglishRecentResearchPattern = regexp.MustCompile(
+		`(?i)^(?:please\s+)?use\s+crossref\s+to\s+` +
+			`(?:find|search\s+for|look\s+up|survey)\s+` +
+			`(?:the\s+)?(?:latest\s+|recent\s+)?` +
+			`(?:papers?|stud(?:y|ies)|preprints?|research)\s+` +
+			`(?:on|about)\s+"([^"\r\n]{1,80})"\s*$`,
+	)
+	explicitJapaneseDOIResearchPattern = regexp.MustCompile(
+		`^(?:(?i:crossref)|クロスレフ|外部検索)で\s*(?i:doi)\s+` +
+			`(10\.[0-9]{4,9}/\S+)\s+を` +
+			`(?:調べて|確認して|照会して|検索して)` +
+			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?\s*$`,
+	)
+	explicitEnglishDOIResearchPattern = regexp.MustCompile(
+		`(?i)^(?:please\s+)?use\s+crossref\s+to\s+` +
+			`(?:look\s+up|check)\s+doi\s+` +
+			`(10\.[0-9]{4,9}/\S+)\s*$`,
+	)
 )
 
 type Agent interface {
@@ -62,6 +93,8 @@ type vertexAgent struct {
 	codec          *StateCodec
 	fastModel      string
 	precisionModel string
+	research       research.Verifier
+	now            func() time.Time
 }
 
 type modelPlan struct {
@@ -72,6 +105,8 @@ type modelPlan struct {
 	AnswerAttempt       string                  `json:"answer_attempt"`
 	RespondentEvidence  []modelSlotEvidence     `json:"respondent_slot_evidence"`
 	RespondentProtected []string                `json:"respondent_protected_spans"`
+	ResearchAction      string                  `json:"research_action"`
+	ResearchQuery       string                  `json:"research_query"`
 	LatentQuestion      string                  `json:"latent_question"`
 	ArgumentStructure   string                  `json:"argument_structure"`
 	InterventionPolicy  string                  `json:"intervention_policy"`
@@ -154,7 +189,23 @@ func NewVertexAgent(
 	if err != nil {
 		return nil, errors.New("conversation: initialize Vertex AI client")
 	}
-	return NewAgent(client.Models, fastModel, precisionModel, stateKey)
+	source, err := research.NewCrossrefSource(research.CrossrefOptions{
+		UserAgent: "KOTAE-ResearchVerifier/0.1 (https://kotae-ai.web.app)",
+	})
+	if err != nil {
+		return nil, errors.New("conversation: initialize research source")
+	}
+	verifier, err := research.NewDiscoveryVerifier(source)
+	if err != nil {
+		return nil, errors.New("conversation: initialize research verifier")
+	}
+	return newAgent(
+		client.Models,
+		fastModel,
+		precisionModel,
+		stateKey,
+		verifier,
+	)
 }
 
 func NewAgent(
@@ -162,6 +213,16 @@ func NewAgent(
 	fastModel,
 	precisionModel string,
 	stateKey []byte,
+) (Agent, error) {
+	return newAgent(generator, fastModel, precisionModel, stateKey, nil)
+}
+
+func newAgent(
+	generator ContentGenerator,
+	fastModel,
+	precisionModel string,
+	stateKey []byte,
+	researchVerifier research.Verifier,
 ) (Agent, error) {
 	if generator == nil {
 		return nil, errors.New("conversation: content generator is required")
@@ -183,6 +244,8 @@ func NewAgent(
 		codec:          codec,
 		fastModel:      fastModel,
 		precisionModel: precisionModel,
+		research:       researchVerifier,
+		now:            time.Now,
 	}, nil
 }
 
@@ -263,6 +326,20 @@ func (agent *vertexAgent) Process(
 		}
 	}
 
+	researchStatus := "none"
+	researchRecords := []ResearchRecord{}
+	researchReply := ""
+	if !precisionUnavailable && finalPlan.ResearchAction != "none" {
+		var researchErr error
+		researchStatus, researchRecords, researchReply, researchErr =
+			agent.performResearch(ctx, normalized, finalPlan)
+		if researchErr != nil {
+			return VoiceTurnResult{}, researchErr
+		}
+		finalPlan.SpokenReply = researchReply
+	}
+	researchHandled := researchStatus != "none"
+
 	verificationUnavailable := precisionUnavailable
 	respondentAwaitingAnswer := finalPlan.AssistanceTarget == "respondent" &&
 		finalPlan.RespondentStage == "awaiting_answer"
@@ -317,11 +394,15 @@ func (agent *vertexAgent) Process(
 	}
 
 	decision := arbitrate(finalPlan)
+	researchAuditBlocked := researchHandled &&
+		finalPlan.answerAssessment.Outcome != answercontract.OutcomeKeep
 	lacBlocksAnswer := finalPlan.answerAssessment.Outcome == answercontract.OutcomeClarify ||
-		finalPlan.answerAssessment.Outcome == answercontract.OutcomeReject
-	ambiguous := finalPlan.Confidence < PrecisionConfidenceThreshold ||
-		finalPlan.InterventionPolicy == "clarify" ||
-		decision.Act == "clarify" ||
+		finalPlan.answerAssessment.Outcome == answercontract.OutcomeReject ||
+		researchAuditBlocked
+	ambiguous := (!researchHandled &&
+		(finalPlan.Confidence < PrecisionConfidenceThreshold ||
+			finalPlan.InterventionPolicy == "clarify" ||
+			decision.Act == "clarify")) ||
 		lacBlocksAnswer
 	urgentSafety := finalPlan.InterventionPolicy == "safety" &&
 		decision.Urgency >= 0.8
@@ -351,6 +432,10 @@ func (agent *vertexAgent) Process(
 		decision.Act = "clarify"
 		spokenReply = "意味を変えずに整えたいので、いちばん先に伝えたいことはどれですか？"
 		interventionPolicy = "clarify"
+	} else if researchAuditBlocked {
+		decision.Act = "reflect"
+		spokenReply = "取得した論文候補は画面に出します。内容や主張は、まだ一次資料で検証していません。"
+		interventionPolicy = "paper_check"
 	} else if forceAmbientSilence {
 		decision.Act = "silent"
 		spokenReply = ""
@@ -411,6 +496,12 @@ func (agent *vertexAgent) Process(
 			route = "respondent-restructure-" + route
 		}
 	}
+	switch researchStatus {
+	case string(research.StatusNeedsPrimaryEvidence):
+		route = "research-discovery-" + route
+	case "unavailable":
+		route = "research-unavailable-" + route
+	}
 	nextState := conversationState{
 		Turn:                state.Turn + 1,
 		Graph:               graph,
@@ -431,6 +522,8 @@ func (agent *vertexAgent) Process(
 		Intent:              finalPlan.Intent,
 		AssistanceTarget:    finalPlan.AssistanceTarget,
 		RespondentStage:     finalPlan.RespondentStage,
+		ResearchStatus:      researchStatus,
+		ResearchRecords:     researchRecords,
 		LatentQuestion:      finalPlan.LatentQuestion,
 		ArgumentStructure:   finalPlan.ArgumentStructure,
 		InterventionPolicy:  interventionPolicy,
@@ -494,6 +587,149 @@ func pendingAnswerFromPlan(plan modelPlan, utterance string) PendingAnswerFrame 
 		return PendingAnswerFrame{RequiredSlots: []answercontract.RequiredSlot{}}
 	}
 	return normalized
+}
+
+func (agent *vertexAgent) performResearch(
+	ctx context.Context,
+	turn VoiceTurn,
+	plan modelPlan,
+) (string, []ResearchRecord, string, error) {
+	unavailable := func() (string, []ResearchRecord, string, error) {
+		return "unavailable", []ResearchRecord{},
+			"論文候補の取得先に接続できませんでした。内容や主張は検証していません。",
+			nil
+	}
+	if agent == nil || agent.research == nil || agent.now == nil {
+		return unavailable()
+	}
+
+	now := agent.now().UTC()
+	query, err := authorizedResearchQuery(plan, turn, now)
+	if err != nil {
+		return "", []ResearchRecord{}, "", ErrModelOutputInvalid
+	}
+
+	researchCtx, cancel := context.WithTimeout(ctx, researchDiscoveryTimeout)
+	defer cancel()
+	verification, err := agent.research.Verify(researchCtx, query)
+	if ctx.Err() != nil {
+		return "", []ResearchRecord{}, "", ctx.Err()
+	}
+	if err != nil ||
+		verification.Status != research.StatusNeedsPrimaryEvidence ||
+		verification.Role != research.RoleDiscoveryMetadata ||
+		verification.QueryKind != query.Kind ||
+		verification.RetrievedAt.IsZero() ||
+		verification.RetrievedAt.Before(now.Add(-5*time.Minute)) ||
+		verification.RetrievedAt.After(now.Add(time.Minute)) ||
+		len(verification.Sources) != 1 ||
+		verification.Sources[0] != crossrefDiscoverySource() {
+		return unavailable()
+	}
+	if query.Kind == research.QueryDOI &&
+		(len(verification.Records) != 1 ||
+			verification.Records[0].DOI != query.DOI) {
+		return unavailable()
+	}
+
+	records := make([]ResearchRecord, 0,
+		min(len(verification.Records), MaxResearchRecords))
+	for _, record := range verification.Records {
+		if len(records) == MaxResearchRecords {
+			break
+		}
+		if !validResearchVerificationRecord(record) {
+			return unavailable()
+		}
+		records = append(records, ResearchRecord{
+			Title:     boundedRunes(record.Title, 300),
+			DOI:       record.DOI,
+			URL:       record.LandingURL,
+			Published: record.Published.Value,
+			Source:    "Crossref",
+		})
+	}
+
+	reply := ""
+	switch {
+	case len(records) == 0:
+		reply = "Crossrefの索引日が指定期間内の書誌候補は見つかりませんでした。内容の検証ではありません。"
+	case plan.ResearchAction == "doi_lookup":
+		reply = "このDOIの書誌情報を見つけました。内容や主張は、まだ一次資料で検証していません。"
+	default:
+		reply = "Crossrefの索引日が指定期間内の書誌候補を" +
+			strconv.Itoa(len(records)) +
+			"件見つけました。内容や主張はまだ検証していません。"
+	}
+	return string(research.StatusNeedsPrimaryEvidence), records, reply, nil
+}
+
+func crossrefDiscoverySource() research.SourceDescriptor {
+	return research.SourceDescriptor{
+		ID:        research.SourceCrossref,
+		Name:      "Crossref",
+		Authority: "https://api.crossref.org",
+		Role:      research.RoleDiscoveryMetadata,
+	}
+}
+
+func validResearchVerificationRecord(record research.Record) bool {
+	doiQuery, err := research.NewDOIQuery(record.DOI)
+	if err != nil ||
+		doiQuery.DOI != record.DOI ||
+		record.CanonicalID != "doi:"+record.DOI ||
+		record.AbstractRights == "" ||
+		!utf8.ValidString(record.Title) ||
+		utf8.RuneCountInString(record.Title) > 1_000 ||
+		!validNormalizedResearchDate(record.Published) {
+		return false
+	}
+	doi := doiQuery.DOI
+	expectedLanding := (&url.URL{
+		Scheme: "https",
+		Host:   "doi.org",
+		Path:   "/" + doi,
+	}).String()
+	expectedMetadata := (&url.URL{
+		Scheme: "https",
+		Host:   research.CrossrefAPIHost,
+		Path:   "/works/" + doi,
+	}).String()
+	return record.LandingURL == expectedLanding &&
+		record.MetadataURL == expectedMetadata
+}
+
+func validNormalizedResearchDate(value research.NormalizedDate) bool {
+	if value.Value == "" {
+		return value.Precision == ""
+	}
+	layout := ""
+	switch value.Precision {
+	case research.PrecisionYear:
+		layout = "2006"
+	case research.PrecisionMonth:
+		layout = "2006-01"
+	case research.PrecisionDay:
+		layout = time.DateOnly
+	case research.PrecisionTimestamp:
+		layout = time.RFC3339Nano
+	default:
+		return false
+	}
+	_, err := time.Parse(layout, value.Value)
+	return err == nil
+}
+
+func boundedRunes(value string, limit int) string {
+	value = collapseSpace(value)
+	if limit < 1 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }
 
 func (agent *vertexAgent) auditAnswerWithRetry(
@@ -653,7 +889,12 @@ func (agent *vertexAgent) infer(
 	if err := requireJSONEOF(decoder); err != nil {
 		return modelPlan{}, ErrModelOutputInvalid
 	}
-	if err := normalizeAndValidatePlan(&plan, turn.PDF != nil, turn.Utterance); err != nil {
+	if err := normalizeAndValidatePlan(
+		&plan,
+		turn.PDF != nil,
+		turn.Utterance,
+		turn.Ambient,
+	); err != nil {
 		return modelPlan{}, err
 	}
 	return plan, nil
@@ -981,7 +1222,12 @@ func criticFailureStage(err error) string {
 	}
 }
 
-func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) error {
+func normalizeAndValidatePlan(
+	plan *modelPlan,
+	hasPDF bool,
+	utterance string,
+	ambient bool,
+) error {
 	plan.Domain = strings.TrimSpace(plan.Domain)
 	plan.Intent = strings.TrimSpace(plan.Intent)
 	plan.AssistanceTarget = strings.TrimSpace(plan.AssistanceTarget)
@@ -995,6 +1241,8 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 	for index := range plan.RespondentProtected {
 		plan.RespondentProtected[index] = collapseSpace(plan.RespondentProtected[index])
 	}
+	plan.ResearchAction = strings.TrimSpace(plan.ResearchAction)
+	plan.ResearchQuery = collapseSpace(plan.ResearchQuery)
 	plan.ArgumentStructure = strings.TrimSpace(plan.ArgumentStructure)
 	plan.InterventionPolicy = strings.TrimSpace(plan.InterventionPolicy)
 	plan.LatentQuestion = collapseSpace(plan.LatentQuestion)
@@ -1007,6 +1255,7 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 		!allowedIntent(plan.Intent) ||
 		!allowedAssistanceTarget(plan.AssistanceTarget) ||
 		!allowedRespondentStage(plan.RespondentStage) ||
+		!allowedResearchAction(plan.ResearchAction) ||
 		!allowedArgumentStructure(plan.ArgumentStructure) ||
 		!allowedInterventionPolicy(plan.InterventionPolicy) ||
 		!validUnitInterval(plan.Confidence) ||
@@ -1014,6 +1263,8 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 		utf8.RuneCountInString(plan.LatentQuestion) > MaxLatentQuestionRunes ||
 		!utf8.ValidString(plan.AnswerAttempt) ||
 		utf8.RuneCountInString(plan.AnswerAttempt) > MaxAnswerAttemptRunes ||
+		!utf8.ValidString(plan.ResearchQuery) ||
+		utf8.RuneCountInString(plan.ResearchQuery) > maxResearchQueryRunes ||
 		!utf8.ValidString(plan.SpokenReply) ||
 		utf8.RuneCountInString(plan.SpokenReply) > MaxSpokenReplyRunes ||
 		!utf8.ValidString(plan.ConversationSummary) ||
@@ -1049,6 +1300,9 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool, utterance string) er
 		default:
 			return ErrModelOutputInvalid
 		}
+	}
+	if !validResearchPlan(plan, utterance, ambient) {
+		return ErrModelOutputInvalid
 	}
 	if !hasPDF && plan.DocumentSummary != "" {
 		return ErrModelOutputInvalid
@@ -1104,6 +1358,7 @@ func validRespondentEvidence(plan *modelPlan) bool {
 	for _, evidence := range plan.RespondentEvidence {
 		if _, ok := required[evidence.Slot]; !ok ||
 			evidence.Span == "" ||
+			!utf8.ValidString(evidence.Span) ||
 			utf8.RuneCountInString(evidence.Span) > answercontract.MaxFirstCommitmentRunes ||
 			!strings.Contains(plan.AnswerAttempt, evidence.Span) {
 			return false
@@ -1116,6 +1371,7 @@ func validRespondentEvidence(plan *modelPlan) bool {
 	seenProtected := make(map[string]struct{}, len(plan.RespondentProtected))
 	for _, span := range plan.RespondentProtected {
 		if span == "" ||
+			!utf8.ValidString(span) ||
 			utf8.RuneCountInString(span) > maxRespondentProtectedRunes ||
 			!strings.Contains(plan.AnswerAttempt, span) {
 			return false
@@ -1128,8 +1384,148 @@ func validRespondentEvidence(plan *modelPlan) bool {
 	return true
 }
 
+func allowedResearchAction(action string) bool {
+	return action == "none" ||
+		action == "doi_lookup" ||
+		action == "recent_papers"
+}
+
+func validResearchPlan(plan *modelPlan, utterance string, ambient bool) bool {
+	if plan == nil {
+		return false
+	}
+	if plan.ResearchAction == "none" {
+		return plan.ResearchQuery == ""
+	}
+	fixedNow := time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)
+	query, err := authorizedResearchQuery(*plan, VoiceTurn{
+		Utterance: utterance,
+		Ambient:   ambient,
+	}, fixedNow)
+	if err != nil {
+		return false
+	}
+	if query.Kind == research.QueryDOI {
+		plan.ResearchQuery = query.DOI
+	}
+	return true
+}
+
+func authorizedResearchQuery(
+	plan modelPlan,
+	turn VoiceTurn,
+	now time.Time,
+) (research.Query, error) {
+	if plan.AssistanceTarget != "assistant" ||
+		plan.RespondentStage != "none" ||
+		plan.ResearchQuery == "" ||
+		plan.InterventionPolicy != "paper_check" ||
+		plan.Intervention.Act != "paper_check" ||
+		turn.Ambient {
+		return research.Query{}, ErrModelOutputInvalid
+	}
+
+	utterance := collapseSpace(turn.Utterance)
+	if researchRequestNegated(utterance) {
+		return research.Query{}, ErrModelOutputInvalid
+	}
+	switch plan.ResearchAction {
+	case "doi_lookup":
+		spokenDOI, ok := explicitDOIResearchRequest(utterance)
+		if !ok {
+			return research.Query{}, ErrModelOutputInvalid
+		}
+		spokenQuery, spokenErr := research.NewDOIQuery(spokenDOI)
+		plannedQuery, plannedErr := research.NewDOIQuery(plan.ResearchQuery)
+		if spokenErr != nil ||
+			plannedErr != nil ||
+			spokenQuery.DOI != plannedQuery.DOI {
+			return research.Query{}, ErrModelOutputInvalid
+		}
+		return spokenQuery, nil
+	case "recent_papers":
+		spokenTopic, ok := explicitRecentResearchRequest(utterance)
+		if !ok ||
+			spokenTopic != plan.ResearchQuery ||
+			utf8.RuneCountInString(plan.ResearchQuery) > 80 ||
+			len(strings.Fields(plan.ResearchQuery)) > 12 {
+			return research.Query{}, ErrModelOutputInvalid
+		}
+		query, err := research.NewRecentTopicQuery(
+			plan.ResearchQuery,
+			now.UTC().AddDate(0, 0, -30),
+			now.UTC(),
+			MaxResearchRecords,
+		)
+		if err != nil {
+			return research.Query{}, ErrModelOutputInvalid
+		}
+		return query, nil
+	default:
+		return research.Query{}, ErrModelOutputInvalid
+	}
+}
+
+func explicitRecentResearchRequest(utterance string) (string, bool) {
+	for _, pattern := range []*regexp.Regexp{
+		explicitJapaneseRecentResearchPattern,
+		explicitEnglishRecentResearchPattern,
+	} {
+		match := pattern.FindStringSubmatch(utterance)
+		if len(match) != 2 {
+			continue
+		}
+		topic := strings.TrimSpace(match[1])
+		if topic != "" && utf8.ValidString(topic) {
+			return topic, true
+		}
+	}
+	return "", false
+}
+
+func explicitDOIResearchRequest(utterance string) (string, bool) {
+	for _, pattern := range []*regexp.Regexp{
+		explicitJapaneseDOIResearchPattern,
+		explicitEnglishDOIResearchPattern,
+	} {
+		match := pattern.FindStringSubmatch(utterance)
+		if len(match) == 2 && match[1] != "" {
+			return match[1], true
+		}
+	}
+	return "", false
+}
+
+func researchRequestNegated(utterance string) bool {
+	lower := strings.ToLower(utterance)
+	for _, signal := range []string{
+		"探さない", "探さなく", "探すな", "調べない", "調べなく", "調べるな",
+		"検索しない", "検索しなく", "検索するな", "照会しない", "確認しない",
+		"探してほしくない", "調べてほしくない", "調査してほしくない",
+		"検索してほしくない", "照会してほしくない", "確認してほしくない",
+		"検索は不要", "検索不要", "探さなくていい", "調べなくていい",
+		"do not search", "don't search", "dont search", "not search",
+		"without searching", "do not look up", "don't look up", "no search",
+		"do not find", "don't find", "dont find", "do not check",
+		"don't check", "dont check", "never search", "never find",
+		"without checking", "やっぱりやめて", "やはりやめて",
+		"検索をやめて", "調査をやめて", "照会をやめて",
+		"検索を中止", "調査を中止", "照会を中止",
+		"検索をキャンセル", "調査をキャンセル", "照会をキャンセル",
+		"今のは取り消し", "依頼を取り消し", "さっきのはなし",
+		"never mind", "nevermind", "cancel that", "cancel the search",
+		"cancel my request", "withdraw that", "actually cancel",
+	} {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
 func needsPrecision(plan modelPlan) bool {
-	return plan.Domain == "research" ||
+	return plan.ResearchAction != "none" ||
+		plan.Domain == "research" ||
 		plan.Domain == "technical" ||
 		plan.Domain == "health" ||
 		plan.Domain == "legal" ||
@@ -1139,6 +1535,7 @@ func needsPrecision(plan modelPlan) bool {
 
 func requiresFailClosedPrecision(turn VoiceTurn, plan modelPlan) bool {
 	if turn.PDF != nil ||
+		plan.ResearchAction != "none" ||
 		plan.Domain == "research" ||
 		plan.Domain == "health" ||
 		plan.Domain == "legal" ||
@@ -1379,7 +1776,8 @@ func modelResponseSchema() map[string]any {
 		"propertyOrdering": []string{
 			"domain", "intent", "assistance_target", "respondent_stage",
 			"answer_attempt", "respondent_slot_evidence",
-			"respondent_protected_spans", "latent_question", "argument_structure",
+			"respondent_protected_spans", "research_action", "research_query",
+			"latent_question", "argument_structure",
 			"intervention_policy", "spoken_reply", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
 			"self_correction_grace", "intervention", "answer_contract",
@@ -1387,7 +1785,8 @@ func modelResponseSchema() map[string]any {
 		"required": []string{
 			"domain", "intent", "assistance_target", "respondent_stage",
 			"answer_attempt", "respondent_slot_evidence",
-			"respondent_protected_spans", "latent_question", "argument_structure",
+			"respondent_protected_spans", "research_action", "research_query",
+			"latent_question", "argument_structure",
 			"intervention_policy", "spoken_reply", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
 			"self_correction_grace", "intervention", "answer_contract",
@@ -1442,6 +1841,11 @@ func modelResponseSchema() map[string]any {
 				"maxItems": maxRespondentProtected,
 				"items":    map[string]any{"type": "string"},
 			},
+			"research_action": map[string]any{
+				"type": "string",
+				"enum": []string{"none", "doi_lookup", "recent_papers"},
+			},
+			"research_query":  map[string]any{"type": "string"},
 			"latent_question": map[string]any{"type": "string"},
 			"argument_structure": map[string]any{
 				"type": "string",
@@ -1546,6 +1950,16 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - respondent_protected_spansには、表層規則だけでは守りにくい日本語の人名、組織名、製品名、研究名などがanswer_attemptにある時だけ、その完全一致spanを入れる。
 - assistantまたはawaiting_answerではrespondent_slot_evidenceとrespondent_protected_spansを空配列にする。
 - respondentではanswer_contract.question_frameを「他者から本人へ向けられた質問」に合わせ、spoken_replyがそれへA先出しで答えるか監査する。
+
+Research discovery:
+- 通常はresearch_action=none、research_query=""にする。
+- ambient=true、検索を否定している、DOIや論文に触れただけで照会を依頼していない場合は必ずnoneにする。
+- DOI照会は、発話全体が「Crossrefで DOI 10.xxxx/... を調べて」の固定形式に完全一致する時だけresearch_action=doi_lookupにし、research_queryはそのbare DOIだけを一字も補わず抜き出す。それ以外はnone。
+- 論文探索は、発話全体が「外部検索で「テーマ」の最新論文を探して」または同等のCrossref固定形式に完全一致する時だけresearch_action=recent_papersにする。research_queryは括弧内のテーマ全体を一字も言い換えず抜き出す。通常の「論文を探して」だけではnone。
+- 固定形式ではない外部検索希望にはtoolを使わず、必要なら「外部検索で、かぎ括弧にテーマを入れて、最新論文を探して、と言って」と短く音声案内する。
+- PDF、過去state、保留質問、推測した個人情報からresearch_queryを作らない。氏名、連絡先、症例記述、資格情報、秘密を外部検索へ送らない。
+- research_actionがnone以外ならassistance_target=assistant、respondent_stage=none、intervention_policy=paper_check、intervention.act=paper_checkにする。
+- research_actionはCrossref書誌情報の候補発見だけを要求する。論文本文や主張を検証済みと断定しない。spoken_replyは取得前なので、件数・存在・検証結果を創作しない。
 
 介入判定:
 - benefit、interruption_cost、urgency、confidenceは0から1。

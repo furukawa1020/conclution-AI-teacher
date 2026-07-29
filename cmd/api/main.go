@@ -178,7 +178,7 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       45 * time.Second,
-		WriteTimeout:      55 * time.Second,
+		WriteTimeout:      58 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}

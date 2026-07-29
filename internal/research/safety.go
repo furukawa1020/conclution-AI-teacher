@@ -25,7 +25,7 @@ var (
 		`(?i)(?:\bAIza[0-9A-Za-z_-]{30,}\b|\bsk-[0-9A-Za-z_-]{16,}\b|\bgh[pousr]_[0-9A-Za-z]{20,}\b|\bxox[baprs]-[0-9A-Za-z-]{10,}\b)`,
 	)
 	jwtPattern = regexp.MustCompile(
-		`\beyJ[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\b`,
+		`(?i)\beyj[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\b`,
 	)
 	japanesePhonePattern = regexp.MustCompile(
 		`(?:\+81[\s()-]*(?:0[\s()-]*)?[1-9][0-9\s()-]{7,12}[0-9]|(?:^|[^0-9])0[1-9][0-9\s()-]{7,12}[0-9](?:$|[^0-9]))`,
@@ -38,6 +38,53 @@ var (
 	)
 	orcidPattern = regexp.MustCompile(
 		`^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$`,
+	)
+	personalCasePattern = regexp.MustCompile(
+		`[一-龯々ぁ-んァ-ヶー]{2,12}の(?:症状|診断|病気|うつ病|服薬|治療|病歴|ADHD|PTSD)`,
+	)
+	healthContextPattern = regexp.MustCompile(
+		`(?i)(?:ADHD|PTSD|depression|bipolar|schizophrenia|autism|` +
+			`diagnosis|diagnosed|symptoms?|うつ病|鬱|統合失調|双極|` +
+			`自閉|発達障害|診断|症状|服薬|治療|病歴)`,
+	)
+	japaneseNameLikePattern = regexp.MustCompile(
+		`(?:^|[/\s「『"'（(._・-])[一-龯々ぁ-んァ-ヶー]{2,12}` +
+			`(?:さん|氏|先生)?(?:$|[/\s」』"'、,）)._・-])`,
+	)
+	latinFullNamePattern = regexp.MustCompile(
+		`(?:^|[^A-Za-z])(?:` +
+			`[A-Z][a-z]{1,30}(?:[-'][A-Z]?[a-z]{1,30})?` +
+			`\s+[A-Z][a-z]{1,30}(?:[-'][A-Z]?[a-z]{1,30})?` +
+			`|[A-Z]{2,30}\s+[A-Z]{2,30}` +
+			`)(?:$|[^A-Za-z])`,
+	)
+	commonJapaneseNamePattern = regexp.MustCompile(
+		`(?:^|[\s「『"'（(])(?:佐藤|鈴木|高橋|田中|伊藤|渡辺|山本|中村|` +
+			`小林|加藤|吉田|山田|佐々木|山口|松本|井上|木村|斎藤|清水|` +
+			`山崎|森|池田|橋本|阿部|石川|山下|中島|前田|藤田|小川|` +
+			`後藤|岡田|長谷川|村上|近藤|石井|坂本|遠藤|青木|藤井|` +
+			`西村|福田|太田|三浦|藤原|岡本|松田|中川|中野|原田)` +
+			`[一-龯々ぁ-んァ-ヶー]{1,8}(?:$|[\s」』"'、,）)])`,
+	)
+	commonLatinNamePattern = regexp.MustCompile(
+		`(?i)(?:^|[^a-z])(?:john|jane|james|mary|robert|patricia|michael|` +
+			`jennifer|william|linda|david|elizabeth|richard|barbara|` +
+			`joseph|susan|thomas|jessica|charles|sarah|christopher|` +
+			`karen|daniel|nancy|matthew|lisa|anthony|betty|mark|` +
+			`sandra|donald|ashley|steven|kimberly|paul|emily|andrew|` +
+			`alice|bob)\s+[a-z][a-z'-]{1,30}(?:$|[^a-z])`,
+	)
+	healthPersonSlugPattern = regexp.MustCompile(
+		`(?i)(?:^|[/\s])(?:[\p{L}]{1,30}[-_.・\s]+){1,4}` +
+			`(?:adhd|ptsd|depression|bipolar|schizophrenia|autism)` +
+			`(?:$|[^\p{L}])`,
+	)
+	compactJapaneseTopicPattern = regexp.MustCompile(
+		`^[一-龯々ぁ-んァ-ヶー]{2,12}$`,
+	)
+	latinShortPhrasePattern = regexp.MustCompile(
+		`(?i)^[\p{L}][\p{L}'-]{1,30}` +
+			`(?:\s+[\p{L}][\p{L}'-]{1,30}){1,2}$`,
 	)
 )
 
@@ -82,11 +129,17 @@ func NormalizeQuery(query Query) (Query, error) {
 		if query.Topic != "" || !query.From.IsZero() || !query.Until.IsZero() {
 			return Query{}, ErrInvalidQuery
 		}
+		if likelySensitive(query.DOI) {
+			return Query{}, ErrSensitiveQuery
+		}
 		doi, err := NormalizeDOI(query.DOI)
 		if err != nil {
 			return Query{}, err
 		}
 		query.DOI = doi
+		if likelySensitive(query.DOI) {
+			return Query{}, ErrSensitiveQuery
+		}
 		query.Limit = 1
 		return query, nil
 
@@ -132,6 +185,9 @@ func NormalizeDOI(rawDOI string) (string, error) {
 	switch {
 	case strings.HasPrefix(lower, "doi:"):
 		value = strings.TrimSpace(value[len("doi:"):])
+		if strings.Contains(value, "%") {
+			return "", ErrInvalidQuery
+		}
 	case strings.HasPrefix(lower, "https://") ||
 		strings.HasPrefix(lower, "http://"):
 		parsed, err := url.Parse(value)
@@ -148,6 +204,13 @@ func NormalizeDOI(rawDOI string) (string, error) {
 		escapedPath := strings.TrimPrefix(parsed.EscapedPath(), "/")
 		value, err = url.PathUnescape(escapedPath)
 		if err != nil {
+			return "", ErrInvalidQuery
+		}
+		if strings.Contains(value, "%") {
+			return "", ErrInvalidQuery
+		}
+	default:
+		if strings.Contains(value, "%") {
 			return "", ErrInvalidQuery
 		}
 	}
@@ -171,6 +234,26 @@ func NormalizeDOI(rawDOI string) (string, error) {
 }
 
 func likelySensitive(value string) bool {
+	if likelySensitiveLiteral(value) {
+		return true
+	}
+	decoded := value
+	for depth := 0; depth < 4; depth++ {
+		next, err := url.PathUnescape(decoded)
+		if err != nil || next == decoded {
+			return false
+		}
+		if likelySensitiveLiteral(next) {
+			return true
+		}
+		decoded = next
+	}
+	// Excessively nested encoding is not needed for a DOI lookup and is
+	// rejected rather than risk sending a reversible secret representation.
+	return strings.Contains(decoded, "%")
+}
+
+func likelySensitiveLiteral(value string) bool {
 	if emailPattern.MatchString(value) ||
 		credentialAssignmentPattern.MatchString(value) ||
 		knownSecretPattern.MatchString(value) ||
@@ -178,13 +261,96 @@ func likelySensitive(value string) bool {
 		japanesePhonePattern.MatchString(value) ||
 		postalCodePattern.MatchString(value) ||
 		strings.Contains(value, "-----BEGIN PRIVATE KEY-----") ||
-		strings.Contains(value, "-----BEGIN RSA PRIVATE KEY-----") {
+		strings.Contains(value, "-----BEGIN RSA PRIVATE KEY-----") ||
+		likelyPersonalResearchContext(value) {
 		return true
 	}
 
 	for _, candidate := range longDigitPattern.FindAllString(value, -1) {
 		digits := digitsOnly(candidate)
 		if len(digits) >= 12 || (len(digits) >= 13 && luhnValid(digits)) {
+			return true
+		}
+	}
+	return false
+}
+
+func likelyPersonalResearchContext(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{
+		"私の", "わたしの", "僕の", "自分の", "患者名", "患者id", "症例番号",
+		"カルテ", "病歴", "服薬歴", "氏名", "本名", "住所", "勤務先",
+		"学校名", "学籍番号", "生年月日", "マイナンバー",
+		"さんの症状", "氏の症状", "先生の症状",
+		"my symptoms", "my diagnosis", "my patient", "patient named",
+		"medical record", "case id", "case number", "full name",
+		"home address", "date of birth", "student id", "employee id",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	if personalCasePattern.MatchString(value) {
+		return true
+	}
+	if commonJapaneseNamePattern.MatchString(value) ||
+		commonLatinNamePattern.MatchString(value) {
+		return true
+	}
+	if healthContextPattern.MatchString(value) &&
+		(japaneseNameLikePattern.MatchString(value) ||
+			latinFullNamePattern.MatchString(value) ||
+			healthPersonSlugPattern.MatchString(value)) {
+		return true
+	}
+	return likelyStandalonePersonName(value)
+}
+
+func likelyStandalonePersonName(value string) bool {
+	candidate := strings.Trim(
+		strings.TrimSpace(value),
+		"「」『』\"'()（）",
+	)
+	if candidate == "" ||
+		strings.ContainsAny(candidate, "/:@") {
+		return false
+	}
+
+	academicTopic := containsAcademicTopicMarker(candidate)
+	if fullName := latinFullNamePattern.FindString(candidate); fullName != "" &&
+		(fullName != candidate || !academicTopic) {
+		return true
+	}
+	compact := strings.NewReplacer(
+		" ", "",
+		"　", "",
+		"・", "",
+		"-", "",
+		".", "",
+	).Replace(candidate)
+	if compactJapaneseTopicPattern.MatchString(compact) && !academicTopic {
+		return true
+	}
+	return latinShortPhrasePattern.MatchString(candidate) && !academicTopic
+}
+
+func containsAcademicTopicMarker(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{
+		"理論", "解析", "分析", "学習", "記憶", "認知", "言語", "処理",
+		"計算", "量子", "細胞", "遺伝", "疾患", "症候群", "治療", "研究",
+		"技術", "手法", "モデル", "システム", "ネットワーク", "アルゴリズム",
+		"エラー", "訂正", "評価", "効果", "機構", "化学", "物理", "数学",
+		"医学", "教育", "支援", "障害", "環境", "経済", "政策", "材料",
+		"電池", "宇宙", "地震", "睡眠", "感染", "免疫", "疼痛",
+		"quantum", "comput", "learning", "memory", "language", "model",
+		"network", "algorithm", "analysis", "theory", "method", "system",
+		"physics", "chemistry", "biology", "medicine", "education",
+		"policy", "econom", "material", "battery", "climate", "error",
+		"retrieval", "augment", "generation", "cryptograph", "coding",
+		"research", "topic", "agentic", "fraud", "detect",
+	} {
+		if strings.Contains(lower, marker) {
 			return true
 		}
 	}

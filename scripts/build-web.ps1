@@ -52,10 +52,21 @@ $cargoCommand = Get-Command $CargoPath -CommandType Application -ErrorAction Sto
 
 if ([string]::IsNullOrWhiteSpace($WasmBindgenPath)) {
     $workspaceWasmBindgen = Join-Path $workspace ".tools\wasm-bindgen-0.2.126\wasm-bindgen.exe"
-    $userWasmBindgen = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".dx\tools\wasm-bindgen-0.2.126\wasm-bindgen.exe"
+    $profileRoots = @(
+        [Environment]::GetFolderPath("UserProfile"),
+        $env:USERPROFILE
+    ) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    $userWasmBindgen = $profileRoots |
+        ForEach-Object {
+            Join-Path $_ ".dx\tools\wasm-bindgen-0.2.126\wasm-bindgen.exe"
+        } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
     if (Test-Path -LiteralPath $workspaceWasmBindgen -PathType Leaf) {
         $WasmBindgenPath = $workspaceWasmBindgen
-    } elseif (Test-Path -LiteralPath $userWasmBindgen -PathType Leaf) {
+    } elseif (-not [string]::IsNullOrWhiteSpace($userWasmBindgen)) {
         $WasmBindgenPath = $userWasmBindgen
     } else {
         $wasmBindgenCommand = Get-Command "wasm-bindgen" -CommandType Application -ErrorAction SilentlyContinue

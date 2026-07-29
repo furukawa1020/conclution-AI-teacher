@@ -67,7 +67,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			operator: OperatorChoice, required: slots(SlotSelection), filled: slots(SlotSelection),
 			hypotheses: []float64{0.96, 0.04}, position: PositionLater,
 			calibration: CalibrationCommitted, issue: IssueBackgroundFirst, first: "A案です",
-			minimal: "A案です", reconstructed: "A案です。費用を考えたためです。",
+			minimal: "A案です", reconstructed: "A案です。費用を考えるとそう判断します。",
 			meaning: 0.96, gain: 0.28, want: OutcomeRestructure,
 		},
 		{
@@ -91,7 +91,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			position: PositionFirst, calibration: CalibrationConditional,
 			issue: IssueMissingRequiredSlot, first: "だいたい20くらいです",
 			minimal: "約20分です", reconstructed: "約20分です",
-			meaning: 0.94, gain: 0.25, want: OutcomeRestructure,
+			meaning: 0.94, gain: 0.25, want: OutcomeReject,
 		},
 		{
 			name: "quantity type mismatch", question: "参加者は何人ですか？", answer: "3時間です。",
@@ -113,7 +113,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			hypotheses: []float64{0.91, 0.09}, position: PositionAbsent,
 			calibration: CalibrationCommitted, issue: IssueReasonOnly,
 			minimal: "導入には反対です", reconstructed: "導入には反対です。高すぎるからです。",
-			meaning: 0.94, gain: 0.34, want: OutcomeRestructure,
+			meaning: 0.94, gain: 0.34, want: OutcomeReject,
 		},
 		{
 			name: "required reason missing", question: "賛成ですか？理由も教えてください。", answer: "賛成です。",
@@ -189,7 +189,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			filled: slots(SlotEvidence, SlotUncertainty), hypotheses: []float64{0.96, 0.04},
 			position: PositionFirst, calibration: CalibrationConditional,
 			issue: IssueInsufficientEvidence, first: "一人には効いた可能性があります",
-			minimal:       "一人の事例です",
+			minimal:       "一人の事例",
 			reconstructed: "一人の事例では効いた可能性がありますが、一般化はできません",
 			meaning:       0.95, gain: 0.27, want: OutcomeRestructure,
 		},

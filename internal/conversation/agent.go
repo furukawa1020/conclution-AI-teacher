@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
@@ -20,6 +21,7 @@ const (
 	PrecisionConfidenceThreshold = 0.78
 	AmbientEVIThreshold          = 0.35
 	maxModelResponseBytes        = 64 * 1024
+	criticTimeout                = 12 * time.Second
 )
 
 type Agent interface {
@@ -83,6 +85,14 @@ type inferencePayload struct {
 	PreviousState promptState `json:"previous_state"`
 	Preliminary   *modelPlan  `json:"preliminary_plan,omitempty"`
 	HasPDF        bool        `json:"has_pdf"`
+}
+
+type criticPayload struct {
+	Ambient              bool               `json:"ambient"`
+	Utterance            string             `json:"utterance"`
+	CandidateSpokenReply string             `json:"candidate_spoken_reply"`
+	PreviousState        promptState        `json:"previous_state"`
+	HasPDF               bool               `json:"has_pdf"`
 }
 
 func NewVertexAgent(
@@ -191,7 +201,10 @@ func (agent *vertexAgent) Process(
 	}
 	finalPlan := fastPlan
 	route := "fast"
-	if needsPrecision(fastPlan) {
+	draftModel := agent.fastModel
+	failClosedPrecision := requiresFailClosedPrecision(normalized, fastPlan)
+	precisionUnavailable := false
+	if needsPrecision(fastPlan) || failClosedPrecision {
 		precisionPlan, precisionErr := agent.infer(
 			ctx,
 			agent.precisionModel,
@@ -201,13 +214,37 @@ func (agent *vertexAgent) Process(
 			&fastPlan,
 		)
 		if precisionErr != nil {
-			// The fast plan has already passed the same strict schema and safety
-			// validation. A preview precision model must not make the whole voice
-			// turn unavailable.
-			route = "fast-fallback"
+			if failClosedPrecision {
+				route = "precision-unavailable"
+				precisionUnavailable = true
+			} else {
+				route = "fast-fallback"
+			}
 		} else {
 			finalPlan = precisionPlan
 			route = "precision"
+			draftModel = agent.precisionModel
+		}
+	}
+
+	verificationUnavailable := precisionUnavailable
+	if !verificationUnavailable {
+		criticModel := agent.precisionModel
+		if draftModel == agent.precisionModel {
+			criticModel = agent.fastModel
+		}
+		assessment, criticErr := agent.auditAnswer(
+			ctx,
+			criticModel,
+			normalized,
+			state,
+			finalPlan.SpokenReply,
+		)
+		if criticErr != nil {
+			route = "verification-unavailable"
+			verificationUnavailable = true
+		} else {
+			finalPlan.answerAssessment = assessment
 		}
 	}
 
@@ -228,7 +265,21 @@ func (agent *vertexAgent) Process(
 
 	spokenReply := finalPlan.SpokenReply
 	interventionPolicy := finalPlan.InterventionPolicy
-	if forceAmbientSilence {
+	if urgentSafety {
+		if verificationUnavailable {
+			decision.Act = "reflect"
+			spokenReply = "緊急性があるため、安全を優先してください。今すぐ地域の緊急窓口へ連絡できますか？"
+			interventionPolicy = "safety"
+		}
+	} else if verificationUnavailable && normalized.Ambient {
+		decision.Act = "silent"
+		spokenReply = ""
+		interventionPolicy = "wait"
+	} else if verificationUnavailable {
+		decision.Act = "clarify"
+		spokenReply = "回答の意味を安全に確認できませんでした。もう一度試してもらえますか？"
+		interventionPolicy = "clarify"
+	} else if forceAmbientSilence {
 		decision.Act = "silent"
 		spokenReply = ""
 		interventionPolicy = "wait"
@@ -245,14 +296,22 @@ func (agent *vertexAgent) Process(
 		interventionPolicy = "wait"
 	}
 
-	graph := mergeGraph(state.Graph, finalPlan.ThoughtStateDelta, normalized.Utterance)
+	graph := state.Graph
 	conversationSummary := stateSafeSummary(
 		finalPlan.ConversationSummary,
 		normalized.Utterance,
 		state.ConversationSummary,
 	)
 	documentSummary := state.DocumentSummary
-	if normalized.PDF != nil {
+	nextSelfCorrectionGrace := finalPlan.SelfCorrectionGrace
+	if verificationUnavailable {
+		conversationSummary = state.ConversationSummary
+		documentSummary = state.DocumentSummary
+		nextSelfCorrectionGrace = state.SelfCorrectionGrace
+	} else {
+		graph = mergeGraph(state.Graph, finalPlan.ThoughtStateDelta, normalized.Utterance)
+	}
+	if normalized.PDF != nil && !verificationUnavailable {
 		documentSummary = collapseSpace(finalPlan.DocumentSummary)
 	}
 	nextState := conversationState{
@@ -260,7 +319,7 @@ func (agent *vertexAgent) Process(
 		Graph:               graph,
 		ConversationSummary: conversationSummary,
 		DocumentSummary:     documentSummary,
-		SelfCorrectionGrace: finalPlan.SelfCorrectionGrace,
+		SelfCorrectionGrace: nextSelfCorrectionGrace,
 		LastIntervention:    decision,
 	}
 	stateToken, err := agent.codec.seal(uid, nextState)

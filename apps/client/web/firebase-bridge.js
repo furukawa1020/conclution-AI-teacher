@@ -494,6 +494,10 @@ function createRecording(stream) {
 }
 
 async function beginTurn() {
+  if (document.hidden) {
+    stopSession();
+    fail("request_cancelled");
+  }
   if (activeRecording) {
     fail("voice_turn_invalid");
   }
@@ -653,7 +657,7 @@ function mapVoiceResponseError(status) {
   return "voice_api_unavailable";
 }
 
-async function finishTurn(serializedSessionState) {
+async function finishTurn(serializedSessionState, turnMode) {
   const recording = activeRecording;
   if (!recording) {
     fail("voice_turn_invalid");
@@ -661,7 +665,8 @@ async function finishTurn(serializedSessionState) {
   const expectedEpoch = sessionEpoch;
   if (
     typeof serializedSessionState !== "string" ||
-    serializedSessionState.length > SESSION_STATE_MAX_CHARS
+    serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
+    (turnMode !== "intentional" && turnMode !== "ambient")
   ) {
     fail("voice_turn_invalid");
   }
@@ -699,6 +704,7 @@ async function finishTurn(serializedSessionState) {
       audioBase64,
       mimeType: capture.mimeType,
       sessionState: serializedSessionState,
+      turnMode,
     };
     if (documentForTurn) {
       payload.document = {
@@ -893,6 +899,7 @@ function stopSession() {
 
 function hasActiveVoiceSession() {
   return Boolean(
+    sessionStartedAt > 0 ||
     activeRecording ||
       activeRequestController ||
       activePlayback ||

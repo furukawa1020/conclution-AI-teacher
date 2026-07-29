@@ -1,117 +1,152 @@
 # 音声セキュリティ設計
 
-## 結論
+## 現在の保証範囲
 
-「音声を一時データにして機能を削る」のではなく、保存音声をクライアント暗号化し、復号経路を独立した鍵ブローカーへ隔離します。履歴、再生、後日再評価は維持します。
+現在の公開音声経路は「録音を暗号化して長期保存するサービス」ではありません。利用者が明示的に開始したセッション中に、一つの発話を認識、推論、必要なら音声合成し、アプリ側では音声、文字起こし、モデル応答、PDFを永続化しない構成です。
 
-ただし、無人の後日再評価と「サーバーが絶対に復号できないE2EE」は同時には成立しません。そのため、製品上も次の二つを混同しません。
+ここでいう「アプリ側で保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話データを書かないという意味です。音声は発話ごとのrequest dataとしてregional STTへ渡し、KOTAEはrequest終了後に履歴を保持しません。一方、処理に必要な平文は端末、Cloud Run、Google Cloudの各APIから見えます。E2EE、完全な端末内処理、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。管理サービス側のデータ利用・ログ条件は公式契約とproject設定を別に確認します。
 
-| モード | 履歴・再生 | 無人の後日再評価 | 復号条件 |
-|---|---:|---:|---|
-| 管理型セキュア履歴 | 可能 | 可能 | 認可済みworkerが一回限り復号 |
-| Vault | 可能 | 不可 | 本人が端末で鍵を解除した時だけ |
-
-どちらもVertex AIの処理中まで平文を見せない方式ではありません。Live意味処理を行う時間だけ、平文音声が認可済みLive GatewayとVertex AIのメモリ上に存在します。
-
-## 録音暗号
-
-- 録音の入力音声とAI応答音声を別トラックにする
-- トラックごとに新しい256-bit DEKを生成する
-- 固定サイズのチャンクをAES-256-GCMで暗号化する
-- 同じDEKでnonceを再利用しない
-- AADへschema version、所有者binding、録音ID、方向、codec、sample rate、channels、chunk indexを含める
-- manifestへ総チャンク数、総暗号文サイズ、連鎖SHA-256を保存する
-- 欠落、重複、並べ替え、別ユーザー・別録音への差し替えを拒否する
-- オブジェクト名はランダム128-bit IDとし、氏名、UID、題名を含めない
-
-この中核は `crates/audio_vault` にあり、秘密鍵のDebug表示を常に伏せ、復号平文をdrop時にzeroizeします。
-
-## 鍵階層
-
-公開ベータ以降は、ユーザーごとのCloud KMS RSA-OAEP-3072/SHA-256鍵で録音DEKを包みます。
+## データフローと所在地
 
 ```text
-ユーザーKMS RSA鍵
-└─ 公開鍵: ブラウザが録音DEKをwrap
-└─ 秘密鍵: KMS外へ出ない
-     └─ Key Brokerだけが利用
-          └─ トラックDEK
-               └─ AES-GCM暗号化音声チャンク
+マイク
+  │ 端末RAM: MediaRecorder + VAD
+  ▼
+Firebase Hosting /api rewrite
+  ▼
+Cloud Run kotae-api（asia-northeast1）
+  ├─ raw audio ──→ Cloud Speech-to-Text V2（asia-northeast1）
+  │                    └─ transcript
+  ├─ transcript + 今回だけのPDF ──→ Vertex AI（global）
+  │                                    ├─ KOTAE Reflex / LAC
+  │                                    └─ silence または短い応答文
+  └─ 応答文 ──→ Cloud Text-to-Speech（asia-northeast1）
+                    └─ MP3 ──→ ブラウザ再生
 ```
 
-再生時、ブラウザは一時鍵ペアを生成します。Key Brokerは認可後にDEKを開き、その一時公開鍵へ再wrapします。再生サーバーへ平文音声を返しません。
+| データ | 処理先 | アプリ側の永続化 | セッション継続に残るもの |
+|---|---|---|---|
+| マイク音声 | ブラウザ、Cloud Run、東京リージョンSTT | なし | なし |
+| 文字起こし | Cloud Run、Vertex AI `global` | なし | 原文ではなく短い意味要約が暗号化状態に入り得る |
+| モデル応答文 | Cloud Run、東京リージョンTTS | なし | 原文は状態へ保存しない |
+| 合成音声 | Cloud Run、ブラウザ | なし | 再生後は参照を解放する |
+| PDF | Cloud Run、Vertex AI `global` | なし | PDF本文ではなく短い資料要約が暗号化状態に入り得る |
+| 会話状態 | ブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | 暗号化した意味グラフと短い要約、15分TTL |
+| 音声レート制限 | Firestore | 48時間TTL | UIDのSHA-256由来document IDと回数・時刻 |
 
-管理型セキュア履歴の後日再評価では、Cloud Tasksの特定ジョブ、特定録音generation、短い期限へ束縛した許可を一回だけ消費します。workerは音声をメモリ上でだけ復号し、KMSを直接呼ばずKey Brokerを経由します。
+STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
 
-## IAM分離
+## マイクとセッション制御
 
-| サービスID | 許可 | 明示的に持たせないもの |
-|---|---|---|
-| API | Vertex、Firestore | 音声Storage、KMS |
-| Live Gateway | Vertex Live | Storage、KMS |
-| Cipher Gateway | 指定暗号文のread/write | KMS decrypt、Vertex |
-| Key Broker | 録音DEK用KMS操作 | Storage、Vertex |
-| Re-eval Worker | 指定object read、Vertex、Broker invoke | KMS直接操作、bucket list |
-| Key Lifecycle | KMS version無効化・破棄 | decrypt、Storage |
+- 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
+- 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
+- AI処理中と合成音声の再生中はマイクトラックを無効にする
+- タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
+- 無発話が3分続いた時、または開始から30分経過した時にセッションを終了する
+- 一発話は音声ありで最大55秒、無音で最大30秒とし、音声requestは2 MiB、PDFは7 MiBを上限にする
+- 会話状態とPDFはJavaScript変数にだけ保持し、localStorageへ保存しない。Firebaseの匿名認証だけは`browserSessionPersistence`を使う
 
-サービスアカウントJSON鍵は作りません。Cloud Runへ割り当てたサービスIDのApplication Default Credentialsを使います。
+JavaScriptのガベージコレクションや文字列の複製は完全には制御できません。クライアントは使用後に参照を解放し、Go側は受信byte sliceを可能な範囲でclearしますが、これを暗号学的なRAM消去保証とは表現しません。
 
-## Live音声
+## API境界
 
-```text
-Firebase Hosting                 voice.<domain>
-Rust/Wasm UI ── ticket POST ──→ HTTPS LB / Cloud Armor
-      │                              │
-      └──────── WSS + cookie ───────→ Live Gateway ──→ Vertex Live
-```
+`POST /api/v1/voice/turns`では次をすべて要求します。
 
-ブラウザWebSocketは任意のAuthorizationヘッダーを付けられないため、先にHTTPS POSTでFirebase ID token、App Check、Originを検証します。発行するticketは30〜60秒、単発、UID・Origin・session ID束縛とし、`Secure; HttpOnly; SameSite=Strict` cookieで渡してWSS handshake時に原子的に消費します。
+- Firebase ID token
+- Firebase App Check token
+- 許可済みFirebase App ID
+- 同一サイトのOrigin
+- `application/json`と許可済み音声MIME
+- サイズ上限、strict Base64、未知JSON fieldの拒否
+- 音声用の独立したユーザーレート制限
+- request timeout
 
-## 保存と削除
+PDFは`application/pdf`、サイズ上限、`%PDF-` magicを確認します。PDF内の文章は命令ではなく信頼できない資料としてモデルへ渡し、外部ツール実行や権限変更に使いません。
 
-保持期間は一律にせず、raw audio、AI応答音声、文字起こし、評価結果ごとに選択できます。
+## 会話状態
 
-- 30日
-- 90日
-- 1年
-- 自分で削除するまで
-- 録音単位で固定
+会話履歴をサーバーへ保存する代わりに、短い意味状態を不透明なtokenとしてブラウザへ返します。
 
-アカウント削除時は、将来の再生・再評価を即時停止し、ユーザー鍵を破棄予定状態へ移し、音声、wrapped DEK、manifest、文字起こし、評価、通知tokenを削除します。「アプリから即時アクセス不能」と、Storage soft deleteやKMS破棄待機を含む「物理削除完了」は別の日時として表示します。
+- AES-256-GCM
+- ランダムnonce
+- Firebase UIDをAADへ含め、別ユーザーへの差し替えを拒否
+- 発行から15分で失効
+- schema、長さ、turn数を復号後にも検証
+- 暗号鍵は32 byteで、Cloud RunへSecret Managerから注入
+- tokenへ逐語録、PDF本文、モデルのchain-of-thoughtを入れない
 
-## 同意
+tokenには会話と資料の短い意味要約が含まれるため、秘密でないデータとは扱いません。また、Cloud RunはSecret Managerの鍵を使って復号できるためE2EEではありません。秘密へのアクセスはCloud Runの実行サービスIDだけに限定します。
 
-次を一括同意にしません。
+## PDFの「今回だけ」
 
-- マイク利用
-- raw audio保存
-- Vertex AI処理
-- AI応答音声保存
-- 後日再評価
-- 教師・組織との共有
-- 品質改善・学習利用
-- 話者識別、声紋、感情推定
+PDFは利用者が選択した後の一つの音声ターンにだけ添付します。request完了時にブラウザ側の参照を外し、Cloud Run側のbyte bufferをclearし、FirestoreやCloud Storageへ原本を保存しません。
 
-品質改善・学習利用は既定OFFです。声を認証要素として使わず、声だけで課金、成績、共有、削除を承認しません。
+ただし、次を明示します。
 
-## ログ禁止項目
+- PDF本文は推論のためVertex AI `global`へ送られる
+- 同じターンで高速経路と精密経路の両方を使う場合がある
+- 資料の短い意味要約は暗号化状態tokenへ残り、後続ターンの文脈に使われ得る
+- JavaScript、Go runtime、管理されたGoogle Cloudサービス内部の一時コピーまで物理消去を証明するものではない
 
-音声、文字起こし、prompt/response、Firebase token、App Check token、cookie、署名URL、DEK、session handleはログへ出しません。ログにはrequest ID、UIDの短い不可逆hash、処理時間、論理モデルID、エラー分類だけを残します。
+## ログと永続データ
 
-## 最低限の侵入試験
+音声、文字起こし、モデルprompt/response、PDF、Firebase token、App Check token、状態token、秘密鍵をアプリログへ出しません。音声APIの運用ログは次に限定します。
 
-- 他人の録音IDで取得できない
-- Live ticketを二度使えない
-- チャンクの改ざん、欠落、並べ替えを検出する
-- Cipher GatewayからKMSを利用できない
-- Key BrokerからStorageを閲覧できない
-- 鍵破棄後は暗号文が残っていても復号できない
-- ログとブラウザキャッシュへ音声・tokenが残らない
+- request ID
+- UIDの短い不可逆hash
+- 推定domain
+- fast / precisionなどのroute
+- 音声を返したかどうか
+- 処理時間
+- 列挙したerror class
+
+既存の`/api/v1/evaluations`は評価メタデータを30日TTLで保存しますが、音声会話経路はこのevaluation storeへ本文を書きません。音声レート制限counterは別collectionへ保存し、48時間TTLを設定します。
+
+## 推論と過剰介入の安全策
+
+KOTAE ReflexとLatent Answer Contract（LAC）はプロジェクト独自の実験的な制御機構であり、医療機器や安全認証済みの判断機構ではありません。
+
+- 潜在問いの上位候補が近く曖昧なら、勝手に一つへ固定せず確認または沈黙を選ぶ
+- 答えが問いの必須slotを満たすか、最初のコミットメントがどこにあるかを決定論的に再検証する
+- 再構成で条件や不確実性が変わる場合は、その修復案を拒否する
+- 自己修正の兆候がある時は、AIの訂正より本人の言い直しを優先する
+- 日常のぼやきや感情表現を、常に論理誤りとして矯正しない
+- 医療、法律、金融は高リスク経路として扱い、音声だけで最終判断を確定しない
+
+LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservation`は内部の制御・評価指標であり、モデルの自己申告だけを正解とはしません。現在は研究的な仮説であり、実際の会話データによる精度、誤介入率、校正の検証が必要です。
+
+## 保証しないこと
+
+- 端末内だけの処理
+- E2EE
+- 声紋による本人確認
+- 音声・文字・PDFがすべて日本リージョン内に留まること
+- 第三者クラウドを含む絶対的なゼロデータ保持
+- ブラウザ拡張、OSマルウェア、画面・スピーカーの盗み見への防御
+- モデル回答の正しさ、最新情報の自動保証
+- 保存音声の履歴、再生、共有、後日再評価
+
+`crates/audio_vault`は将来の同意制履歴を検討するための暗号化コアで、現在の公開音声経路には接続していません。履歴機能を追加する場合は、raw audio保存、応答音声保存、後日再評価、共有、品質改善を別々に同意させ、保存先、削除、鍵管理、監査を改めて設計します。
+
+## 最低限の検証
+
+- ID token、App Check、Originのどれかが不正ならモデルを呼ばない
+- 未知field、不正MIME、過大音声、過大PDF、PDF magic不正を拒否する
+- 状態tokenの改ざん、期限切れ、別UIDでの利用を拒否する
+- 曖昧な潜在問いで断定的な再構成をしない
+- 条件、不確実性、留保を変える再構成を拒否する
+- 自己修正中と介入価値が低い発話では沈黙する
+- タブ非表示、session停止、error時にマイクを解放する
+- ログ、Firestore、Cloud Storageへ音声、逐語録、PDF本文が作られない
 
 参考:
 
-- [Cloud KMS envelope encryption](https://cloud.google.com/kms/docs/envelope-encryption)
-- [Cloud KMS separation of duties](https://cloud.google.com/kms/docs/separation-of-duties)
-- [Cloud Run service identity](https://cloud.google.com/run/docs/securing/service-identity)
-- [Cloud Storage client-side encryption](https://cloud.google.com/storage/docs/encryption/client-side-keys)
+- [Cloud Speech-to-Text Chirp 3](https://cloud.google.com/speech-to-text/v2/docs/chirp-model)
+- [Speech-to-Text data usage FAQ](https://cloud.google.com/speech-to-text/docs/data-usage-faq)
+- [Cloud Text-to-Speech Chirp 3 HD](https://cloud.google.com/text-to-speech/docs/chirp3-hd)
+- [Text-to-Speech regional endpoints](https://cloud.google.com/text-to-speech/docs/endpoints)
+- [Text-to-Speech data logging](https://cloud.google.com/text-to-speech/docs/data-logging)
+- [Vertex AI zero data retention](https://cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)
 - [Firebase App Check custom backend](https://firebase.google.com/docs/app-check/custom-resource-backend)
+- [Secret Manager access control](https://cloud.google.com/secret-manager/docs/access-control)
+- [Cloud Run service identity](https://cloud.google.com/run/docs/securing/service-identity)

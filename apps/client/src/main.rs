@@ -146,7 +146,7 @@ mod cloud {
         async fn wait_for_turn_end_js() -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = finishTurn)]
-        async fn finish_turn_js(session_state: &str) -> Result<JsValue, JsValue>;
+        async fn finish_turn_js(session_state: &str, turn_mode: &str) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = playResponse)]
         async fn play_response_js(
@@ -186,8 +186,18 @@ mod cloud {
             .map_err(|_| "マイクの状態を確認できない")
     }
 
-    pub async fn finish_turn(session_state: &str) -> Result<VoiceTurnResult, &'static str> {
-        let value = finish_turn_js(session_state).await.map_err(user_message)?;
+    pub async fn finish_turn(
+        session_state: &str,
+        intentional: bool,
+    ) -> Result<VoiceTurnResult, &'static str> {
+        let turn_mode = if intentional {
+            "intentional"
+        } else {
+            "ambient"
+        };
+        let value = finish_turn_js(session_state, turn_mode)
+            .await
+            .map_err(user_message)?;
         serde_wasm_bindgen::from_value(value)
             .map_err(|_| "音声応答を確認できない　もう一度ためしてみて")
     }
@@ -267,7 +277,10 @@ mod cloud {
         Err("WebAssembly版で使ってみて")
     }
 
-    pub async fn finish_turn(_session_state: &str) -> Result<VoiceTurnResult, &'static str> {
+    pub async fn finish_turn(
+        _session_state: &str,
+        _intentional: bool,
+    ) -> Result<VoiceTurnResult, &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -293,13 +306,14 @@ fn main() {
 fn arm_listening(
     operation: u64,
     announce_permission: bool,
+    intentional: bool,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     session_state: Signal<String>,
     detected_domain: Signal<String>,
     route: Signal<String>,
     needs_paper: Signal<bool>,
-    document_info: Signal<Option<DocumentInfo>>,
+    mut document_info: Signal<Option<DocumentInfo>>,
     caption: Signal<Option<String>>,
 ) {
     if announce_permission {
@@ -310,6 +324,7 @@ fn arm_listening(
         if let Err(message) = cloud::begin_turn().await {
             if *generation.peek() == operation {
                 cloud::stop_session();
+                document_info.set(None);
                 voice_state.set(VoiceState::Error(message));
             }
             return;
@@ -325,6 +340,7 @@ fn arm_listening(
             Err(message) => {
                 if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
                     cloud::stop_session();
+                    document_info.set(None);
                     voice_state.set(VoiceState::Error(message));
                 }
                 return;
@@ -335,6 +351,7 @@ fn arm_listening(
             if has_speech {
                 submit_turn(
                     operation,
+                    intentional,
                     voice_state,
                     generation,
                     session_state,
@@ -348,6 +365,7 @@ fn arm_listening(
                 arm_listening(
                     operation,
                     false,
+                    intentional,
                     voice_state,
                     generation,
                     session_state,
@@ -365,6 +383,7 @@ fn arm_listening(
 #[allow(clippy::too_many_arguments)]
 fn submit_turn(
     operation: u64,
+    intentional: bool,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     mut session_state: Signal<String>,
@@ -383,7 +402,7 @@ fn submit_turn(
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
-        let result = cloud::finish_turn(&state_snapshot).await;
+        let result = cloud::finish_turn(&state_snapshot, intentional).await;
         if *generation.peek() != operation {
             return;
         }
@@ -428,6 +447,7 @@ fn submit_turn(
         arm_listening(
             operation,
             false,
+            false,
             voice_state,
             generation,
             session_state,
@@ -455,6 +475,7 @@ fn start_or_resume(
     generation.set(operation);
     arm_listening(
         operation,
+        true,
         true,
         voice_state,
         generation,

@@ -238,6 +238,160 @@ func TestAgentAmbiguousPrecisionAsksExactlyOneQuestion(t *testing.T) {
 	}
 }
 
+func TestAgentLACForcesMeaningPreservingRestructureAndPublishesMetrics(t *testing.T) {
+	plan := validModelPlan()
+	plan.SpokenReply = "理由を先に説明します。A案です。"
+	plan.AnswerContract = answercontract.Contract{
+		QuestionFrame: answercontract.QuestionFrame{
+			Operator:      answercontract.OperatorChoice,
+			Subject:       "A案とB案の選択",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotSelection},
+			Hypotheses: []answercontract.Hypothesis{{
+				Interpretation: "一案を選ぶ",
+				Confidence:     1,
+			}},
+		},
+		CommitmentFront: answercontract.CommitmentFront{
+			FirstCommitment: "A案です",
+			FillsTarget:     true,
+			TargetCoverage:  1,
+			FilledSlots:     []answercontract.RequiredSlot{answercontract.SlotSelection},
+			PositionClass:   answercontract.PositionLater,
+			Calibration:     answercontract.CalibrationCommitted,
+			Issue:           answercontract.IssueBackgroundFirst,
+		},
+		CounterfactualRepair: answercontract.CounterfactualRepair{
+			MinimalAnswer:                 "A案です",
+			ReconstructedAnswer:           "A案です。理由を先に説明します。",
+			MeaningPreservationConfidence: 0.98,
+			RepairGain:                    0.40,
+		},
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	agent := newTestAgent(t, fake)
+	result, err := agent.Process(context.Background(), "uid-lac", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "A案とB案ならどちら？",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Intervention.Act != "restructure" ||
+		result.SpokenReply != plan.AnswerContract.CounterfactualRepair.ReconstructedAnswer {
+		t.Fatalf("LAC repair was not forced: %#v", result)
+	}
+	if result.AnswerContract.TargetSlotCoverage != 1 ||
+		result.AnswerContract.CommitmentFrontPosition != answercontract.PositionLater ||
+		result.AnswerContract.MeaningPreservation != 0.98 {
+		t.Fatalf("unexpected public LAC metrics: %+v", result.AnswerContract)
+	}
+
+	state, err := agent.codec.open("uid-lac", result.StateToken)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	for _, currentTurnText := range []string{
+		plan.AnswerContract.QuestionFrame.Subject,
+		plan.AnswerContract.CommitmentFront.FirstCommitment,
+		plan.AnswerContract.CounterfactualRepair.MinimalAnswer,
+	} {
+		if bytes.Contains(stateJSON, []byte(currentTurnText)) {
+			t.Fatalf("current-turn LAC text entered state: %s", stateJSON)
+		}
+	}
+}
+
+func TestAgentLACAmbiguityClarifiesOrStaysSilent(t *testing.T) {
+	for _, ambient := range []bool{false, true} {
+		name := "intentional"
+		if ambient {
+			name = "ambient"
+		}
+		t.Run(name, func(t *testing.T) {
+			plan := validModelPlan()
+			plan.AnswerContract.QuestionFrame.Hypotheses = []answercontract.Hypothesis{
+				{Interpretation: "Aを尋ねている", Confidence: 0.55},
+				{Interpretation: "Bを尋ねている", Confidence: 0.45},
+			}
+			fake := &fakeGenerator{generations: []fakeGeneration{{
+				body: encodePlan(t, plan),
+			}}}
+			agent := newTestAgent(t, fake)
+			result, err := agent.Process(context.Background(), "uid-lac", VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "それはどちら？",
+				Ambient:       ambient,
+			})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if result.AnswerContract.HypothesisGap != 0.1 {
+				t.Fatalf("server gap = %v", result.AnswerContract.HypothesisGap)
+			}
+			if ambient {
+				if result.Intervention.Act != "silent" || result.SpokenReply != "" {
+					t.Fatalf("ambiguous ambient turn spoke: %#v", result)
+				}
+				return
+			}
+			if result.Intervention.Act != "clarify" ||
+				!result.NeedsClarification ||
+				countQuestions(result.SpokenReply) != 1 {
+				t.Fatalf("intentional ambiguity did not clarify: %#v", result)
+			}
+		})
+	}
+}
+
+func TestAgentLACRejectsMeaningChangingRepair(t *testing.T) {
+	plan := validModelPlan()
+	plan.SpokenReply = "理由のあとではA案です。"
+	plan.AnswerContract = answercontract.Contract{
+		QuestionFrame: answercontract.QuestionFrame{
+			Operator:      answercontract.OperatorChoice,
+			Subject:       "A案とB案の選択",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotSelection},
+			Hypotheses: []answercontract.Hypothesis{{
+				Interpretation: "一案を選ぶ",
+				Confidence:     1,
+			}},
+		},
+		CommitmentFront: answercontract.CommitmentFront{
+			FirstCommitment: "A案です",
+			FillsTarget:     true,
+			TargetCoverage:  1,
+			FilledSlots:     []answercontract.RequiredSlot{answercontract.SlotSelection},
+			PositionClass:   answercontract.PositionLater,
+			Calibration:     answercontract.CalibrationCommitted,
+			Issue:           answercontract.IssueBackgroundFirst,
+		},
+		CounterfactualRepair: answercontract.CounterfactualRepair{
+			MinimalAnswer:                 "B案です",
+			ReconstructedAnswer:           "B案です。理由は同じです。",
+			MeaningPreservationConfidence: 0.99,
+			RepairGain:                    0.50,
+		},
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	agent := newTestAgent(t, fake)
+	result, err := agent.Process(context.Background(), "uid-lac", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "A案とB案ならどちら？",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Intervention.Act != "clarify" ||
+		strings.Contains(result.SpokenReply, "B案") ||
+		result.AnswerContract.MeaningPreservation != 0 {
+		t.Fatalf("meaning-changing repair escaped gate: %#v", result)
+	}
+}
+
 func TestAgentAmbientLowEVIAndSelfRepairStaySilent(t *testing.T) {
 	tests := []struct {
 		name  string

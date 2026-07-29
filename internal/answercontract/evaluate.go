@@ -1,11 +1,38 @@
 package answercontract
 
 import (
-	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
+
+var (
+	arabicNumberPattern = regexp.MustCompile(
+		`[0-9０-９]+([.．][0-9０-９]+)?(円|人|件|日|時間|分|秒|年|月|週|%|％|個|回|倍|GB|MB|KB|キロ|メートル|cm|mm)?`,
+	)
+	kanjiNumberWithUnitPattern = regexp.MustCompile(
+		`[一二三四五六七八九十百千万]+(円|人|件|日|時間|分|秒|年|月|週|個|回|倍)`,
+	)
+	latinAnchorPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9._-]*`)
+	labelAnchorPattern = regexp.MustCompile(
+		`[A-Za-zＡ-Ｚａ-ｚ0-9０-９ァ-ヶー]{1,24}(案|社|方式|プラン|モデル|版)`,
+	)
+	quotedAnchorPattern    = regexp.MustCompile(`「([^」]{1,40})」`)
+	conditionClausePattern = regexp.MustCompile(
+		`([^\s、。,.!?！？]{1,30})(なら|であれば|の場合|のとき|時だけ)`,
+	)
+	causalClausePattern = regexp.MustCompile(
+		`([^\s、。,.!?！？]{1,40})(から|ため|ので)`,
+	)
+)
+
+// Validate checks the structural LAC contract without treating it as an
+// authoritative audit of any candidate answer.
+func Validate(contract Contract) error {
+	_, _, err := validateAndNormalize(contract)
+	return err
+}
 
 // Evaluate validates a current-turn LAC and derives all scores independently
 // from its discrete evidence. originalAnswer is used only during this call to
@@ -23,7 +50,8 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 	entropy := hypothesisEntropy(question.Hypotheses)
 	topConfidence := question.Hypotheses[0].Confidence
 	ambiguous := (len(question.Hypotheses) > 1 && gap <= HypothesisGapThreshold) ||
-		(entropy >= HighEntropyThreshold && topConfidence < LowTopHypothesisThreshold)
+		topConfidence < LowTopHypothesisThreshold ||
+		entropy >= HighEntropyThreshold
 
 	targetSlot, _ := TargetSlot(question.Operator)
 	targetFilled := containsSlot(commitment.FilledSlots, targetSlot)
@@ -36,6 +64,7 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 		originalAnswer,
 		repair.ReconstructedAnswer,
 		commitment.Calibration,
+		question.Operator,
 	)
 	if repair.RepairGain == 0 &&
 		collapseSpace(repair.ReconstructedAnswer) != collapseSpace(originalAnswer) {
@@ -231,7 +260,12 @@ func hypothesisEntropy(hypotheses []Hypothesis) float64 {
 	return entropy / math.Log(float64(len(probabilities)))
 }
 
-func preservesMeaning(original, reconstructed string, calibration Calibration) bool {
+func preservesMeaning(
+	original,
+	reconstructed string,
+	calibration Calibration,
+	operator Operator,
+) bool {
 	original = collapseSpace(original)
 	reconstructed = collapseSpace(reconstructed)
 	if reconstructed == "" {
@@ -240,11 +274,126 @@ func preservesMeaning(original, reconstructed string, calibration Calibration) b
 	if hasCondition(original) != hasCondition(reconstructed) {
 		return false
 	}
+	if !sameStringSet(
+		extractClauses(conditionClausePattern, original),
+		extractClauses(conditionClausePattern, reconstructed),
+	) {
+		return false
+	}
+	if hasCausalClaim(original) != hasCausalClaim(reconstructed) {
+		return false
+	}
+	if !sameStringSet(
+		extractClauses(causalClausePattern, original),
+		extractClauses(causalClausePattern, reconstructed),
+	) {
+		return false
+	}
+	if operator == OperatorBoolean &&
+		polarityClass(original) != polarityClass(reconstructed) {
+		return false
+	}
+	if !sameStringSet(protectedFacts(original), protectedFacts(reconstructed)) {
+		return false
+	}
 	originalUncertainty := uncertaintyLevel(original)
 	if originalUncertainty == 0 {
 		originalUncertainty = calibrationUncertainty(calibration)
 	}
 	return originalUncertainty == uncertaintyLevel(reconstructed)
+}
+
+func hasCausalClaim(value string) bool {
+	for _, marker := range []string{
+		"から", "ため", "ので", "原因", "理由", "により", "によって",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func polarityClass(value string) int {
+	negative := containsAny(value, []string{
+		"いいえ", "反対", "できない", "できません", "不可能", "しない",
+		"しません", "行かない", "行きません", "参加しない", "ありません",
+		"不要です", "却下", "中止します", "禁止します", "断定できません",
+	})
+	affirmative := containsAny(value, []string{
+		"はい", "賛成", "できます", "できる", "採用します", "採用する",
+		"実施します", "実施する", "行きます", "参加します", "必要です",
+		"有効です", "改善します", "改善する",
+	})
+	switch {
+	case negative && affirmative:
+		return 2
+	case negative:
+		return -1
+	case affirmative:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func protectedFacts(value string) map[string]struct{} {
+	normalized := normalizeDigits(value)
+	result := make(map[string]struct{})
+	for _, pattern := range []*regexp.Regexp{
+		arabicNumberPattern,
+		kanjiNumberWithUnitPattern,
+		latinAnchorPattern,
+		labelAnchorPattern,
+	} {
+		for _, match := range pattern.FindAllString(normalized, -1) {
+			result[match] = struct{}{}
+		}
+	}
+	for _, match := range quotedAnchorPattern.FindAllStringSubmatch(normalized, -1) {
+		if len(match) >= 2 {
+			result["quoted:"+match[1]] = struct{}{}
+		}
+	}
+	return result
+}
+
+func extractClauses(pattern *regexp.Regexp, value string) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, match := range pattern.FindAllStringSubmatch(value, -1) {
+		if len(match) >= 2 {
+			result[collapseSpace(match[1])] = struct{}{}
+		}
+	}
+	return result
+}
+
+func sameStringSet(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if _, exists := right[value]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func containsAny(value string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeDigits(value string) string {
+	return strings.NewReplacer(
+		"０", "0", "１", "1", "２", "2", "３", "3", "４", "4",
+		"５", "5", "６", "6", "７", "7", "８", "8", "９", "9", "．", ".",
+	).Replace(value)
 }
 
 func hasCondition(value string) bool {
@@ -406,8 +555,4 @@ func collapseSpace(value string) string {
 
 func roundScore(value float64) float64 {
 	return math.Round(value*1_000) / 1_000
-}
-
-func invalidField(name string) error {
-	return fmt.Errorf("%w: %s", ErrInvalidContract, name)
 }

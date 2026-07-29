@@ -2,54 +2,114 @@
 
 ## 作品の核
 
-コタエーAIの独自性は、生成AIへ回答を投げることではありません。発話が始まる前の迷い、結論までの時間、沈黙、言い直しを端末上で計測し、意味評価と重ねて「答え方の癖」を可視化する点です。
+コタエーAIは、固定質問に対する採点器ではありません。明示的に開始した音声セッションから潜在的な問いと話題の移行を推定し、「Aを聞かれているのにAへ答えていない」状態を検出し、意味を変えずに答えの核を前へ出せる時だけ介入します。
 
 ```text
-マイク
-  │ PCM（端末内だけ）
+発話
   ▼
-Rust audio_core ──→ 時間特徴 ──→ 校正定規UI
-  │
-  ├─ 生PCMを継続保持しない
-  │
-  └─ 保存を選んだ録音
-       ▼
-Rust audio_vault ──→ 暗号文 ──→ Cipher Gateway ──→ 非公開Storage
-
-回答テキスト ──→ Go API ──→ Genkit ──→ Vertex AI
-                    │
-                    ├─ Firebase ID token
-                    ├─ Firebase App Check
-                    └─ Firestore（評価値・版情報）
+潜在問いの仮説 ──→ Latent Answer Contract
+  │                  ├─ 問いのoperatorと必須slot
+  │                  ├─ 最初のcommitmentとtarget coverage
+  │                  └─ 条件・不確実性を守るcounterfactual repair
+  ▼
+Revision-aware Thought State Graph
+  ├─ goal / claim / evidence / constraint
+  ├─ Self-repair grace
+  └─ Expected Value of Intervention
+       ├─ silence
+       ├─ clarify
+       └─ short spoken repair
 ```
+
+KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設計した実験機構です。新規性はクラウドAPIを接続したことではなく、潜在問いの不確実性、答えの必須slot、冒頭のコミットメント、意味を保持した修復を一つの検証可能な契約として扱えるかに置きます。「世界初」や有効性が確立済みとは主張しません。
+
+## 現在の実装経路
+
+```text
+┌──────────────────────────────────────────────┐
+│ Browser                                      │
+│ Rust / Dioxus / Wasm                         │
+│  └─ JS bridge: MediaRecorder / Web Audio VAD │
+│                 Firebase Auth / App Check    │
+└───────────────────┬──────────────────────────┘
+                    │ same-origin HTTPS
+                    │ POST /api/v1/voice/turns
+                    ▼
+┌──────────────────────────────────────────────┐
+│ Cloud Run / Go（asia-northeast1）             │
+│ Auth + App Check + Origin + size + rate limit│
+└──────────┬──────────────────┬────────────────┘
+           │ raw audio        │ transcript / one-turn PDF
+           ▼                  ▼
+┌──────────────────┐   ┌─────────────────────────────┐
+│ Cloud STT V2     │   │ Vertex AI（global）          │
+│ asia-northeast1  │   │ Gemini fast / precision     │
+│ chirp_3, ja-JP   │   │ Thought Graph + EVI + LAC   │
+└────────┬─────────┘   └────────────┬────────────────┘
+         └──── transcript ──────────┘
+                                    │ silence / reply text
+                                    ▼
+                         ┌──────────────────────────┐
+                         │ Cloud TTS                │
+                         │ asia-northeast1          │
+                         │ Chirp 3 HD, ja-JP        │
+                         └────────────┬─────────────┘
+                                      │ MP3
+                                      ▼
+                                   Browser
+```
+
+Cloud STTにはraw audioだけ、Vertex AIには文字起こしと任意のPDF、Cloud TTSには選択された短い応答文だけを渡します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。
+
+## 状態
+
+長い会話履歴をサーバーへ置かず、短い意味状態だけを暗号化tokenとしてブラウザメモリへ返します。
+
+```text
+AES-256-GCM token
+  ├─ schema / issuedAt / expiresAt / turn
+  ├─ short Thought State Graph
+  ├─ short conversation summary
+  ├─ optional short document summary
+  └─ last intervention metadata
+```
+
+tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret ManagerからCloud Runへ注入します。逐語録、PDF本文、chain-of-thoughtは入れません。ただし意味要約は機微情報になり得て、Cloud Runは復号できるためE2EEではありません。
 
 ## 技術境界
 
 | 層 | 技術 | 責務 |
 |---|---|---|
-| 体験 | Rust / Dioxus / Wasm | UI、端末状態、アクセシビリティ |
-| 音声特徴 | Rust | VAD、開始時刻、沈黙、発話区間 |
-| 録音保護 | Rust / AES-256-GCM | チャンク暗号化、AAD、完全性manifest |
-| 意味評価 | Go / Genkit | 型付き評価、出力検証、判定経路 |
-| 認証境界 | Firebase Auth / App Check | 人と正規アプリの両方を検証 |
-| 永続化 | Firestore / Cloud Storage | 評価メタデータと暗号文を分離 |
-| モデル | Vertex AI | 意味判定とLive対話 |
+| 体験 | Rust / Dioxus / Wasm | 音声中心UI、session状態、アクセシビリティ |
+| ブラウザ境界 | 小さなJavaScript module | MediaRecorder、Web Audio VAD、Firebase Web SDK、音声再生 |
+| API | Go / Cloud Run | 認証、App Check、Origin、入力検証、timeout、rate limit |
+| 音声認識 | Cloud Speech-to-Text V2 | `asia-northeast1`で日本語音声を文字へ変換 |
+| 推論 | Go / Vertex AI | structured output、fast / precision routing、KOTAE Reflex |
+| 答え契約 | Go | LACの決定論的検証、曖昧性・coverage・意味保存guard |
+| 音声合成 | Cloud Text-to-Speech | `asia-northeast1`で短い応答文をMP3へ変換 |
+| 一時状態 | Go / browser memory | UID-bound AES-GCM token、15分TTL |
+| 運用メタデータ | Firestore | 評価メタデータとrate counterだけをTTL付きで保存 |
 
-ブラウザが要求するマイク、AudioWorklet、Web Crypto、Firebase Web SDKの呼び出しだけは、監査可能な小さなJavaScriptブリッジに隔離します。アプリ本体の状態・評価ロジック・暗号ロジックはJavaScriptへ置きません。
+TypeScriptは使いません。ブラウザAPIとFirebase Web SDKを直接呼ぶ必要がある範囲だけをJavaScriptへ隔離し、認証判断、推論、暗号、LACをJavaScriptへ置きません。
 
-## 評価経路
+## 推論経路
 
-1. Fast Judgeが通常回答を短時間で構造化判定する。
-2. 信頼度が低い、音声認識が不確実、判定境界に近い回答だけPrecision Pathへ送る。
-3. 二経路が不一致の場合だけAdjudicatorが最終判定する。
-4. モデル名ではなく、logical model ID、rubric、prompt、schemaの各バージョンを結果へ保存する。
+1. Gemini 3.6 Flashの高速経路が、domain、潜在問い、Thought State Graph差分、介入候補、LACを構造化出力する。
+2. 研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。
+3. モデル出力をJSON schemaと上限で検証する。
+4. LACが仮説gap、entropy、必須slot coverage、commitment位置、意味保存を決定論的に再計算する。
+5. 潜在問いが曖昧ならclarifyまたはsilence、答えの核が欠けていて意味保存できる時だけrestructureする。
+6. Self-repair graceとEVIで、モデルが話したがっても介入価値が低ければsilenceへ落とす。
+7. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送る。
 
-これにより、生成AIを一回呼んだ結果を正解扱いせず、費用と再現性を管理します。
+LACの指標は内部評価用で、画面へ分析文を大量表示しません。モデルの非公開chain-of-thoughtを保存または表示する設計でもありません。
 
 ## 配信経路
 
-- 静的Wasm UIと短いREST API: Firebase Hosting
-- REST評価: Hosting rewriteからCloud Run `kotae-api`
-- 長時間音声: `voice.<domain>` のHTTPS Load Balancer＋Cloud ArmorからCloud Run Live Gateway
+- 静的なWasm UI: Firebase Hosting
+- REST API: Firebase Hostingの`/api/**` rewriteからCloud Run `kotae-api`
+- 一発話ごとの音声request: `POST /api/v1/voice/turns`
+- Cloud Run、Speech-to-Text、Text-to-Speech: `asia-northeast1`
+- Vertex AI: `global`
 
-Firebase Hosting rewriteには60秒の制約があるため、Live WebSocketを通しません。WSS接続前に通常のHTTPSでAuth＋App Checkを検証し、UID・Origin・セッションへ束縛した短命の一回限りticketを発行します。
+現在はWebSocketやVertex Live APIを使いません。一発話ごとのHTTPS requestに収め、処理中と音声再生中はマイクを無効にします。full-duplex、barge-in、保存音声履歴、Vault、無人の後日再評価は将来候補であり、現在の公開経路の保証には含めません。

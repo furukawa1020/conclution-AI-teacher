@@ -2,7 +2,7 @@
 
 ## 結論
 
-KOTAE Reflexは、質問を待って回答する音声チャットではありません。利用者が明示的にセッションを開始した後は、日常のぼやき、独り言、考え途中の発話、研究の議論を継続的に聞き、次の条件をすべて満たす時だけ短く介入するambient conversational coachです。
+KOTAE Reflexは、固定質問を表示して採点する音声チャットではありません。利用者が明示的にセッションを開始した後は、日常のぼやき、独り言、考え途中の発話、研究の議論から潜在的な問いを仮説化し、次の条件をすべて満たす時だけ短く介入するambient conversational coachです。
 
 1. 利用者の目標、主張、根拠、制約のどこかに介入対象がある。
 2. 利用者自身による言い直しや自己修正を待っても解消しそうにない。
@@ -11,15 +11,19 @@ KOTAE Reflexは、質問を待って回答する音声チャットではあり�
 
 「沈黙」は失敗や機能制限ではなく、最も重要な出力の一つです。感情のあるぼやきを論理問題として即座に訂正したり、自然なフィラーを誤り扱いしたり、利用者の許可なく端末内の資料を読んだりしません。
 
-本設計の新規性は単一の音声モデルではなく、次を一つの制御系へ統合する点にあります。
+中心に置く研究仮説は、既存部品の統合そのものではなく、**Latent Answer Contract（LAC）**です。LACは「何を聞かれているか」を一つに決め打ちせず、問いの型と上位仮説、答えに必要なslot、最初のcommitmentを明示します。そのうえで、答えの核が抜けた、または後ろへ埋もれた時だけ、元の条件と不確実性を変えないcounterfactual repairを許可します。
+
+LACを次の制御と組み合わせ、誤った訂正より沈黙を優先します。
 
 - 後から解釈を訂正できるRevision-aware Thought State Graph
 - 利用者自身の言い直しを優先するSelf-repair grace
 - 沈黙との比較で発話を選ぶExpected Value of Intervention
 - 深い推論と短い音声表現を分けるThink-Verbalize-Speak
-- 音声転送を最小化する端末側Privacy Sentinel
+- 音声転送とsessionを制限する端末側Privacy Sentinel
 
-近接研究は存在しますが、本資料で確認した一次資料の範囲では、この組み合わせが完成した一般向け製品や研究システムは確認できていません。したがって「世界初」とは断定せず、各要素に対する統合上の差分を作品の研究性として扱います。
+これらは、このプロジェクトで設計・実装している実験的な機構です。近接研究は存在し、有効性や新規性の査読評価はまだ受けていません。「世界初」とは断定せず、LACの潜在問い同定、target slot coverage、commitment位置、meaning preservationが既存baselineより改善するかを実験で評価します。
+
+本資料には、現在動くHTTPSターン型MVPと、将来研究するincremental / full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Live、検索、個人適応は設計目標です。
 
 ## 対象範囲と非目標
 
@@ -41,62 +45,43 @@ KOTAE Reflexは、質問を待って回答する音声チャットではあり�
 - 利用者の確認なしにメール送信、購入、公開、削除を実行すること
 - 添付されていない論文や端末内ファイルを読んだふりをすること
 
-## 全体構成
+## 現在の全体構成
 
 ```text
-明示的に開始したマイクセッション
-           │
-           ▼
-┌──────────────────────────────┐
-│ Privacy Sentinel / Rust・Wasm │
-│ VAD・発話継続・無音・抑揚     │
-│ 短いRAMリングバッファ         │
-└──────────────┬───────────────┘
-               │ 安定したイベント
-               ▼
-┌──────────────────────────────┐
-│ Live Gateway                  │
-│ Firebase Auth・App Check      │
-│ 一回限りticket・Origin binding│
-└──────────┬───────────┬───────┘
-           │           │
-           │           └──→ Vertex Live
-           │                聞く・話す・barge-in
-           ▼
-┌──────────────────────────────┐
-│ Shadow Reasoner               │
-│ 増分Thought State Graph       │
-│ breakdown候補・不確実性       │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ Intervention Arbiter          │
-│ Self-repair grace・EVI        │
-│ silence / speak / verify      │
-└──────────────┬───────────────┘
-               ▼
-┌──────────────────────────────┐
-│ Verbalizer                    │
-│ 短く、音声向けに再構成        │
-└──────────────┬───────────────┘
-               ▼
-            音声応答
+明示的に開始したブラウザsession
+  │ Rust / Dioxus / Wasm UI
+  │ JavaScript境界: MediaRecorder + Web Audio VAD
+  ▼
+同一Origin HTTPS / Firebase Auth + App Check
+  ▼
+Cloud Run / Go（asia-northeast1）
+  ├─ raw audio → Cloud STT V2（asia-northeast1）
+  │                 └─ transcript
+  ├─ transcript + 今回だけのPDF → Vertex AI（global）
+  │                                  ├─ Thought State Graph
+  │                                  ├─ LAC
+  │                                  ├─ Self-repair grace
+  │                                  └─ EVI: silence / clarify / repair
+  └─ 選ばれた短い応答文 → Cloud TTS（asia-northeast1）
+                              └─ MP3 → ブラウザ再生
 ```
 
-Vertex Liveは低遅延の音声理解と発話を担当します。構造化グラフ、根拠検証、介入価値の決定をLiveモデル一つへ混在させません。音声対話と並行してShadow Reasonerが更新を行うことで、Liveモデルの自然さを保ちながら、判断を監査可能にします。
+raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。短い意味グラフと要約だけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。Vertex AIは`global`なので、文字起こしとPDFまで東京リージョンだけに留まるとは保証しません。
 
 ### 現在のMVP境界
 
-ブラウザだけで高精度な日本語ASR、意味推論、自然なfull-duplex音声をすべて端末内処理するのは、対応端末、電力、モデル配布量の面でまだ不安定です。そのためMVPは次の境界にします。
+ブラウザだけで高精度な日本語ASR、意味推論、自然なfull-duplex音声をすべて端末内処理するのは、対応端末、電力、モデル配布量の面でまだ不安定です。そのため現在のMVPは次の境界です。
 
-- 利用者が開始したセッション中だけLive Gatewayへ音声を送る。
-- raw audio、文字起こし、prompt/responseを既定で永続化しない。
-- Vertex Liveのsession resumptionを使わない。
-- request-response loggingを有効にしない。
-- セッション終了時に端末とGatewayの音声バッファを破棄する。
-- 端末側Sentinelを先に実装し、将来のローカルASR追加を同じイベント契約で受けられるようにする。
+- 利用者が最初にタップして開始したsession中だけマイクを使う。
+- 端末VADで一発話を区切り、一発話ごとのHTTPS requestとして東京リージョンSTTへ送る。
+- raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
+- raw audioをVertex AIへ送らず、STTで得た文字列と明示添付PDFだけを`global`のVertex AIへ送る。
+- 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
+- WebSocket、Vertex Live、session resumption、full-duplex、barge-inを現在は使わない。
+- AI処理中と再生中はマイクを無効にし、タブ非表示、3分無発話、30分経過でsessionを止める。
+- PDFは一つのturnだけ送信し、短い資料要約だけが暗号化状態へ残り得る。
 
-真に端末内で介入候補を絞るPrivacy-firstモードでは、ローカルASRが安定した部分だけを送信し、生音声をクラウドへ送らない経路も選べるようにします。この場合はnative audioの抑揚理解と引き換えになるため、二つのモードを同じものとして表示しません。
+将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
 
 ## Revision-aware Thought State Graph
 
@@ -238,6 +223,50 @@ EVI(a) =
 - 直前に「最後まで聞いて」「今は共感だけ」と指示された
 - 介入の方が利用者の主体性を損なう
 
+## Latent Answer Contract
+
+### 問題設定
+
+根本の失敗を「質問Aに対して、説明は長いがAへ答えていない」と定義します。文体の採点ではなく、いまの発話が要求している答えの型と、返答の最初のcommitmentが一致するかを扱います。
+
+LACは一つのturnについて次の三要素を作ります。
+
+```text
+QuestionFrame
+  ├─ operator: boolean / choice / quantity / state / cause
+  │            procedure / definition / comparison / evidence / open
+  ├─ required_slots
+  └─ target hypotheses: 最大3件 + confidence
+
+CommitmentFront
+  ├─ first_commitment
+  ├─ filled_slots / target_coverage
+  ├─ position: first / later / absent
+  ├─ calibration: committed / conditional / uncertain / abstain
+  └─ issue
+
+CounterfactualRepair
+  ├─ minimal_answer
+  ├─ reconstructed_answer
+  ├─ meaning_preservation_confidence
+  └─ repair_gain
+```
+
+モデルはこの構造を提案しますが、最終判定をモデルのscoreへ丸投げしません。Go側が仮説gap、正規化entropy、必須slot coverage、commitment位置、意味保存条件を再計算します。
+
+### AからAへ答える不変条件
+
+1. 潜在問いの上位仮説が近い、またはentropyが高い場合は、勝手に一つへ固定せず`clarify`にする。
+2. 問いのoperatorに対応するtarget slotが回答にない時は、説明の流暢さだけで`keep`にしない。
+3. targetが満たされてもcommitmentが後ろにある場合は、repair gainが十分な時だけ前へ移す。
+4. 再構成で元の条件、留保、不確実性が変わる場合は`reject`する。
+5. targetを原文から安全に推定できない場合は、もっともらしい答えを捏造せず`clarify`または`silence`にする。
+6. LACの原文入りcontractは現在turnだけで破棄し、暗号化したcross-turn stateへ入れない。
+
+内部metricsは`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservation`です。これらはUIに採点文として並べるためではなく、A→Aのhard case、過剰修正、条件消失を回帰テストするために使います。
+
+現実装の意味保存guardは、日本語の条件markerと不確実性markerを含む決定論的検査です。意味同値性を完全に判定できるものではないため、閾値以上でも誤修復率を人手評価し、operator別・domain別に校正する必要があります。
+
 ## Think-Verbalize-Speak
 
 Reasonerが生成する構造化判断を、そのまま読み上げません。
@@ -260,7 +289,9 @@ Reasonerが生成する構造化判断を、そのまま読み上げません。
 
 ## 研究・論文モード
 
-研究モードは一般会話と同じ推論だけで処理しません。利用者が明示的に渡したPDF、DOI、URL、引用情報を`source`ノードへ登録し、次を別のResearch Verifierで扱います。
+現在のMVPが受け取る資料は、利用者がそのturnに明示添付したPDFだけです。PDFはVertex AI `global`へinline送信し、原本を保存せず、短い資料要約だけを暗号化状態へ残し得ます。DOI / URLの取得、世界中の新着論文の自動検索、引用付きの独立Research Verifierはまだ実装していません。
+
+研究ロードマップでは、PDF、DOI、URL、引用情報を`source`ノードへ登録し、次を一般会話とは別のResearch Verifierで扱います。
 
 - 主張と引用箇所の対応
 - 支持、反証、条件付き支持
@@ -279,9 +310,9 @@ insufficient_evidence
 
 `insufficient_evidence`を無理に支持・反証へ変換しません。論文が渡されていない場合は内容を推測せず、必要なら資料提供を音声で依頼します。
 
-PDFやWebページ内の命令文は資料データとして扱い、システム命令として実行しません。外部取得、検索、コード実行、保存は別のtool policyで認可します。
+PDFやWebページ内の命令文は資料データとして扱い、システム命令として実行しません。現在のMVPは外部取得、検索、コード実行を行いません。将来追加する場合も、別のtool policyで利用者の意図、権限、保持条件を確認します。
 
-Gemini Live APIは、Google Searchのような検索toolと通常のfunction callingを同じsetup requestで組み合わせられません。またGoogle Search Groundingにはゼロ保持にできない短期ログ条件があります。したがって、Live Gateway内へ検索責務を詰め込まず、独立したResearch Verifierと管理可能な検索経路を使います。
+将来Vertex Live APIやGoogle Search Groundingを評価する場合は、音声session、検索tool、行動toolを一つのモデル接続へ詰め込まず、独立したResearch Verifierと管理可能な検索経路へ分けます。検索の利用可否は、最新のAPI仕様とデータ保持条件を配備時に再確認します。
 
 ## イベント契約
 
@@ -518,7 +549,7 @@ Secure session channel内だけで扱う増分文字起こしです。
 
 - 発話終了予測から介入開始までのp50、p95
 - breakdownがstableになってからdecisionまでのp50、p95
-- barge-in検出からAI音声停止までのp95
+- 将来full-duplex経路でのbarge-in検出からAI音声停止までのp95
 - 発話継続中に割り込んだ割合
 - backchannel、side conversation、ambient noiseごとの誤作動
 - 日本語と英語のcode-switch時のターン判定
@@ -558,9 +589,10 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 明示開始前に取得・送信された音声byteが0である
 - 停止後に取得・送信された音声byteが0である
 - raw audio、transcript、prompt/responseがログへ現れない
-- Live ticketの再利用成功率が0である
-- セッション終了後に残る平文バッファがない
-- 保存不同意時にStorage、Firestoreへ音声・transcriptが作成されない
+- Firebase ID token、App Check、Originのどれかが不正なrequestでモデル呼び出しが0である
+- 状態tokenの改ざん、期限切れ、別UID利用の成功率が0である
+- session停止後にマイクtrackが終了し、新しい音声送信が起きない
+- Storage、Firestoreへ音声・transcript・PDF本文が作成されない
 - third-party audioを利用者本人の入力として誤採用した割合
 
 ## 評価ケース設計
@@ -635,32 +667,42 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 
 ## 実装段階
 
-### A. Voice-first MVP
+### A. Voice-first MVP — 実装済み
 
-- 明示開始されたLive session
-- 入出力transcriptionを永続化せずShadow Reasonerへ渡す
-- `transcript.revision`、`thought_graph.delta`、`intervention.decision`を実装
-- 最初は規則とモデル判定を併用したEVI
-- 選ばれたmicro-interventionだけをLive音声へ渡す
-- 既定は日常・独り言、資料なしの研究断定はしない
+- 明示開始されたブラウザsessionと端末側VAD
+- 一発話ごとのHTTPS request、Firebase Auth、App Check、Origin検証
+- 東京リージョンSTT → `global` Vertex AI structured reasoner → 東京リージョンTTS
+- raw audio、文字起こし、応答文、PDFをアプリ側で永続化しない
+- AES-256-GCM、UID-bound、15分TTLの短い意味状態
+- Thought State Graph、規則とモデル判定を併用したEVI
+- LACのQuestionFrame、CommitmentFront、CounterfactualRepair
+- 曖昧な問いでのclarify、低EVIと自己修正中のsilence
+- 一つのturnだけのPDF添付とPDF本文の非永続化
 
-### B. Privacy Sentinel
+### B. LAC評価 — 実装中
 
-- Rust/WasmでVAD、短いring buffer、発話継続signal
-- PCMはブラウザ外へexportしないAPIを維持する
+- 日本語hard caseでA→A、operator、条件、不確実性の不変条件を回帰テスト
+- Target Slot Coverage、Commitment Front Position、Meaning Preservationの校正
+- `keep / clarify / restructure / reject`を人手blind評価
+- 一般会話、研究、技術、高リスク領域ごとの誤修復率と過剰介入率
+- model-only、固定prompt、LACなしEVIとのablation
+
+### C. Privacy Sentinel拡張 — 未実装
+
+- Rust/WasmへVADと短いring bufferの責務をさらに移す
 - TEN VAD、VAP、Moonshine等はライセンス、配布量、日本語精度、Web性能を実測してから採用する
 - 対応端末ではlocal transcript pathを追加する
-- native audio pathとprivacy-first pathをUI上で区別する
+- regional STT path、native audio path、privacy-first pathをUI上で区別する
 
-### C. Research Verifier
+### D. Research Verifier — 一部実装
 
-- 明示的なPDF、DOI、URL入力
-- source、claim、evidence graph
-- 引用検証と`insufficient_evidence`
-- 検索toolと行動toolをLive sessionから分離
+- 一つのturnだけの明示PDF入力は実装済み
+- DOI / URL取得、新着論文survey、source / claim / evidence graphは未実装
+- 引用検証と`insufficient_evidence`の評価器を一般会話から分離する
+- 検索toolと行動toolを音声sessionから分離する
 - 検索時の保持条件を利用者へ表示する
 
-### D. 個人適応
+### E. 個人適応 — 未実装
 
 - 「最後まで聞いて」「今は共感だけ」「厳しく」等の明示feedback
 - 利用者別の介入強度とcooldownを端末内集約値で調整
@@ -669,7 +711,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 
 ## セキュリティ継承
 
-認証、Live ticket、暗号化保存、IAM分離、ログ禁止、削除、同意は`docs/audio-security.md`を正とします。本資料はその上に推論と介入の制約を追加します。
+認証、リージョン境界、一時処理、暗号化状態、IAM、ログ禁止は`docs/audio-security.md`を正とします。本資料はその上に推論と介入の制約を追加します。現在はLive ticket、保存音声Vault、音声履歴、無人の後日再評価を実装していません。
 
 追加の禁止ログ項目:
 
@@ -683,7 +725,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 
 運用ログにはevent kind、schema version、logical policy ID、latency、列挙型reason code、集約された成功・失敗だけを残します。デバッグのために会話本文を一時的に記録する場合も、本番とは分離した明示同意、短期TTL、アクセス監査を必要とします。
 
-Google Cloudのゼロ保持条件では、Live APIのsession resumptionを有効にすると音声、映像、文字、出力のcached dataが最大24時間保存されます。KOTAE Reflexでは有効にしません。Google Search Groundingは派生query等を最大3日保存し、無効化できないため、厳密なゼロ保持モードでは使用しません。詳細は[Gemini Enterprise Agent Platform and zero data retention](https://docs.cloud.google.com/gemini-enterprise-agent-platform/resources/zero-data-retention)を参照します。
+現在のMVPはVertex Liveのsession resumptionもGoogle Search Groundingも使いません。ただし「使っていない」ことだけでGoogle Cloud全体のゼロ保持を保証するとは表現しません。将来Liveや検索を追加する場合は、その時点のGoogle Cloud公式仕様、preview条件、データ保持、リージョンを再確認します。現在の境界は[Vertex AI zero data retention](https://cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)と`docs/audio-security.md`を参照します。
 
 ## 参考一次資料
 

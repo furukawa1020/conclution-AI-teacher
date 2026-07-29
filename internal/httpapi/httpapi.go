@@ -207,6 +207,10 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.voice.Service.Process(ctx, principal.UID, input)
 	if err != nil {
+		if errors.Is(err, ErrVoiceNotRecognized) || errors.Is(err, ErrVoiceStateInvalid) {
+			writeProblem(w, http.StatusUnprocessableEntity, "voice_turn_invalid", "The voice turn could not be understood safely.")
+			return
+		}
 		s.logger.ErrorContext(ctx, "voice turn failed",
 			"request_id", requestIDFromContext(ctx),
 			"uid_hash", shortHash(principal.UID),

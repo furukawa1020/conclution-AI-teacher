@@ -21,14 +21,16 @@ const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
 const VOICE_ENDPOINT = "/api/v1/voice/turns";
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
-const AUDIO_MAX_BYTES = 10 * 1024 * 1024;
+const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 20 * 1024 * 1024;
 const SESSION_STATE_MAX_CHARS = 16 * 1024;
 const VAD_INTERVAL_MS = 40;
 const MIN_VOICE_MS = 200;
 const END_OF_TURN_SILENCE_MS = 1_100;
 const SILENT_CAPTURE_LIMIT_MS = 30_000;
-const SPOKEN_CAPTURE_LIMIT_MS = 75_000;
+const SPOKEN_CAPTURE_LIMIT_MS = 55_000;
+const IDLE_SESSION_LIMIT_MS = 3 * 60_000;
+const MAX_SESSION_MS = 30 * 60_000;
 
 const ALLOWED_CONFIG_KEYS = Object.freeze([
   "apiKey",
@@ -50,6 +52,8 @@ let activePlayback;
 let pendingDocument;
 let sessionEpoch = 0;
 let documentEpoch = 0;
+let sessionStartedAt = 0;
+let lastSpeechAt = 0;
 
 function fail(code) {
   throw new Error(code);
@@ -195,6 +199,29 @@ function stopTracks(stream) {
   for (const track of stream.getTracks()) {
     track.stop();
   }
+}
+
+function releaseMicrophone() {
+  if (activeRecording) {
+    activeRecording.discard = true;
+    requestRecordingStop(activeRecording, "cancelled");
+    activeRecording = undefined;
+  }
+  setTracksEnabled(false);
+  stopTracks(mediaStream);
+  mediaStream = undefined;
+  if (analyserSource) {
+    analyserSource.disconnect();
+    analyserSource = undefined;
+  }
+  if (analyser) {
+    analyser.disconnect();
+    analyser = undefined;
+  }
+  if (audioContext && audioContext.state !== "closed") {
+    void audioContext.close();
+  }
+  audioContext = undefined;
 }
 
 function hasLiveAudioTrack(stream) {
@@ -470,17 +497,37 @@ async function beginTurn() {
   if (activeRecording) {
     fail("voice_turn_invalid");
   }
-  const expectedEpoch = sessionEpoch;
-  const stream = await ensureMediaStream(expectedEpoch);
-  await ensureAudioGraph(stream);
-  if (expectedEpoch !== sessionEpoch) {
-    fail("request_cancelled");
+  const now = performance.now();
+  if (
+    (sessionStartedAt > 0 && now - sessionStartedAt >= MAX_SESSION_MS) ||
+    (lastSpeechAt > 0 && now - lastSpeechAt >= IDLE_SESSION_LIMIT_MS)
+  ) {
+    stopSession();
+    fail("session_expired");
+  }
+  if (sessionStartedAt === 0) {
+    sessionStartedAt = now;
+    lastSpeechAt = now;
   }
 
-  setTracksEnabled(true);
-  activeRecording = createRecording(stream);
-  void authenticatedUser().catch(() => {});
-  return Object.freeze({ state: "listening" });
+  const expectedEpoch = sessionEpoch;
+  try {
+    const stream = await ensureMediaStream(expectedEpoch);
+    await ensureAudioGraph(stream);
+    if (expectedEpoch !== sessionEpoch) {
+      fail("request_cancelled");
+    }
+
+    setTracksEnabled(true);
+    activeRecording = createRecording(stream);
+    void authenticatedUser().catch(() => {});
+    return Object.freeze({ state: "listening" });
+  } catch (error) {
+    releaseMicrophone();
+    sessionStartedAt = 0;
+    lastSpeechAt = 0;
+    throw error;
+  }
 }
 
 async function waitForTurnEnd() {
@@ -488,12 +535,27 @@ async function waitForTurnEnd() {
   if (!recording) {
     fail("voice_turn_invalid");
   }
-  const capture = await recording.endPromise;
+  let capture;
+  try {
+    capture = await recording.endPromise;
+  } catch (error) {
+    stopVad(recording);
+    if (recording.recorder.state !== "inactive") {
+      recording.discard = true;
+      requestRecordingStop(recording, "cancelled");
+    }
+    if (activeRecording === recording) {
+      activeRecording = undefined;
+    }
+    throw error;
+  }
   if (activeRecording !== recording) {
     fail("request_cancelled");
   }
   if (!capture.hasSpeech) {
     activeRecording = undefined;
+  } else {
+    lastSpeechAt = performance.now();
   }
   return Object.freeze({
     hasSpeech: capture.hasSpeech,
@@ -818,27 +880,9 @@ function stopSession() {
     }
     activePlayback = undefined;
   }
-  if (activeRecording) {
-    activeRecording.discard = true;
-    requestRecordingStop(activeRecording, "cancelled");
-    activeRecording = undefined;
-  }
-
-  setTracksEnabled(false);
-  stopTracks(mediaStream);
-  mediaStream = undefined;
-  if (analyserSource) {
-    analyserSource.disconnect();
-    analyserSource = undefined;
-  }
-  if (analyser) {
-    analyser.disconnect();
-    analyser = undefined;
-  }
-  if (audioContext && audioContext.state !== "closed") {
-    void audioContext.close();
-  }
-  audioContext = undefined;
+  releaseMicrophone();
+  sessionStartedAt = 0;
+  lastSpeechAt = 0;
 
   pendingDocument = undefined;
   const input = document.getElementById("paper-input");
@@ -846,6 +890,26 @@ function stopSession() {
     input.value = "";
   }
 }
+
+function hasActiveVoiceSession() {
+  return Boolean(
+    activeRecording ||
+      activeRequestController ||
+      activePlayback ||
+      hasLiveAudioTrack(mediaStream),
+  );
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && hasActiveVoiceSession()) {
+    stopSession();
+  }
+});
+globalThis.addEventListener("pagehide", () => {
+  if (hasActiveVoiceSession()) {
+    stopSession();
+  }
+});
 
 const publicBridge = Object.freeze({
   attachDocument,

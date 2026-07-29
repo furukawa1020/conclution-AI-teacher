@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 	"google.golang.org/genai"
 )
 
@@ -42,18 +43,21 @@ type vertexAgent struct {
 }
 
 type modelPlan struct {
-	Domain              string            `json:"domain"`
-	Intent              string            `json:"intent"`
-	LatentQuestion      string            `json:"latent_question"`
-	ArgumentStructure   string            `json:"argument_structure"`
-	InterventionPolicy  string            `json:"intervention_policy"`
-	SpokenReply         string            `json:"spoken_reply"`
-	Confidence          float64           `json:"confidence"`
-	ConversationSummary string            `json:"conversation_summary"`
-	DocumentSummary     string            `json:"document_summary"`
-	ThoughtStateDelta   ThoughtStateDelta `json:"thought_state_delta"`
-	SelfCorrectionGrace bool              `json:"self_correction_grace"`
-	Intervention        modelArbiter      `json:"intervention"`
+	Domain              string                  `json:"domain"`
+	Intent              string                  `json:"intent"`
+	LatentQuestion      string                  `json:"latent_question"`
+	ArgumentStructure   string                  `json:"argument_structure"`
+	InterventionPolicy  string                  `json:"intervention_policy"`
+	SpokenReply         string                  `json:"spoken_reply"`
+	Confidence          float64                 `json:"confidence"`
+	ConversationSummary string                  `json:"conversation_summary"`
+	DocumentSummary     string                  `json:"document_summary"`
+	ThoughtStateDelta   ThoughtStateDelta       `json:"thought_state_delta"`
+	SelfCorrectionGrace bool                    `json:"self_correction_grace"`
+	Intervention        modelArbiter            `json:"intervention"`
+	AnswerContract      answercontract.Contract `json:"answer_contract"`
+
+	answerAssessment answercontract.Assessment
 }
 
 type modelArbiter struct {
@@ -208,15 +212,19 @@ func (agent *vertexAgent) Process(
 	}
 
 	decision := arbitrate(finalPlan)
+	lacBlocksAnswer := finalPlan.answerAssessment.Outcome == answercontract.OutcomeClarify ||
+		finalPlan.answerAssessment.Outcome == answercontract.OutcomeReject
 	ambiguous := finalPlan.Confidence < PrecisionConfidenceThreshold ||
 		finalPlan.InterventionPolicy == "clarify" ||
-		decision.Act == "clarify"
+		decision.Act == "clarify" ||
+		lacBlocksAnswer
 	urgentSafety := finalPlan.InterventionPolicy == "safety" &&
 		decision.Urgency >= 0.8
 	forceAmbientSilence := normalized.Ambient &&
 		!urgentSafety &&
 		(decision.Score < AmbientEVIThreshold ||
-			(finalPlan.SelfCorrectionGrace && decision.Urgency < 0.85))
+			(finalPlan.SelfCorrectionGrace && decision.Urgency < 0.85) ||
+			lacBlocksAnswer)
 
 	spokenReply := finalPlan.SpokenReply
 	interventionPolicy := finalPlan.InterventionPolicy
@@ -224,6 +232,10 @@ func (agent *vertexAgent) Process(
 		decision.Act = "silent"
 		spokenReply = ""
 		interventionPolicy = "wait"
+	} else if !urgentSafety &&
+		finalPlan.answerAssessment.Outcome == answercontract.OutcomeRestructure {
+		decision.Act = "restructure"
+		spokenReply = finalPlan.answerAssessment.ReconstructedAnswer
 	} else if ambiguous {
 		decision.Act = "clarify"
 		spokenReply = exactlyOneQuestion(spokenReply)
@@ -267,6 +279,7 @@ func (agent *vertexAgent) Process(
 		Confidence:          finalPlan.Confidence,
 		Intervention:        decision,
 		SelfCorrectionGrace: finalPlan.SelfCorrectionGrace,
+		AnswerContract:      finalPlan.answerAssessment.Metrics,
 		Route:               route,
 		NeedsClarification:  decision.Act == "clarify",
 		StateToken:          stateToken,
@@ -315,7 +328,7 @@ func (agent *vertexAgent) infer(
 		&genai.GenerateContentConfig{
 			SystemInstruction:  genai.NewContentFromText(systemInstruction, genai.RoleUser),
 			CandidateCount:     1,
-			MaxOutputTokens:    2_048,
+			MaxOutputTokens:    3_072,
 			ResponseMIMEType:   "application/json",
 			ResponseJsonSchema: modelResponseSchema(),
 			ThinkingConfig: &genai.ThinkingConfig{
@@ -399,6 +412,16 @@ func normalizeAndValidatePlan(plan *modelPlan, hasPDF bool) error {
 	if decision.Act == "silent" {
 		plan.SpokenReply = ""
 	}
+	assessment, err := answercontract.Evaluate(plan.AnswerContract, plan.SpokenReply)
+	if err != nil {
+		return ErrModelOutputInvalid
+	}
+	if assessment.Outcome == answercontract.OutcomeRestructure &&
+		(containsUnspeakableMarkup(assessment.ReconstructedAnswer) ||
+			utf8.RuneCountInString(assessment.ReconstructedAnswer) > MaxSpokenReplyRunes) {
+		return ErrModelOutputInvalid
+	}
+	plan.answerAssessment = assessment
 	delta, err := normalizeDelta(plan.ThoughtStateDelta)
 	if err != nil {
 		return ErrModelOutputInvalid
@@ -580,13 +603,13 @@ func modelResponseSchema() map[string]any {
 			"domain", "intent", "latent_question", "argument_structure",
 			"intervention_policy", "spoken_reply", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
-			"self_correction_grace", "intervention",
+			"self_correction_grace", "intervention", "answer_contract",
 		},
 		"required": []string{
 			"domain", "intent", "latent_question", "argument_structure",
 			"intervention_policy", "spoken_reply", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
-			"self_correction_grace", "intervention",
+			"self_correction_grace", "intervention", "answer_contract",
 		},
 		"properties": map[string]any{
 			"domain": map[string]any{
@@ -658,6 +681,7 @@ func modelResponseSchema() map[string]any {
 					},
 				},
 			},
+			"answer_contract": answerContractResponseSchema(),
 		},
 	}
 }
@@ -683,6 +707,17 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - ambient=trueは受動的に得た発話断片である。介入価値が低い、発話途中、単なる独り言ならsilentを選ぶ。
 - 曖昧で、意図的な問いかけに答えるため情報が一つだけ不足する場合はclarifyを選び、spoken_replyを具体的な質問一問だけにする。
 - act=silentならspoken_replyは空文字にする。それ以外は空にしない。
+
+Latent Answer Contract:
+- answer_contractは今回のユーザー発話と、今回生成するspoken_replyだけを監査する。過去stateへ原文を移さない。
+- question_frame.operatorは問いが直接要求する答えの型である。required_slotsには答えるため必須のslotをすべて入れる。
+- hypothesesは問いの解釈候補を確率の高い順に最大3件返す。confidence合計は1以下にする。
+- commitment_frontはspoken_replyを監査する。first_commitmentは最初に現れる実質的な答えであり、前置きや理由ではない。
+- filled_slotsは実際にspoken_replyが満たすrequired_slotsだけにする。target_coverageはfilled_slots数をrequired_slots数で割った値にする。
+- 明示的な「わからない」はabstainとして有効な答えであり、推測で埋めない。
+- counterfactual_repairは、新事実を足さず、元の答えを最小限並べ替えた場合だけ作る。
+- reconstructed_answerで元の条件を追加・削除したり、committed、conditional、uncertain、abstainの強さを変えたりしない。
+- 問いの上位2仮説が近い場合は自動で答えを確定せず、意図的な問いならclarify、ambientならsilentを選ぶ。
 
 音声出力:
 - spoken_replyは自然で簡潔な日本語の話し言葉にする。

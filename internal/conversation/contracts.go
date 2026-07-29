@@ -7,6 +7,8 @@ import (
 	"math"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 )
 
 const (
@@ -48,19 +50,20 @@ type InlinePDF struct {
 }
 
 type VoiceTurnResult struct {
-	SchemaVersion       int             `json:"schemaVersion"`
-	Domain              string          `json:"domain"`
-	Intent              string          `json:"intent"`
-	LatentQuestion      string          `json:"latent_question"`
-	ArgumentStructure   string          `json:"argument_structure"`
-	InterventionPolicy  string          `json:"intervention_policy"`
-	SpokenReply         string          `json:"spoken_reply"`
-	Confidence          float64         `json:"confidence"`
-	Intervention        ArbiterDecision `json:"intervention"`
-	SelfCorrectionGrace bool            `json:"self_correction_grace"`
-	Route               string          `json:"route"`
-	NeedsClarification  bool            `json:"needs_clarification"`
-	StateToken          string          `json:"state_token"`
+	SchemaVersion       int                    `json:"schemaVersion"`
+	Domain              string                 `json:"domain"`
+	Intent              string                 `json:"intent"`
+	LatentQuestion      string                 `json:"latent_question"`
+	ArgumentStructure   string                 `json:"argument_structure"`
+	InterventionPolicy  string                 `json:"intervention_policy"`
+	SpokenReply         string                 `json:"spoken_reply"`
+	Confidence          float64                `json:"confidence"`
+	Intervention        ArbiterDecision        `json:"intervention"`
+	SelfCorrectionGrace bool                   `json:"self_correction_grace"`
+	AnswerContract      answercontract.Metrics `json:"answer_contract_metrics"`
+	Route               string                 `json:"route"`
+	NeedsClarification  bool                   `json:"needs_clarification"`
+	StateToken          string                 `json:"state_token"`
 }
 
 type ArbiterDecision struct {

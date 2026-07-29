@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 	"google.golang.org/genai"
 )
 
@@ -425,7 +426,7 @@ func newTestAgent(t *testing.T, generator ContentGenerator) *vertexAgent {
 }
 
 func validModelPlan() modelPlan {
-	return modelPlan{
+	plan := modelPlan{
 		Domain:              "general",
 		Intent:              "answer",
 		LatentQuestion:      "次の一歩は何か",
@@ -449,10 +450,41 @@ func validModelPlan() modelPlan {
 			Confidence: 0.9, Act: "reflect",
 		},
 	}
+	plan.AnswerContract = answercontract.Contract{
+		QuestionFrame: answercontract.QuestionFrame{
+			Operator:      answercontract.OperatorOpen,
+			Subject:       "next action",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPosition},
+			Hypotheses: []answercontract.Hypothesis{{
+				Interpretation: "choose the next action",
+				Confidence:     1,
+			}},
+		},
+		CommitmentFront: answercontract.CommitmentFront{
+			FirstCommitment: "small verified step first",
+			FillsTarget:     true,
+			TargetCoverage:  1,
+			FilledSlots:     []answercontract.RequiredSlot{answercontract.SlotPosition},
+			PositionClass:   answercontract.PositionFirst,
+			Calibration:     answercontract.CalibrationCommitted,
+			Issue:           answercontract.IssueNone,
+		},
+		CounterfactualRepair: answercontract.CounterfactualRepair{
+			MinimalAnswer:                 plan.SpokenReply,
+			ReconstructedAnswer:           plan.SpokenReply,
+			MeaningPreservationConfidence: 1,
+			RepairGain:                    0,
+		},
+	}
+	return plan
 }
 
 func encodePlan(t *testing.T, plan modelPlan) string {
 	t.Helper()
+	if plan.AnswerContract.CounterfactualRepair.RepairGain == 0 {
+		plan.AnswerContract.CounterfactualRepair.MinimalAnswer = plan.SpokenReply
+		plan.AnswerContract.CounterfactualRepair.ReconstructedAnswer = plan.SpokenReply
+	}
 	encoded, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatalf("marshal plan: %v", err)

@@ -265,7 +265,10 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		Audio:         audio,
 		MIMEType:      mimeType,
 		StateToken:    request.SessionState,
-		Ambient:       true,
+		// The first utterance follows an explicit start gesture. Once an
+		// authenticated state token exists, subsequent automatically captured
+		// turns are ambient and use the stricter intervention threshold.
+		Ambient:       request.SessionState != "",
 		STTLocale:     "ja-JP",
 		SchemaVersion: 1,
 	}

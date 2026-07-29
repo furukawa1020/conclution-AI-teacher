@@ -440,11 +440,29 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	if service.calls != 1 || limiter.calls != 1 {
 		t.Fatalf("service calls = %d, limiter calls = %d; want 1, 1", service.calls, limiter.calls)
 	}
-	if service.input.MIMEType != "audio/wav" || !service.input.Ambient {
+	if service.input.MIMEType != "audio/wav" || service.input.Ambient {
 		t.Fatalf("voice input = %+v", service.input)
 	}
 	if strings.Contains(response.Body.String(), "RIFF-safe-test-audio") {
 		t.Fatal("response exposed input audio")
+	}
+}
+
+func TestVoiceTurnsBecomeAmbientOnlyAfterBoundStateExists(t *testing.T) {
+	t.Parallel()
+
+	request := voiceTurnRequest{
+		AudioBase64:  "YXVkaW8=",
+		MIMEType:     "audio/webm;codecs=opus",
+		SessionState: "v1.opaque-bound-state",
+	}
+	input, err := decodeVoiceTurn(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearVoiceInput(&input)
+	if !input.Ambient {
+		t.Fatal("a continued state-bound turn must use ambient intervention policy")
 	}
 }
 

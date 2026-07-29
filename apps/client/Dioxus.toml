@@ -3,7 +3,7 @@ name = "kotae-client"
 default_platform = "web"
 
 [web.app]
-title = "コタエーAI — 答えを、先に。"
+title = "コタエーAI — 話しているうちに、考えが整う"
 
 [web.watcher]
 watch_path = ["src", "assets"]

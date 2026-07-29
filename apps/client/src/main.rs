@@ -233,6 +233,7 @@ mod cloud {
             Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
             Some("rate_limited") => "いま少し混み合ってる　少し待って再開してみて",
             Some("request_cancelled") => "会話を一時停止した",
+            Some("session_expired") => "安全のためマイクを閉じた　もう一度すぐ始められる",
             Some("audio_playback_blocked") => "声を再生できない　端末の消音設定を確認してみて",
             Some("voice_api_unavailable") => "音声エージェントを準備中　少し待ってためしてみて",
             _ => "音声エージェントにつながらない　もう一度ためしてみて",
@@ -308,6 +309,7 @@ fn arm_listening(
     spawn(async move {
         if let Err(message) = cloud::begin_turn().await {
             if *generation.peek() == operation {
+                cloud::stop_session();
                 voice_state.set(VoiceState::Error(message));
             }
             return;
@@ -322,6 +324,7 @@ fn arm_listening(
             Ok(has_speech) => has_speech,
             Err(message) => {
                 if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
+                    cloud::stop_session();
                     voice_state.set(VoiceState::Error(message));
                 }
                 return;
@@ -391,6 +394,7 @@ fn submit_turn(
                 if consumed_document {
                     document_info.set(None);
                 }
+                cloud::stop_session();
                 voice_state.set(VoiceState::Error(message));
                 return;
             }
@@ -405,14 +409,17 @@ fn submit_turn(
             document_info.set(None);
         }
 
-        voice_state.set(VoiceState::Speaking);
-        if let Err(message) =
-            cloud::play_response(&result.audio_base64, &result.audio_mime_type).await
-        {
-            if *generation.peek() == operation {
-                voice_state.set(VoiceState::Error(message));
+        if !result.audio_base64.is_empty() {
+            voice_state.set(VoiceState::Speaking);
+            if let Err(message) =
+                cloud::play_response(&result.audio_base64, &result.audio_mime_type).await
+            {
+                if *generation.peek() == operation {
+                    cloud::stop_session();
+                    voice_state.set(VoiceState::Error(message));
+                }
+                return;
             }
-            return;
         }
         if *generation.peek() != operation {
             return;

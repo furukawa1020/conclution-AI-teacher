@@ -606,9 +606,9 @@ fn App() -> Element {
                         }
                         h1 { id: "voice-heading",
                             if state_snapshot == VoiceState::Ready {
-                                "ただ話す。"
+                                "話しているうちに、"
                                 br {}
-                                "考えは、あとから整う。"
+                                "考えが整う"
                             } else {
                                 {state_snapshot.label()}
                             }
@@ -616,10 +616,34 @@ fn App() -> Element {
                         p { class: "voice-status__hint", {state_snapshot.hint()} }
                     }
 
+                    section {
+                        class: if state_snapshot.session_active() {
+                            "capability-strip is-collapsed"
+                        } else {
+                            "capability-strip"
+                        },
+                        aria_label: "できること",
+                        div { class: "capability",
+                            span { "ぼやく" }
+                            i { aria_hidden: "true", "→" }
+                            strong { "本当の迷いを拾う" }
+                        }
+                        div { class: "capability",
+                            span { "説明する" }
+                            i { aria_hidden: "true", "→" }
+                            strong { "話の組み立てを直す" }
+                        }
+                        div { class: "capability",
+                            span { "論文を話す" }
+                            i { aria_hidden: "true", "→" }
+                            strong { "主張と根拠を確かめる" }
+                        }
+                    }
+
                     if *needs_paper.read() && document_snapshot.is_none() {
                         p { class: "paper-request", role: "status",
                             span { "↳" }
-                            "論文の中身まで検討するには、下からPDFを今回だけ渡してください。"
+                            "論文の中身まで読むなら　下からPDFを今回だけ"
                         }
                     }
 
@@ -704,7 +728,7 @@ fn App() -> Element {
                                 if let Some(current_caption) = caption.read().as_ref() {
                                     {current_caption.clone()}
                                 } else {
-                                    "字幕が届くと、ここにだけ表示します。既定では非表示です。"
+                                    "字幕が届くとここにだけ表示　いつもは隠しておく"
                                 }
                             }
                         }
@@ -776,18 +800,18 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "発話ターンの間だけブラウザのメモリに保持し、応答生成のため暗号化通信でクラウドへ送ります。永続ストレージには書き込みません。"
+                                "話している間だけメモリに置き　暗号化通信で送る　端末には残さない"
                             }
                             p {
                                 strong { "PDF" }
-                                "選んだ場合だけ次の応答へ添付し、送信完了後にブラウザ側の参照を破棄します。"
+                                "選んだときだけ次の応答へ添付　送信後はブラウザから手放す"
                             }
                             p {
                                 strong { "本人性" }
-                                "Firebase Authentication と App Check を毎リクエスト検証します。"
+                                "Firebase Authentication と App Check で毎回たしかめる"
                             }
                             p { class: "privacy-fold__stop",
-                                "一時停止・終了を押すと、マイクトラックと再生をすぐ停止します。"
+                                "一時停止・終了で　マイクと再生をすぐ止める"
                             }
                         }
                     }

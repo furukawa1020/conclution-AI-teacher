@@ -15,7 +15,7 @@ enum VoiceState {
 impl VoiceState {
     const fn label(self) -> &'static str {
         match self {
-            Self::Ready => "タップして、会話をひらく",
+            Self::Ready => "話しはじめる",
             Self::RequestingPermission => "マイクを準備しています",
             Self::Listening => "聴いています",
             Self::Thinking => "背景まで読んでいます",
@@ -27,14 +27,12 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "ぼやきでも、研究の話でも。テーマを決めずに、そのまま話してください。",
-            Self::RequestingPermission => {
-                "この会話に使うマイクを、ブラウザの確認画面で選んでください。"
-            }
-            Self::Listening => "言い終えて約一秒すると、自動で応答します。操作はいりません。",
-            Self::Thinking => "意図・前提・論点を推論し、次に返すべき一言を組み立てています。",
-            Self::Speaking => "返答が終わると、自動でまた聴き始めます。",
-            Self::Paused => "マイクは解放されています。再開するまで、音声は取り込みません。",
+            Self::Ready => "テーマも質問もいらない　ぼやきから始められる",
+            Self::RequestingPermission => "この会話に使うマイクを選ぶ",
+            Self::Listening => "話し終えて約一秒　そのまま自動で返す",
+            Self::Thinking => "迷いと前提をほどいて　返す言葉を組み立てる",
+            Self::Speaking => "返事のあと　そのまままた聴きはじめる",
+            Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
             Self::Error(message) => message,
         }
     }
@@ -53,7 +51,7 @@ impl VoiceState {
 
     const fn orb_action(self) -> &'static str {
         match self {
-            Self::Ready => "会話を始める",
+            Self::Ready => "話しはじめる",
             Self::Listening => "自動で聴き取り中",
             Self::Paused => "一時停止中",
             Self::Error(_) => "もう一度接続する",
@@ -185,13 +183,13 @@ mod cloud {
         let value = wait_for_turn_end_js().await.map_err(user_message)?;
         serde_wasm_bindgen::from_value::<TurnEnd>(value)
             .map(|result| result.has_speech)
-            .map_err(|_| "マイクの状態を確認できませんでした。")
+            .map_err(|_| "マイクの状態を確認できない")
     }
 
     pub async fn finish_turn(session_state: &str) -> Result<VoiceTurnResult, &'static str> {
         let value = finish_turn_js(session_state).await.map_err(user_message)?;
         serde_wasm_bindgen::from_value(value)
-            .map_err(|_| "音声応答の形式を確認できませんでした。もう一度お試しください。")
+            .map_err(|_| "音声応答を確認できない　もう一度ためしてみて")
     }
 
     pub async fn play_response(
@@ -208,7 +206,7 @@ mod cloud {
         let value = attach_document_js(input_id)
             .await
             .map_err(document_message)?;
-        serde_wasm_bindgen::from_value(value).map_err(|_| "PDFの情報を確認できませんでした。")
+        serde_wasm_bindgen::from_value(value).map_err(|_| "PDFの情報を確認できない")
     }
 
     pub fn stop_session() {
@@ -222,44 +220,44 @@ mod cloud {
     fn user_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
             Some("microphone_unsupported") => {
-                "このブラウザは音声会話に対応していません。最新版でお試しください。"
+                "このブラウザでは音声会話を使えない　最新版でためしてみて"
             }
             Some("microphone_permission_denied") => {
-                "マイクが許可されていません。ブラウザの権限設定を確認してください。"
+                "マイクが許可されていない　ブラウザの権限を確認してみて"
             }
             Some("microphone_unavailable") => {
-                "利用できるマイクが見つかりません。接続を確認してください。"
+                "使えるマイクが見つからない　接続を確認してみて"
             }
-            Some("no_speech") => "声を確認できませんでした。少し近づいて、もう一度話してください。",
+            Some("no_speech") => "声を拾えなかった　少し近づいてもう一度",
             Some("authentication_failed") => {
-                "安全な接続を確認できませんでした。もう一度お試しください。"
+                "安全な接続を確認できない　もう一度ためしてみて"
             }
             Some("app_check_not_configured") => {
-                "App Check の公開サイトキーがまだ設定されていません。"
+                "App Check の公開サイトキーがまだない"
             }
-            Some("voice_turn_too_large") => "発話が長すぎました。少し短く区切ってください。",
-            Some("voice_turn_invalid") => "音声を確認できませんでした。もう一度お試しください。",
-            Some("rate_limited") => "短時間の利用上限に達しました。少し待って再開してください。",
-            Some("request_cancelled") => "会話を一時停止しました。",
+            Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
+            Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
+            Some("rate_limited") => "いま少し混み合ってる　少し待って再開してみて",
+            Some("request_cancelled") => "会話を一時停止した",
             Some("audio_playback_blocked") => {
-                "音声を再生できませんでした。端末の消音設定を確認してください。"
+                "声を再生できない　端末の消音設定を確認してみて"
             }
             Some("voice_api_unavailable") => {
-                "音声エージェントを準備中です。少し待ってからお試しください。"
+                "音声エージェントを準備中　少し待ってためしてみて"
             }
-            _ => "音声エージェントに接続できませんでした。もう一度お試しください。",
+            _ => "音声エージェントにつながらない　もう一度ためしてみて",
         }
     }
 
     fn document_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
-            Some("document_not_selected") => "PDFを選択してください。",
-            Some("document_type_invalid") => "PDF形式の資料だけを添付できます。",
-            Some("document_too_large") => "PDFは7MB以下にしてください。",
+            Some("document_not_selected") => "PDFを選んでみて",
+            Some("document_type_invalid") => "ここではPDFだけを読める",
+            Some("document_too_large") => "PDFは7MBまで",
             Some("document_read_failed") => {
-                "PDFを読み取れませんでした。別のファイルをお試しください。"
+                "PDFを読めなかった　別のファイルをためしてみて"
             }
-            _ => "PDFを添付できませんでした。",
+            _ => "PDFを添付できなかった",
         }
     }
 }
@@ -273,26 +271,26 @@ mod cloud {
     }
 
     pub async fn begin_turn() -> Result<(), &'static str> {
-        Err("WebAssembly版で利用してください。")
+        Err("WebAssembly版で使ってみて")
     }
 
     pub async fn wait_for_turn_end() -> Result<bool, &'static str> {
-        Err("WebAssembly版で利用してください。")
+        Err("WebAssembly版で使ってみて")
     }
 
     pub async fn finish_turn(_session_state: &str) -> Result<VoiceTurnResult, &'static str> {
-        Err("WebAssembly版で利用してください。")
+        Err("WebAssembly版で使ってみて")
     }
 
     pub async fn play_response(
         _audio_base64: &str,
         _audio_mime_type: &str,
     ) -> Result<(), &'static str> {
-        Err("WebAssembly版で利用してください。")
+        Err("WebAssembly版で使ってみて")
     }
 
     pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
-        Err("WebAssembly版で利用してください。")
+        Err("WebAssembly版で使ってみて")
     }
 
     pub fn stop_session() {}

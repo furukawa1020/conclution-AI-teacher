@@ -7,22 +7,22 @@ import (
 )
 
 type hardCase struct {
-	name           string
-	question       string
-	answer         string
-	operator       Operator
-	required       []RequiredSlot
-	filled         []RequiredSlot
-	hypotheses     []float64
-	position       PositionClass
-	calibration    Calibration
-	issue          Issue
-	first          string
-	minimal        string
-	reconstructed  string
-	meaning        float64
-	gain           float64
-	want           Outcome
+	name          string
+	question      string
+	answer        string
+	operator      Operator
+	required      []RequiredSlot
+	filled        []RequiredSlot
+	hypotheses    []float64
+	position      PositionClass
+	calibration   Calibration
+	issue         Issue
+	first         string
+	minimal       string
+	reconstructed string
+	meaning       float64
+	gain          float64
+	want          Outcome
 }
 
 func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
@@ -189,9 +189,9 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			filled: slots(SlotEvidence, SlotUncertainty), hypotheses: []float64{0.96, 0.04},
 			position: PositionFirst, calibration: CalibrationConditional,
 			issue: IssueInsufficientEvidence, first: "一人には効いた可能性があります",
-			minimal: "一人の事例です",
+			minimal:       "一人の事例です",
 			reconstructed: "一人の事例では効いた可能性がありますが、一般化はできません",
-			meaning: 0.95, gain: 0.27, want: OutcomeRestructure,
+			meaning:       0.95, gain: 0.27, want: OutcomeRestructure,
 		},
 		{
 			name: "research causal claim cannot change certainty", question: "この介入は改善すると言えますか？", answer: "相関があったので改善します。",
@@ -199,9 +199,9 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			filled: slots(SlotEvidence), hypotheses: []float64{0.91, 0.09},
 			position: PositionFirst, calibration: CalibrationCommitted,
 			issue: IssueUnsupportedCertainty, first: "改善します",
-			minimal: "因果関係は未確認です",
+			minimal:       "因果関係は未確認です",
 			reconstructed: "相関はありますが、改善の因果関係は断定できません",
-			meaning: 0.92, gain: 0.35, want: OutcomeReject,
+			meaning:       0.92, gain: 0.35, want: OutcomeReject,
 		},
 		{
 			name: "research calibrated reservation", question: "平均が上がったので有効ですか？", answer: "平均は上がりましたが、まだ有効とは断定できません。",

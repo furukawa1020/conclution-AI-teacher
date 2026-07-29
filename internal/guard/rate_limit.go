@@ -144,6 +144,7 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 			"dayCount":      state.DayCount,
 			"schemaVersion": 1,
 			"updatedAt":     firestore.ServerTimestamp,
+			"expiresAt":     now.UTC().Add(48 * time.Hour),
 		})
 	})
 	if errors.Is(err, ErrRateLimitExceeded) {

@@ -3,38 +3,32 @@
 ## 現在の専用環境
 
 - 公開URL: `https://kotae-ai.web.app`
-- Firebase / Google Cloud project ID: `kotae-ai-u22-2026`
-- Firestore: `(default)`、`asia-northeast1`、削除保護あり
+- Firestore: `(default)`、`asia-northeast1`、削除保護あり、評価30日・レート制限48時間のTTL
 - Cloud Run: `kotae-api`、`asia-northeast1`
-- Firebase Web App ID: `1:551920539470:web:6518baf6d84d7ab89eb01f`
+- Firebase Auth: 匿名認証、30日後の未使用アカウント自動削除
+- Firebase App Check: reCAPTCHA Enterprise、Authenticationと独自APIの両方で強制
 
-Google Cloudのproject IDは作成後に変更できません。コンテスト名をブランドへ露出させないため、Hosting site IDを別に `kotae-ai` とし、project IDは内部識別子としてだけ使います。
+Google Cloudのproject IDは作成後に変更できません。公開ブランドとURLは `コタエーAI / kotae-ai` に統一し、既存project IDは誤配備防止のため設定ファイルとデプロイスクリプト内だけで照合します。
 
 FirebaseとGoogle Cloudは別プロジェクトを「接続」するものではありません。FirebaseプロジェクトはFirebase機能が追加されたGoogle Cloudプロジェクトそのものです。同一project IDをHosting、Auth、Firestore、Cloud Run、Vertex AIで使います。
 
-現在このPCに残っているgcloud既定プロジェクト `improve-production-management` は別用途と判断し、変更対象にしません。
-
 ## 今後ユーザーがブラウザで行う操作
 
-1. Google認証のOAuth同意画面に表示するアプリ名とサポートメールを確定する。
-2. reCAPTCHA Enterpriseの課金・利用条件を確認してApp Checkを有効化する。
-3. 音声保存、後日再評価、共有、品質改善を分離した同意文面を承認する。
+1. Googleログインを追加する段階で、OAuth同意画面のアプリ名とサポートメールを確定する。
+2. 音声履歴を実装する前に、保存、後日再評価、共有、品質改善を分離した同意文面を承認する。
+3. Firebase / Vertex AI / reCAPTCHA Enterpriseの利用量と請求アラートを定期確認する。
 
-Firebase利用規約、課金接続、専用project作成、Firebase追加、必要API有効化までは完了しています。
+課金接続、Firebase追加、必要API、Hosting、Auth、App Check、Firestore、Cloud Run、Vertex AIの接続は完了しています。
 
 ## CLI
 
-このPCには現在 `gcloud` と `firebase` がPATH上にありません。インストール後、次を実行します。
+必要なCLIはリポジトリ内のインストールスクリプトで検証します。
 
 ```powershell
-gcloud auth login
-gcloud auth application-default login
-firebase login
-gcloud auth list
-firebase login:list
+powershell -ExecutionPolicy Bypass -File scripts/install-tools.ps1
 ```
 
-サービスアカウントJSON鍵はダウンロードしません。ローカルはユーザーADC、本番はCloud RunのサービスIDを使います。
+サービスアカウントJSON鍵はダウンロードしません。本番はCloud Runの専用サービスIDを使います。すべての変更コマンドは対象projectを明示し、gcloudの既定projectには依存しません。
 
 ## 作成時の順序
 

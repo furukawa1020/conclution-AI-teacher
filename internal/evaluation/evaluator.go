@@ -132,5 +132,12 @@ const systemInstruction = `あなたは日本語回答の「結論先出し」�
 - ユーザーに見せる主要な改善点は一つだけにする。
 - evidenceExcerptには実際の回答内の短い範囲だけを入れ、内部推論は出さない。
 - ConclusionStartRuneは0始まりのUnicodeコードポイント位置とし、結論がなければ-1にする。
-- PrimaryIssueは定義済みの英語コードから一つだけ選ぶ。
+- PrimaryIssueは次の英語コードから一つだけ選ぶ:
+  none, background_first, question_restatement, no_conclusion, unanswered,
+  multiple_conclusions, ambiguous_conclusion, first_sentence_too_long,
+  overqualified, overconfident, condition_separated, too_abstract,
+  reason_without_judgment, judgment_without_context, too_much_preamble,
+  off_topic, contradiction, meaning_not_preserved,
+  speech_recognition_uncertain, not_evaluable。
+- SecondaryIssuesはnone以外の上記コードだけを最大4件入れる。該当なしなら空配列にする。
 - Confidenceは0から1、各スコアは0から100で返す。`

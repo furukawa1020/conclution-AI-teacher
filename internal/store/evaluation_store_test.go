@@ -6,7 +6,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
 )
 
-func TestResultWithoutAnswerText(t *testing.T) {
+func TestResultWithoutFreeformText(t *testing.T) {
 	t.Parallel()
 
 	original := contracts.EvaluationResult{
@@ -18,17 +18,21 @@ func TestResultWithoutAnswerText(t *testing.T) {
 		ModelLogicalID:      "fast-judge-v1",
 	}
 
-	stored := resultWithoutAnswerText(original)
-	if stored.EstimatedConclusion != "" || stored.EvidenceExcerpt != "" {
-		t.Fatal("stored result must not retain answer-derived text")
+	stored := resultWithoutFreeformText(original)
+	if stored.EstimatedConclusion != "" ||
+		stored.EvidenceExcerpt != "" ||
+		stored.Feedback != "" ||
+		stored.RetryInstruction != "" {
+		t.Fatal("stored result must not retain freeform model or answer-derived text")
 	}
 	if stored.CalibrationScore != original.CalibrationScore ||
-		stored.Feedback != original.Feedback ||
-		stored.RetryInstruction != original.RetryInstruction ||
 		stored.ModelLogicalID != original.ModelLogicalID {
-		t.Fatal("non-excerpt evaluation fields must be preserved")
+		t.Fatal("bounded metric and version fields must be preserved")
 	}
-	if original.EstimatedConclusion == "" || original.EvidenceExcerpt == "" {
+	if original.EstimatedConclusion == "" ||
+		original.EvidenceExcerpt == "" ||
+		original.Feedback == "" ||
+		original.RetryInstruction == "" {
 		t.Fatal("redaction must not mutate the active-session result")
 	}
 }

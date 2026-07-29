@@ -37,9 +37,10 @@ func (s *FirestoreEvaluationStore) Save(
 		return "", fmt.Errorf("create attempt id: %w", err)
 	}
 
-	storedResult := resultWithoutAnswerText(result)
+	storedResult := resultWithoutFreeformText(result)
 	userDigest := sha256.Sum256([]byte(uid))
 	userDocumentID := hex.EncodeToString(userDigest[:])
+	expiresAt := time.Now().UTC().Add(30 * 24 * time.Hour)
 	_, err = s.client.
 		Collection("users").
 		Doc(userDocumentID).
@@ -54,10 +55,12 @@ func (s *FirestoreEvaluationStore) Save(
 			"rawQuestionStored":     false,
 			"rawAnswerStored":       false,
 			"containsAnswerExcerpt": false,
-			"storageMode":           "evaluation_without_answer_text",
+			"freeformTextStored":    false,
+			"storageMode":           "evaluation_metrics_only",
 			"createdAt":             firestore.ServerTimestamp,
-			"schemaVersion":         1,
-			"retentionPolicy":       "user_controlled",
+			"expiresAt":             expiresAt,
+			"schemaVersion":         2,
+			"retentionPolicy":       "firestore_ttl_30_days",
 		})
 	if err != nil {
 		return "", fmt.Errorf("save evaluation: %w", err)
@@ -65,12 +68,15 @@ func (s *FirestoreEvaluationStore) Save(
 	return attemptID, nil
 }
 
-// resultWithoutAnswerText keeps the structured coaching result while removing
-// fields that can contain verbatim user input. The complete result is returned
-// to the active browser session, but Firestore never receives those excerpts.
-func resultWithoutAnswerText(result contracts.EvaluationResult) contracts.EvaluationResult {
+// resultWithoutFreeformText keeps only bounded scores, booleans, issue codes,
+// and version identifiers. Model-written strings may paraphrase or quote an
+// answer even when they are not designated excerpts, so none are persisted.
+// The complete result is returned only to the active browser session.
+func resultWithoutFreeformText(result contracts.EvaluationResult) contracts.EvaluationResult {
 	result.EstimatedConclusion = ""
 	result.EvidenceExcerpt = ""
+	result.Feedback = ""
+	result.RetryInstruction = ""
 	return result
 }
 

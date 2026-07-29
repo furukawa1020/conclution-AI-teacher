@@ -178,7 +178,7 @@ func testVoiceHandlerWithAppLimiter(
 			RateLimiter:     limiter,
 			AppRateLimiter:  appLimiter,
 			RequestTimeout:  2 * time.Second,
-			MaxRequestBytes: 12 * 1024 * 1024,
+			MaxRequestBytes: 13 * 1024 * 1024,
 		},
 	)
 }
@@ -521,6 +521,32 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	}
 }
 
+func TestMaximumPublishedVoicePayloadFitsThirteenMiBEnvelope(t *testing.T) {
+	t.Parallel()
+
+	const (
+		jsonAndMaximumNameAllowance = 2 * 1024
+		twelveMiB                   = 12 * 1024 * 1024
+		thirteenMiB                 = 13 * 1024 * 1024
+	)
+	maximumEncodedRequest := base64.StdEncoding.EncodedLen(maxAudioBytes) +
+		base64.StdEncoding.EncodedLen(maxDocumentBytes) +
+		maxStateBytes +
+		jsonAndMaximumNameAllowance
+	if maximumEncodedRequest <= twelveMiB {
+		t.Fatalf(
+			"test no longer covers the historical 12 MiB overflow: %d",
+			maximumEncodedRequest,
+		)
+	}
+	if maximumEncodedRequest >= thirteenMiB {
+		t.Fatalf(
+			"maximum published payload %d does not fit 13 MiB envelope",
+			maximumEncodedRequest,
+		)
+	}
+}
+
 func TestVoiceTurnConsumesUIDAndAppQuotaBeforeBodyDecode(t *testing.T) {
 	t.Parallel()
 
@@ -643,6 +669,25 @@ func TestVoiceTurnModeIsExplicitAndIndependentOfState(t *testing.T) {
 	}
 }
 
+func TestVoiceStateLimitMatchesConversationAndClientBoundary(t *testing.T) {
+	t.Parallel()
+
+	if maxStateBytes != 16*1024 {
+		t.Fatalf("state cap = %d; want 16 KiB", maxStateBytes)
+	}
+	request := voiceTurnRequest{
+		AudioBase64:  "YXVkaW8=",
+		MIMEType:     "audio/webm",
+		SessionState: strings.Repeat("x", maxStateBytes+1),
+		TurnMode:     VoiceTurnIntentional,
+	}
+	input, err := decodeVoiceTurn(request)
+	if err == nil {
+		clearVoiceInput(&input)
+		t.Fatal("oversized state token was accepted")
+	}
+}
+
 func TestVoiceTurnConsumesQuotaBeforeDecodingMalformedPayload(t *testing.T) {
 	t.Parallel()
 
@@ -755,6 +800,35 @@ func TestVoiceResultCaptionMustMatchSpokenShapeAndStayBounded(t *testing.T) {
 		if err := validateVoiceResult(result); err == nil {
 			t.Fatalf("unsafe caption accepted: %#v", result)
 		}
+	}
+}
+
+func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
+	t.Parallel()
+
+	for _, result := range []VoiceTurnResult{
+		{
+			DetectedDomain: "unknown",
+			Route:          "stt-silent",
+		},
+		{
+			Audio:          []byte("audio"),
+			AudioMIMEType:  "audio/mpeg",
+			Caption:        "もう一度話してもらえますか？",
+			DetectedDomain: "unknown",
+			Route:          "stt-clarify",
+		},
+	} {
+		if err := validateVoiceResult(result); err != nil {
+			t.Fatalf("safe pre-inference fallback rejected: %+v: %v", result, err)
+		}
+	}
+	normal := VoiceTurnResult{
+		DetectedDomain: "general",
+		Route:          "fast",
+	}
+	if err := validateVoiceResult(normal); err == nil {
+		t.Fatal("normal model result without encrypted state was accepted")
 	}
 }
 

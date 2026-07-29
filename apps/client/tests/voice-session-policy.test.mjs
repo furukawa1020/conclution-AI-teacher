@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   advanceVad,
   createCaptureBuffer,
+  createCapturePhase,
   createSessionClock,
   createTurnGate,
   createVadState,
@@ -288,6 +289,33 @@ test("pre-roll and promoted payload enforce independent byte ceilings", () => {
   assert.equal(overflow.tooLarge, true);
   assert.equal(overflow.totalBytes, 0);
   assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
+});
+
+test("a delayed huge first chunk after speech confirmation is discarded", () => {
+  const capture = createCaptureBuffer({
+    maximumBytes: 2_000,
+    preRollByteLimit: 100,
+    preRollChunkLimit: 4,
+  });
+  const phase = createCapturePhase();
+
+  for (let id = 1; id <= 4; id += 1) {
+    capture.append({ id, size: 10 }, phase.classifyChunk() === "retain");
+  }
+  assert.equal(phase.confirmSpeech(), true);
+
+  const delayedBoundaryChunk = { id: 5, size: 1_500 };
+  assert.equal(phase.classifyChunk(), "discard-boundary");
+  capture.clear();
+  assert.equal(capture.snapshot().totalBytes, 0);
+
+  const voiceChunk = { id: 6, size: 50 };
+  assert.equal(phase.classifyChunk(), "retain");
+  capture.append(voiceChunk, true);
+  assert.deepEqual(capture.take(), {
+    chunks: [voiceChunk],
+    totalBytes: 50,
+  });
 });
 
 test("gesture epoch, not session state, selects explicit versus ambient mode", () => {

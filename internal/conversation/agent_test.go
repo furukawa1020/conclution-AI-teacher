@@ -13,8 +13,9 @@ import (
 )
 
 type fakeGeneration struct {
-	body string
-	err  error
+	body         string
+	err          error
+	finishReason genai.FinishReason
 }
 
 type generatorCall struct {
@@ -81,7 +82,8 @@ func (fake *fakeGenerator) GenerateContent(
 	}
 	return &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{
-			Content: genai.NewContentFromText(generation.body, genai.RoleModel),
+			Content:      genai.NewContentFromText(generation.body, genai.RoleModel),
+			FinishReason: generation.finishReason,
 		}},
 	}, nil
 }
@@ -186,6 +188,15 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 		call.temperatureSet {
 		t.Fatalf("unexpected fast generation config: %#v", call)
 	}
+	criticCall := fake.calls[1]
+	if criticCall.model != DefaultFastModel ||
+		criticCall.thinkingLevel != genai.ThinkingLevelHigh ||
+		criticCall.responseMIME != "application/json" ||
+		!criticCall.hasJSONSchema ||
+		!strings.Contains(criticCall.prompt, "<lac_critic_data>") ||
+		strings.Contains(criticCall.prompt, `"answer_contract"`) {
+		t.Fatalf("unexpected independent critic config: %#v", criticCall)
+	}
 	state, err := agent.codec.open("uid-1", result.StateToken)
 	if err != nil {
 		t.Fatalf("open initial state: %v", err)
@@ -193,6 +204,181 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 	if state.Turn != 1 || len(state.Graph.Claims) != 1 {
 		t.Fatalf("unexpected initial state: %#v", state)
 	}
+}
+
+func TestAgentCanonicalizesCriticDerivedFields(t *testing.T) {
+	plan := validModelPlan()
+	critic := validCriticContract(plan.SpokenReply)
+	critic.CommitmentFront.FillsTarget = false
+	critic.CommitmentFront.TargetCoverage = 0
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, critic)},
+	}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-derived", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "結論は何ですか？",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "fast" ||
+		result.AnswerContract.TargetSlotCoverage != 1 ||
+		len(fake.calls) != 2 {
+		t.Fatalf("derived contract fields were not canonicalized: %#v", result)
+	}
+}
+
+func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
+	t.Run("precision model recovers two primary provider failures", func(t *testing.T) {
+		plan := validModelPlan()
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, plan)},
+			{err: errors.New("primary critic provider failure")},
+			{err: errors.New("primary critic provider failure again")},
+			{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-critic-recovery", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "結論は何ですか？",
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "fast" ||
+			len(fake.calls) != 4 ||
+			fake.calls[3].model != DefaultPrecisionModel ||
+			fake.calls[3].thinkingLevel != genai.ThinkingLevelMedium {
+			t.Fatalf("precision critic recovery failed: result=%#v calls=%#v", result, fake.calls)
+		}
+	})
+
+	t.Run("provider unavailable is retried once", func(t *testing.T) {
+		plan := validModelPlan()
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, plan)},
+			{err: errors.New("temporary critic provider failure")},
+			{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-critic-provider", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "結論は何ですか？",
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "fast" || len(fake.calls) != 3 {
+			t.Fatalf("provider critic retry failed: %#v", result)
+		}
+	})
+
+	t.Run("invalid JSON is retried once", func(t *testing.T) {
+		plan := validModelPlan()
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, plan)},
+			{body: "{"},
+			{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-retry", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "結論は何ですか？",
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "fast" || len(fake.calls) != 3 {
+			t.Fatalf("retryable critic failure was not recovered: %#v", result)
+		}
+		for _, call := range fake.calls[1:] {
+			if call.model != DefaultFastModel ||
+				!strings.Contains(call.prompt, "<lac_critic_data>") {
+				t.Fatalf("retry escaped isolated critic call: %#v", call)
+			}
+		}
+	})
+
+	t.Run("safety finish is never retried", func(t *testing.T) {
+		plan := validModelPlan()
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, plan)},
+			{finishReason: genai.FinishReasonSafety},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-safety-finish", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "答えて",
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "verification-unavailable" || len(fake.calls) != 2 {
+			t.Fatalf("safety finish was retried or published: %#v", result)
+		}
+	})
+}
+
+func TestAgentRetriesStructuredInferenceButNotSafetyFinish(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		first fakeGeneration
+	}{
+		{
+			name:  "provider unavailable",
+			first: fakeGeneration{err: errors.New("temporary provider failure")},
+		},
+		{
+			name:  "invalid structured output",
+			first: fakeGeneration{body: "{"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan := validModelPlan()
+			fake := &fakeGenerator{generations: []fakeGeneration{
+				test.first,
+				{body: encodePlan(t, plan)},
+				{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+			}}
+			agent := newTestAgent(t, fake)
+
+			result, err := agent.Process(context.Background(), "uid-infer-retry", VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "日本の首都はどこ？",
+			})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if result.Route != "fast" || len(fake.calls) != 3 {
+				t.Fatalf("structured inference retry failed: %#v", result)
+			}
+			if fake.calls[0].model != DefaultFastModel ||
+				fake.calls[1].model != DefaultFastModel {
+				t.Fatalf("retry changed model role: %#v", fake.calls)
+			}
+		})
+	}
+
+	t.Run("safety finish is not retried", func(t *testing.T) {
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{finishReason: genai.FinishReasonSafety},
+		}}
+		agent := newTestAgent(t, fake)
+		_, err := agent.Process(context.Background(), "uid-infer-safety", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "答えて",
+		})
+		if !errors.Is(err, ErrModelOutputInvalid) || len(fake.calls) != 1 {
+			t.Fatalf("safety finish was retried: calls=%d err=%v", len(fake.calls), err)
+		}
+	})
 }
 
 func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
@@ -223,6 +409,8 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 			fake.calls[1].model != DefaultPrecisionModel ||
 			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
 			!strings.Contains(fake.calls[1].prompt, `"preliminary_plan"`) ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
 			!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
 			t.Fatalf("unexpected precision calls: %#v", fake.calls)
 		}
@@ -535,6 +723,8 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 			fake := &fakeGenerator{generations: []fakeGeneration{
 				{body: encodePlan(t, plan)},
 				{err: errors.New("critic unavailable with provider detail")},
+				{err: errors.New("critic still unavailable with provider detail")},
+				{err: errors.New("precision recovery unavailable with provider detail")},
 			}}
 			agent := newTestAgent(t, fake)
 			result, err := agent.Process(context.Background(), "uid-critic", VoiceTurn{
@@ -557,6 +747,79 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 				result.Intervention.Act != "clarify" ||
 				countQuestions(result.SpokenReply) != 1 {
 				t.Fatalf("intentional critic failure did not ask one question: %#v", result)
+			}
+		})
+	}
+}
+
+func TestCriticFailureClassIsFiniteAndContentFree(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		wantClass string
+		wantStage string
+	}{
+		{
+			name:      "deadline",
+			err:       errors.Join(ErrModelUnavailable, errCriticDeadline),
+			wantClass: "deadline",
+			wantStage: "generate",
+		},
+		{
+			name:      "canceled",
+			err:       errors.Join(ErrModelUnavailable, errCriticCanceled),
+			wantClass: "canceled",
+			wantStage: "generate",
+		},
+		{
+			name:      "provider",
+			err:       ErrModelUnavailable,
+			wantClass: "provider_unavailable",
+			wantStage: "generate",
+		},
+		{
+			name:      "safety",
+			err:       errors.Join(ErrModelOutputInvalid, errCriticFinishSafety),
+			wantClass: "safety",
+			wantStage: "finish",
+		},
+		{
+			name:      "contract",
+			err:       errors.Join(ErrModelOutputInvalid, errCriticContract),
+			wantClass: "contract_invalid",
+			wantStage: "contract",
+		},
+		{
+			name:      "response",
+			err:       ErrModelOutputInvalid,
+			wantClass: "response_invalid",
+			wantStage: "internal",
+		},
+		{
+			name:      "unknown provider detail",
+			err:       errors.New("SECRET provider response"),
+			wantClass: "internal",
+			wantStage: "internal",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			gotClass := criticFailureClass(test.err)
+			gotStage := criticFailureStage(test.err)
+			if gotClass != test.wantClass ||
+				gotStage != test.wantStage ||
+				strings.Contains(gotClass+gotStage, "SECRET") {
+				t.Fatalf(
+					"critic failure = (%q, %q); want (%q, %q)",
+					gotClass,
+					gotStage,
+					test.wantClass,
+					test.wantStage,
+				)
 			}
 		})
 	}
@@ -642,7 +905,7 @@ func TestAgentUrgentSafetyOutranksLowConfidenceAndAmbiguousLAC(t *testing.T) {
 	plan := validModelPlan()
 	plan.Confidence = 0.35
 	plan.InterventionPolicy = "safety"
-	plan.SpokenReply = "今は安全を優先して、その場から離れて緊急窓口へ連絡してください。"
+	plan.SpokenReply = "監査で曖昧とされたdraftは読み上げない。"
 	plan.Intervention = modelArbiter{
 		Benefit: 0, InterruptionCost: 1, Urgency: 0.95,
 		Confidence: 1, Act: "reflect",
@@ -667,7 +930,8 @@ func TestAgentUrgentSafetyOutranksLowConfidenceAndAmbiguousLAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.SpokenReply != plan.SpokenReply ||
+	if result.SpokenReply == "" ||
+		result.SpokenReply == plan.SpokenReply ||
 		result.Intervention.Act == "silent" ||
 		result.Intervention.Act == "clarify" ||
 		result.InterventionPolicy != "safety" {

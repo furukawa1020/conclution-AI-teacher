@@ -252,7 +252,7 @@ CounterfactualRepair
   └─ repair_gain
 ```
 
-draftモデル内のLACはadvisoryです。最終draftの後に、source utterance、前状態、候補返答だけを別のstructured callへ渡し、draft側のLAC自己申告を見せずに独立監査します。最終判定はその監査値も鵜呑みにせず、Go側が仮説gap、正規化entropy、必須slot coverage、commitment位置、意味保存条件を再計算します。独立監査が失敗した場合は未監査draftを読まず、intentional turnなら短い確認一問、ambient turnなら沈黙にします。
+draftモデル内のLACはadvisoryです。最終draftの後に、source utterance、前状態、候補返答だけを低遅延fast modelの別structured callへ渡し、draft側のLAC自己申告を見せずに独立監査します。ここでいう独立性は別モデル利用ではなく、隔離prompt、別call、自己申告の非共有を指します。高速監査が構造不正または一時的provider障害で二度失敗した時だけprecision modelの中思考で一度回復監査し、安全終了・cancelでは切り替えません。最終判定はその監査値も鵜呑みにせず、Go側が仮説gap、正規化entropy、必須slot coverage、commitment位置、意味保存条件を再計算します。すべての監査が失敗した場合は未監査draftを読まず、intentional turnなら短い確認一問、ambient turnなら沈黙にします。
 
 ### AからAへ答える不変条件
 

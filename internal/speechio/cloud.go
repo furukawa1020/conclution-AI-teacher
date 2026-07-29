@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	speech "cloud.google.com/go/speech/apiv2"
@@ -12,6 +14,8 @@ import (
 	texttospeech "cloud.google.com/go/texttospeech/apiv1"
 	"cloud.google.com/go/texttospeech/apiv1/texttospeechpb"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -33,11 +37,18 @@ type Service interface {
 }
 
 type CloudService struct {
-	speechClient *speech.Client
-	ttsClient    *texttospeech.Client
-	recognizer   string
-	speechModel  string
-	voiceName    string
+	speechClient    *speech.Client
+	ttsClient       *texttospeech.Client
+	recognizer      string
+	speechModel     string
+	fallbackModel   string
+	voiceName       string
+	fallbackEnabled bool
+	fallbackActive  atomic.Bool
+	recognizeCall   func(
+		context.Context,
+		*speechpb.RecognizeRequest,
+	) (*speechpb.RecognizeResponse, error)
 }
 
 func NewCloudService(
@@ -45,6 +56,7 @@ func NewCloudService(
 	projectID string,
 	location string,
 	speechModel string,
+	fallbackModel string,
 	voiceName string,
 ) (*CloudService, error) {
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(location) == "" {
@@ -67,7 +79,7 @@ func NewCloudService(
 		return nil, fmt.Errorf("initialize regional text-to-speech client: %w", err)
 	}
 
-	return &CloudService{
+	service := &CloudService{
 		speechClient: speechClient,
 		ttsClient:    ttsClient,
 		recognizer: fmt.Sprintf(
@@ -75,9 +87,18 @@ func NewCloudService(
 			projectID,
 			location,
 		),
-		speechModel: speechModel,
-		voiceName:   voiceName,
-	}, nil
+		speechModel:     speechModel,
+		fallbackModel:   fallbackModel,
+		voiceName:       voiceName,
+		fallbackEnabled: guardedFallbackEnabled(location, speechModel, fallbackModel),
+	}
+	service.recognizeCall = func(
+		callContext context.Context,
+		request *speechpb.RecognizeRequest,
+	) (*speechpb.RecognizeResponse, error) {
+		return speechClient.Recognize(callContext, request)
+	}
+	return service, nil
 }
 
 func (s *CloudService) Close() error {
@@ -92,22 +113,30 @@ func (s *CloudService) Transcribe(
 		return "", 0, ErrNoSpeech
 	}
 
-	response, err := s.speechClient.Recognize(ctx, &speechpb.RecognizeRequest{
-		Recognizer: s.recognizer,
-		Config: &speechpb.RecognitionConfig{
-			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
-				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
-			},
-			Model:         s.speechModel,
-			LanguageCodes: []string{"ja-JP"},
-			Features: &speechpb.RecognitionFeatures{
-				EnableAutomaticPunctuation: true,
-				EnableWordConfidence:       false,
-				EnableWordTimeOffsets:      false,
-			},
-		},
-		AudioSource: &speechpb.RecognizeRequest_Content{Content: audio},
-	})
+	model := s.speechModel
+	if s.fallbackActive.Load() {
+		model = s.fallbackModel
+	}
+	response, err := s.recognize(ctx, audio, model)
+	if err != nil &&
+		ctx.Err() == nil &&
+		s.fallbackEnabled &&
+		model == s.speechModel &&
+		s.fallbackModel != "" &&
+		s.fallbackModel != s.speechModel &&
+		primaryModelUnavailable(err, s.speechModel) {
+		if s.fallbackActive.CompareAndSwap(false, true) {
+			slog.WarnContext(
+				ctx,
+				"regional speech primary model unavailable; enabling guarded fallback",
+				"primary_model",
+				s.speechModel,
+				"fallback_model",
+				s.fallbackModel,
+			)
+		}
+		response, err = s.recognize(ctx, audio, s.fallbackModel)
+	}
 	if err != nil {
 		return "", 0, fmt.Errorf("regional speech recognition failed: %w", err)
 	}
@@ -120,6 +149,48 @@ func (s *CloudService) Transcribe(
 		return "", 0, ErrTranscriptLong
 	}
 	return transcript, confidence, nil
+}
+
+func (s *CloudService) recognize(
+	ctx context.Context,
+	audio []byte,
+	model string,
+) (*speechpb.RecognizeResponse, error) {
+	return s.recognizeCall(ctx, &speechpb.RecognizeRequest{
+		Recognizer: s.recognizer,
+		Config: &speechpb.RecognitionConfig{
+			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
+				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
+			},
+			Model:         model,
+			LanguageCodes: []string{"ja-JP"},
+			Features: &speechpb.RecognitionFeatures{
+				EnableAutomaticPunctuation: true,
+				EnableWordConfidence:       false,
+				EnableWordTimeOffsets:      false,
+			},
+		},
+		AudioSource: &speechpb.RecognizeRequest_Content{Content: audio},
+	})
+}
+
+func primaryModelUnavailable(err error, model string) bool {
+	rpcStatus, ok := status.FromError(err)
+	if !ok || rpcStatus.Code() != codes.PermissionDenied {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(rpcStatus.Message()))
+	modelMarker := " on model " + strings.ToLower(strings.TrimSpace(model)) +
+		" locale ja-jp. "
+	return strings.HasPrefix(message, "permission denied for project ") &&
+		strings.Contains(message, modelMarker) &&
+		strings.HasSuffix(message, "it is no longer generally available.")
+}
+
+func guardedFallbackEnabled(location, primaryModel, fallbackModel string) bool {
+	return location == "asia-northeast1" &&
+		primaryModel == "chirp_3" &&
+		fallbackModel == "short"
 }
 
 func recognizedText(response *speechpb.RecognizeResponse) (string, float32) {

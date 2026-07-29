@@ -17,6 +17,9 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_VOICE_RATE_LIMIT_PER_DAY", "")
 	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", "")
 	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", "")
+	t.Setenv("KOTAE_MAX_VOICE_BYTES", "")
+	t.Setenv("KOTAE_SPEECH_MODEL", "")
+	t.Setenv("KOTAE_SPEECH_FALLBACK_MODEL", "")
 }
 
 func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
@@ -37,6 +40,30 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 		PerDay:    guard.MaxPerDay,
 	}) {
 		t.Fatalf("voice app rate limits = %+v", cfg.VoiceAppRateLimits)
+	}
+	if cfg.MaxVoiceBytes != 13*1024*1024 {
+		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)
+	}
+	if cfg.SpeechModel != "chirp_3" || cfg.SpeechFallback != "short" {
+		t.Fatalf(
+			"speech models = primary %q, fallback %q",
+			cfg.SpeechModel,
+			cfg.SpeechFallback,
+		)
+	}
+}
+
+func TestLoadAllowsThirteenMiBVoiceEnvelopeButNoMore(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_MAX_VOICE_BYTES", "13631488")
+	if _, err := Load(); err != nil {
+		t.Fatalf("13 MiB envelope rejected: %v", err)
+	}
+
+	t.Setenv("KOTAE_MAX_VOICE_BYTES", "13631489")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_MAX_VOICE_BYTES") {
+		t.Fatalf("oversized envelope error = %v", err)
 	}
 }
 
@@ -68,6 +95,8 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "day too high", key: "KOTAE_RATE_LIMIT_PER_DAY", value: "201"},
 		{name: "voice app minute too high", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", value: "21"},
 		{name: "voice app day disabled", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", value: "0"},
+		{name: "unreviewed speech primary", key: "KOTAE_SPEECH_MODEL", value: "short"},
+		{name: "unreviewed speech fallback", key: "KOTAE_SPEECH_FALLBACK_MODEL", value: "long"},
 	}
 
 	for _, test := range tests {

@@ -16,6 +16,8 @@ web-sys = { version = "=0.3.103", features = [
     "AnalyserNode",
     "AudioContext",
     "AudioNode",
+    "Event",
+    "EventTarget",
     "Location",
     "MediaDevices",
     "MediaStream",

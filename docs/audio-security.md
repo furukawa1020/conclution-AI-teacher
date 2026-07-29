@@ -36,6 +36,8 @@ Cloud Run kotae-api（asia-northeast1）
 
 STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
 
+STTは`chirp_3`をprimaryにします。ただしlive APIが、このproject・`ja-JP`に限ってmodel固有の`PermissionDenied`と「no longer generally available」を同時に返した場合だけ、同じ`asia-northeast1`の`short`へ一度再試行し、そのCloud Run instance内でfallbackを保持します。一般的なIAM拒否、別model、別locale、timeout、decode失敗では品質を黙って下げずfail-closedにします。東京域外のChirpへは自動退避しません。fallbackは可用性のための限定経路であり、自然な独話に対する同等精度を保証しません。
+
 ## マイクとセッション制御
 
 - 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
@@ -44,7 +46,7 @@ STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固
 - AI処理中と合成音声の再生中はマイクトラックを無効にする
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
 - 無発話が3分続いた時、または開始から30分経過した時にセッションを終了する
-- 一発話は音声ありで最大55秒、無音で最大30秒とし、音声requestは2 MiB、PDFは7 MiBを上限にする
+- 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、PDFは7 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする
 - 会話状態とPDFはJavaScript変数にだけ保持し、localStorageへ保存しない。Firebaseの匿名認証だけは`browserSessionPersistence`を使う
 
 JavaScriptのガベージコレクションや文字列の複製は完全には制御できません。クライアントは使用後に参照を解放し、Go側は受信byte sliceを可能な範囲でclearしますが、これを暗号学的なRAM消去保証とは表現しません。
@@ -110,13 +112,16 @@ PDFは利用者が選択した後の一つの音声ターンにだけ添付し�
 KOTAE ReflexとLatent Answer Contract（LAC）はプロジェクト独自の実験的な制御機構であり、医療機器や安全認証済みの判断機構ではありません。
 
 - 潜在問いの上位候補が近く曖昧なら、勝手に一つへ固定せず確認または沈黙を選ぶ
-- 最終draftの後に、draft側のLAC自己申告を渡さない別のstructured model callで回答を監査する
+- 最終draftの後に、draft側のLAC自己申告を渡さない低遅延fast modelの別structured callで回答を監査する。これは別モデル監査ではなく、隔離promptと別callによる独立監査である。構造不正または一時的provider障害が二度続いた時だけprecision modelで一度回復監査し、安全終了・cancelでは回復を試みない
 - 答えが問いの必須slotを満たすか、最初のコミットメントがどこにあるかを決定論的に再検証する
 - first commitmentが候補回答内に実在することと、keepに必要な必須slotの完全充足を決定論的に確認する
 - 再構成で条件、因果、boolean極性、数値・単位、選択肢label、引用anchor、不確実性が変わる場合は、その修復案を拒否する
 - 自己修正の兆候がある時は、AIの訂正より本人の言い直しを優先する
 - 日常のぼやきや感情表現を、常に論理誤りとして矯正しない
 - PDF、医療、法律、金融、研究根拠は高リスク経路として扱い、精密経路が使えない時は実質回答を読み上げない
+- STTが0より大きく0.65未満のconfidenceを返した場合、文字起こしをモデルへ渡さず、intentionalなら固定文で聞き返し、ambientなら沈黙する。confidence 0はAPIが値を提供しなかった状態として扱い、低信頼判定とは区別する
+
+`0.65`は未校正の補助境界であり、誤認識をゼロにする保証ではありません。Google Cloudが返す値を真の確率とはみなさず、実利用条件の音声でROC、聞き返し率、取りこぼし率を測って校正する必要があります。
 
 LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservation`は内部の制御・評価指標であり、モデルの自己申告だけを正解とはしません。現在は研究的な仮説であり、実際の会話データによる精度、誤介入率、校正の検証が必要です。
 
@@ -139,6 +144,7 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - missing / unknown `turnMode`を拒否し、intentionalとambientを状態tokenから推測しない
 - 不正本文でも認証後はUID枠とApp枠が先に消費される
 - 未知field、不正MIME、過大音声、過大PDF、PDF magic不正を拒否する
+- 測定されたSTT confidenceが低い時に文字起こしがモデルへ届かない
 - 状態tokenの改ざん、期限切れ、別UIDでの利用を拒否する
 - 曖昧な潜在問いで断定的な再構成をしない
 - 条件、不確実性、留保を変える再構成を拒否する

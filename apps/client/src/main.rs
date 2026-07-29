@@ -132,7 +132,24 @@ struct TurnEnd {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{BridgeStatus, CloudState, DocumentInfo, TurnEnd, VoiceTurnResult};
+    use dioxus::prelude::{Signal, WritableExt};
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
+
+    pub(super) struct DocumentClearListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Drop for DocumentClearListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:document-cleared",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
 
     #[wasm_bindgen]
     extern "C" {
@@ -219,6 +236,22 @@ mod cloud {
         serde_wasm_bindgen::from_value(value).map_err(|_| "PDFの情報を確認できない")
     }
 
+    pub fn install_document_clear_listener(
+        mut document_info: Signal<Option<DocumentInfo>>,
+    ) -> Option<Rc<DocumentClearListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            document_info.set(None);
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:document-cleared",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(DocumentClearListener { window, callback }))
+    }
+
     pub fn stop_session() {
         let _ = stop_session_js();
     }
@@ -264,6 +297,7 @@ mod cloud {
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
     use super::{CloudState, DocumentInfo, VoiceTurnResult};
+    use dioxus::prelude::Signal;
 
     pub async fn status() -> CloudState {
         CloudState::Unavailable
@@ -294,6 +328,8 @@ mod cloud {
     pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
         Err("WebAssembly版で使ってみて")
     }
+
+    pub fn install_document_clear_listener(_document_info: Signal<Option<DocumentInfo>>) {}
 
     pub fn stop_session() {}
 }
@@ -419,6 +455,7 @@ fn submit_turn(
             }
         };
 
+        let retry_intentional = next_turn_is_intentional(&result.route);
         session_state.set(result.session_state.clone());
         detected_domain.set(result.detected_domain.clone());
         route.set(result.route.clone());
@@ -447,7 +484,7 @@ fn submit_turn(
         arm_listening(
             operation,
             false,
-            false,
+            retry_intentional,
             voice_state,
             generation,
             session_state,
@@ -496,6 +533,10 @@ fn human_file_size(bytes: u64) -> String {
     }
 }
 
+fn next_turn_is_intentional(route: &str) -> bool {
+    route == "stt-clarify"
+}
+
 #[component]
 fn App() -> Element {
     let mut voice_state = use_signal(|| VoiceState::Ready);
@@ -508,6 +549,8 @@ fn App() -> Element {
     let mut document_error = use_signal(|| None::<&'static str>);
     let mut caption = use_signal(|| None::<String>);
     let mut captions_visible = use_signal(|| false);
+    let _document_clear_listener =
+        use_hook(|| cloud::install_document_clear_listener(document_info));
     let cloud_status = use_resource(|| async { cloud::status().await });
 
     let state_snapshot = *voice_state.read();
@@ -760,7 +803,7 @@ fn App() -> Element {
                             span { class: "utility-index", "01" }
                             div {
                                 h2 { "論文を、今回だけ" }
-                                p { "PDF / 最大7MB / 送信後に端末メモリから破棄" }
+                                p { "PDF / 最大7MB / 次の応答後に参照を解除" }
                             }
                         }
                         input {
@@ -819,15 +862,15 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "話している間だけメモリに置き　暗号化通信で送る　端末には残さない"
+                                "発話ごとに一時処理し　暗号化通信で送る　アプリの履歴には残さない"
                             }
                             p {
                                 strong { "PDF" }
-                                "選んだときだけ次の応答へ添付　送信後はブラウザから手放す"
+                                "選んだときだけ次の応答へ添付　応答後に参照を解除"
                             }
                             p {
-                                strong { "本人性" }
-                                "Firebase Authentication と App Check で毎回たしかめる"
+                                strong { "接続" }
+                                "匿名セッションと正規アプリからのリクエストか毎回たしかめる"
                             }
                             p { class: "privacy-fold__stop",
                                 "一時停止・終了で　マイクと再生をすぐ止める"
@@ -843,5 +886,17 @@ fn App() -> Element {
                 span { "KOTAE / 2026" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_turn_is_intentional;
+
+    #[test]
+    fn recognition_clarification_keeps_the_explicit_turn_open() {
+        assert!(next_turn_is_intentional("stt-clarify"));
+        assert!(!next_turn_is_intentional("stt-silent"));
+        assert!(!next_turn_is_intentional("direct-answer"));
     }
 }

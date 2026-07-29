@@ -132,6 +132,7 @@ func main() {
 			cfg.ProjectID,
 			cfg.SpeechLocation,
 			cfg.SpeechModel,
+			cfg.SpeechFallback,
 			cfg.SpeechVoice,
 		)
 		if err != nil {

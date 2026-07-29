@@ -3,6 +3,7 @@ package voiceflow
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
@@ -11,20 +12,24 @@ import (
 
 type fakeSpeech struct {
 	transcript      string
+	confidence      float32
 	transcribeErr   error
 	synthesizeCalls int
+	synthesizedText string
 }
 
 func (s *fakeSpeech) Transcribe(_ context.Context, _ []byte) (string, float32, error) {
-	return s.transcript, 0.95, s.transcribeErr
+	return s.transcript, s.confidence, s.transcribeErr
 }
 
-func (s *fakeSpeech) Synthesize(_ context.Context, _ string) ([]byte, string, error) {
+func (s *fakeSpeech) Synthesize(_ context.Context, text string) ([]byte, string, error) {
 	s.synthesizeCalls++
+	s.synthesizedText = text
 	return []byte("speech"), "audio/mpeg", nil
 }
 
 type fakeAgent struct {
+	calls  int
 	turn   conversation.VoiceTurn
 	result conversation.VoiceTurnResult
 	err    error
@@ -35,8 +40,118 @@ func (a *fakeAgent) Process(
 	_ string,
 	turn conversation.VoiceTurn,
 ) (conversation.VoiceTurnResult, error) {
+	a.calls++
 	a.turn = turn
 	return a.result, a.err
+}
+
+func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
+	t.Parallel()
+
+	for _, ambient := range []bool{false, true} {
+		name := "intentional"
+		if ambient {
+			name = "ambient"
+		}
+		t.Run(name, func(t *testing.T) {
+			speech := &fakeSpeech{
+				transcript: "誤認したかもしれない高リスク発話",
+				confidence: 0.40,
+			}
+			agent := &fakeAgent{}
+			pipeline, err := New(speech, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := pipeline.Process(
+				context.Background(),
+				"uid",
+				httpapi.VoiceTurnInput{
+					Audio:      []byte("audio"),
+					Ambient:    ambient,
+					StateToken: "existing-state",
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if agent.calls != 0 {
+				t.Fatalf("low-confidence transcript reached the model: %d", agent.calls)
+			}
+			if result.StateToken != "existing-state" ||
+				result.DetectedDomain != "unknown" {
+				t.Fatalf("recognition fallback metadata = %+v", result)
+			}
+			if ambient {
+				if result.Route != "stt-silent" ||
+					len(result.Audio) != 0 ||
+					result.Caption != "" ||
+					speech.synthesizeCalls != 0 {
+					t.Fatalf("ambient low-confidence turn spoke: %+v", result)
+				}
+				return
+			}
+			if result.Route != "stt-clarify" ||
+				result.Caption != lowConfidencePrompt ||
+				speech.synthesizedText != lowConfidencePrompt ||
+				len(result.Audio) == 0 ||
+				speech.synthesizeCalls != 1 {
+				t.Fatalf("intentional low-confidence turn did not clarify: %+v", result)
+			}
+		})
+	}
+}
+
+func TestPipelineTreatsZeroSTTConfidenceAsUnavailableNotLow(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{transcript: "confidenceが提供されない認識結果"}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		Domain:      "general",
+		Route:       "fast",
+		StateToken:  "state",
+		SpokenReply: "続けます。",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{Audio: []byte("audio")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.calls != 1 {
+		t.Fatalf("zero/unavailable confidence suppressed transcript: %d", agent.calls)
+	}
+}
+
+func TestTranscriptConfidenceBoundary(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		confidence float32
+		tooLow     bool
+	}{
+		{name: "unavailable zero", confidence: 0, tooLow: false},
+		{name: "below threshold", confidence: 0.649, tooLow: true},
+		{name: "at threshold", confidence: 0.65, tooLow: false},
+		{name: "high", confidence: 0.95, tooLow: false},
+		{name: "negative invalid", confidence: -0.1, tooLow: true},
+		{name: "above one invalid", confidence: 1.1, tooLow: true},
+		{name: "NaN invalid", confidence: float32(math.NaN()), tooLow: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			if got := transcriptConfidenceTooLow(test.confidence); got != test.tooLow {
+				t.Fatalf("tooLow(%v) = %v; want %v", test.confidence, got, test.tooLow)
+			}
+		})
+	}
 }
 
 func TestPipelinePreservesDeliberateSilence(t *testing.T) {

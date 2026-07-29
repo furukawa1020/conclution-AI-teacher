@@ -7,6 +7,7 @@
 target
 dist
 apps
+artifacts
 crates
 docs
 scripts

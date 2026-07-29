@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
+)
+
+const (
+	minUsableTranscriptConfidence = 0.65
+	lowConfidencePrompt           = "うまく聞き取れませんでした。もう一度、短く話してもらえますか？"
 )
 
 // Pipeline keeps the three trust boundaries explicit: regional speech
@@ -30,12 +36,37 @@ func (p *Pipeline) Process(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, error) {
-	transcript, _, err := p.speech.Transcribe(ctx, input.Audio)
+	transcript, confidence, err := p.speech.Transcribe(ctx, input.Audio)
 	if err != nil {
 		if errors.Is(err, speechio.ErrNoSpeech) {
 			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNotRecognized
 		}
 		return httpapi.VoiceTurnResult{}, fmt.Errorf("voiceflow: transcribe: %w", err)
+	}
+	if transcriptConfidenceTooLow(confidence) {
+		result := httpapi.VoiceTurnResult{
+			StateToken:     input.StateToken,
+			DetectedDomain: "unknown",
+			Route:          "stt-silent",
+		}
+		if input.Ambient {
+			return result, nil
+		}
+		audio, audioMIME, synthesizeErr := p.speech.Synthesize(
+			ctx,
+			lowConfidencePrompt,
+		)
+		if synthesizeErr != nil {
+			return httpapi.VoiceTurnResult{}, fmt.Errorf(
+				"voiceflow: synthesize recognition clarification: %w",
+				synthesizeErr,
+			)
+		}
+		result.Audio = audio
+		result.AudioMIMEType = audioMIME
+		result.Caption = lowConfidencePrompt
+		result.Route = "stt-clarify"
+		return result, nil
 	}
 
 	turn := conversation.VoiceTurn{
@@ -78,4 +109,16 @@ func (p *Pipeline) Process(
 	result.AudioMIMEType = audioMIME
 	result.Caption = decision.SpokenReply
 	return result, nil
+}
+
+func transcriptConfidenceTooLow(confidence float32) bool {
+	if math.IsNaN(float64(confidence)) ||
+		math.IsInf(float64(confidence), 0) ||
+		confidence < 0 ||
+		confidence > 1 {
+		return true
+	}
+	// Some recognizers omit utterance confidence and return zero. Treat zero
+	// as "not provided", not as a measured zero-confidence transcript.
+	return confidence > 0 && confidence < minUsableTranscriptConfidence
 }

@@ -44,7 +44,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 ┌──────────────────┐   ┌─────────────────────────────┐
 │ Cloud STT V2     │   │ Vertex AI（global）          │
 │ asia-northeast1  │   │ Gemini fast / precision     │
-│ chirp_3, ja-JP   │   │ Thought Graph + EVI + LAC   │
+│ chirp_3 → short  │   │ Thought Graph + EVI + LAC   │
 └────────┬─────────┘   └────────────┬────────────────┘
          └──── transcript ──────────┘
                                     │ silence / reply text
@@ -94,7 +94,7 @@ TypeScriptは使いません。ブラウザAPIとFirebase Web SDKを直接呼ぶ
 
 1. Gemini 3.6 Flashの高速経路が、domain、潜在問い、Thought State Graph差分、介入候補、advisory LACを構造化出力する。
 2. PDF、研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。PDF・医療・法律・金融・研究根拠では精密経路の失敗時に実質回答へfallbackしない。
-3. 最終draftの後に、draft側のLACを入力しない独立structured callでLACを監査する。
+3. 最終draftの後に、低遅延のfast modelを使う別のstructured callでLACを監査する。独立性は別モデルという主張ではなく、隔離prompt、別call、draft側LAC自己申告の非共有で確保する。高速監査が構造不正または一時的provider障害で二度失敗した時だけprecision modelの中思考で一度回復監査し、安全終了・cancelでは切り替えない。
 4. モデル出力をJSON schemaと上限で検証し、Go側が仮説gap、entropy、必須slotの完全充足、回答内に実在するcommitment、意味保存を決定論的に再計算する。
 5. 潜在問いが曖昧ならclarifyまたはsilence、答えの核が欠けていて意味保存できる時だけrestructureする。独立監査が使えない場合も未監査draftは話さない。
 6. Self-repair graceとEVIで、モデルが話したがっても介入価値が低ければsilenceへ落とす。ただし緊急安全介入を曖昧判定で消さない。

@@ -35,7 +35,7 @@ const VOICE_ENDPOINT = "/api/v1/voice/turns";
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
-const RESPONSE_AUDIO_MAX_BASE64_CHARS = 20 * 1024 * 1024;
+const RESPONSE_AUDIO_MAX_BASE64_CHARS = 4 * Math.ceil(AUDIO_MAX_BYTES / 3);
 const SESSION_STATE_MAX_CHARS = 16 * 1024;
 const VAD_INTERVAL_MS = VOICE_SESSION_LIMITS.vadIntervalMs;
 
@@ -415,6 +415,8 @@ function armVad(recording) {
     recording.hasSpeech = vadState.hasSpeech;
     recording.lastVoiceAt = vadState.lastVoiceAt ?? 0;
     if (!hadSpeech && recording.hasSpeech) {
+      // A delayed first Blob may contain everything heard before VAD
+      // confirmation. Force a boundary and discard that Blob below.
       recording.capturePhase.confirmSpeech();
       if (typeof recording.recorder.requestData !== "function") {
         recording.discard = true;
@@ -476,6 +478,7 @@ function createRecording(stream) {
     }
     const disposition = recording.capturePhase.classifyChunk();
     if (disposition === "discard-boundary") {
+      // Privacy takes priority over retaining the first ~200 ms of speech.
       recording.captureBuffer.clear();
       recording.totalBytes = 0;
       return;
@@ -522,6 +525,7 @@ function createRecording(stream) {
       }
 
       const captured = recording.captureBuffer.take();
+      recording.capturePhase.reset();
       const mimeType =
         recorder.mimeType ||
         captured.chunks[0]?.type ||
@@ -574,7 +578,7 @@ async function beginTurn() {
     return await initializeWithCleanup(
       async () => {
         const stream = await ensureMediaStream(expectedEpoch);
-      await ensureAudioGraph(stream, expectedEpoch);
+        await ensureAudioGraph(stream, expectedEpoch);
         if (expectedEpoch !== sessionEpoch) {
           fail("request_cancelled");
         }

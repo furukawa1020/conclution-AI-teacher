@@ -19,6 +19,7 @@ import (
 
 	"github.com/firebase/genkit/go/core"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
@@ -27,8 +28,8 @@ import (
 
 const (
 	maxAudioBytes    = 2 * 1024 * 1024
-	maxDocumentBytes = 8 * 1024 * 1024
-	maxStateBytes    = 64 * 1024
+	maxDocumentBytes = 7 * 1024 * 1024
+	maxStateBytes    = conversation.MaxStateTokenBytes
 	maxCaptionRunes  = 480
 	allowedWebOrigin = "https://kotae-ai.web.app"
 )
@@ -355,8 +356,10 @@ func normalizedAudioMIME(value string) string {
 }
 
 func validateVoiceResult(result VoiceTurnResult) error {
+	preInferenceRecognitionResult := result.Route == "stt-clarify" ||
+		result.Route == "stt-silent"
 	if len(result.Audio) > maxAudioBytes ||
-		len(result.StateToken) == 0 ||
+		(len(result.StateToken) == 0 && !preInferenceRecognitionResult) ||
 		len(result.StateToken) > maxStateBytes ||
 		len(result.DetectedDomain) == 0 ||
 		len(result.DetectedDomain) > 40 ||

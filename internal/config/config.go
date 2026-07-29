@@ -14,7 +14,7 @@ import (
 const (
 	defaultPort           = "8080"
 	defaultVertexLocation = "global"
-	defaultFastModel      = "vertexai/gemini-2.5-flash"
+	defaultFastModel      = "vertexai/gemini-3.6-flash"
 )
 
 type Config struct {

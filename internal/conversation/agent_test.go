@@ -24,7 +24,7 @@ type generatorCall struct {
 	temperatureSet bool
 	pdfMIME        string
 	pdfData        []byte
-	prompt          string
+	prompt         string
 }
 
 type fakeGenerator struct {
@@ -166,6 +166,48 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 			t.Fatalf("fast uncertainty was not preserved: %#v", result)
 		}
 	})
+}
+
+func TestAgentHighStakesDomainsAlwaysUsePrecision(t *testing.T) {
+	for _, domain := range []string{"health", "legal", "finance"} {
+		t.Run(domain, func(t *testing.T) {
+			fast := validModelPlan()
+			fast.Domain = domain
+			fast.Confidence = 0.99
+			precision := fast
+			precision.SpokenReply = "不確実性があるため、最新情報と専門家への確認が必要です。"
+			fake := &fakeGenerator{generations: []fakeGeneration{
+				{body: encodePlan(t, fast)},
+				{body: encodePlan(t, precision)},
+			}}
+			agent := newTestAgent(t, fake)
+			result, err := agent.Process(context.Background(), "uid-h", VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "判断してほしい",
+			})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if result.Route != "precision" || len(fake.calls) != 2 {
+				t.Fatalf("%s did not use precision: %#v", domain, result)
+			}
+		})
+	}
+}
+
+func TestAgentRejectsLowUrgencySafetyIntervention(t *testing.T) {
+	plan := validModelPlan()
+	plan.InterventionPolicy = "safety"
+	plan.Intervention.Urgency = 0.4
+	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	agent := newTestAgent(t, fake)
+	_, err := agent.Process(context.Background(), "uid-s", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "一般的な相談",
+	})
+	if !errors.Is(err, ErrModelOutputInvalid) {
+		t.Fatalf("low-urgency safety accepted: %v", err)
+	}
 }
 
 func TestAgentAmbiguousPrecisionAsksExactlyOneQuestion(t *testing.T) {

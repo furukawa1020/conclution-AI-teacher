@@ -586,6 +586,9 @@ fn App() -> Element {
                                     }
                                 }
                             }
+                            if state_snapshot == VoiceState::Ready {
+                                span { class: "voice-orb__cta", "話しはじめる" }
+                            }
                             span { class: "sr-only", {state_snapshot.orb_action()} }
                         }
                     }

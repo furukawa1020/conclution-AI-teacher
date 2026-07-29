@@ -454,6 +454,22 @@
     opacity: 0.72;
   }
 
+  .voice-orb__cta {
+    position: absolute;
+    z-index: 4;
+    bottom: 16%;
+    padding: 7px 11px;
+    border: 1px solid oklch(14% 0.03 258 / 28%);
+    border-radius: 999px;
+    background: oklch(12% 0.03 258 / 72%);
+    box-shadow: 0 8px 24px oklch(8% 0.02 258 / 28%);
+    color: var(--white);
+    font-size: 0.61rem;
+    font-weight: 720;
+    letter-spacing: 0.08em;
+    backdrop-filter: blur(10px);
+  }
+
   .voice-status {
     display: grid;
     justify-items: center;
@@ -494,6 +510,66 @@
     color: var(--white-soft);
     font-size: clamp(0.73rem, 0.9vw, 0.84rem);
     text-wrap: pretty;
+  }
+
+  .capability-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    width: min(760px, 100%);
+    margin: 22px auto 0;
+  }
+
+  .capability {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 10px 11px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: oklch(20% 0.04 258 / 44%);
+    font-size: 0.62rem;
+    backdrop-filter: blur(12px);
+  }
+
+  .capability span {
+    flex: 0 0 auto;
+    color: var(--cyan);
+    font-weight: 720;
+  }
+
+  .capability i {
+    color: var(--white-faint);
+    font-family: var(--mono);
+    font-style: normal;
+  }
+
+  .capability strong {
+    min-width: 0;
+    color: var(--white-soft);
+    font-weight: 580;
+    overflow-wrap: anywhere;
+  }
+
+  .capability-strip.is-collapsed {
+    display: flex;
+    justify-content: center;
+    width: auto;
+    margin-top: 12px;
+    opacity: 0.58;
+  }
+
+  .capability-strip.is-collapsed .capability {
+    padding: 6px 9px;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .capability-strip.is-collapsed .capability i,
+  .capability-strip.is-collapsed .capability strong {
+    display: none;
   }
 
   .paper-request {
@@ -916,6 +992,26 @@
     .voice-status__hint {
       max-width: 40ch;
       padding-inline: 12px;
+    }
+
+    .capability-strip {
+      grid-template-columns: 1fr;
+      width: min(340px, 94%);
+      margin-top: 18px;
+    }
+
+    .capability {
+      justify-content: flex-start;
+      padding-inline: 15px;
+    }
+
+    .capability-strip.is-collapsed {
+      display: flex;
+      width: 100%;
+      overflow-x: auto;
+      justify-content: flex-start;
+      padding-inline: 8px;
+      scrollbar-width: none;
     }
 
     .utility-dock {

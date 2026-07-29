@@ -207,8 +207,7 @@ mod cloud {
         let value = attach_document_js(input_id)
             .await
             .map_err(document_message)?;
-        serde_wasm_bindgen::from_value(value)
-            .map_err(|_| "PDFの情報を確認できませんでした。")
+        serde_wasm_bindgen::from_value(value).map_err(|_| "PDFの情報を確認できませんでした。")
     }
 
     pub fn stop_session() {
@@ -255,8 +254,10 @@ mod cloud {
         match error_code(error).as_deref() {
             Some("document_not_selected") => "PDFを選択してください。",
             Some("document_type_invalid") => "PDF形式の資料だけを添付できます。",
-            Some("document_too_large") => "PDFは8MB以下にしてください。",
-            Some("document_read_failed") => "PDFを読み取れませんでした。別のファイルをお試しください。",
+            Some("document_too_large") => "PDFは7MB以下にしてください。",
+            Some("document_read_failed") => {
+                "PDFを読み取れませんでした。別のファイルをお試しください。"
+            }
             _ => "PDFを添付できませんでした。",
         }
     }
@@ -333,9 +334,7 @@ fn arm_listening(
         let has_speech = match cloud::wait_for_turn_end().await {
             Ok(has_speech) => has_speech,
             Err(message) => {
-                if *generation.peek() == operation
-                    && *voice_state.peek() == VoiceState::Listening
-                {
+                if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
                     voice_state.set(VoiceState::Error(message));
                 }
                 return;
@@ -483,7 +482,7 @@ fn human_file_size(bytes: u64) -> String {
 fn App() -> Element {
     let mut voice_state = use_signal(|| VoiceState::Ready);
     let mut generation = use_signal(|| 0_u64);
-    let mut session_state = use_signal(|| "{}".to_owned());
+    let mut session_state = use_signal(String::new);
     let mut detected_domain = use_signal(String::new);
     let mut route = use_signal(String::new);
     let mut needs_paper = use_signal(|| false);
@@ -661,7 +660,7 @@ fn App() -> Element {
                                 onclick: move |_| {
                                     generation.set(generation.peek().wrapping_add(1));
                                     voice_state.set(VoiceState::Ready);
-                                    session_state.set("{}".to_owned());
+                                    session_state.set(String::new());
                                     detected_domain.set(String::new());
                                     route.set(String::new());
                                     needs_paper.set(false);
@@ -714,7 +713,7 @@ fn App() -> Element {
                             span { class: "utility-index", "01" }
                             div {
                                 h2 { "論文を、今回だけ" }
-                                p { "PDF / 最大8MB / 送信後に端末メモリから破棄" }
+                                p { "PDF / 最大7MB / 送信後に端末メモリから破棄" }
                             }
                         }
                         input {

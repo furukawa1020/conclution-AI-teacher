@@ -29,18 +29,23 @@ const (
 	maxStateBytes    = 64 * 1024
 )
 
+var (
+	ErrVoiceNotRecognized = errors.New("voice was not recognized")
+	ErrVoiceStateInvalid  = errors.New("voice state is invalid")
+)
+
 type VoiceDocument struct {
 	MIMEType string
 	Data     []byte
 }
 
 type VoiceTurnInput struct {
-	Audio        []byte
-	MIMEType     string
-	StateToken   string
-	Ambient      bool
-	Document     *VoiceDocument
-	STTLocale    string
+	Audio         []byte
+	MIMEType      string
+	StateToken    string
+	Ambient       bool
+	Document      *VoiceDocument
+	STTLocale     string
 	SchemaVersion int
 }
 

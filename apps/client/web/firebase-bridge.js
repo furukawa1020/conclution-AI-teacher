@@ -20,10 +20,10 @@ const EXPECTED_MESSAGING_SENDER_ID = "551920539470";
 const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
 const VOICE_ENDPOINT = "/api/v1/voice/turns";
 
-const DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
+const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 10 * 1024 * 1024;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 20 * 1024 * 1024;
-const SESSION_STATE_MAX_CHARS = 128 * 1024;
+const SESSION_STATE_MAX_CHARS = 16 * 1024;
 const VAD_INTERVAL_MS = 40;
 const MIN_VOICE_MS = 200;
 const END_OF_TURN_SILENCE_MS = 1_100;
@@ -530,25 +530,6 @@ function base64ToArrayBuffer(base64) {
   return bytes.buffer;
 }
 
-function parseSessionState(serialized) {
-  if (
-    typeof serialized !== "string" ||
-    serialized.length > SESSION_STATE_MAX_CHARS
-  ) {
-    fail("voice_turn_invalid");
-  }
-  let value;
-  try {
-    value = JSON.parse(serialized);
-  } catch {
-    fail("voice_turn_invalid");
-  }
-  if (!isPlainRecord(value)) {
-    fail("voice_turn_invalid");
-  }
-  return value;
-}
-
 function isBase64(value) {
   return (
     typeof value === "string" &&
@@ -573,7 +554,8 @@ function safeVoiceResponse(payload) {
       (!boundedString(payload.audioMimeType, 100) ||
         !payload.audioMimeType.startsWith("audio/"))) ||
     (!hasAudio && payload.audioMimeType !== "") ||
-    !isPlainRecord(payload.sessionState) ||
+    typeof payload.sessionState !== "string" ||
+    payload.sessionState.length > SESSION_STATE_MAX_CHARS ||
     !boundedString(payload.detectedDomain, 100) ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
@@ -584,10 +566,6 @@ function safeVoiceResponse(payload) {
     fail("voice_response_invalid");
   }
 
-  const serializedState = JSON.stringify(payload.sessionState);
-  if (serializedState.length > SESSION_STATE_MAX_CHARS) {
-    fail("voice_response_invalid");
-  }
   return Object.freeze({
     audioBase64: payload.audioBase64,
     audioMimeType: payload.audioMimeType,
@@ -595,7 +573,7 @@ function safeVoiceResponse(payload) {
     detectedDomain: payload.detectedDomain,
     needsPaper: payload.needsPaper,
     route: payload.route,
-    sessionState: serializedState,
+    sessionState: payload.sessionState,
   });
 }
 
@@ -616,6 +594,12 @@ async function finishTurn(serializedSessionState) {
     fail("voice_turn_invalid");
   }
   const expectedEpoch = sessionEpoch;
+  if (
+    typeof serializedSessionState !== "string" ||
+    serializedSessionState.length > SESSION_STATE_MAX_CHARS
+  ) {
+    fail("voice_turn_invalid");
+  }
   if (recording.recorder.state === "recording") {
     requestRecordingStop(recording, "manual");
   }
@@ -649,7 +633,7 @@ async function finishTurn(serializedSessionState) {
     const payload = {
       audioBase64,
       mimeType: capture.mimeType,
-      sessionState: parseSessionState(serializedSessionState),
+      sessionState: serializedSessionState,
     };
     if (documentForTurn) {
       payload.document = {

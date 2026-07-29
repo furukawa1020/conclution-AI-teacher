@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxTranscriptRunes = 12_000
+	maxTranscriptRunes  = 12_000
 	maxSpokenReplyRunes = 1_200
 )
 

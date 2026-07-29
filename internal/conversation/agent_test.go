@@ -62,6 +62,17 @@ func (fake *fakeGenerator) GenerateContent(
 	fake.calls = append(fake.calls, call)
 	index := len(fake.calls) - 1
 	if index >= len(fake.generations) {
+		if strings.Contains(call.prompt, "<lac_critic_data>") {
+			body, err := defaultCriticBody(call.prompt)
+			if err != nil {
+				return nil, err
+			}
+			return &genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{{
+					Content: genai.NewContentFromText(body, genai.RoleModel),
+				}},
+			}, nil
+		}
 		return nil, errors.New("unexpected generation")
 	}
 	generation := fake.generations[index]
@@ -75,10 +86,78 @@ func (fake *fakeGenerator) GenerateContent(
 	}, nil
 }
 
+func defaultCriticBody(prompt string) (string, error) {
+	const (
+		startMarker = "<lac_critic_data>\n"
+		endMarker   = "\n</lac_critic_data>"
+	)
+	start := strings.Index(prompt, startMarker)
+	end := strings.Index(prompt, endMarker)
+	if start < 0 || end <= start {
+		return "", errors.New("critic payload not found")
+	}
+	var payload struct {
+		CandidateSpokenReply string `json:"candidate_spoken_reply"`
+	}
+	if err := json.Unmarshal(
+		[]byte(prompt[start+len(startMarker):end]),
+		&payload,
+	); err != nil {
+		return "", err
+	}
+	contract := validCriticContract(payload.CandidateSpokenReply)
+	encoded, err := json.Marshal(contract)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func validCriticContract(candidate string) answercontract.Contract {
+	commitment := answercontract.CommitmentFront{
+		PositionClass: answercontract.PositionAbsent,
+		Calibration:   answercontract.CalibrationAbstain,
+		Issue:         answercontract.IssueTargetMissing,
+		FilledSlots:   []answercontract.RequiredSlot{},
+	}
+	if candidate != "" {
+		commitment = answercontract.CommitmentFront{
+			FirstCommitment: "verified current answer",
+			FillsTarget:     true,
+			TargetCoverage:  1,
+			FilledSlots:     []answercontract.RequiredSlot{answercontract.SlotPosition},
+			PositionClass:   answercontract.PositionFirst,
+			Calibration:     answercontract.CalibrationCommitted,
+			Issue:           answercontract.IssueNone,
+		}
+	}
+	return answercontract.Contract{
+		QuestionFrame: answercontract.QuestionFrame{
+			Operator:      answercontract.OperatorOpen,
+			Subject:       "current request",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPosition},
+			Hypotheses: []answercontract.Hypothesis{{
+				Interpretation: "answer the current request",
+				Confidence:     1,
+			}},
+		},
+		CommitmentFront: commitment,
+		CounterfactualRepair: answercontract.CounterfactualRepair{
+			MinimalAnswer:                 candidate,
+			ReconstructedAnswer:           candidate,
+			MeaningPreservationConfidence: 1,
+			RepairGain:                    0,
+		},
+	}
+}
+
 func TestAgentFastPathAndInitialState(t *testing.T) {
 	plan := validModelPlan()
 	plan.ThoughtStateDelta.Claims = []string{"検証可能性を優先する"}
-	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, plan.AnswerContract)},
+	}}
 	agent := newTestAgent(t, fake)
 
 	result, err := agent.Process(context.Background(), "uid-1", VoiceTurn{
@@ -91,8 +170,8 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 	if result.Route != "fast" || result.SpokenReply != plan.SpokenReply {
 		t.Fatalf("unexpected result: %#v", result)
 	}
-	if len(fake.calls) != 1 {
-		t.Fatalf("calls = %d, want 1", len(fake.calls))
+	if len(fake.calls) != 2 {
+		t.Fatalf("calls = %d, want planner plus independent critic", len(fake.calls))
 	}
 	call := fake.calls[0]
 	if call.model != DefaultFastModel ||
@@ -135,15 +214,16 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 		if result.Route != "precision" || result.SpokenReply != precision.SpokenReply {
 			t.Fatalf("unexpected precision result: %#v", result)
 		}
-		if len(fake.calls) != 2 ||
+		if len(fake.calls) != 3 ||
 			fake.calls[1].model != DefaultPrecisionModel ||
 			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
-			!strings.Contains(fake.calls[1].prompt, `"preliminary_plan"`) {
+			!strings.Contains(fake.calls[1].prompt, `"preliminary_plan"`) ||
+			!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
 			t.Fatalf("unexpected precision calls: %#v", fake.calls)
 		}
 	})
 
-	t.Run("preview failure keeps validated fast plan", func(t *testing.T) {
+	t.Run("precision failure fails closed", func(t *testing.T) {
 		fast := validModelPlan()
 		fast.Domain = "research"
 		fast.Confidence = 0.84
@@ -161,10 +241,11 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process should fall back: %v", err)
 		}
-		if result.Route != "fast-fallback" ||
-			result.Confidence != fast.Confidence ||
-			result.SpokenReply != fast.SpokenReply {
-			t.Fatalf("fast uncertainty was not preserved: %#v", result)
+		if result.Route != "precision-unavailable" ||
+			!result.NeedsClarification ||
+			result.SpokenReply == fast.SpokenReply ||
+			strings.Contains(result.SpokenReply, "標本数") {
+			t.Fatalf("high-risk fast draft escaped fail-closed path: %#v", result)
 		}
 	})
 }
@@ -189,7 +270,7 @@ func TestAgentHighStakesDomainsAlwaysUsePrecision(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Process: %v", err)
 			}
-			if result.Route != "precision" || len(fake.calls) != 2 {
+			if result.Route != "precision" || len(fake.calls) != 3 {
 				t.Fatalf("%s did not use precision: %#v", domain, result)
 			}
 		})
@@ -200,7 +281,10 @@ func TestAgentRejectsLowUrgencySafetyIntervention(t *testing.T) {
 	plan := validModelPlan()
 	plan.InterventionPolicy = "safety"
 	plan.Intervention.Urgency = 0.4
-	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, plan.AnswerContract)},
+	}}
 	agent := newTestAgent(t, fake)
 	_, err := agent.Process(context.Background(), "uid-s", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -267,7 +351,10 @@ func TestAgentLACForcesMeaningPreservingRestructureAndPublishesMetrics(t *testin
 			RepairGain:                    0.40,
 		},
 	}
-	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, plan.AnswerContract)},
+	}}
 	agent := newTestAgent(t, fake)
 	result, err := agent.Process(context.Background(), "uid-lac", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -317,9 +404,10 @@ func TestAgentLACAmbiguityClarifiesOrStaysSilent(t *testing.T) {
 				{Interpretation: "Aを尋ねている", Confidence: 0.55},
 				{Interpretation: "Bを尋ねている", Confidence: 0.45},
 			}
-			fake := &fakeGenerator{generations: []fakeGeneration{{
-				body: encodePlan(t, plan),
-			}}}
+			fake := &fakeGenerator{generations: []fakeGeneration{
+				{body: encodePlan(t, plan)},
+				{body: encodeContract(t, plan.AnswerContract)},
+			}}
 			agent := newTestAgent(t, fake)
 			result, err := agent.Process(context.Background(), "uid-lac", VoiceTurn{
 				SchemaVersion: SchemaVersion,
@@ -376,7 +464,10 @@ func TestAgentLACRejectsMeaningChangingRepair(t *testing.T) {
 			RepairGain:                    0.50,
 		},
 	}
-	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, plan.AnswerContract)},
+	}}
 	agent := newTestAgent(t, fake)
 	result, err := agent.Process(context.Background(), "uid-lac", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -389,6 +480,80 @@ func TestAgentLACRejectsMeaningChangingRepair(t *testing.T) {
 		strings.Contains(result.SpokenReply, "B案") ||
 		result.AnswerContract.MeaningPreservation != 0 {
 		t.Fatalf("meaning-changing repair escaped gate: %#v", result)
+	}
+}
+
+func TestAgentDraftLACCannotBypassIndependentCritic(t *testing.T) {
+	plan := validModelPlan()
+	plan.SpokenReply = "前置きだけで、まだ答えは述べません。"
+	// The draft falsely claims full, answer-first coverage.
+	plan.AnswerContract = validCriticContract(plan.SpokenReply)
+
+	critic := validCriticContract(plan.SpokenReply)
+	critic.CommitmentFront = answercontract.CommitmentFront{
+		FillsTarget:    false,
+		TargetCoverage: 0,
+		FilledSlots:    []answercontract.RequiredSlot{},
+		PositionClass:  answercontract.PositionAbsent,
+		Calibration:    answercontract.CalibrationAbstain,
+		Issue:          answercontract.IssueTargetMissing,
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, critic)},
+	}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-independent", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "結論は何ですか？",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Intervention.Act != "clarify" ||
+		!result.NeedsClarification ||
+		result.AnswerContract.TargetSlotCoverage != 0 {
+		t.Fatalf("draft-side LAC bypassed critic: %#v", result)
+	}
+	if !strings.Contains(fake.calls[1].prompt, "candidate_spoken_reply") ||
+		strings.Contains(fake.calls[1].prompt, "answer_contract") {
+		t.Fatalf("critic was not independent of draft LAC: %q", fake.calls[1].prompt)
+	}
+}
+
+func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
+	for _, ambient := range []bool{false, true} {
+		t.Run(map[bool]string{false: "intentional", true: "ambient"}[ambient], func(t *testing.T) {
+			plan := validModelPlan()
+			plan.SpokenReply = "監査前の実質回答を読み上げてはいけない。"
+			fake := &fakeGenerator{generations: []fakeGeneration{
+				{body: encodePlan(t, plan)},
+				{err: errors.New("critic unavailable with provider detail")},
+			}}
+			agent := newTestAgent(t, fake)
+			result, err := agent.Process(context.Background(), "uid-critic", VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "答えて",
+				Ambient:       ambient,
+			})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if result.Route != "verification-unavailable" ||
+				strings.Contains(result.SpokenReply, "実質回答") {
+				t.Fatalf("unaudited draft escaped: %#v", result)
+			}
+			if ambient {
+				if result.SpokenReply != "" || result.Intervention.Act != "silent" {
+					t.Fatalf("ambient critic failure spoke: %#v", result)
+				}
+			} else if result.SpokenReply == "" ||
+				result.Intervention.Act != "clarify" ||
+				countQuestions(result.SpokenReply) != 1 {
+				t.Fatalf("intentional critic failure did not ask one question: %#v", result)
+			}
+		})
 	}
 }
 
@@ -468,14 +633,82 @@ func TestAgentAmbientUrgentSafetyIntervenes(t *testing.T) {
 	}
 }
 
-func TestAgentPDFIsInlineThenZeroizedAndOnlySummaryEntersState(t *testing.T) {
+func TestAgentUrgentSafetyOutranksLowConfidenceAndAmbiguousLAC(t *testing.T) {
+	plan := validModelPlan()
+	plan.Confidence = 0.35
+	plan.InterventionPolicy = "safety"
+	plan.SpokenReply = "今は安全を優先して、その場から離れて緊急窓口へ連絡してください。"
+	plan.Intervention = modelArbiter{
+		Benefit: 0, InterruptionCost: 1, Urgency: 0.95,
+		Confidence: 1, Act: "reflect",
+	}
+	critic := validCriticContract(plan.SpokenReply)
+	critic.QuestionFrame.Hypotheses = []answercontract.Hypothesis{
+		{Interpretation: "事故の危険", Confidence: 0.51},
+		{Interpretation: "別の危険", Confidence: 0.49},
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, critic)},
+	}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-safety-priority", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "いま目の前で危険が迫っている",
+		Ambient:       true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.SpokenReply != plan.SpokenReply ||
+		result.Intervention.Act == "silent" ||
+		result.Intervention.Act == "clarify" ||
+		result.InterventionPolicy != "safety" {
+		t.Fatalf("urgent safety was rewritten by ambiguity: %#v", result)
+	}
+}
+
+func TestAgentLexicalHighRiskCannotBypassPrecision(t *testing.T) {
+	fast := validModelPlan()
+	fast.Domain = "general"
+	fast.SpokenReply = "早いモデルの薬の回答。"
+	precision := fast
+	precision.SpokenReply = "薬の量は処方元か薬剤師に確認してください。"
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, fast)},
+		{body: encodePlan(t, precision)},
+		{body: encodeContract(t, validCriticContract(precision.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	result, err := agent.Process(context.Background(), "uid-lexical", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "この薬の用量を変えてもいい？",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "precision" ||
+		len(fake.calls) != 3 ||
+		fake.calls[1].model != DefaultPrecisionModel ||
+		result.SpokenReply != precision.SpokenReply {
+		t.Fatalf("lexical high-risk signal bypassed precision: %#v", result)
+	}
+}
+
+func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
 	utterance := "この秘密の逐語発話XYZをそのまま保存しないで"
 	pdf := []byte("%PDF-1.7\nRAW-PDF-SECRET")
 	plan := validModelPlan()
 	plan.ConversationSummary = utterance
 	plan.ThoughtStateDelta.Claims = []string{utterance}
 	plan.DocumentSummary = "資料は小規模な比較実験と三つの限界を示す"
-	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, plan.AnswerContract)},
+	}}
 	agent := newTestAgent(t, fake)
 
 	result, err := agent.Process(context.Background(), "uid-p", VoiceTurn{
@@ -490,6 +723,11 @@ func TestAgentPDFIsInlineThenZeroizedAndOnlySummaryEntersState(t *testing.T) {
 		!bytes.Contains(fake.calls[0].pdfData, []byte("RAW-PDF-SECRET")) {
 		t.Fatalf("PDF was not sent inline: %#v", fake.calls[0])
 	}
+	if result.Route != "precision" ||
+		len(fake.calls) != 3 ||
+		fake.calls[1].model != DefaultPrecisionModel {
+		t.Fatalf("PDF did not force precision and independent audit: %#v", fake.calls)
+	}
 	if !allZero(pdf) {
 		t.Fatalf("PDF bytes were not cleared: %q", pdf)
 	}
@@ -498,7 +736,7 @@ func TestAgentPDFIsInlineThenZeroizedAndOnlySummaryEntersState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open state: %v", err)
 	}
-	if state.DocumentSummary != plan.DocumentSummary ||
+	if state.DocumentSummary != "" ||
 		state.ConversationSummary != "" ||
 		len(state.Graph.Claims) != 0 {
 		t.Fatalf("unsafe state derivation: %#v", state)
@@ -514,6 +752,22 @@ func TestAgentPDFIsInlineThenZeroizedAndOnlySummaryEntersState(t *testing.T) {
 	}
 }
 
+func TestGraphStateDropsPIITokensAndPartialQuotes(t *testing.T) {
+	utterance := "秘密の計画は来週火曜に実行するつもりです"
+	graph := mergeGraph(ThoughtStateGraph{}, ThoughtStateDelta{
+		Claims: []string{
+			"秘密の計画は来週火曜に実行する",
+			"連絡先はalice@example.com",
+			"電話は090-1234-5678",
+			"Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+			"意思決定の条件を整理する",
+		},
+	}, utterance)
+	if len(graph.Claims) != 1 || graph.Claims[0] != "意思決定の条件を整理する" {
+		t.Fatalf("unsafe graph nodes survived: %#v", graph.Claims)
+	}
+}
+
 func TestAgentStateTokenIsBoundToUIDBeforeGeneration(t *testing.T) {
 	plan := validModelPlan()
 	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
@@ -525,6 +779,7 @@ func TestAgentStateTokenIsBoundToUIDBeforeGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Process: %v", err)
 	}
+	callsBeforeWrongUID := len(fake.calls)
 	_, err = agent.Process(context.Background(), "uid-other", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     "次の質問",
@@ -533,7 +788,7 @@ func TestAgentStateTokenIsBoundToUIDBeforeGeneration(t *testing.T) {
 	if !errors.Is(err, ErrInvalidStateToken) {
 		t.Fatalf("wrong UID: got %v", err)
 	}
-	if len(fake.calls) != 1 {
+	if len(fake.calls) != callsBeforeWrongUID {
 		t.Fatalf("model called before UID binding check: %d", len(fake.calls))
 	}
 }
@@ -642,6 +897,15 @@ func encodePlan(t *testing.T, plan modelPlan) string {
 	encoded, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatalf("marshal plan: %v", err)
+	}
+	return string(encoded)
+}
+
+func encodeContract(t *testing.T, contract answercontract.Contract) string {
+	t.Helper()
+	encoded, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatalf("marshal answer contract: %v", err)
 	}
 	return string(encoded)
 }

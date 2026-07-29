@@ -138,7 +138,12 @@ try {
         throw "wasm-bindgen failed."
     }
 
-    foreach ($name in @("index.html", "bootstrap.js", "firebase-bridge.js")) {
+    foreach ($name in @(
+        "index.html",
+        "bootstrap.js",
+        "firebase-bridge.js",
+        "voice-session-policy.mjs"
+    )) {
         $source = Join-Path $webSource $name
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "Required web source is missing: $name"
@@ -151,6 +156,7 @@ try {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "voice-session-policy.mjs",
         "assets\main.css",
         "wasm\kotae_client.js",
         "wasm\kotae_client_bg.wasm"
@@ -175,6 +181,9 @@ try {
         $siteKeyMatch.Groups["key"].Value.Length -lt 20
     ) {
         throw "Refusing to build with an unconfigured reCAPTCHA Enterprise site key."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./voice-session-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited voice session policy module."
     }
 
     $bootstrap = [System.IO.File]::ReadAllText(
@@ -215,6 +224,7 @@ try {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "voice-session-policy.mjs",
                 "assets/main.css",
                 "wasm/kotae_client.js",
                 "wasm/kotae_client_bg.wasm"

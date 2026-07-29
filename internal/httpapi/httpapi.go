@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/firebase/genkit/go/core"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
@@ -27,6 +28,8 @@ const (
 	maxAudioBytes    = 2 * 1024 * 1024
 	maxDocumentBytes = 8 * 1024 * 1024
 	maxStateBytes    = 64 * 1024
+	maxCaptionRunes  = 480
+	allowedWebOrigin = "https://kotae-ai.web.app"
 )
 
 var (
@@ -39,10 +42,18 @@ type VoiceDocument struct {
 	Data     []byte
 }
 
+type VoiceTurnMode string
+
+const (
+	VoiceTurnIntentional VoiceTurnMode = "intentional"
+	VoiceTurnAmbient     VoiceTurnMode = "ambient"
+)
+
 type VoiceTurnInput struct {
 	Audio         []byte
 	MIMEType      string
 	StateToken    string
+	TurnMode      VoiceTurnMode
 	Ambient       bool
 	Document      *VoiceDocument
 	STTLocale     string
@@ -56,6 +67,7 @@ type VoiceTurnResult struct {
 	DetectedDomain string
 	Route          string
 	NeedsPaper     bool
+	Caption        string
 }
 
 type VoiceTurnService interface {
@@ -65,6 +77,7 @@ type VoiceTurnService interface {
 type VoiceOptions struct {
 	Service         VoiceTurnService
 	RateLimiter     guard.Limiter
+	AppRateLimiter  guard.Limiter
 	RequestTimeout  time.Duration
 	MaxRequestBytes int64
 }
@@ -141,6 +154,7 @@ type voiceTurnRequest struct {
 	AudioBase64  string                `json:"audioBase64"`
 	MIMEType     string                `json:"mimeType"`
 	SessionState string                `json:"sessionState"`
+	TurnMode     VoiceTurnMode         `json:"turnMode"`
 	Document     *voiceDocumentRequest `json:"document,omitempty"`
 }
 
@@ -157,9 +171,37 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.voice.Service == nil || s.voice.RateLimiter == nil ||
+		s.voice.AppRateLimiter == nil ||
 		s.voice.RequestTimeout <= 0 || s.voice.MaxRequestBytes <= 0 {
 		writeProblem(w, http.StatusServiceUnavailable, "voice_unavailable", "Voice conversation is not configured.")
 		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.voice.RequestTimeout)
+	defer cancel()
+	started := time.Now()
+	quotaChecks := []struct {
+		limiter guard.Limiter
+		key     string
+		scope   string
+	}{
+		{limiter: s.voice.RateLimiter, key: principal.UID, scope: "uid"},
+		{limiter: s.voice.AppRateLimiter, key: "app:" + principal.AppID, scope: "app"},
+	}
+	for _, check := range quotaChecks {
+		if err := check.limiter.Consume(ctx, check.key, started.UTC()); err != nil {
+			if errors.Is(err, guard.ErrRateLimitExceeded) {
+				writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The voice conversation limit has been reached.")
+				return
+			}
+			s.logger.ErrorContext(ctx, "voice rate-limit guard failed",
+				"request_id", requestIDFromContext(ctx),
+				"quota_scope", check.scope,
+				"error_class", "voice_rate_limit_store_failure",
+			)
+			writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
+			return
+		}
 	}
 
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -188,23 +230,6 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clearVoiceInput(&input)
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.voice.RequestTimeout)
-	defer cancel()
-	started := time.Now()
-	if err := s.voice.RateLimiter.Consume(ctx, principal.UID, started.UTC()); err != nil {
-		if errors.Is(err, guard.ErrRateLimitExceeded) {
-			writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The voice conversation limit has been reached.")
-			return
-		}
-		s.logger.ErrorContext(ctx, "voice rate-limit guard failed",
-			"request_id", requestIDFromContext(ctx),
-			"uid_hash", shortHash(principal.UID),
-			"error_class", "voice_rate_limit_store_failure",
-		)
-		writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
-		return
-	}
-
 	result, err := s.voice.Service.Process(ctx, principal.UID, input)
 	if err != nil {
 		if errors.Is(err, ErrVoiceNotRecognized) || errors.Is(err, ErrVoiceStateInvalid) {
@@ -213,7 +238,6 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.ErrorContext(ctx, "voice turn failed",
 			"request_id", requestIDFromContext(ctx),
-			"uid_hash", shortHash(principal.UID),
 			"duration_ms", time.Since(started).Milliseconds(),
 			"error_class", "voice_pipeline_failure",
 		)
@@ -225,7 +249,6 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 	if err := validateVoiceResult(result); err != nil {
 		s.logger.ErrorContext(ctx, "voice result rejected",
 			"request_id", requestIDFromContext(ctx),
-			"uid_hash", shortHash(principal.UID),
 			"error_class", "invalid_voice_result",
 		)
 		writeProblem(w, http.StatusBadGateway, "voice_turn_unavailable", "The voice turn could not be completed.")
@@ -234,15 +257,18 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.InfoContext(ctx, "voice turn completed",
 		"request_id", requestIDFromContext(ctx),
-		"uid_hash", shortHash(principal.UID),
-		"domain", result.DetectedDomain,
 		"route", result.Route,
 		"spoke", len(result.Audio) > 0,
 		"duration_ms", time.Since(started).Milliseconds(),
 	)
+	var caption any
+	if result.Caption != "" {
+		caption = result.Caption
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"audioBase64":    base64.StdEncoding.EncodeToString(result.Audio),
 		"audioMimeType":  result.AudioMIMEType,
+		"caption":        caption,
 		"sessionState":   result.StateToken,
 		"detectedDomain": result.DetectedDomain,
 		"route":          result.Route,
@@ -255,6 +281,14 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	if mimeType == "" || len(request.SessionState) > maxStateBytes {
 		return VoiceTurnInput{}, errors.New("invalid voice metadata")
 	}
+	ambient := false
+	switch request.TurnMode {
+	case VoiceTurnIntentional:
+	case VoiceTurnAmbient:
+		ambient = true
+	default:
+		return VoiceTurnInput{}, errors.New("invalid turn mode")
+	}
 	audio, err := decodeBoundedBase64(request.AudioBase64, maxAudioBytes)
 	if err != nil || len(audio) == 0 {
 		clear(audio)
@@ -265,10 +299,8 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		Audio:         audio,
 		MIMEType:      mimeType,
 		StateToken:    request.SessionState,
-		// The first utterance follows an explicit start gesture. Once an
-		// authenticated state token exists, subsequent automatically captured
-		// turns are ambient and use the stricter intervention threshold.
-		Ambient:       request.SessionState != "",
+		TurnMode:      request.TurnMode,
+		Ambient:       ambient,
 		STTLocale:     "ja-JP",
 		SchemaVersion: 1,
 	}
@@ -326,14 +358,19 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		len(result.DetectedDomain) == 0 ||
 		len(result.DetectedDomain) > 40 ||
 		len(result.Route) == 0 ||
-		len(result.Route) > 80 {
+		len(result.Route) > 80 ||
+		!utf8.ValidString(result.Caption) ||
+		utf8.RuneCountInString(result.Caption) > maxCaptionRunes {
 		return errors.New("voice result is outside bounds")
 	}
 	if len(result.Audio) == 0 {
-		if result.AudioMIMEType != "" {
-			return errors.New("silent result has an audio MIME type")
+		if result.AudioMIMEType != "" || result.Caption != "" {
+			return errors.New("silent result has audio metadata")
 		}
 		return nil
+	}
+	if result.Caption == "" {
+		return errors.New("spoken result is missing its caption")
 	}
 	if result.AudioMIMEType != "audio/mpeg" && result.AudioMIMEType != "audio/ogg" {
 		return errors.New("unsupported synthesized audio type")
@@ -551,7 +588,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 func (s *Server) rejectCrossSiteWrites(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+			origins := r.Header.Values("Origin")
+			if len(origins) != 1 ||
+				origins[0] != allowedWebOrigin ||
+				strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
 				writeProblem(w, http.StatusForbidden, "cross_site_request", "Cross-site writes are not allowed.")
 				return
 			}

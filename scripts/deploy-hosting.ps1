@@ -186,6 +186,7 @@ function Assert-HostingArtifact {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "voice-session-policy.mjs",
         "assets\main.css",
         "wasm\kotae_client.js",
         "wasm\kotae_client_bg.wasm"
@@ -215,6 +216,7 @@ function Assert-HostingArtifact {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "voice-session-policy.mjs",
                 "assets/main.css",
                 "wasm/kotae_client.js",
                 "wasm/kotae_client_bg.wasm"
@@ -248,6 +250,9 @@ function Assert-HostingArtifact {
         $siteKeyMatch.Groups["key"].Value.Length -lt 20
     ) {
         throw "firebase-bridge.js does not contain a configured reCAPTCHA Enterprise site key."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./voice-session-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited voice session policy module."
     }
     if (
         $bridge -notmatch [regex]::Escape("const EXPECTED_PROJECT_ID = `"$expectedProjectId`";") -or

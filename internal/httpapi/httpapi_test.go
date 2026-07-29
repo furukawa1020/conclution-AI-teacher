@@ -75,8 +75,10 @@ func (s *fakeStore) Save(
 }
 
 type fakeLimiter struct {
-	calls int
-	err   error
+	calls   int
+	err     error
+	wantKey string
+	keys    []string
 }
 
 type fakeVoiceService struct {
@@ -101,7 +103,12 @@ func (s *fakeVoiceService) Process(
 
 func (l *fakeLimiter) Consume(_ context.Context, uid string, _ time.Time) error {
 	l.calls++
-	if uid != "user-123" {
+	l.keys = append(l.keys, uid)
+	wantKey := l.wantKey
+	if wantKey == "" {
+		wantKey = "user-123"
+	}
+	if uid != wantKey {
 		return errors.New("unexpected uid")
 	}
 	return l.err
@@ -136,10 +143,23 @@ func authenticatedRequest(method, target, body string) *http.Request {
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer id-token")
 	request.Header.Set("X-Firebase-AppCheck", "app-check-token")
+	request.Header.Set("Origin", allowedWebOrigin)
 	return request
 }
 
 func testVoiceHandler(service *fakeVoiceService, limiter *fakeLimiter) http.Handler {
+	return testVoiceHandlerWithAppLimiter(
+		service,
+		limiter,
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+}
+
+func testVoiceHandlerWithAppLimiter(
+	service *fakeVoiceService,
+	limiter *fakeLimiter,
+	appLimiter *fakeLimiter,
+) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return NewWithVoice(
 		logger,
@@ -156,6 +176,7 @@ func testVoiceHandler(service *fakeVoiceService, limiter *fakeLimiter) http.Hand
 		VoiceOptions{
 			Service:         service,
 			RateLimiter:     limiter,
+			AppRateLimiter:  appLimiter,
 			RequestTimeout:  2 * time.Second,
 			MaxRequestBytes: 12 * 1024 * 1024,
 		},
@@ -298,6 +319,52 @@ func TestCrossSiteWriteIsRejectedBeforeAuthentication(t *testing.T) {
 	}
 }
 
+func TestWriteOriginMustExactlyMatchFirebaseHosting(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		origin string
+		omit   bool
+	}{
+		{name: "missing", omit: true},
+		{name: "null", origin: "null"},
+		{name: "attacker", origin: "https://attacker.example"},
+		{name: "lookalike", origin: "https://kotae-ai.web.app.attacker.example"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			handler := testHandler(&fakeEvaluator{}, &fakeStore{})
+			request := authenticatedRequest(
+				http.MethodPost,
+				"/api/v1/evaluations",
+				`{"question":"実施しますか","answer":"実施します。","mode":"decision"}`,
+			)
+			request.Header.Set("Content-Type", "application/json")
+			if test.omit {
+				request.Header.Del("Origin")
+			} else {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d; want %d", response.Code, http.StatusForbidden)
+			}
+		})
+	}
+
+	handler := testHandler(&fakeEvaluator{}, &fakeStore{})
+	healthResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		healthResponse,
+		httptest.NewRequest(http.MethodGet, "/healthz", nil),
+	)
+	if healthResponse.Code != http.StatusOK {
+		t.Fatalf("GET health without Origin = %d", healthResponse.Code)
+	}
+}
+
 func TestEvaluationRateLimitStopsBeforeModelInvocation(t *testing.T) {
 	t.Parallel()
 
@@ -416,6 +483,7 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 		result: VoiceTurnResult{
 			Audio:          []byte("mp3"),
 			AudioMIMEType:  "audio/mpeg",
+			Caption:        "音声と同じ最終回答です。",
 			StateToken:     "opaque-encrypted-state",
 			DetectedDomain: "casual",
 			Route:          "fast",
@@ -425,7 +493,7 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	handler := testVoiceHandler(service, limiter)
 	audio := []byte("RIFF-safe-test-audio")
 	body := fmt.Sprintf(
-		`{"audioBase64":%q,"mimeType":"audio/wav","sessionState":""}`,
+		`{"audioBase64":%q,"mimeType":"audio/wav","sessionState":"","turnMode":"intentional"}`,
 		base64.StdEncoding.EncodeToString(audio),
 	)
 	request := authenticatedRequest(http.MethodPost, "/api/v1/voice/turns", body)
@@ -440,33 +508,142 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	if service.calls != 1 || limiter.calls != 1 {
 		t.Fatalf("service calls = %d, limiter calls = %d; want 1, 1", service.calls, limiter.calls)
 	}
-	if service.input.MIMEType != "audio/wav" || service.input.Ambient {
+	if service.input.MIMEType != "audio/wav" ||
+		service.input.TurnMode != VoiceTurnIntentional ||
+		service.input.Ambient {
 		t.Fatalf("voice input = %+v", service.input)
 	}
 	if strings.Contains(response.Body.String(), "RIFF-safe-test-audio") {
 		t.Fatal("response exposed input audio")
 	}
+	if !strings.Contains(response.Body.String(), `"caption":"音声と同じ最終回答です。"`) {
+		t.Fatalf("response caption = %s", response.Body.String())
+	}
 }
 
-func TestVoiceTurnsBecomeAmbientOnlyAfterBoundStateExists(t *testing.T) {
+func TestVoiceTurnConsumesUIDAndAppQuotaBeforeBodyDecode(t *testing.T) {
 	t.Parallel()
 
-	request := voiceTurnRequest{
-		AudioBase64:  "YXVkaW8=",
-		MIMEType:     "audio/webm;codecs=opus",
-		SessionState: "v1.opaque-bound-state",
-	}
-	input, err := decodeVoiceTurn(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer clearVoiceInput(&input)
-	if !input.Ambient {
-		t.Fatal("a continued state-bound turn must use ambient intervention policy")
+	service := &fakeVoiceService{}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{wantKey: "app:app-123"}
+	handler := testVoiceHandlerWithAppLimiter(service, uidLimiter, appLimiter)
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/voice/turns",
+		`{"audioBase64":"***","mimeType":"audio/webm","sessionState":"","turnMode":"intentional"}`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity ||
+		service.calls != 0 ||
+		uidLimiter.calls != 1 ||
+		appLimiter.calls != 1 {
+		t.Fatalf(
+			"status=%d service=%d uid_quota=%d app_quota=%d body=%s",
+			response.Code,
+			service.calls,
+			uidLimiter.calls,
+			appLimiter.calls,
+			response.Body.String(),
+		)
 	}
 }
 
-func TestVoiceTurnRejectsMalformedPayloadBeforeQuotaOrModel(t *testing.T) {
+func TestVoiceAppQuotaStopsBeforeDecodeAndService(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeVoiceService{}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{
+		wantKey: "app:app-123",
+		err:     guard.ErrRateLimitExceeded,
+	}
+	handler := testVoiceHandlerWithAppLimiter(service, uidLimiter, appLimiter)
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/voice/turns",
+		`not-json-and-must-not-be-decoded`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests ||
+		service.calls != 0 ||
+		uidLimiter.calls != 1 ||
+		appLimiter.calls != 1 {
+		t.Fatalf(
+			"status=%d service=%d uid_quota=%d app_quota=%d",
+			response.Code,
+			service.calls,
+			uidLimiter.calls,
+			appLimiter.calls,
+		)
+	}
+}
+
+func TestVoiceTurnModeIsExplicitAndIndependentOfState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		mode      VoiceTurnMode
+		state     string
+		wantError bool
+		ambient   bool
+	}{
+		{
+			name:  "intentional with state remains intentional",
+			mode:  VoiceTurnIntentional,
+			state: "v1.opaque-bound-state",
+		},
+		{
+			name:    "ambient can be first turn",
+			mode:    VoiceTurnAmbient,
+			ambient: true,
+		},
+		{
+			name:      "missing mode",
+			wantError: true,
+		},
+		{
+			name:      "unknown mode",
+			mode:      VoiceTurnMode("background"),
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			request := voiceTurnRequest{
+				AudioBase64:  "YXVkaW8=",
+				MIMEType:     "audio/webm;codecs=opus",
+				SessionState: test.state,
+				TurnMode:     test.mode,
+			}
+			input, err := decodeVoiceTurn(request)
+			if test.wantError {
+				if err == nil {
+					clearVoiceInput(&input)
+					t.Fatal("decode succeeded; want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer clearVoiceInput(&input)
+			if input.Ambient != test.ambient || input.TurnMode != test.mode {
+				t.Fatalf("voice mode = %+v", input)
+			}
+		})
+	}
+}
+
+func TestVoiceTurnConsumesQuotaBeforeDecodingMalformedPayload(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -475,19 +652,19 @@ func TestVoiceTurnRejectsMalformedPayloadBeforeQuotaOrModel(t *testing.T) {
 	}{
 		{
 			name: "invalid base64",
-			body: `{"audioBase64":"***","mimeType":"audio/webm","sessionState":""}`,
+			body: `{"audioBase64":"***","mimeType":"audio/webm","sessionState":"","turnMode":"intentional"}`,
 		},
 		{
 			name: "unsupported audio type",
-			body: `{"audioBase64":"YXVkaW8=","mimeType":"text/plain","sessionState":""}`,
+			body: `{"audioBase64":"YXVkaW8=","mimeType":"text/plain","sessionState":"","turnMode":"intentional"}`,
 		},
 		{
 			name: "non PDF document",
-			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","document":{"base64":"YQ==","mimeType":"text/plain","name":"paper.txt"}}`,
+			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional","document":{"base64":"YQ==","mimeType":"text/plain","name":"paper.txt"}}`,
 		},
 		{
 			name: "unknown field",
-			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","transcript":"secret"}`,
+			body: `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional","transcript":"secret"}`,
 		},
 	}
 
@@ -508,8 +685,8 @@ func TestVoiceTurnRejectsMalformedPayloadBeforeQuotaOrModel(t *testing.T) {
 				response.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
 			}
-			if service.calls != 0 || limiter.calls != 0 {
-				t.Fatalf("service calls = %d, limiter calls = %d; want 0, 0", service.calls, limiter.calls)
+			if service.calls != 0 || limiter.calls != 1 {
+				t.Fatalf("service calls = %d, limiter calls = %d; want 0, 1", service.calls, limiter.calls)
 			}
 		})
 	}
@@ -529,7 +706,7 @@ func TestVoiceTurnAllowsDeliberateSilence(t *testing.T) {
 	request := authenticatedRequest(
 		http.MethodPost,
 		"/api/v1/voice/turns",
-		`{"audioBase64":"YXVkaW8=","mimeType":"audio/webm;codecs=opus","sessionState":""}`,
+		`{"audioBase64":"YXVkaW8=","mimeType":"audio/webm;codecs=opus","sessionState":"","turnMode":"ambient"}`,
 	)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -541,6 +718,39 @@ func TestVoiceTurnAllowsDeliberateSilence(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"audioBase64":""`) {
 		t.Fatalf("silent response = %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"caption":null`) {
+		t.Fatalf("silent caption must be null: %s", response.Body.String())
+	}
+}
+
+func TestVoiceResultCaptionMustMatchSpokenShapeAndStayBounded(t *testing.T) {
+	t.Parallel()
+
+	base := VoiceTurnResult{
+		Audio:          []byte("audio"),
+		AudioMIMEType:  "audio/mpeg",
+		Caption:        "最終回答",
+		StateToken:     "state",
+		DetectedDomain: "general",
+		Route:          "fast",
+	}
+	if err := validateVoiceResult(base); err != nil {
+		t.Fatalf("valid spoken result: %v", err)
+	}
+	for _, mutate := range []func(*VoiceTurnResult){
+		func(result *VoiceTurnResult) { result.Caption = "" },
+		func(result *VoiceTurnResult) { result.Caption = strings.Repeat("あ", maxCaptionRunes+1) },
+		func(result *VoiceTurnResult) {
+			result.Audio = nil
+			result.AudioMIMEType = ""
+		},
+	} {
+		result := base
+		mutate(&result)
+		if err := validateVoiceResult(result); err == nil {
+			t.Fatalf("unsafe caption accepted: %#v", result)
+		}
 	}
 }
 

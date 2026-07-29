@@ -152,12 +152,19 @@ gcloud run deploy kotae-api `
   --project=$ProjectId `
   --region=asia-northeast1 `
   --service-account=$RuntimeSa `
+  --cpu=1 `
+  --memory=1Gi `
+  --concurrency=4 `
+  --min-instances=0 `
+  --max-instances=3 `
   --timeout=60 `
   --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=chirp_3,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=12582912,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120" `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:latest"
 ```
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い60秒にします。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い60秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
+
+UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。匿名UIDを作り直してもproject全体の費用上限を素通りできないための二段目です。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
 
 ## FirestoreとTTL
 
@@ -189,9 +196,14 @@ gcloud firestore fields ttls update expiresAt `
   --database="(default)" `
   --enable-ttl `
   --project=$ProjectId
+
+gcloud firestore fields ttls list `
+  --database="(default)" `
+  --project=$ProjectId `
+  --format="table(name,ttlConfig.state)"
 ```
 
-TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、セキュリティ認可の期限としてTTLだけに依存しません。会話状態tokenの15分期限は、復号後にAPIが独立して検証します。
+3 collectionすべてが`ACTIVE`になるまで配備完了としません。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、セキュリティ認可の期限としてTTLだけに依存しません。会話状態tokenの15分期限は、復号後にAPIが独立して検証します。
 
 ## Hosting
 

@@ -81,7 +81,7 @@ tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret Man
 | 層 | 技術 | 責務 |
 |---|---|---|
 | 体験 | Rust / Dioxus / Wasm | 音声中心UI、session状態、アクセシビリティ |
-| ブラウザ境界 | 小さなJavaScript module | MediaRecorder、Web Audio VAD、Firebase Web SDK、音声再生 |
+| ブラウザ境界 | JavaScript module | MediaRecorder、Web Audio VAD、Firebase Web SDK、音声再生 |
 | API | Go / Cloud Run | 認証、App Check、Origin、入力検証、timeout、rate limit |
 | 音声認識 | Cloud Speech-to-Text V2 | `asia-northeast1`で日本語音声を文字へ変換 |
 | 推論 | Go / Vertex AI | structured output、fast / precision routing、KOTAE Reflex |

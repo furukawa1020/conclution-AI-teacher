@@ -76,5 +76,6 @@ func (p *Pipeline) Process(
 	}
 	result.Audio = audio
 	result.AudioMIMEType = audioMIME
+	result.Caption = decision.SpokenReply
 	return result, nil
 }

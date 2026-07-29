@@ -10,6 +10,17 @@ import {
   initializeAppCheck,
   ReCaptchaEnterpriseProvider,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app-check.js";
+import {
+  advanceVad,
+  createSessionClock,
+  createTurnGate,
+  createVadState,
+  initializeWithCleanup,
+  isPendingDocumentExpired,
+  isValidTurnMode,
+  shouldStopSessionForLifecycle,
+  VOICE_SESSION_LIMITS,
+} from "./voice-session-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
@@ -24,13 +35,7 @@ const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 20 * 1024 * 1024;
 const SESSION_STATE_MAX_CHARS = 16 * 1024;
-const VAD_INTERVAL_MS = 40;
-const MIN_VOICE_MS = 200;
-const END_OF_TURN_SILENCE_MS = 1_100;
-const SILENT_CAPTURE_LIMIT_MS = 30_000;
-const SPOKEN_CAPTURE_LIMIT_MS = 55_000;
-const IDLE_SESSION_LIMIT_MS = 3 * 60_000;
-const MAX_SESSION_MS = 30 * 60_000;
+const VAD_INTERVAL_MS = VOICE_SESSION_LIMITS.vadIntervalMs;
 
 const ALLOWED_CONFIG_KEYS = Object.freeze([
   "apiKey",
@@ -50,10 +55,14 @@ let activeRecording;
 let activeRequestController;
 let activePlayback;
 let pendingDocument;
+let pendingDocumentTimer;
 let sessionEpoch = 0;
 let documentEpoch = 0;
-let sessionStartedAt = 0;
-let lastSpeechAt = 0;
+const beginGate = createTurnGate();
+const finishGate = createTurnGate();
+const sessionClock = createSessionClock({
+  now: () => performance.now(),
+});
 
 function fail(code) {
   throw new Error(code);
@@ -160,7 +169,28 @@ async function getStatus() {
     return Object.freeze({ state: "configuration-required" });
   }
   try {
-    await appServices();
+    const [{ appCheck }, { user }] = await Promise.all([
+      appServices(),
+      authenticatedUser(),
+    ]);
+    const [idToken, appCheckResult] = await Promise.all([
+      getIdToken(user, false),
+      getAppCheckToken(appCheck, false),
+    ]);
+    const response = await fetch("/api/v1/me", {
+      method: "GET",
+      cache: "no-store",
+      credentials: "same-origin",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        "X-Firebase-AppCheck": appCheckResult.token,
+      },
+    });
+    if (!response.ok) {
+      fail("voice_api_unavailable");
+    }
     return Object.freeze({ state: "ready" });
   } catch {
     return Object.freeze({ state: "unavailable" });
@@ -185,13 +215,17 @@ function classifyMicrophoneError(error) {
   return "microphone_unsupported";
 }
 
-function setTracksEnabled(enabled) {
-  if (!mediaStream) return;
-  for (const track of mediaStream.getAudioTracks()) {
+function setStreamTracksEnabled(stream, enabled) {
+  if (!stream) return;
+  for (const track of stream.getAudioTracks()) {
     if (track.readyState === "live") {
       track.enabled = enabled;
     }
   }
+}
+
+function setTracksEnabled(enabled) {
+  setStreamTracksEnabled(mediaStream, enabled);
 }
 
 function stopTracks(stream) {
@@ -335,8 +369,7 @@ function requestRecordingStop(recording, reason) {
 
 function armVad(recording) {
   const pcm = new Float32Array(analyser.fftSize);
-  let noiseFloor = 0.006;
-  let voiceRunMs = 0;
+  let vadState = createVadState(recording.startedAt);
 
   recording.vadTimer = setInterval(() => {
     if (
@@ -357,42 +390,11 @@ function armVad(recording) {
     }
     const rms = Math.sqrt(sumSquares / pcm.length);
     const now = performance.now();
-    const threshold = Math.max(0.014, noiseFloor * 2.8);
-    const soundsVoiced = rms >= threshold && peak >= threshold * 1.8;
-
-    if (soundsVoiced) {
-      voiceRunMs += VAD_INTERVAL_MS;
-      if (voiceRunMs >= MIN_VOICE_MS) {
-        recording.hasSpeech = true;
-        recording.lastVoiceAt = now;
-      }
-    } else {
-      if (!recording.hasSpeech) {
-        noiseFloor = Math.min(
-          0.04,
-          Math.max(0.0025, noiseFloor * 0.94 + rms * 0.06),
-        );
-      }
-      voiceRunMs = Math.max(0, voiceRunMs - VAD_INTERVAL_MS * 2);
-    }
-
-    if (
-      recording.hasSpeech &&
-      now - recording.lastVoiceAt >= END_OF_TURN_SILENCE_MS
-    ) {
-      requestRecordingStop(recording, "end-of-turn");
-      return;
-    }
-
-    const elapsed = now - recording.startedAt;
-    if (
-      (!recording.hasSpeech && elapsed >= SILENT_CAPTURE_LIMIT_MS) ||
-      (recording.hasSpeech && elapsed >= SPOKEN_CAPTURE_LIMIT_MS)
-    ) {
-      requestRecordingStop(
-        recording,
-        recording.hasSpeech ? "duration-limit" : "silence",
-      );
+    vadState = advanceVad(vadState, { now, peak, rms });
+    recording.hasSpeech = vadState.hasSpeech;
+    recording.lastVoiceAt = vadState.lastVoiceAt ?? 0;
+    if (vadState.action !== null) {
+      requestRecordingStop(recording, vadState.action);
     }
   }, VAD_INTERVAL_MS);
 }
@@ -443,7 +445,7 @@ function createRecording(stream) {
     "error",
     () => {
       stopVad(recording);
-      setTracksEnabled(false);
+      setStreamTracksEnabled(stream, false);
       recording.rejectEnd(new Error("voice_turn_invalid"));
     },
     { once: true },
@@ -453,7 +455,7 @@ function createRecording(stream) {
     "stop",
     () => {
       stopVad(recording);
-      setTracksEnabled(false);
+      setStreamTracksEnabled(stream, false);
       if (recording.discard) {
         recording.chunks.length = 0;
         recording.rejectEnd(
@@ -498,39 +500,44 @@ async function beginTurn() {
     stopSession();
     fail("request_cancelled");
   }
-  if (activeRecording) {
+  if (activeRecording || beginGate.isBusy() || finishGate.isBusy()) {
     fail("voice_turn_invalid");
   }
-  const now = performance.now();
-  if (
-    (sessionStartedAt > 0 && now - sessionStartedAt >= MAX_SESSION_MS) ||
-    (lastSpeechAt > 0 && now - lastSpeechAt >= IDLE_SESSION_LIMIT_MS)
-  ) {
-    stopSession();
-    fail("session_expired");
-  }
-  if (sessionStartedAt === 0) {
-    sessionStartedAt = now;
-    lastSpeechAt = now;
+  const beginToken = beginGate.acquire();
+  if (beginToken === null) {
+    fail("voice_turn_invalid");
   }
 
-  const expectedEpoch = sessionEpoch;
   try {
-    const stream = await ensureMediaStream(expectedEpoch);
-    await ensureAudioGraph(stream);
-    if (expectedEpoch !== sessionEpoch) {
-      fail("request_cancelled");
+    const sessionStatus = sessionClock.begin();
+    if (!sessionStatus.ok) {
+      stopSession();
+      fail("session_expired");
     }
 
-    setTracksEnabled(true);
-    activeRecording = createRecording(stream);
-    void authenticatedUser().catch(() => {});
-    return Object.freeze({ state: "listening" });
-  } catch (error) {
-    releaseMicrophone();
-    sessionStartedAt = 0;
-    lastSpeechAt = 0;
-    throw error;
+    const expectedEpoch = sessionEpoch;
+    return await initializeWithCleanup(
+      async () => {
+        const stream = await ensureMediaStream(expectedEpoch);
+        await ensureAudioGraph(stream);
+        if (expectedEpoch !== sessionEpoch) {
+          fail("request_cancelled");
+        }
+
+        setStreamTracksEnabled(stream, true);
+        activeRecording = createRecording(stream);
+        void authenticatedUser().catch(() => {});
+        return Object.freeze({ state: "listening" });
+      },
+      () => {
+        if (expectedEpoch === sessionEpoch) {
+          releaseMicrophone();
+          sessionClock.reset();
+        }
+      },
+    );
+  } finally {
+    beginGate.release(beginToken);
   }
 }
 
@@ -559,7 +566,7 @@ async function waitForTurnEnd() {
   if (!capture.hasSpeech) {
     activeRecording = undefined;
   } else {
-    lastSpeechAt = performance.now();
+    sessionClock.markSpeech();
   }
   return Object.freeze({
     hasSpeech: capture.hasSpeech,
@@ -606,6 +613,33 @@ function isBase64(value) {
 
 function boundedString(value, maxLength) {
   return typeof value === "string" && Array.from(value).length <= maxLength;
+}
+
+function clearPendingDocument() {
+  pendingDocument = undefined;
+  if (pendingDocumentTimer !== undefined) {
+    clearTimeout(pendingDocumentTimer);
+    pendingDocumentTimer = undefined;
+  }
+  const input = document.getElementById("paper-input");
+  if (input instanceof HTMLInputElement) {
+    input.value = "";
+  }
+}
+
+function armPendingDocumentExpiry(documentForExpiry, attachedAt) {
+  if (pendingDocumentTimer !== undefined) {
+    clearTimeout(pendingDocumentTimer);
+  }
+  pendingDocumentTimer = setTimeout(() => {
+    pendingDocumentTimer = undefined;
+    if (
+      pendingDocument === documentForExpiry &&
+      isPendingDocumentExpired(attachedAt, performance.now())
+    ) {
+      clearPendingDocument();
+    }
+  }, VOICE_SESSION_LIMITS.pendingDocumentLimitMs);
 }
 
 function safeVoiceResponse(payload) {
@@ -659,34 +693,41 @@ function mapVoiceResponseError(status) {
 
 async function finishTurn(serializedSessionState, turnMode) {
   const recording = activeRecording;
-  if (!recording) {
+  if (!recording || finishGate.isBusy()) {
     fail("voice_turn_invalid");
   }
-  const expectedEpoch = sessionEpoch;
   if (
     typeof serializedSessionState !== "string" ||
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
-    (turnMode !== "intentional" && turnMode !== "ambient")
+    !isValidTurnMode(turnMode)
   ) {
     fail("voice_turn_invalid");
   }
-  if (recording.recorder.state === "recording") {
-    requestRecordingStop(recording, "manual");
-  }
 
-  const capture = await recording.endPromise;
-  if (!capture.hasSpeech) {
-    activeRecording = undefined;
-    fail("no_speech");
+  const finishToken = finishGate.acquire();
+  if (finishToken === null) {
+    fail("voice_turn_invalid");
   }
-  if (capture.blob.size > AUDIO_MAX_BYTES) {
-    activeRecording = undefined;
-    fail("voice_turn_too_large");
-  }
-
+  const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
-  const documentForTurn = pendingDocument;
+  let documentForTurn;
+  let requestController;
   try {
+    if (recording.recorder.state === "recording") {
+      requestRecordingStop(recording, "manual");
+    }
+    const capture = await recording.endPromise;
+    if (!capture.hasSpeech) {
+      fail("no_speech");
+    }
+    if (capture.blob.size > AUDIO_MAX_BYTES) {
+      fail("voice_turn_too_large");
+    }
+
+    documentForTurn = pendingDocument;
+    if (documentForTurn) {
+      clearPendingDocument();
+    }
     audioBase64 = arrayBufferToBase64(await capture.blob.arrayBuffer());
     const [{ appCheck }, { user }] = await Promise.all([
       appServices(),
@@ -710,19 +751,18 @@ async function finishTurn(serializedSessionState, turnMode) {
       payload.document = {
         base64: documentForTurn.base64,
         mimeType: documentForTurn.mimeType,
-        name: documentForTurn.name,
       };
     }
 
-    const controller = new AbortController();
-    activeRequestController = controller;
+    requestController = new AbortController();
+    activeRequestController = requestController;
     const response = await fetch(VOICE_ENDPOINT, {
       method: "POST",
       cache: "no-store",
       credentials: "same-origin",
       redirect: "error",
       referrerPolicy: "no-referrer",
-      signal: controller.signal,
+      signal: requestController.signal,
       headers: {
         Authorization: `Bearer ${idToken}`,
         "Content-Type": "application/json",
@@ -740,15 +780,13 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     throw error;
   } finally {
+    finishGate.release(finishToken);
     audioBase64 = "";
-    activeRequestController = undefined;
-    activeRecording = undefined;
-    if (documentForTurn && pendingDocument === documentForTurn) {
-      pendingDocument = undefined;
-      const input = document.getElementById("paper-input");
-      if (input instanceof HTMLInputElement) {
-        input.value = "";
-      }
+    if (activeRequestController === requestController) {
+      activeRequestController = undefined;
+    }
+    if (activeRecording === recording) {
+      activeRecording = undefined;
     }
   }
 }
@@ -844,6 +882,7 @@ async function attachDocument(inputId) {
     fail("document_too_large");
   }
 
+  documentEpoch += 1;
   const expectedEpoch = documentEpoch;
   let base64;
   try {
@@ -858,11 +897,14 @@ async function attachDocument(inputId) {
   }
 
   const name = safeDocumentName(file.name);
+  clearPendingDocument();
+  const attachedAt = performance.now();
   pendingDocument = Object.freeze({
     base64,
     mimeType: "application/pdf",
     name,
   });
+  armPendingDocumentExpiry(pendingDocument, attachedAt);
   base64 = "";
   return Object.freeze({
     name,
@@ -873,6 +915,8 @@ async function attachDocument(inputId) {
 function stopSession() {
   sessionEpoch += 1;
   documentEpoch += 1;
+  beginGate.reset();
+  finishGate.reset();
 
   if (activeRequestController) {
     activeRequestController.abort();
@@ -887,33 +931,43 @@ function stopSession() {
     activePlayback = undefined;
   }
   releaseMicrophone();
-  sessionStartedAt = 0;
-  lastSpeechAt = 0;
+  sessionClock.reset();
 
-  pendingDocument = undefined;
-  const input = document.getElementById("paper-input");
-  if (input instanceof HTMLInputElement) {
-    input.value = "";
-  }
+  clearPendingDocument();
 }
 
 function hasActiveVoiceSession() {
   return Boolean(
-    sessionStartedAt > 0 ||
+    sessionClock.isStarted() ||
     activeRecording ||
-      activeRequestController ||
-      activePlayback ||
-      hasLiveAudioTrack(mediaStream),
+    beginGate.isBusy() ||
+    activeRequestController ||
+    activePlayback ||
+    finishGate.isBusy() ||
+    pendingDocument ||
+    hasLiveAudioTrack(mediaStream),
   );
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && hasActiveVoiceSession()) {
+  if (
+    shouldStopSessionForLifecycle(
+      "visibilitychange",
+      document.hidden,
+      hasActiveVoiceSession(),
+    )
+  ) {
     stopSession();
   }
 });
 globalThis.addEventListener("pagehide", () => {
-  if (hasActiveVoiceSession()) {
+  if (
+    shouldStopSessionForLifecycle(
+      "pagehide",
+      document.hidden,
+      hasActiveVoiceSession(),
+    )
+  ) {
     stopSession();
   }
 });

@@ -225,26 +225,16 @@ mod cloud {
             Some("microphone_permission_denied") => {
                 "マイクが許可されていない　ブラウザの権限を確認してみて"
             }
-            Some("microphone_unavailable") => {
-                "使えるマイクが見つからない　接続を確認してみて"
-            }
+            Some("microphone_unavailable") => "使えるマイクが見つからない　接続を確認してみて",
             Some("no_speech") => "声を拾えなかった　少し近づいてもう一度",
-            Some("authentication_failed") => {
-                "安全な接続を確認できない　もう一度ためしてみて"
-            }
-            Some("app_check_not_configured") => {
-                "App Check の公開サイトキーがまだない"
-            }
+            Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
+            Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
             Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
             Some("rate_limited") => "いま少し混み合ってる　少し待って再開してみて",
             Some("request_cancelled") => "会話を一時停止した",
-            Some("audio_playback_blocked") => {
-                "声を再生できない　端末の消音設定を確認してみて"
-            }
-            Some("voice_api_unavailable") => {
-                "音声エージェントを準備中　少し待ってためしてみて"
-            }
+            Some("audio_playback_blocked") => "声を再生できない　端末の消音設定を確認してみて",
+            Some("voice_api_unavailable") => "音声エージェントを準備中　少し待ってためしてみて",
             _ => "音声エージェントにつながらない　もう一度ためしてみて",
         }
     }
@@ -254,9 +244,7 @@ mod cloud {
             Some("document_not_selected") => "PDFを選んでみて",
             Some("document_type_invalid") => "ここではPDFだけを読める",
             Some("document_too_large") => "PDFは7MBまで",
-            Some("document_read_failed") => {
-                "PDFを読めなかった　別のファイルをためしてみて"
-            }
+            Some("document_read_failed") => "PDFを読めなかった　別のファイルをためしてみて",
             _ => "PDFを添付できなかった",
         }
     }

@@ -59,17 +59,20 @@ JavaScriptのガベージコレクションや文字列の複製は完全には�
 
 ## 研究queryの境界
 
-- 外部探索は、現在のintentional turn全体が「外部検索で『テーマ』の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ。自然文から同意を推測せず、追記、取消し、複数命令、ambient turnには外部送信権限を与えない
+- 外部探索は、現在のintentional turn全体が「外部検索で、テーマは何々の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ。自然文から同意を推測せず、追記、取消し、複数命令、ambient turnには外部送信権限を与えない
 - `assistant`経路だけで許可し、本人回答の`respondent`経路から外部queryを作らない
-- topicは固定形式のかぎ括弧内全体、DOIは空白で区切ったbare DOI全体だけを使い、PDF、過去state、別文、推測した個人情報から作らない。発話から決定論的に抽出した値、モデルの値、取得結果を完全一致で結ぶ
-- email、電話番号らしい値、郵便番号、長い番号、API key、token、credential assignment、氏名と健康情報の組合せらしいqueryを送信前に保守的に拒否する。percent encodingも復号して再検査する
+- topicは固定形式の「テーマは」と「の最新論文」の間全体、DOIは空白で区切ったbare DOI全体だけを使い、PDF、過去state、別文、推測した個人情報から作らない。発話から決定論的に抽出した値、モデルの値、取得結果を完全一致で結ぶ
+- `@`を含む値、電話番号らしい値、郵便番号、長い番号、ASCII外の数字、API key、token、credential assignment、既知の氏名形や患者・健康文脈らしいqueryを送信前に保守的に拒否する。HTML entity、percent encoding、PIIらしいBase64・Base32文字列も復号して元の文へ戻し、分割されたBase64候補も結合して再検査する
+- 送信値はNFKCで表記が変わる文字とUnicode format文字をfail-closedで拒否する。検査時にはformat文字を空白へ置換した形と除去した形の両方も確認し、全角`＠`、全角数字区切り、ゼロ幅文字による検査分断を許可しない。DOIのcanonical suffixはASCIIへ限定する
+- topicに許可する文字をUnicodeの文字・結合記号、ASCII数字、空白、hyphen、数字間のdecimal pointへ限定する。任意URL、slash、colon、`@`、一般の記号をtopicとして送らない
+- topicに句読点・節区切り・取消語が入った場合と、DOIにcomma・semicolon・取消語が付いた場合は送信しない。「量子、いや、やめて」や`10.1234/public,cancel`を検索対象として吸収しない
 - 接続先は`https://api.crossref.org`へ固定し、redirectを拒否する
 - Crossref source requestは8秒、会話側tool-policyは7秒で打ち切り、responseは2 MiB、返却候補は5件を上限にする
 - abstractはcopyright状態が不明なため、音声応答や画面へ再配布しない
 - 結果は常に`discovery_metadata_not_claim_evidence`かつ`needs_primary_evidence`とし、「検証済み」というstatusを型として持たない
 - 現在のtopic探索はCrossrefのindex date filterを使うため、「新しく発表された論文」ではなく「Crossrefの索引日が指定期間内の書誌候補」と表示する
 
-このscreenは完全なPII検出ではありません。意味的に機微なtopicや氏名をすべて検出できるとは保証しないため、任意Web巡回、PDF由来の自動query、バックグラウンド定期収集は現在の公開経路へ接続しません。
+このscreenは完全なPII検出ではありません。未知の研究語をclosed vocabularyで拒否すると本機能の目的を壊すため、任意の語が氏名か新規技術名かを完全には判定しません。固定形式で発話したtopicそのものがCrossrefへ送られることを、初期表示したprivacy欄に示し、氏名・連絡先・症例を入れないよう案内します。意味的に機微なtopicや氏名をすべて検出できるとは保証しないため、任意Web巡回、PDF由来の自動query、バックグラウンド定期収集は現在の公開経路へ接続しません。
 
 ## API境界
 

@@ -975,7 +975,7 @@ fn App() -> Element {
                         }
                     }
 
-                    details { class: "privacy-fold",
+                    details { class: "privacy-fold", open: true,
                         summary {
                             span { class: "utility-index", "02" }
                             span {
@@ -1003,7 +1003,7 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "外部検索" }
-                                "Crossrefへ送るのは「外部検索で『テーマ』の最新論文を探して」と発話全体で明示したときだけ。通常の会話やPDFからは検索しません。"
+                                "「外部検索で、テーマは何々の最新論文を探して」と発話全体で明示したときだけ、その検索語をCrossrefへ送ります。通常の会話やPDFからは検索しません。氏名・連絡先・症例は検索語に入れないでください。"
                             }
                             p { class: "privacy-fold__stop",
                                 "一時停止・終了で　マイクと再生をすぐ止める"

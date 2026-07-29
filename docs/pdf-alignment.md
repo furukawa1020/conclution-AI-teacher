@@ -49,9 +49,12 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 現在の公開経路に接続するResearch機能は、検証器の安全な入口である。
 
 - intentional turn全体が「Crossrefで DOI … を調べて」に完全一致したDOI照会
-- intentional turn全体が「外部検索で『テーマ』の最新論文を探して」に完全一致した論文検索
+- intentional turn全体が「外部検索で、テーマは何々の最新論文を探して」に完全一致した論文検索
 - 固定された`https://api.crossref.org`だけへのread-only request
-- redirect拒否、timeout、response上限、queryのPII・credentialらしい値とpercent encodingの検査
+- redirect拒否、timeout、response上限、queryのPII・credentialらしい値の検査
+- NFKC差・Unicode format文字・ASCII外のDOI suffixのfail-closed拒否と、HTML entity・percent encoding・PIIらしいBase64・Base32文字列の復号再検査。分割Base64も結合し、復号値を元の文へ戻して検査する
+- topic文字をUnicodeの文字・結合記号、ASCII数字、空白、hyphen、数字間のdecimal pointへ限定し、任意URLや命令をqueryへ混ぜない
+- topic内の節区切り・取消語、DOIへ付加されたcomma・semicolon・取消語の拒否
 - 発話中の一意なDOI、モデルが選んだDOI、Crossrefが返したDOIの完全一致
 - DOI、日付、URLの正規化と重複排除
 - 結果を必ず`discovery_metadata_not_claim_evidence`、`needs_primary_evidence`として扱う

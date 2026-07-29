@@ -1,6 +1,9 @@
 package research
 
 import (
+	"bytes"
+	"encoding/base32"
+	"encoding/base64"
 	"html"
 	"net/url"
 	"regexp"
@@ -11,15 +14,25 @@ import (
 	"unicode/utf8"
 
 	xhtml "golang.org/x/net/html"
+	"golang.org/x/text/unicode/norm"
 )
 
 var (
-	doiPrefixPattern = regexp.MustCompile(`(?i)^10\.[0-9]{4,9}/`)
-	emailPattern     = regexp.MustCompile(
+	doiPrefixPattern   = regexp.MustCompile(`(?i)^10\.[0-9]{4,9}/`)
+	doiAnywherePattern = regexp.MustCompile(
+		`(?i)10\.[0-9]{4,9}/`,
+	)
+	emailPattern = regexp.MustCompile(
 		`(?i)\b[a-z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\b`,
 	)
 	credentialAssignmentPattern = regexp.MustCompile(
 		`(?i)\b(?:api[_ -]?key|client[_ -]?secret|password|passwd|authorization|bearer|access[_ -]?token|refresh[_ -]?token|private[_ -]?key)\b\s*(?::|=|is|は)\s*\S+`,
+	)
+	credentialLoosePattern = regexp.MustCompile(
+		`(?i)\b(?:api[_ -]?key|client[_ -]?secret|password|passwd|` +
+			`authorization|bearer|access[_ -]?token|refresh[_ -]?token|` +
+			`private[_ -]?key)\b(?:\s+|[-_.])` +
+			`([^\s,;、。！？!?]+)`,
 	)
 	knownSecretPattern = regexp.MustCompile(
 		`(?i)(?:\bAIza[0-9A-Za-z_-]{30,}\b|\bsk-[0-9A-Za-z_-]{16,}\b|\bgh[pousr]_[0-9A-Za-z]{20,}\b|\bxox[baprs]-[0-9A-Za-z-]{10,}\b)`,
@@ -30,11 +43,17 @@ var (
 	japanesePhonePattern = regexp.MustCompile(
 		`(?:\+81[\s()-]*(?:0[\s()-]*)?[1-9][0-9\s()-]{7,12}[0-9]|(?:^|[^0-9])0[1-9][0-9\s()-]{7,12}[0-9](?:$|[^0-9]))`,
 	)
+	phoneContextPattern = regexp.MustCompile(
+		`(?i)(?:phone|telephone|mobile|cell|tel|fax|電話|連絡先)` +
+			`(?:\s*[:：=-]\s*|\s+)(?:\+?[0-9][0-9\s().-]{7,16}[0-9])`,
+	)
+	northAmericanPhonePattern = regexp.MustCompile(
+		`(?:^|[^0-9])(?:\+?1[\s().-]*)?` +
+			`[2-9][0-9]{2}[\s().-]*[2-9][0-9]{2}[\s().-]*[0-9]{4}` +
+			`(?:$|[^0-9])`,
+	)
 	postalCodePattern = regexp.MustCompile(
 		`(?:〒\s*)?\b[0-9]{3}-[0-9]{4}\b`,
-	)
-	longDigitPattern = regexp.MustCompile(
-		`(?:^|[^0-9])[0-9][0-9 -]{10,23}[0-9](?:$|[^0-9])`,
 	)
 	orcidPattern = regexp.MustCompile(
 		`^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$`,
@@ -58,12 +77,19 @@ var (
 			`|[A-Z]{2,30}\s+[A-Z]{2,30}` +
 			`)(?:$|[^A-Za-z])`,
 	)
+	unicodeLatinFullNamePattern = regexp.MustCompile(
+		`(?:^|[^\p{L}])` +
+			`\p{Lu}\p{Ll}{1,30}(?:[-']\p{Lu}?\p{Ll}{1,30})?` +
+			`\s+\p{Lu}\p{Ll}{1,30}(?:[-']\p{Lu}?\p{Ll}{1,30})?` +
+			`(?:$|[^\p{L}])`,
+	)
 	commonJapaneseNamePattern = regexp.MustCompile(
-		`(?:^|[\s「『"'（(])(?:佐藤|鈴木|高橋|田中|伊藤|渡辺|山本|中村|` +
+		`(?:佐藤|鈴木|高橋|田中|伊藤|渡辺|山本|中村|` +
 			`小林|加藤|吉田|山田|佐々木|山口|松本|井上|木村|斎藤|清水|` +
 			`山崎|森|池田|橋本|阿部|石川|山下|中島|前田|藤田|小川|` +
 			`後藤|岡田|長谷川|村上|近藤|石井|坂本|遠藤|青木|藤井|` +
-			`西村|福田|太田|三浦|藤原|岡本|松田|中川|中野|原田)` +
+			`西村|福田|太田|三浦|藤原|岡本|松田|中川|中野|原田|小鳥遊)` +
+			`[・\s-]?` +
 			`[一-龯々ぁ-んァ-ヶー]{1,8}(?:$|[\s」』"'、,）)])`,
 	)
 	commonLatinNamePattern = regexp.MustCompile(
@@ -72,21 +98,50 @@ var (
 			`joseph|susan|thomas|jessica|charles|sarah|christopher|` +
 			`karen|daniel|nancy|matthew|lisa|anthony|betty|mark|` +
 			`sandra|donald|ashley|steven|kimberly|paul|emily|andrew|` +
-			`alice|bob)\s+[a-z][a-z'-]{1,30}(?:$|[^a-z])`,
+			`alice|bob|xavier|turing|einstein|curie|tesla|hopper|lovelace)` +
+			`[\s/._-]+[a-z][a-z'-]{1,30}(?:$|[^a-z])`,
 	)
 	healthPersonSlugPattern = regexp.MustCompile(
 		`(?i)(?:^|[/\s])(?:[\p{L}]{1,30}[-_.・\s]+){1,4}` +
 			`(?:adhd|ptsd|depression|bipolar|schizophrenia|autism)` +
 			`(?:$|[^\p{L}])`,
 	)
-	compactJapaneseTopicPattern = regexp.MustCompile(
-		`^[一-龯々ぁ-んァ-ヶー]{2,12}$`,
+	patientIdentifierPattern = regexp.MustCompile(
+		`(?i)(?:\bpatient|患者)[-_.\s]*` +
+			`(?:(?:id|no|number|番号)[-_.\s]*)?` +
+			`(?:[0-9][a-z0-9]{3,}|[a-z]{1,8}[0-9][a-z0-9]{2,})`,
 	)
-	latinShortPhrasePattern = regexp.MustCompile(
-		`(?i)^[\p{L}][\p{L}'-]{1,30}` +
-			`(?:\s+[\p{L}][\p{L}'-]{1,30}){1,2}$`,
+	base64TokenPattern = regexp.MustCompile(
+		`[A-Za-z0-9+/_-]{4,}={0,2}`,
+	)
+	base32TokenPattern = regexp.MustCompile(
+		`[A-Za-z2-7]{16,}={0,6}`,
+	)
+	splitBase64Pattern = regexp.MustCompile(
+		`[A-Za-z0-9+/_=-]+(?:\s+[A-Za-z0-9+/_=-]+)+`,
+	)
+	percentEscapePattern = regexp.MustCompile(
+		`(?i)%[0-9a-f]{2}`,
+	)
+	htmlCharacterReferencePattern = regexp.MustCompile(
+		`(?i)&#(?:[0-9]+|x[0-9a-f]+);?`,
 	)
 )
+
+const (
+	maxSensitiveDecodeDepth = 8
+	maxSensitiveScanStates  = 64
+	maxSensitiveAttempts    = 256
+	maxSensitiveScanBytes   = 16 * 1024
+	maxSensitiveInputBytes  = 4 * 1024
+)
+
+type sensitiveScanBudget struct {
+	states     int
+	attempts   int
+	totalBytes int
+	seen       map[string]struct{}
+}
 
 var abstractBoundaryElements = map[string]struct{}{
 	"address": {}, "article": {}, "aside": {}, "blockquote": {}, "br": {},
@@ -137,7 +192,11 @@ func NormalizeQuery(query Query) (Query, error) {
 			return Query{}, err
 		}
 		query.DOI = doi
-		if likelySensitive(query.DOI) {
+		// DOI canonicalization lowercases the suffix. Base64 is
+		// case-sensitive, so re-decoding the lowercased identifier could turn
+		// an opaque DOI into unrelated bytes. Reversible encodings were
+		// already screened on the exact outbound input above.
+		if likelySensitiveLiteral(query.DOI) {
 			return Query{}, ErrSensitiveQuery
 		}
 		query.Limit = 1
@@ -152,13 +211,27 @@ func NormalizeQuery(query Query) (Query, error) {
 			query.Until.IsZero() {
 			return Query{}, ErrInvalidQuery
 		}
+		if hasUnicodeScreenAmbiguity(query.Topic) {
+			return Query{}, ErrSensitiveQuery
+		}
 		query.Topic = cleanText(query.Topic)
 		if query.Topic == "" ||
 			utf8.RuneCountInString(query.Topic) > MaxTopicRunes {
 			return Query{}, ErrInvalidQuery
 		}
+		if containsResearchWithdrawal(query.Topic) {
+			return Query{}, ErrInvalidQuery
+		}
+		if containsLongDigitSequence(query.Topic, 12) ||
+			isBareContactNumber(query.Topic) {
+			return Query{}, ErrSensitiveQuery
+		}
 		if likelySensitive(query.Topic) {
 			return Query{}, ErrSensitiveQuery
+		}
+		if containsResearchClauseBoundary(query.Topic) ||
+			containsUnsupportedTopicCharacter(query.Topic) {
+			return Query{}, ErrInvalidQuery
 		}
 		query.From = startOfUTCDay(query.From)
 		query.Until = startOfUTCDay(query.Until)
@@ -217,16 +290,22 @@ func NormalizeDOI(rawDOI string) (string, error) {
 
 	value = strings.TrimSpace(value)
 	if value == "" ||
+		hasUnicodeScreenAmbiguity(value) ||
 		utf8.RuneCountInString(value) > MaxDOIRunes ||
-		!doiPrefixPattern.MatchString(value) {
+		!doiPrefixPattern.MatchString(value) ||
+		len(doiAnywherePattern.FindAllStringIndex(value, -1)) != 1 ||
+		containsResearchWithdrawal(value) {
 		return "", ErrInvalidQuery
 	}
 	for _, char := range value {
-		if unicode.IsSpace(char) ||
+		if char > unicode.MaxASCII ||
+			unicode.IsSpace(char) ||
 			unicode.IsControl(char) ||
+			unicode.Is(unicode.Cf, char) ||
 			char == '?' ||
 			char == '#' ||
-			char == '\\' {
+			char == '\\' ||
+			strings.ContainsRune(",;、；", char) {
 			return "", ErrInvalidQuery
 		}
 	}
@@ -234,41 +313,90 @@ func NormalizeDOI(rawDOI string) (string, error) {
 }
 
 func likelySensitive(value string) bool {
-	if likelySensitiveLiteral(value) {
+	budget := &sensitiveScanBudget{
+		seen: make(map[string]struct{}),
+	}
+	return likelySensitiveWithBudget(value, 0, budget)
+}
+
+func likelySensitiveWithBudget(
+	value string,
+	depth int,
+	budget *sensitiveScanBudget,
+) bool {
+	if len(value) > maxSensitiveInputBytes ||
+		depth > maxSensitiveDecodeDepth {
 		return true
 	}
-	decoded := value
-	for depth := 0; depth < 4; depth++ {
-		next, err := url.PathUnescape(decoded)
-		if err != nil || next == decoded {
-			return false
-		}
-		if likelySensitiveLiteral(next) {
+	stateKey := strconv.Itoa(depth) + ":" + value
+	if _, exists := budget.seen[stateKey]; exists {
+		return false
+	}
+	budget.seen[stateKey] = struct{}{}
+	budget.states++
+	budget.totalBytes += len(value)
+	if budget.states > maxSensitiveScanStates ||
+		budget.totalBytes > maxSensitiveScanBytes {
+		return true
+	}
+
+	canonical := norm.NFKC.String(value)
+	for _, variant := range unicodeScreenVariants(canonical) {
+		if likelySensitiveLiteral(variant) ||
+			likelySensitiveBase64(variant, depth, budget) ||
+			likelySensitiveBase32(variant, depth, budget) {
 			return true
 		}
-		decoded = next
 	}
-	// Excessively nested encoding is not needed for a DOI lookup and is
-	// rejected rather than risk sending a reversible secret representation.
-	return strings.Contains(decoded, "%")
+	htmlDecoded := html.UnescapeString(canonical)
+	if htmlDecoded != canonical {
+		if depth == maxSensitiveDecodeDepth {
+			return true
+		}
+		return likelySensitiveWithBudget(htmlDecoded, depth+1, budget)
+	}
+	if !strings.Contains(canonical, "%") {
+		return false
+	}
+	pathDecoded, err := url.PathUnescape(canonical)
+	if err != nil {
+		// A malformed escape can be appended to an otherwise reversible
+		// email or secret encoding. Decode errors therefore fail closed.
+		return true
+	}
+	if pathDecoded == canonical {
+		return false
+	}
+	if depth == maxSensitiveDecodeDepth {
+		return true
+	}
+	return likelySensitiveWithBudget(pathDecoded, depth+1, budget)
 }
 
 func likelySensitiveLiteral(value string) bool {
-	if emailPattern.MatchString(value) ||
-		credentialAssignmentPattern.MatchString(value) ||
-		knownSecretPattern.MatchString(value) ||
-		jwtPattern.MatchString(value) ||
-		japanesePhonePattern.MatchString(value) ||
-		postalCodePattern.MatchString(value) ||
-		strings.Contains(value, "-----BEGIN PRIVATE KEY-----") ||
-		strings.Contains(value, "-----BEGIN RSA PRIVATE KEY-----") ||
+	if likelySensitiveHardLiteral(value) ||
 		likelyPersonalResearchContext(value) {
 		return true
 	}
+	return false
+}
 
-	for _, candidate := range longDigitPattern.FindAllString(value, -1) {
-		digits := digitsOnly(candidate)
-		if len(digits) >= 12 || (len(digits) >= 13 && luhnValid(digits)) {
+func likelyPhoneOrPostal(value string) bool {
+	if !doiPrefixPattern.MatchString(value) {
+		return japanesePhonePattern.MatchString(value) ||
+			postalCodePattern.MatchString(value)
+	}
+	slash := strings.IndexByte(value, '/')
+	if slash < 0 || slash+1 >= len(value) {
+		return false
+	}
+	suffix := value[slash+1:]
+	for _, pattern := range []*regexp.Regexp{
+		japanesePhonePattern,
+		postalCodePattern,
+	} {
+		match := pattern.FindStringIndex(suffix)
+		if len(match) == 2 && match[0] == 0 {
 			return true
 		}
 	}
@@ -276,6 +404,10 @@ func likelySensitiveLiteral(value string) bool {
 }
 
 func likelyPersonalResearchContext(value string) bool {
+	return likelyExplicitPersonalResearchContext(value)
+}
+
+func likelyExplicitPersonalResearchContext(value string) bool {
 	lower := strings.ToLower(value)
 	for _, marker := range []string{
 		"私の", "わたしの", "僕の", "自分の", "患者名", "患者id", "症例番号",
@@ -293,78 +425,113 @@ func likelyPersonalResearchContext(value string) bool {
 	if personalCasePattern.MatchString(value) {
 		return true
 	}
+	if patientIdentifierPattern.MatchString(value) {
+		return true
+	}
 	if commonJapaneseNamePattern.MatchString(value) ||
 		commonLatinNamePattern.MatchString(value) {
 		return true
 	}
-	if healthContextPattern.MatchString(value) &&
+	healthContext := healthContextPattern.MatchString(value)
+	if healthContext && strings.Contains(value, "/") {
+		return true
+	}
+	if healthContext &&
 		(japaneseNameLikePattern.MatchString(value) ||
 			latinFullNamePattern.MatchString(value) ||
+			unicodeLatinFullNamePattern.MatchString(value) ||
 			healthPersonSlugPattern.MatchString(value)) {
 		return true
 	}
-	return likelyStandalonePersonName(value)
+	return false
 }
 
-func likelyStandalonePersonName(value string) bool {
-	candidate := strings.Trim(
-		strings.TrimSpace(value),
-		"「」『』\"'()（）",
-	)
-	if candidate == "" ||
-		strings.ContainsAny(candidate, "/:@") {
-		return false
-	}
-
-	academicTopic := containsAcademicTopicMarker(candidate)
-	if fullName := latinFullNamePattern.FindString(candidate); fullName != "" &&
-		(fullName != candidate || !academicTopic) {
-		return true
-	}
-	compact := strings.NewReplacer(
-		" ", "",
-		"　", "",
-		"・", "",
-		"-", "",
-		".", "",
-	).Replace(candidate)
-	if compactJapaneseTopicPattern.MatchString(compact) && !academicTopic {
-		return true
-	}
-	return latinShortPhrasePattern.MatchString(candidate) && !academicTopic
-}
-
-func containsAcademicTopicMarker(value string) bool {
-	lower := strings.ToLower(value)
-	for _, marker := range []string{
-		"理論", "解析", "分析", "学習", "記憶", "認知", "言語", "処理",
-		"計算", "量子", "細胞", "遺伝", "疾患", "症候群", "治療", "研究",
-		"技術", "手法", "モデル", "システム", "ネットワーク", "アルゴリズム",
-		"エラー", "訂正", "評価", "効果", "機構", "化学", "物理", "数学",
-		"医学", "教育", "支援", "障害", "環境", "経済", "政策", "材料",
-		"電池", "宇宙", "地震", "睡眠", "感染", "免疫", "疼痛",
-		"quantum", "comput", "learning", "memory", "language", "model",
-		"network", "algorithm", "analysis", "theory", "method", "system",
-		"physics", "chemistry", "biology", "medicine", "education",
-		"policy", "econom", "material", "battery", "climate", "error",
-		"retrieval", "augment", "generation", "cryptograph", "coding",
-		"research", "topic", "agentic", "fraud", "detect",
-	} {
-		if strings.Contains(lower, marker) {
+func containsNonASCIIDigit(value string) bool {
+	for _, char := range value {
+		if char > unicode.MaxASCII &&
+			(unicode.IsDigit(char) || unicode.IsNumber(char)) {
 			return true
 		}
 	}
 	return false
 }
 
-func digitsOnly(value string) string {
-	var result strings.Builder
+func containsLongDigitSequence(value string, minimum int) bool {
+	var digits strings.Builder
+	suspicious := func() bool {
+		return digits.Len() >= minimum
+	}
 	for _, char := range value {
-		if char >= '0' && char <= '9' {
-			result.WriteRune(char)
+		switch {
+		case char >= '0' && char <= '9':
+			digits.WriteRune(char)
+		case unicode.IsSpace(char) ||
+			unicode.IsPunct(char) ||
+			unicode.IsSymbol(char):
+			continue
+		default:
+			if suspicious() {
+				return true
+			}
+			digits.Reset()
 		}
 	}
-	return result.String()
+	return suspicious()
+}
+
+func containsDOIPaymentCard(value string) bool {
+	if !doiPrefixPattern.MatchString(value) {
+		return false
+	}
+	slash := strings.IndexByte(value, '/')
+	if slash < 0 || slash+1 >= len(value) ||
+		value[slash+1] < '0' || value[slash+1] > '9' {
+		return false
+	}
+	var digits strings.Builder
+scan:
+	for _, char := range value[slash+1:] {
+		switch {
+		case char >= '0' && char <= '9':
+			digits.WriteRune(char)
+		case unicode.IsSpace(char) ||
+			unicode.IsPunct(char) ||
+			unicode.IsSymbol(char):
+			continue
+		default:
+			break scan
+		}
+	}
+	candidate := digits.String()
+	return len(candidate) >= 13 &&
+		len(candidate) <= 19 &&
+		luhnValid(candidate)
+}
+
+func isBareContactNumber(value string) bool {
+	digits := 0
+	for _, char := range value {
+		switch {
+		case char >= '0' && char <= '9':
+			digits++
+		case unicode.IsSpace(char) || char == '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return digits >= 8 && digits <= 11
+}
+
+func containsDOIBareContactNumber(value string) bool {
+	if !doiPrefixPattern.MatchString(value) {
+		return false
+	}
+	slash := strings.IndexByte(value, '/')
+	if slash < 0 || slash+1 >= len(value) {
+		return false
+	}
+	return isBareContactNumber(value[slash+1:])
 }
 
 func luhnValid(value string) bool {
@@ -384,6 +551,490 @@ func luhnValid(value string) bool {
 		sum += digit
 	}
 	return sum%10 == 0
+}
+
+func hasUnicodeScreenAmbiguity(value string) bool {
+	if norm.NFKC.String(value) != value {
+		return true
+	}
+	if containsMixedLatinConfusableScriptToken(value) {
+		return true
+	}
+	for _, char := range value {
+		if unicode.Is(unicode.Cf, char) ||
+			(unicode.IsControl(char) && !unicode.IsSpace(char)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsMixedLatinConfusableScriptToken(value string) bool {
+	hasLatin := false
+	hasConfusableScript := false
+	flush := func() bool {
+		mixed := hasLatin && hasConfusableScript
+		hasLatin = false
+		hasConfusableScript = false
+		return mixed
+	}
+	for _, char := range value {
+		switch {
+		case unicode.In(char, unicode.Latin):
+			hasLatin = true
+		case unicode.In(char, unicode.Cyrillic, unicode.Greek):
+			hasConfusableScript = true
+		case unicode.IsLetter(char) || unicode.IsMark(char):
+			continue
+		default:
+			if flush() {
+				return true
+			}
+		}
+	}
+	return flush()
+}
+
+func unicodeScreenVariants(value string) []string {
+	var spaced strings.Builder
+	var joined strings.Builder
+	var marksRemoved strings.Builder
+	spaced.Grow(len(value))
+	joined.Grow(len(value))
+	marksRemoved.Grow(len(value))
+	for _, char := range value {
+		if unicode.Is(unicode.Cf, char) || unicode.IsControl(char) {
+			spaced.WriteByte(' ')
+			continue
+		}
+		spaced.WriteRune(char)
+		joined.WriteRune(char)
+		if !unicode.IsMark(char) {
+			marksRemoved.WriteRune(char)
+		}
+	}
+
+	variants := []string{
+		value,
+		cleanText(spaced.String()),
+		cleanText(joined.String()),
+		cleanText(marksRemoved.String()),
+	}
+	unique := make([]string, 0, len(variants))
+	seen := make(map[string]struct{}, len(variants))
+	for _, variant := range variants {
+		if _, exists := seen[variant]; exists {
+			continue
+		}
+		seen[variant] = struct{}{}
+		unique = append(unique, variant)
+	}
+	return unique
+}
+
+func likelySensitiveBase64(
+	value string,
+	depth int,
+	budget *sensitiveScanBudget,
+) bool {
+	for _, candidate := range base64Candidates(value) {
+		token := candidate.encoded
+		if len(token) > 344 {
+			return true
+		}
+		for _, encoding := range []*base64.Encoding{
+			base64.StdEncoding.Strict(),
+			base64.RawStdEncoding.Strict(),
+			base64.URLEncoding.Strict(),
+			base64.RawURLEncoding.Strict(),
+		} {
+			budget.attempts++
+			if budget.attempts > maxSensitiveAttempts {
+				return true
+			}
+			decoded, err := encoding.DecodeString(token)
+			if err != nil ||
+				len(decoded) == 0 ||
+				encoding.EncodeToString(decoded) != token {
+				continue
+			}
+			budget.totalBytes += len(decoded)
+			if budget.totalBytes > maxSensitiveScanBytes {
+				return true
+			}
+			textLike := plausiblyTextBytes(decoded)
+			for _, decodedView := range decodedScreenViews(decoded) {
+				if likelySensitiveDecodedStructure(decodedView) {
+					return true
+				}
+				replaced := value[:candidate.start] +
+					decodedView +
+					value[candidate.end:]
+				if !textLike {
+					continue
+				}
+				if likelySensitiveHardLiteral(decodedView) ||
+					likelyExplicitPersonalResearchContext(decodedView) {
+					return true
+				}
+				for _, variant := range unicodeScreenVariants(
+					norm.NFKC.String(replaced),
+				) {
+					if likelySensitiveHardLiteral(variant) ||
+						likelyExplicitPersonalResearchContext(variant) {
+						return true
+					}
+				}
+				if shouldRecurseDecodedView(decodedView) {
+					if depth == maxSensitiveDecodeDepth ||
+						likelySensitiveWithBudget(
+							replaced,
+							depth+1,
+							budget,
+						) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func likelySensitiveBase32(
+	value string,
+	depth int,
+	budget *sensitiveScanBudget,
+) bool {
+	for _, index := range base32TokenPattern.FindAllStringIndex(value, -1) {
+		token := value[index[0]:index[1]]
+		canonicalToken := strings.ToUpper(token)
+		for _, encoding := range []*base32.Encoding{
+			base32.StdEncoding,
+			base32.StdEncoding.WithPadding(base32.NoPadding),
+		} {
+			budget.attempts++
+			if budget.attempts > maxSensitiveAttempts {
+				return true
+			}
+			decoded, err := encoding.DecodeString(canonicalToken)
+			if err != nil ||
+				len(decoded) == 0 ||
+				encoding.EncodeToString(decoded) != canonicalToken {
+				continue
+			}
+			budget.totalBytes += len(decoded)
+			if budget.totalBytes > maxSensitiveScanBytes {
+				return true
+			}
+			textLike := plausiblyTextBytes(decoded)
+			for _, decodedView := range decodedScreenViews(decoded) {
+				if likelySensitiveDecodedStructure(decodedView) {
+					return true
+				}
+				replaced := value[:index[0]] +
+					decodedView +
+					value[index[1]:]
+				if !textLike {
+					continue
+				}
+				if likelySensitiveHardLiteral(decodedView) ||
+					likelyExplicitPersonalResearchContext(decodedView) {
+					return true
+				}
+				for _, variant := range unicodeScreenVariants(
+					norm.NFKC.String(replaced),
+				) {
+					if likelySensitiveHardLiteral(variant) ||
+						likelyExplicitPersonalResearchContext(variant) {
+						return true
+					}
+				}
+				if shouldRecurseDecodedView(decodedView) {
+					if depth == maxSensitiveDecodeDepth ||
+						likelySensitiveWithBudget(
+							replaced,
+							depth+1,
+							budget,
+						) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func shouldRecurseDecodedView(value string) bool {
+	if percentEscapePattern.MatchString(value) ||
+		htmlCharacterReferencePattern.MatchString(value) {
+		return true
+	}
+	for _, candidate := range base64Candidates(value) {
+		if len(candidate.encoded) < 7 {
+			continue
+		}
+		for _, encoding := range []*base64.Encoding{
+			base64.StdEncoding.Strict(),
+			base64.RawStdEncoding.Strict(),
+			base64.URLEncoding.Strict(),
+			base64.RawURLEncoding.Strict(),
+		} {
+			decoded, err := encoding.DecodeString(candidate.encoded)
+			if err == nil &&
+				len(decoded) > 0 &&
+				encoding.EncodeToString(decoded) == candidate.encoded &&
+				mostlyTextBytes(decoded) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mostlyTextBytes(value []byte) bool {
+	return textByteRatioAtLeast(value, 85)
+}
+
+func plausiblyTextBytes(value []byte) bool {
+	return textByteRatioAtLeast(value, 80)
+}
+
+func textByteRatioAtLeast(value []byte, minimumPercent int) bool {
+	if len(value) == 0 {
+		return false
+	}
+	textBytes := 0
+	for offset := 0; offset < len(value); {
+		char, size := utf8.DecodeRune(value[offset:])
+		if char == utf8.RuneError && size == 1 {
+			offset++
+			continue
+		}
+		if unicode.IsPrint(char) || unicode.IsSpace(char) {
+			textBytes += size
+		}
+		offset += size
+	}
+	return textBytes*100 >= len(value)*minimumPercent
+}
+
+func decodedScreenViews(value []byte) []string {
+	rawViews := [][]byte{
+		bytes.ToValidUTF8(value, []byte(" ")),
+		bytes.ToValidUTF8(value, nil),
+	}
+	seen := make(map[string]struct{})
+	var views []string
+	for _, raw := range rawViews {
+		var spaced strings.Builder
+		var joined strings.Builder
+		for _, char := range string(raw) {
+			if unicode.IsControl(char) || !unicode.IsPrint(char) {
+				spaced.WriteByte(' ')
+				continue
+			}
+			spaced.WriteRune(char)
+			joined.WriteRune(char)
+		}
+		for _, view := range []string{
+			cleanText(spaced.String()),
+			cleanText(joined.String()),
+		} {
+			if view == "" {
+				continue
+			}
+			if _, exists := seen[view]; exists {
+				continue
+			}
+			seen[view] = struct{}{}
+			views = append(views, view)
+		}
+	}
+	return views
+}
+
+func likelySensitiveHardLiteral(value string) bool {
+	if strings.ContainsRune(value, '@') ||
+		emailPattern.MatchString(value) ||
+		likelyCredentialValue(value) ||
+		knownSecretPattern.MatchString(value) ||
+		jwtPattern.MatchString(value) ||
+		likelyPhoneOrPostal(value) ||
+		phoneContextPattern.MatchString(value) ||
+		northAmericanPhonePattern.MatchString(value) ||
+		strings.Contains(value, "-----BEGIN PRIVATE KEY-----") ||
+		strings.Contains(value, "-----BEGIN RSA PRIVATE KEY-----") ||
+		containsNonASCIIDigit(value) ||
+		containsLongDigitSequence(value, 15) ||
+		containsDOIPaymentCard(value) ||
+		containsDOIBareContactNumber(value) {
+		return true
+	}
+	return false
+}
+
+func likelySensitiveDecodedStructure(value string) bool {
+	if emailPattern.MatchString(value) ||
+		likelyCredentialValue(value) ||
+		knownSecretPattern.MatchString(value) ||
+		jwtPattern.MatchString(value) ||
+		likelyPhoneOrPostal(value) ||
+		phoneContextPattern.MatchString(value) ||
+		northAmericanPhonePattern.MatchString(value) ||
+		isBareContactNumber(value) ||
+		containsLongDigitSequence(value, 12) ||
+		strings.Contains(value, "-----BEGIN PRIVATE KEY-----") ||
+		strings.Contains(value, "-----BEGIN RSA PRIVATE KEY-----") ||
+		likelyExplicitPersonalResearchContext(value) {
+		return true
+	}
+	return false
+}
+
+func likelyCredentialValue(value string) bool {
+	if credentialAssignmentPattern.MatchString(value) {
+		return true
+	}
+	for _, match := range credentialLoosePattern.FindAllStringSubmatch(value, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		switch strings.ToLower(match[1]) {
+		case "rotation", "rotations", "management", "security", "storage",
+			"handling", "leakage", "exposure", "detection", "scanning",
+			"method", "methods", "research", "cryptography", "encryption",
+			"authentication", "hash", "hashing", "policy", "policies",
+			"lifecycle", "revocation", "validation", "verification",
+			"generation", "spraying", "watermarking":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+type base64Candidate struct {
+	encoded string
+	start   int
+	end     int
+}
+
+func base64Candidates(value string) []base64Candidate {
+	seen := make(map[string]struct{})
+	var candidates []base64Candidate
+	appendCandidate := func(candidate base64Candidate) {
+		if len(candidate.encoded) < 4 ||
+			candidate.start < 0 ||
+			candidate.end > len(value) ||
+			candidate.start >= candidate.end {
+			return
+		}
+		key := strconv.Itoa(candidate.start) + ":" +
+			strconv.Itoa(candidate.end) + ":" +
+			candidate.encoded
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
+	for _, index := range base64TokenPattern.FindAllStringIndex(value, -1) {
+		match := value[index[0]:index[1]]
+		appendCandidate(base64Candidate{
+			encoded: match,
+			start:   index[0],
+			end:     index[1],
+		})
+		for relativeIndex, char := range match {
+			if char == '/' {
+				appendCandidate(base64Candidate{
+					encoded: match[relativeIndex+1:],
+					start:   index[0] + relativeIndex + 1,
+					end:     index[1],
+				})
+			}
+		}
+	}
+	for _, index := range splitBase64Pattern.FindAllStringIndex(value, -1) {
+		encoded := strings.Map(
+			func(char rune) rune {
+				if unicode.IsSpace(char) {
+					return -1
+				}
+				return char
+			},
+			value[index[0]:index[1]],
+		)
+		appendCandidate(base64Candidate{
+			encoded: encoded,
+			start:   index[0],
+			end:     index[1],
+		})
+	}
+	return candidates
+}
+
+func containsResearchClauseBoundary(value string) bool {
+	return strings.ContainsAny(value, "、,;；。！？!?")
+}
+
+func containsUnsupportedTopicCharacter(value string) bool {
+	runes := []rune(value)
+	for index, char := range runes {
+		switch {
+		case unicode.IsLetter(char) || unicode.IsMark(char):
+			continue
+		case char >= '0' && char <= '9':
+			continue
+		case unicode.IsSpace(char) || char == '-':
+			continue
+		case char == '.' &&
+			index > 0 &&
+			index+1 < len(runes) &&
+			runes[index-1] >= '0' &&
+			runes[index-1] <= '9' &&
+			runes[index+1] >= '0' &&
+			runes[index+1] <= '9':
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func containsResearchWithdrawal(value string) bool {
+	for _, variant := range unicodeScreenVariants(norm.NFKC.String(value)) {
+		lower := strings.ToLower(variant)
+		for _, phrase := range []string{
+			"やめて", "やめます", "やめる", "中止", "キャンセル",
+			"取り消", "取消", "検索不要", "調査不要", "照会不要",
+			"いらない", "なしにして", "しないで", "しなくて",
+			"never mind", "nevermind",
+			"scratch that", "forget it", "changed my mind", "do not",
+			"don't", "dont",
+		} {
+			if strings.Contains(lower, phrase) {
+				return true
+			}
+		}
+		for _, token := range strings.FieldsFunc(
+			lower,
+			func(char rune) bool {
+				return !unicode.IsLetter(char)
+			},
+		) {
+			switch token {
+			case "cancel", "cancelled", "canceled", "abort", "withdraw":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func startOfUTCDay(value time.Time) time.Time {

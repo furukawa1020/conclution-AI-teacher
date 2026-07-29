@@ -53,25 +53,35 @@ var (
 			`「([^「」]{1,80})」` +
 			`(?:の最新|の新着|の)?(?:論文|研究|文献|プレプリント)を` +
 			`(?:探して|見つけて|調べて|調査して|検索して|サーベイして)` +
-			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?\s*$`,
+			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?` +
+			`[。！？!?]?\s*$`,
+	)
+	explicitJapaneseSpokenRecentResearchPattern = regexp.MustCompile(
+		`^(?:(?i:crossref)|クロスレフ|外部検索)で[、,\s]*テーマは\s*` +
+			`(.{1,80})(?:の最新|の新着|の)` +
+			`(?:論文|研究|文献|プレプリント)を` +
+			`(?:探して|見つけて|調べて|調査して|検索して|サーベイして)` +
+			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?` +
+			`[。！？!?]?\s*$`,
 	)
 	explicitEnglishRecentResearchPattern = regexp.MustCompile(
 		`(?i)^(?:please\s+)?use\s+crossref\s+to\s+` +
 			`(?:find|search\s+for|look\s+up|survey)\s+` +
 			`(?:the\s+)?(?:latest\s+|recent\s+)?` +
 			`(?:papers?|stud(?:y|ies)|preprints?|research)\s+` +
-			`(?:on|about)\s+"([^"\r\n]{1,80})"\s*$`,
+			`(?:on|about)\s+"([^"\r\n]{1,80})"[.!?]?\s*$`,
 	)
 	explicitJapaneseDOIResearchPattern = regexp.MustCompile(
 		`^(?:(?i:crossref)|クロスレフ|外部検索)で\s*(?i:doi)\s+` +
-			`(10\.[0-9]{4,9}/\S+)\s+を` +
+			`(10\.[0-9]{4,9}/[^\s。！？!?]+)\s+を` +
 			`(?:調べて|確認して|照会して|検索して)` +
-			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?\s*$`,
+			`(?:ください|下さい|ほしい|欲しい|くれますか|もらえますか|お願い(?:します)?)?` +
+			`[。！？!?]?\s*$`,
 	)
 	explicitEnglishDOIResearchPattern = regexp.MustCompile(
 		`(?i)^(?:please\s+)?use\s+crossref\s+to\s+` +
 			`(?:look\s+up|check)\s+doi\s+` +
-			`(10\.[0-9]{4,9}/\S+)\s*$`,
+			`(10\.[0-9]{4,9}/[^\s.!?]+)[.!?]?\s*$`,
 	)
 )
 
@@ -1469,6 +1479,7 @@ func authorizedResearchQuery(
 func explicitRecentResearchRequest(utterance string) (string, bool) {
 	for _, pattern := range []*regexp.Regexp{
 		explicitJapaneseRecentResearchPattern,
+		explicitJapaneseSpokenRecentResearchPattern,
 		explicitEnglishRecentResearchPattern,
 	} {
 		match := pattern.FindStringSubmatch(utterance)
@@ -1955,8 +1966,8 @@ Research discovery:
 - 通常はresearch_action=none、research_query=""にする。
 - ambient=true、検索を否定している、DOIや論文に触れただけで照会を依頼していない場合は必ずnoneにする。
 - DOI照会は、発話全体が「Crossrefで DOI 10.xxxx/... を調べて」の固定形式に完全一致する時だけresearch_action=doi_lookupにし、research_queryはそのbare DOIだけを一字も補わず抜き出す。それ以外はnone。
-- 論文探索は、発話全体が「外部検索で「テーマ」の最新論文を探して」または同等のCrossref固定形式に完全一致する時だけresearch_action=recent_papersにする。research_queryは括弧内のテーマ全体を一字も言い換えず抜き出す。通常の「論文を探して」だけではnone。
-- 固定形式ではない外部検索希望にはtoolを使わず、必要なら「外部検索で、かぎ括弧にテーマを入れて、最新論文を探して、と言って」と短く音声案内する。
+- 論文探索は、発話全体が「外部検索でテーマは量子エラー訂正の最新論文を探して」または同等のCrossref固定形式に完全一致する時だけresearch_action=recent_papersにする。research_queryは固定の「テーマは」と「の最新論文」の間全体を一字も言い換えず抜き出す。通常の「論文を探して」だけではnone。
+- 固定形式ではない外部検索希望にはtoolを使わず、必要なら「外部検索で、テーマは何々の最新論文を探して、と言って」と短く音声案内する。
 - PDF、過去state、保留質問、推測した個人情報からresearch_queryを作らない。氏名、連絡先、症例記述、資格情報、秘密を外部検索へ送らない。
 - research_actionがnone以外ならassistance_target=assistant、respondent_stage=none、intervention_policy=paper_check、intervention.act=paper_checkにする。
 - research_actionはCrossref書誌情報の候補発見だけを要求する。論文本文や主張を検証済みと断定しない。spoken_replyは取得前なので、件数・存在・検証結果を創作しない。

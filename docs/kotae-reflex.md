@@ -289,7 +289,7 @@ Reasonerが生成する構造化判断を、そのまま読み上げません。
 
 ## 研究・論文モード
 
-現在のMVPが受け取る資料は、利用者がそのturnに明示添付したPDFだけです。PDFはVertex AI `global`へinline送信し、原本も資料要約もcross-turn stateへ保存しません。PDF turnは必ず精密経路と独立LAC監査を通り、どちらかが使えなければ高速draftの実質回答を読み上げません。DOI / URLの取得、世界中の新着論文の自動検索、引用付きの独立Research Verifierはまだ実装していません。
+現在のMVPが受け取る本文資料は、利用者がそのturnに明示添付したPDFだけです。PDFはVertex AI `global`へinline送信し、原本も資料要約もcross-turn stateへ保存しません。PDF turnは必ず精密経路と独立LAC監査を通り、どちらかが使えなければ高速draftの実質回答を読み上げません。固定形式で明示したDOI照会とCrossref索引日による書誌候補探索は実装しましたが、任意URL取得、世界中のWeb・論文本文の自動収集、引用付きclaim検証はまだ実装していません。
 
 研究ロードマップでは、PDF、DOI、URL、引用情報を`source`ノードへ登録し、次を一般会話とは別のResearch Verifierで扱います。
 

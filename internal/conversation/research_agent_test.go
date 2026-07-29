@@ -40,7 +40,7 @@ func (fake *fakeResearchVerifier) Verify(
 
 func TestAgentResearchRecentPapersMapsBoundedDiscoveryMetadata(t *testing.T) {
 	const (
-		utterance = "外部検索で「量子エラー訂正」の最新論文を探してください"
+		utterance = "外部検索で、テーマは量子エラー訂正の最新論文を探してください。"
 		topic     = "量子エラー訂正"
 	)
 	plan := recentPapersPlan(topic)
@@ -225,6 +225,110 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 			query:     "alice@example.com",
 		},
 		{
+			name:      "confusable email is not outbound authority",
+			utterance: japaneseRecentRequest("alice@exаmple.org"),
+			query:     "alice@exаmple.org",
+		},
+		{
+			name:      "split base64 email is not outbound authority",
+			utterance: japaneseRecentRequest("YWxpY2VA ZXhhbXBsZS5vcmc="),
+			query:     "YWxpY2VA ZXhhbXBsZS5vcmc=",
+		},
+		{
+			name:      "binary suffixed base64 email is not outbound authority",
+			utterance: japaneseRecentRequest("YWxpY2VAZXhhbXBsZS5vcmcA"),
+			query:     "YWxpY2VAZXhhbXBsZS5vcmcA",
+		},
+		{
+			name:      "name prefixed research topic is not outbound authority",
+			utterance: japaneseRecentRequest("xavier quill quantum computing"),
+			query:     "xavier quill quantum computing",
+		},
+		{
+			name:      "slash cannot hide a name in a research topic",
+			utterance: japaneseRecentRequest("xavier/quill quantum computing"),
+			query:     "xavier/quill quantum computing",
+		},
+		{
+			name:      "Japanese name plus topic is not outbound authority",
+			utterance: japaneseRecentRequest("小鳥遊光の量子計算"),
+			query:     "小鳥遊光の量子計算",
+		},
+		{
+			name:      "topic prefix cannot hide a Japanese name",
+			utterance: japaneseRecentRequest("量子計算田中太郎"),
+			query:     "量子計算田中太郎",
+		},
+		{
+			name:      "payment card number is not outbound authority",
+			utterance: japaneseRecentRequest("card 4222222222222"),
+			query:     "card 4222222222222",
+		},
+		{
+			name:      "phone number is not outbound authority",
+			utterance: japaneseRecentRequest("phone 2125551212"),
+			query:     "phone 2125551212",
+		},
+		{
+			name:      "credential without punctuation is not outbound authority",
+			utterance: japaneseRecentRequest("password hunter2"),
+			query:     "password hunter2",
+		},
+		{
+			name:      "short credential value is not outbound authority",
+			utterance: japaneseRecentRequest("api key abc"),
+			query:     "api key abc",
+		},
+		{
+			name:      "Unicode credential value is not outbound authority",
+			utterance: japaneseRecentRequest("api key 秘密値"),
+			query:     "api key 秘密値",
+		},
+		{
+			name:      "fax number is not outbound authority",
+			utterance: japaneseRecentRequest("fax 6561234567"),
+			query:     "fax 6561234567",
+		},
+		{
+			name:      "patient identifier is not outbound authority",
+			utterance: japaneseRecentRequest("patient12345678 depression"),
+			query:     "patient12345678 depression",
+		},
+		{
+			name:      "labeled patient number is not outbound authority",
+			utterance: japaneseRecentRequest("patient no 12345678"),
+			query:     "patient no 12345678",
+		},
+		{
+			name:      "base32 email is not outbound authority",
+			utterance: japaneseRecentRequest("MFWGSY3FIBSXQYLNOBWGKLTPOJTQ"),
+			query:     "MFWGSY3FIBSXQYLNOBWGKLTPOJTQ",
+		},
+		{
+			name: "binary padded base32 email is not outbound authority",
+			utterance: japaneseRecentRequest(
+				"MFWGSY3FIBSXQYLNOBWGKLTPOJTQAAAAAAAAAAAA",
+			),
+			query: "MFWGSY3FIBSXQYLNOBWGKLTPOJTQAAAAAAAAAAAA",
+		},
+		{
+			name:      "mixed script cancellation is not outbound authority",
+			utterance: japaneseRecentRequest("cаncel"),
+			query:     "cаncel",
+		},
+		{
+			name:      "Greek mixed script cancellation is not outbound authority",
+			utterance: japaneseRecentRequest("cαncel"),
+			query:     "cαncel",
+		},
+		{
+			name: "punctuation fragmented base64 is not outbound authority",
+			utterance: japaneseRecentRequest(
+				"YW:0:xp:0:Y2:0:VA:0:ZX:0:hh:0:bX:0:Bs:0:ZS:0:5v:0:cm:0:c=",
+			),
+			query: "YW:0:xp:0:Y2:0:VA:0:ZX:0:hh:0:bX:0:Bs:0:ZS:0:5v:0:cm:0:c=",
+		},
+		{
 			name:      "ambient capture has no outbound authority",
 			utterance: japaneseRecentRequest("量子エラー訂正"),
 			query:     "量子エラー訂正",
@@ -271,6 +375,11 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 			name:      "cancellation cannot be swallowed by model query",
 			utterance: `Use Crossref to find papers on "quantum computing" scratch that`,
 			query:     "quantum computing scratch that",
+		},
+		{
+			name:      "spoken Japanese cancellation stays withdrawn",
+			utterance: japaneseRecentRequest("量子、いや、やめて"),
+			query:     "量子、いや、やめて",
 		},
 		{
 			name:      "English excluded topic is not authority",
@@ -453,6 +562,16 @@ func TestAuthorizedResearchQueryRejectsAmbiguousOrTruncatedDOI(t *testing.T) {
 			utterance: "Use Crossref to check DOI 10.1234/public but forget it",
 			query:     "10.1234/public",
 		},
+		{
+			name:      "English DOI cannot absorb cancellation",
+			utterance: "Use Crossref to check DOI 10.1234/public,cancel",
+			query:     "10.1234/public,cancel",
+		},
+		{
+			name:      "Unicode separated PAN cannot be a DOI",
+			utterance: "Use Crossref to check DOI 10.1234/4111−1111−1111−1111",
+			query:     "10.1234/4111−1111−1111−1111",
+		},
 	}
 
 	for _, test := range tests {
@@ -625,7 +744,7 @@ func leftPadTwo(value int) string {
 }
 
 func japaneseRecentRequest(topic string) string {
-	return "外部検索で「" + topic + "」の最新論文を探してください"
+	return "外部検索で、テーマは" + topic + "の最新論文を探してください。"
 }
 
 func japaneseDOIRequest(doi string) string {

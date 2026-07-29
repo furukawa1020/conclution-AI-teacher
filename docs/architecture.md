@@ -64,7 +64,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
                                    Browser
 ```
 
-利用者のintentional turn全体が「外部検索で『テーマ』の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ、Cloud Runの独立tool-policy gateが許可します。自然文から検索同意を推測せず、追記、取消し、複数命令、ambient turnから外部queryは作りません。topicはかぎ括弧内全体、DOIは空白で区切ったbare DOI全体を決定論的に抽出し、モデル出力と取得結果へ完全に結びつけます。固定hostのCrossref REST APIから返ったtitle、DOI、日付は候補発見にだけ使い、本文を読んだ証拠やclaimの支持根拠にはしません。topic探索は発表日ではなくCrossrefのindex date filterを使うため、「Crossrefの索引日が指定期間内の書誌候補」と表示します。
+利用者のintentional turn全体が「外部検索で、テーマは何々の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ、Cloud Runの独立tool-policy gateが許可します。自然文から検索同意を推測せず、追記、取消し、複数命令、ambient turnから外部queryは作りません。topicは「テーマは」と「の最新論文」の間全体、DOIは空白で区切ったbare DOI全体を決定論的に抽出し、モデル出力と取得結果へ完全に結びつけます。送信前にはNFKC差とUnicode format文字をfail-closedで拒否し、可逆encodingを再検査し、topic文字を限定し、topic内の節区切り・取消語とDOIに付いたcomma・semicolon・取消語も拒否します。固定hostのCrossref REST APIから返ったtitle、DOI、日付は候補発見にだけ使い、本文を読んだ証拠やclaimの支持根拠にはしません。topic探索は発表日ではなくCrossrefのindex date filterを使うため、「Crossrefの索引日が指定期間内の書誌候補」と表示します。任意の語が氏名か未知の技術名かを完全には区別できないため、固定発話のtopicそのものがCrossrefへ送られることもUIで明示します。
 
 Cloud STTにはraw audioだけ、Vertex AIには文字起こしと任意のPDF、Cloud TTSには選択された短い応答文だけを渡します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。
 

@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/firestore v1.24.0
 	firebase.google.com/go/v4 v4.21.0
 	github.com/firebase/genkit/go v1.11.0
+	golang.org/x/text v0.38.0
 	google.golang.org/genai v1.57.0
 )
 
@@ -70,7 +71,6 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/api v0.287.1 // indirect
 	google.golang.org/appengine/v2 v2.0.6 // indirect

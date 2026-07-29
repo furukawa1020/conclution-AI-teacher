@@ -27,10 +27,10 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "テーマも質問もいらない　ぼやきから始められる",
+            Self::Ready => "相手の質問を言って　まとまらないまま自分の考えを話すだけ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
-            Self::Thinking => "迷いと前提をほどいて　返す言葉を組み立てる",
+            Self::Thinking => "あなたの意味を変えず　聞かれた答えだけを前へ出す",
             Self::Speaking => "返事のあと　そのまままた聴きはじめる",
             Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
             Self::Error(message) => message,
@@ -103,6 +103,8 @@ struct VoiceTurnResult {
     audio_mime_type: String,
     session_state: String,
     detected_domain: String,
+    assistance_target: String,
+    respondent_stage: String,
     route: String,
     needs_paper: bool,
     #[serde(default)]
@@ -606,7 +608,13 @@ fn App() -> Element {
                             span { class: "context-chip context-chip--quiet", "CONTEXT / AUTO" }
                         }
                         if !route.read().is_empty() {
-                            span { class: "route-chip", {route.read().clone()} }
+                            if route.read().starts_with("respondent-") {
+                                span { class: "route-chip route-chip--answer-support",
+                                    "YOUR ANSWER / REFRAMED"
+                                }
+                            } else {
+                                span { class: "route-chip", {route.read().clone()} }
+                            }
                         }
                     }
 
@@ -668,9 +676,9 @@ fn App() -> Element {
                         }
                         h1 { id: "voice-heading",
                             if state_snapshot == VoiceState::Ready {
-                                "話しているうちに、"
+                                "聞かれたことの答えを、"
                                 br {}
-                                "考えが整う"
+                                "あなたの言葉のまま先へ"
                             } else {
                                 {state_snapshot.label()}
                             }
@@ -686,19 +694,19 @@ fn App() -> Element {
                         },
                         aria_label: "できること",
                         div { class: "capability",
-                            span { "ぼやく" }
+                            span { "聞かれた" }
                             i { aria_hidden: "true", "→" }
-                            strong { "本当の迷いを拾う" }
+                            strong { "相手の質問を拾う" }
                         }
                         div { class: "capability",
-                            span { "説明する" }
+                            span { "まとまらない" }
                             i { aria_hidden: "true", "→" }
-                            strong { "話の組み立てを直す" }
+                            strong { "あなたの答えをそのまま受け取る" }
                         }
                         div { class: "capability",
-                            span { "論文を話す" }
+                            span { "答える" }
                             i { aria_hidden: "true", "→" }
-                            strong { "主張と根拠を確かめる" }
+                            strong { "意味を変えずAだけ前へ" }
                         }
                     }
 

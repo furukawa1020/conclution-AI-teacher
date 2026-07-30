@@ -46,7 +46,7 @@ const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
 const VOICE_ENDPOINT =
   "https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream";
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
-const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/healthz`;
+const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/api/v1/me`;
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;

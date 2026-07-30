@@ -752,6 +752,7 @@ func emptyVoiceLiveTimings() VoiceLiveTimings {
 		ConversationMS:      -1,
 		TTSFirstChunkMS:     -1,
 		FinalToFirstAudioMS: -1,
+		TTSReleaseMS:        -1,
 	}
 }
 
@@ -791,6 +792,9 @@ func (s *Server) logVoiceLiveSession(
 		"spec_hit", timings.SpecHit,
 		"spec_miss", timings.SpecMiss,
 		"spec_cancel", timings.SpecCancel,
+		"tts_prestarted", timings.TTSPrestarted,
+		"tts_buffered_bytes", timings.TTSBufferedBytes,
+		"tts_release_ms", finiteLatency(timings.TTSReleaseMS),
 		"commit_to_first_audio_ms", commitToFirstAudioMS,
 		"total_ms", finiteLatency(time.Since(started).Milliseconds()),
 		"input_frames", inputFrames,

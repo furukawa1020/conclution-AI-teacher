@@ -98,6 +98,9 @@ type VoiceLiveTimings struct {
 	SpecHit             int64
 	SpecMiss            int64
 	SpecCancel          int64
+	TTSPrestarted       int64
+	TTSBufferedBytes    int64
+	TTSReleaseMS        int64
 }
 
 type ResearchRecord struct {

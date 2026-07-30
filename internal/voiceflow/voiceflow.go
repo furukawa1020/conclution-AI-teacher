@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -22,6 +23,7 @@ const (
 	minSpeculativeStability       = 0.85
 	minSpeculativeCandidateRunes  = 8
 	minSpeculativeStableDuration  = 160 * time.Millisecond
+	maxSpeculativeTTSBufferBytes  = 24_000
 	lowConfidencePrompt           = "今の一文だけ、もう一度聞かせてください。"
 	routeClarifyNoSpeech          = "stt-clarify-no-speech"
 	routeClarifyLowConfidence     = "stt-clarify-low-confidence"
@@ -48,12 +50,65 @@ type speculativeTurnOutcome struct {
 	decision   conversation.VoiceTurnResult
 	err        error
 	durationMS int64
+	synthesis  *speculativeSynthesis
 }
 
 type liveSpeculation struct {
-	candidate string
-	cancel    context.CancelFunc
-	outcome   <-chan speculativeTurnOutcome
+	candidate     string
+	cancelContext context.CancelFunc
+	outcome       <-chan speculativeTurnOutcome
+
+	mu        sync.Mutex
+	synthesis *speculativeSynthesis
+}
+
+type speculativeAudioBufferState uint8
+
+const (
+	speculativeAudioPending speculativeAudioBufferState = iota
+	speculativeAudioReleasing
+	speculativeAudioLive
+	speculativeAudioDiscarded
+)
+
+var (
+	errSpeculativeAudioDiscarded = errors.New(
+		"voiceflow: speculative audio was discarded",
+	)
+	errSpeculativeAudioMIME = errors.New(
+		"voiceflow: speculative synthesis returned an invalid content type",
+	)
+)
+
+type speculativeAudioCommitBuffer struct {
+	mu      sync.Mutex
+	changed *sync.Cond
+
+	state         speculativeAudioBufferState
+	chunks        [][]byte
+	bufferedBytes int
+	peakBytes     int
+	discardErr    error
+	deliver       func([]byte) error
+
+	stopWatcher     chan struct{}
+	stopWatcherOnce sync.Once
+}
+
+type speculativeSynthesisResult struct {
+	mimeType string
+	err      error
+}
+
+type speculativeSynthesis struct {
+	buffer *speculativeAudioCommitBuffer
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	mu           sync.Mutex
+	result       speculativeSynthesisResult
+	startedAt    time.Time
+	firstChunkAt time.Time
 }
 
 type liveStreamingSpeech interface {
@@ -177,6 +232,20 @@ func (p *Pipeline) ProcessLive(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
+	var firstOutputMu sync.Mutex
+	firstOutputAt := time.Time{}
+	deliverAudio := func(chunk []byte) error {
+		deliveredAt := time.Now()
+		if err := onAudio(chunk); err != nil {
+			return err
+		}
+		firstOutputMu.Lock()
+		if firstOutputAt.IsZero() {
+			firstOutputAt = deliveredAt
+		}
+		firstOutputMu.Unlock()
+		return nil
+	}
 
 	transcriptionStarted := time.Now()
 	transcriptionCtx, cancelTranscription := context.WithCancel(ctx)
@@ -273,6 +342,8 @@ func (p *Pipeline) ProcessLive(
 					uid,
 					input,
 					candidate,
+					streamingSpeech,
+					deliverAudio,
 				)
 			}
 			continue
@@ -317,6 +388,8 @@ func (p *Pipeline) ProcessLive(
 					uid,
 					input,
 					candidate,
+					streamingSpeech,
+					deliverAudio,
 				)
 			}
 		}
@@ -345,6 +418,50 @@ func (p *Pipeline) ProcessLive(
 	specHit := int64(0)
 	specMiss := int64(0)
 	specCancel := int64(0)
+	firstTTSChunkMS := int64(-1)
+	ttsPrestarted := int64(0)
+	ttsBufferedBytes := int64(0)
+	ttsReleaseMS := int64(-1)
+	prestartedTTSDone := false
+	cancelSpeculation := func() {
+		if speculation == nil {
+			return
+		}
+		synthesis := speculation.cancel()
+		if synthesis == nil {
+			return
+		}
+		ttsPrestarted = 1
+		synthesis.await(ctx)
+		ttsBufferedBytes = synthesis.buffer.peakBufferedBytes()
+		firstTTSChunkMS = synthesis.firstChunkMS()
+	}
+	liveTimings := func() httpapi.VoiceLiveTimings {
+		firstOutputMu.Lock()
+		outputAt := firstOutputAt
+		firstOutputMu.Unlock()
+		finalToFirstAudioMS := int64(-1)
+		if !finalObservedAt.IsZero() && !outputAt.IsZero() {
+			finalToFirstAudioMS =
+				outputAt.Sub(finalObservedAt).Milliseconds()
+			if finalToFirstAudioMS < 0 {
+				finalToFirstAudioMS = -1
+			}
+		}
+		return httpapi.VoiceLiveTimings{
+			STTFirstInterimMS:   firstInterimMS,
+			STTFinalMS:          firstFinalMS,
+			ConversationMS:      conversationMS,
+			TTSFirstChunkMS:     firstTTSChunkMS,
+			FinalToFirstAudioMS: finalToFirstAudioMS,
+			SpecHit:             specHit,
+			SpecMiss:            specMiss,
+			SpecCancel:          specCancel,
+			TTSPrestarted:       ttsPrestarted,
+			TTSBufferedBytes:    ttsBufferedBytes,
+			TTSReleaseMS:        ttsReleaseMS,
+		}
+	}
 	var (
 		result      httpapi.VoiceTurnResult
 		spokenReply string
@@ -353,7 +470,7 @@ func (p *Pipeline) ProcessLive(
 		if intentional {
 			specMiss = 1
 			if speculation != nil {
-				speculation.cancel()
+				cancelSpeculation()
 				specCancel = 1
 			}
 		}
@@ -380,7 +497,34 @@ func (p *Pipeline) ProcessLive(
 				case <-ctx.Done():
 					outcome.err = ctx.Err()
 				}
-				if outcome.err == nil {
+				synthesisReady := outcome.err == nil &&
+					(outcome.decision.SpokenReply == "" ||
+						outcome.synthesis != nil)
+				if synthesisReady && outcome.synthesis != nil {
+					ttsPrestarted = 1
+					ttsReleaseMS, err =
+						outcome.synthesis.buffer.release(ctx)
+					synthesisResult := outcome.synthesis.await(ctx)
+					ttsBufferedBytes =
+						outcome.synthesis.buffer.peakBufferedBytes()
+					firstTTSChunkMS =
+						outcome.synthesis.firstChunkMS()
+					if err == nil {
+						err = synthesisResult.err
+					}
+					if err == nil &&
+						synthesisResult.mimeType !=
+							speechio.StreamingAudioContentType {
+						err = errSpeculativeAudioMIME
+					}
+					if err == nil {
+						prestartedTTSDone = true
+					} else {
+						outcome.synthesis.abort(err)
+						synthesisReady = false
+					}
+				}
+				if synthesisReady {
 					specHit = 1
 					conversationMS = outcome.durationMS
 					result = voiceResultFromDecision(input, outcome.decision)
@@ -395,12 +539,13 @@ func (p *Pipeline) ProcessLive(
 						"route", outcome.decision.Route,
 					)
 				} else {
-					speculation.cancel()
+					cancelSpeculation()
 					specMiss = 1
 					specCancel = 1
+					err = nil
 				}
 			} else {
-				speculation.cancel()
+				cancelSpeculation()
 				specMiss = 1
 				specCancel = 1
 			}
@@ -422,66 +567,50 @@ func (p *Pipeline) ProcessLive(
 		}
 	}
 	if err != nil || spokenReply == "" {
-		result.LiveTimings = httpapi.VoiceLiveTimings{
-			STTFirstInterimMS:   firstInterimMS,
-			STTFinalMS:          firstFinalMS,
-			ConversationMS:      conversationMS,
-			TTSFirstChunkMS:     -1,
-			FinalToFirstAudioMS: -1,
-			SpecHit:             specHit,
-			SpecMiss:            specMiss,
-			SpecCancel:          specCancel,
-		}
+		result.LiveTimings = liveTimings()
 		return result, err
 	}
 
-	synthesisStarted := time.Now()
-	firstTTSChunkMS := int64(-1)
-	finalToFirstAudioMS := int64(-1)
-	audioMIME, err := streamingSpeech.StreamSynthesize(
-		ctx,
-		spokenReply,
-		func(chunk []byte) error {
-			if firstTTSChunkMS < 0 {
-				firstAudioAt := time.Now()
-				firstTTSChunkMS = firstAudioAt.Sub(synthesisStarted).Milliseconds()
-				if !finalObservedAt.IsZero() {
-					finalToFirstAudioMS =
-						firstAudioAt.Sub(finalObservedAt).Milliseconds()
-					if finalToFirstAudioMS < 0 {
-						finalToFirstAudioMS = -1
-					}
+	synthesisDurationMS := int64(0)
+	if !prestartedTTSDone {
+		synthesisStarted := time.Now()
+		audioMIME, synthesisErr := streamingSpeech.StreamSynthesize(
+			ctx,
+			spokenReply,
+			func(chunk []byte) error {
+				if firstTTSChunkMS < 0 {
+					firstTTSChunkMS =
+						time.Since(synthesisStarted).Milliseconds()
 				}
-			}
-			return onAudio(chunk)
-		},
-	)
-	if err != nil || audioMIME != speechio.StreamingAudioContentType {
-		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
-			httpapi.VoicePipelineStageSynthesize,
+				return deliverAudio(chunk)
+			},
 		)
+		synthesisDurationMS =
+			time.Since(synthesisStarted).Milliseconds()
+		if synthesisErr != nil ||
+			audioMIME != speechio.StreamingAudioContentType {
+			result.LiveTimings = liveTimings()
+			return result, httpapi.NewVoicePipelineFailure(
+				httpapi.VoicePipelineStageSynthesize,
+			)
+		}
 	}
+	timings := liveTimings()
 	slog.InfoContext(ctx, "voice pipeline stage completed",
 		"request_id", input.RequestID,
 		"stage", "synthesize_live",
-		"duration_ms", time.Since(synthesisStarted).Milliseconds(),
+		"duration_ms", synthesisDurationMS,
 		"tts_first_chunk_ms", firstTTSChunkMS,
-		"final_to_first_audio_ms", finalToFirstAudioMS,
+		"final_to_first_audio_ms", timings.FinalToFirstAudioMS,
 		"spec_hit", specHit,
 		"spec_miss", specMiss,
 		"spec_cancel", specCancel,
+		"tts_prestarted", ttsPrestarted,
+		"tts_buffered_bytes", ttsBufferedBytes,
+		"tts_release_ms", ttsReleaseMS,
 	)
 	result.Caption = spokenReply
-	result.LiveTimings = httpapi.VoiceLiveTimings{
-		STTFirstInterimMS:   firstInterimMS,
-		STTFinalMS:          firstFinalMS,
-		ConversationMS:      conversationMS,
-		TTSFirstChunkMS:     firstTTSChunkMS,
-		FinalToFirstAudioMS: finalToFirstAudioMS,
-		SpecHit:             specHit,
-		SpecMiss:            specMiss,
-		SpecCancel:          specCancel,
-	}
+	result.LiveTimings = timings
 	return result, nil
 }
 
@@ -497,27 +626,289 @@ func (p *Pipeline) startLiveSpeculation(
 	uid string,
 	input httpapi.VoiceTurnInput,
 	candidate string,
+	streamingSpeech speechio.StreamingService,
+	deliverAudio func([]byte) error,
 ) *liveSpeculation {
 	if input.Document != nil {
 		return nil
 	}
 	speculationCtx, cancel := context.WithCancel(ctx)
 	outcome := make(chan speculativeTurnOutcome, 1)
+	speculation := &liveSpeculation{
+		candidate:     candidate,
+		cancelContext: cancel,
+		outcome:       outcome,
+	}
 	turn := conversationTurn(input, candidate, true)
 	started := time.Now()
 	go func() {
 		decision, err := p.agent.Process(speculationCtx, uid, turn)
+		durationMS := time.Since(started).Milliseconds()
+		var synthesis *speculativeSynthesis
+		if err == nil && decision.SpokenReply != "" {
+			speculation.mu.Lock()
+			if contextErr := speculationCtx.Err(); contextErr != nil {
+				err = contextErr
+			} else {
+				synthesis = startSpeculativeSynthesis(
+					speculationCtx,
+					streamingSpeech,
+					decision.SpokenReply,
+					deliverAudio,
+				)
+				speculation.synthesis = synthesis
+			}
+			speculation.mu.Unlock()
+		}
 		outcome <- speculativeTurnOutcome{
 			decision:   decision,
 			err:        err,
-			durationMS: time.Since(started).Milliseconds(),
+			durationMS: durationMS,
+			synthesis:  synthesis,
 		}
 	}()
-	return &liveSpeculation{
-		candidate: candidate,
-		cancel:    cancel,
-		outcome:   outcome,
+	return speculation
+}
+
+func (speculation *liveSpeculation) cancel() *speculativeSynthesis {
+	speculation.mu.Lock()
+	speculation.cancelContext()
+	synthesis := speculation.synthesis
+	speculation.mu.Unlock()
+	if synthesis != nil {
+		synthesis.abort(context.Canceled)
 	}
+	return synthesis
+}
+
+func startSpeculativeSynthesis(
+	ctx context.Context,
+	streamingSpeech speechio.StreamingService,
+	spokenReply string,
+	deliverAudio func([]byte) error,
+) *speculativeSynthesis {
+	synthesisCtx, cancel := context.WithCancel(ctx)
+	synthesis := &speculativeSynthesis{
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		startedAt: time.Now(),
+	}
+	synthesis.buffer = newSpeculativeAudioCommitBuffer(
+		synthesisCtx,
+		deliverAudio,
+	)
+	go func() {
+		mimeType, err := streamingSpeech.StreamSynthesize(
+			synthesisCtx,
+			spokenReply,
+			func(chunk []byte) error {
+				synthesis.markFirstChunk()
+				return synthesis.buffer.write(synthesisCtx, chunk)
+			},
+		)
+		if err == nil && mimeType != speechio.StreamingAudioContentType {
+			err = errSpeculativeAudioMIME
+		}
+		if err != nil {
+			synthesis.buffer.discard(err)
+		}
+		synthesis.mu.Lock()
+		synthesis.result = speculativeSynthesisResult{
+			mimeType: mimeType,
+			err:      err,
+		}
+		synthesis.mu.Unlock()
+		close(synthesis.done)
+	}()
+	return synthesis
+}
+
+func newSpeculativeAudioCommitBuffer(
+	ctx context.Context,
+	deliver func([]byte) error,
+) *speculativeAudioCommitBuffer {
+	buffer := &speculativeAudioCommitBuffer{
+		state:       speculativeAudioPending,
+		deliver:     deliver,
+		stopWatcher: make(chan struct{}),
+	}
+	buffer.changed = sync.NewCond(&buffer.mu)
+	go func() {
+		select {
+		case <-ctx.Done():
+			buffer.discard(ctx.Err())
+		case <-buffer.stopWatcher:
+		}
+	}()
+	return buffer
+}
+
+func (buffer *speculativeAudioCommitBuffer) write(
+	ctx context.Context,
+	chunk []byte,
+) error {
+	offset := 0
+	for offset < len(chunk) {
+		buffer.mu.Lock()
+		for buffer.state == speculativeAudioReleasing ||
+			(buffer.state == speculativeAudioPending &&
+				buffer.bufferedBytes >= maxSpeculativeTTSBufferBytes) {
+			buffer.changed.Wait()
+		}
+		switch buffer.state {
+		case speculativeAudioPending:
+			available :=
+				maxSpeculativeTTSBufferBytes - buffer.bufferedBytes
+			count := len(chunk) - offset
+			if count > available {
+				count = available
+			}
+			buffered := append([]byte(nil), chunk[offset:offset+count]...)
+			buffer.chunks = append(buffer.chunks, buffered)
+			buffer.bufferedBytes += count
+			if buffer.bufferedBytes > buffer.peakBytes {
+				buffer.peakBytes = buffer.bufferedBytes
+			}
+			buffer.mu.Unlock()
+			offset += count
+		case speculativeAudioLive:
+			deliver := buffer.deliver
+			buffer.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return deliver(chunk[offset:])
+		case speculativeAudioDiscarded:
+			err := buffer.discardErr
+			buffer.mu.Unlock()
+			if err == nil {
+				err = errSpeculativeAudioDiscarded
+			}
+			return err
+		default:
+			buffer.mu.Unlock()
+			return errSpeculativeAudioDiscarded
+		}
+	}
+	return nil
+}
+
+func (buffer *speculativeAudioCommitBuffer) release(
+	ctx context.Context,
+) (int64, error) {
+	started := time.Now()
+	buffer.mu.Lock()
+	if buffer.state == speculativeAudioDiscarded {
+		err := buffer.discardErr
+		buffer.mu.Unlock()
+		if err == nil {
+			err = errSpeculativeAudioDiscarded
+		}
+		return -1, err
+	}
+	if buffer.state != speculativeAudioPending {
+		buffer.mu.Unlock()
+		return -1, errSpeculativeAudioDiscarded
+	}
+	buffer.state = speculativeAudioReleasing
+	for index, chunk := range buffer.chunks {
+		if err := ctx.Err(); err != nil {
+			buffer.clearFromLocked(index, err)
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			return -1, err
+		}
+		if err := buffer.deliver(chunk); err != nil {
+			buffer.clearFromLocked(index, err)
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			return -1, err
+		}
+		clear(chunk)
+	}
+	buffer.chunks = nil
+	buffer.bufferedBytes = 0
+	buffer.state = speculativeAudioLive
+	buffer.changed.Broadcast()
+	buffer.mu.Unlock()
+	buffer.stopWatching()
+	return time.Since(started).Milliseconds(), nil
+}
+
+func (buffer *speculativeAudioCommitBuffer) discard(reason error) {
+	if reason == nil {
+		reason = errSpeculativeAudioDiscarded
+	}
+	buffer.mu.Lock()
+	if buffer.state != speculativeAudioDiscarded {
+		buffer.clearFromLocked(0, reason)
+	}
+	buffer.mu.Unlock()
+	buffer.stopWatching()
+}
+
+func (buffer *speculativeAudioCommitBuffer) clearFromLocked(
+	startIndex int,
+	reason error,
+) {
+	for index, chunk := range buffer.chunks {
+		if index >= startIndex {
+			clear(chunk)
+		}
+	}
+	buffer.chunks = nil
+	buffer.bufferedBytes = 0
+	buffer.state = speculativeAudioDiscarded
+	buffer.discardErr = reason
+	buffer.changed.Broadcast()
+}
+
+func (buffer *speculativeAudioCommitBuffer) stopWatching() {
+	buffer.stopWatcherOnce.Do(func() {
+		close(buffer.stopWatcher)
+	})
+}
+
+func (buffer *speculativeAudioCommitBuffer) peakBufferedBytes() int64 {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return int64(buffer.peakBytes)
+}
+
+func (synthesis *speculativeSynthesis) markFirstChunk() {
+	synthesis.mu.Lock()
+	if synthesis.firstChunkAt.IsZero() {
+		synthesis.firstChunkAt = time.Now()
+	}
+	synthesis.mu.Unlock()
+}
+
+func (synthesis *speculativeSynthesis) firstChunkMS() int64 {
+	synthesis.mu.Lock()
+	defer synthesis.mu.Unlock()
+	if synthesis.firstChunkAt.IsZero() {
+		return -1
+	}
+	return synthesis.firstChunkAt.Sub(synthesis.startedAt).Milliseconds()
+}
+
+func (synthesis *speculativeSynthesis) await(
+	ctx context.Context,
+) speculativeSynthesisResult {
+	select {
+	case <-synthesis.done:
+	case <-ctx.Done():
+		synthesis.abort(ctx.Err())
+		return speculativeSynthesisResult{err: ctx.Err()}
+	}
+	synthesis.mu.Lock()
+	defer synthesis.mu.Unlock()
+	return synthesis.result
+}
+
+func (synthesis *speculativeSynthesis) abort(reason error) {
+	synthesis.cancel()
+	synthesis.buffer.discard(reason)
 }
 
 func (tracker *speculativeCandidateTracker) observe(

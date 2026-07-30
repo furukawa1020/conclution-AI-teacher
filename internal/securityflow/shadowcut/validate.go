@@ -1,5 +1,7 @@
 package shadowcut
 
+import "crypto/sha256"
+
 type preparedTrace struct {
 	trace    Trace
 	index    map[NodeID]int
@@ -23,11 +25,20 @@ func prepareCorpus(traces []Trace) (preparedCorpus, error) {
 	prepared := preparedCorpus{
 		traces: make([]preparedTrace, 0, len(traces)),
 	}
+	seenTraces := make(map[[32]byte]struct{}, len(traces))
+	var estimatedSearchWork uint64
 	for _, trace := range traces {
 		item, err := prepareTrace(cloneTrace(trace))
 		if err != nil {
 			return preparedCorpus{}, err
 		}
+		traceFingerprint := sha256.Sum256(canonicalTraceBytes(item.trace))
+		if _, duplicate := seenTraces[traceFingerprint]; duplicate {
+			return preparedCorpus{}, ErrInvalidCorpus
+		}
+		seenTraces[traceFingerprint] = struct{}{}
+		estimatedSearchWork += uint64(len(item.trace.Sources)) *
+			uint64(len(item.trace.Nodes)+len(item.trace.Edges))
 		prepared.traces = append(prepared.traces, item)
 		switch trace.Class {
 		case TraceAttack:
@@ -37,6 +48,10 @@ func prepareCorpus(traces []Trace) (preparedCorpus, error) {
 		default:
 			return preparedCorpus{}, ErrInvalidCorpus
 		}
+	}
+	candidateCount := uint64(knownControlMask) + 1
+	if estimatedSearchWork > maxSearchWork/candidateCount {
+		return preparedCorpus{}, ErrInvalidCorpus
 	}
 	if prepared.attacks == 0 || prepared.benignWeight == 0 {
 		return preparedCorpus{}, ErrInvalidCorpus
@@ -68,8 +83,7 @@ func prepareTrace(trace Trace) (preparedTrace, error) {
 		len(trace.Edges) > MaxEdgesPerTrace ||
 		len(trace.Sources) == 0 ||
 		len(trace.Sources) > MaxSourcesPerTrace ||
-		len(trace.Sinks) == 0 ||
-		len(trace.Sinks) > MaxSinksPerTrace {
+		len(trace.Sinks) != MaxSinksPerTrace {
 		return preparedTrace{}, ErrInvalidTrace
 	}
 
@@ -102,7 +116,7 @@ func prepareTrace(trace Trace) (preparedTrace, error) {
 		if !fromExists || !toExists ||
 			edge.From == edge.To ||
 			edge.Kind <= EdgeUnknown || edge.Kind >= edgeKindLimit ||
-			!validControlMask(edge.Controls) ||
+			!validEdgeControls(edge) ||
 			duplicate ||
 			!validEdgeKinds(
 				trace.Nodes[fromIndex].Kind,
@@ -147,23 +161,29 @@ func validNode(node Node) bool {
 		return node.Integrity == IntegrityAuthenticated &&
 			node.Authority != 0 &&
 			node.Requires == 0 &&
-			node.Binding == BindingExactScopeActionArgs
+			node.Binding == BindingExactScopeActionArgs &&
+			node.BindingRef != 0
 	case NodeAmbient, NodePDF, NodeWeb, NodeModel, NodeTool, NodeMemory:
 		return node.Integrity == IntegrityUntrusted &&
 			node.Authority == 0 &&
 			node.Requires == 0 &&
-			node.Binding == BindingNone
+			node.Binding == BindingNone &&
+			node.BindingRef == 0
 	case NodeGrant:
 		return node.Integrity == IntegritySystem &&
 			node.Authority != 0 &&
 			node.Requires == 0 &&
-			node.Binding == BindingExactScopeActionArgs
+			node.Binding == BindingExactScopeActionArgs &&
+			node.BindingRef != 0
 	case NodeSink:
 		if node.Requires == 0 {
-			return node.Authority == 0 && node.Binding == BindingNone
+			return node.Authority == 0 &&
+				node.Binding == BindingNone &&
+				node.BindingRef == 0
 		}
 		return node.Authority == node.Requires &&
-			node.Binding == BindingExactScopeActionArgs
+			node.Binding == BindingExactScopeActionArgs &&
+			node.BindingRef != 0
 	default:
 		return false
 	}
@@ -171,17 +191,61 @@ func validNode(node Node) bool {
 
 func validEdgeKinds(from NodeKind, to NodeKind, kind EdgeKind) bool {
 	switch kind {
+	case EdgeQuote:
+		return (from == NodeAmbient ||
+			from == NodePDF ||
+			from == NodeWeb) &&
+			(to == NodeMemory || to == NodeModel)
+	case EdgeDerive:
+		return from == NodeTool && to == NodeModel
+	case EdgeRecall:
+		return from == NodeMemory && to == NodeModel
+	case EdgePropose:
+		return from == NodeModel && to == NodeModel
 	case EdgeIssueGrant:
 		return from == NodeAuthenticatedIntent && to == NodeGrant
 	case EdgeConsume:
 		return from == NodeGrant && to == NodeSink
-	case EdgeRecall:
-		return from == NodeMemory && to != NodeGrant
-	case EdgeExecute, EdgeRespond:
-		return to == NodeSink && from != NodeGrant
+	case EdgeToolCall:
+		return from == NodeModel && to == NodeTool
+	case EdgeExecute:
+		return from == NodeTool && to == NodeSink
+	case EdgeRespond:
+		return from == NodeModel && to == NodeSink
 	default:
-		return from != NodeGrant && to != NodeGrant
+		return false
 	}
+}
+
+func validEdgeControls(edge Edge) bool {
+	if !validControlMask(edge.Controls) {
+		return false
+	}
+	var expected Control
+	switch edge.Kind {
+	case EdgeQuote:
+		expected = ControlEvidenceIngress
+	case EdgeRecall:
+		expected = ControlMemoryBoundary
+	case EdgePropose:
+		expected = ControlPlannerBoundary
+	case EdgeIssueGrant:
+		expected = ControlGrantBoundary
+	case EdgeConsume:
+		expected = ControlExecutionBoundary
+	case EdgeToolCall:
+		expected = ControlToolBoundary
+	case EdgeExecute:
+		expected = ControlExternalEgress
+	case EdgeRespond:
+		expected = ControlSpeechBoundary
+	case EdgeDerive:
+		return edge.Controls == 0
+	default:
+		return false
+	}
+	expectedMask := ControlMask(1 << (expected - 1))
+	return edge.Controls == 0 || edge.Controls == expectedMask
 }
 
 func validEndpoints(trace *preparedTrace) bool {
@@ -209,6 +273,9 @@ func validEndpoints(trace *preparedTrace) bool {
 			len(trace.outgoing[index]) != 0 {
 			return false
 		}
+		if _, isSource := sourceSeen[sink]; isSource {
+			return false
+		}
 		if _, duplicate := sinkSeen[sink]; duplicate {
 			return false
 		}
@@ -217,13 +284,19 @@ func validEndpoints(trace *preparedTrace) bool {
 	}
 
 	for index, incoming := range trace.incoming {
+		node := trace.trace.Nodes[index]
+		_, declaredSink := sinkSeen[node.ID]
+		if (node.Kind == NodeSink) != declaredSink {
+			return false
+		}
 		if len(incoming) != 0 {
 			continue
 		}
-		node := trace.trace.Nodes[index]
-		if _, declared := sourceSeen[node.ID]; !declared &&
-			node.Kind != NodeAuthenticatedIntent {
-			return false
+		if _, declared := sourceSeen[node.ID]; !declared {
+			if trace.trace.Class != TraceAttack ||
+				node.Kind != NodeAuthenticatedIntent {
+				return false
+			}
 		}
 	}
 	return true
@@ -330,15 +403,19 @@ func validAuthorityFlow(trace *preparedTrace) bool {
 		}
 
 		if node.Kind == NodeGrant {
-			if len(incoming) != 1 {
+			outgoing := trace.outgoing[index]
+			if len(incoming) != 1 || len(outgoing) != 1 {
 				return false
 			}
 			edge := trace.trace.Edges[incoming[0]]
 			from := trace.trace.Nodes[trace.index[edge.From]]
+			consume := trace.trace.Edges[outgoing[0]]
 			if edge.Kind != EdgeIssueGrant ||
 				from.Kind != NodeAuthenticatedIntent ||
 				from.Binding != BindingExactScopeActionArgs ||
-				node.Authority&^from.Authority != 0 {
+				node.Authority != from.Authority ||
+				node.BindingRef != from.BindingRef ||
+				consume.Kind != EdgeConsume {
 				return false
 			}
 			continue
@@ -368,22 +445,29 @@ func validAuthorityFlow(trace *preparedTrace) bool {
 		}
 
 		if node.Kind == NodeSink && node.Requires != 0 {
-			authorized := false
+			consumeCount := 0
 			for _, edgeIndex := range incoming {
 				edge := trace.trace.Edges[edgeIndex]
 				if edge.Kind != EdgeConsume {
 					continue
 				}
+				consumeCount++
 				grant := trace.trace.Nodes[trace.index[edge.From]]
-				if grant.Kind == NodeGrant &&
-					grant.Binding == BindingExactScopeActionArgs &&
-					node.Requires&^grant.Authority == 0 {
-					authorized = true
-					break
+				if grant.Kind != NodeGrant ||
+					grant.Binding != BindingExactScopeActionArgs ||
+					grant.Authority != node.Requires ||
+					grant.BindingRef != node.BindingRef {
+					return false
 				}
 			}
-			if !authorized {
+			if consumeCount != 1 {
 				return false
+			}
+		} else if node.Kind == NodeSink {
+			for _, edgeIndex := range incoming {
+				if trace.trace.Edges[edgeIndex].Kind == EdgeConsume {
+					return false
+				}
 			}
 		}
 	}

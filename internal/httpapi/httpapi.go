@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -197,28 +198,8 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.voice.RequestTimeout)
 	defer cancel()
 	started := time.Now()
-	quotaChecks := []struct {
-		limiter guard.Limiter
-		key     string
-		scope   string
-	}{
-		{limiter: s.voice.RateLimiter, key: principal.UID, scope: "uid"},
-		{limiter: s.voice.AppRateLimiter, key: "app:" + principal.AppID, scope: "app"},
-	}
-	for _, check := range quotaChecks {
-		if err := check.limiter.Consume(ctx, check.key, started.UTC()); err != nil {
-			if errors.Is(err, guard.ErrRateLimitExceeded) {
-				writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The voice conversation limit has been reached.")
-				return
-			}
-			s.logger.ErrorContext(ctx, "voice rate-limit guard failed",
-				"request_id", requestIDFromContext(ctx),
-				"quota_scope", check.scope,
-				"error_class", "voice_rate_limit_store_failure",
-			)
-			writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
-			return
-		}
+	if !s.consumeVoiceQuota(w, ctx, principal, started.UTC()) {
+		return
 	}
 
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))

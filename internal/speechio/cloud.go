@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -15,14 +16,27 @@ import (
 )
 
 const (
-	maxTranscriptRunes  = 12_000
-	maxSpokenReplyRunes = 1_200
+	maxTranscriptRunes         = 12_000
+	maxSpokenReplyRunes        = 1_200
+	maxStreamingAudioChunkSize = 1 << 20
+	maxStreamingAudioTotalSize = 16 << 20
+
+	// StreamingAudioContentType describes the raw audio bytes returned by
+	// StreamSynthesize. The stream has no container or file header.
+	StreamingAudioContentType = "audio/L16"
+	StreamingSampleRateHertz  = 24_000
+	StreamingChannelCount     = 1
+	StreamingBitsPerSample    = 16
 )
 
 var (
-	ErrNoSpeech       = errors.New("no speech was recognized")
-	ErrTranscriptLong = errors.New("recognized speech is too long")
-	ErrReplyLong      = errors.New("spoken reply is too long")
+	ErrNoSpeech               = errors.New("no speech was recognized")
+	ErrTranscriptLong         = errors.New("recognized speech is too long")
+	ErrReplyLong              = errors.New("spoken reply is too long")
+	ErrNoStreamingAudio       = errors.New("streaming speech synthesis returned no audio")
+	ErrEmptyStreamingChunk    = errors.New("streaming speech synthesis returned an empty audio chunk")
+	ErrStreamingChunkTooLarge = errors.New("streaming speech synthesis chunk is too large")
+	ErrStreamingAudioTooLarge = errors.New("streaming speech synthesis audio is too large")
 )
 
 // Service is the deliberately narrow audio boundary for KOTAE. Raw audio is
@@ -30,6 +44,28 @@ var (
 type Service interface {
 	Transcribe(ctx context.Context, audio []byte) (string, float32, error)
 	Synthesize(ctx context.Context, text string) ([]byte, string, error)
+}
+
+// StreamChunkHandler consumes one raw, signed 16-bit little-endian PCM chunk.
+// The byte slice is valid only for the duration of the call. Returning an error
+// aborts synthesis.
+type StreamChunkHandler func(audio []byte) error
+
+// StreamingService adds bounded streaming synthesis without widening the
+// existing Service interface, so existing implementations remain compatible.
+type StreamingService interface {
+	Service
+	StreamSynthesize(
+		ctx context.Context,
+		text string,
+		onChunk StreamChunkHandler,
+	) (string, error)
+}
+
+type streamingSynthesizeClient interface {
+	Send(*texttospeechpb.StreamingSynthesizeRequest) error
+	Recv() (*texttospeechpb.StreamingSynthesizeResponse, error)
+	CloseSend() error
 }
 
 type CloudService struct {
@@ -42,6 +78,7 @@ type CloudService struct {
 		context.Context,
 		*speechpb.RecognizeRequest,
 	) (*speechpb.RecognizeResponse, error)
+	streamSynthesizeCall func(context.Context) (streamingSynthesizeClient, error)
 }
 
 func NewCloudService(
@@ -87,6 +124,11 @@ func NewCloudService(
 		request *speechpb.RecognizeRequest,
 	) (*speechpb.RecognizeResponse, error) {
 		return speechClient.Recognize(callContext, request)
+	}
+	service.streamSynthesizeCall = func(
+		callContext context.Context,
+	) (streamingSynthesizeClient, error) {
+		return ttsClient.StreamingSynthesize(callContext)
 	}
 	return service, nil
 }
@@ -212,4 +254,143 @@ func (s *CloudService) Synthesize(
 		return nil, "", errors.New("regional speech synthesis returned no audio")
 	}
 	return response.AudioContent, "audio/mpeg", nil
+}
+
+// StreamSynthesize synthesizes an already-approved plain-text reply with the
+// configured voice and delivers raw PCM audio as the provider produces it.
+//
+// Chunks are headerless signed 16-bit little-endian, 24 kHz, mono PCM. A
+// non-nil error invalidates the stream, including audio delivered before a
+// late provider or callback failure.
+func (s *CloudService) StreamSynthesize(
+	ctx context.Context,
+	text string,
+	onChunk StreamChunkHandler,
+) (string, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", errors.New("spoken reply is empty")
+	}
+	if utf8.RuneCountInString(text) > maxSpokenReplyRunes {
+		return "", ErrReplyLong
+	}
+	if onChunk == nil {
+		return "", errors.New("streaming speech synthesis requires a chunk handler")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("streaming speech synthesis canceled: %w", err)
+	}
+	if s.streamSynthesizeCall == nil {
+		return "", errors.New("streaming speech synthesis is unavailable")
+	}
+
+	streamContext, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	stream, err := s.streamSynthesizeCall(streamContext)
+	if err != nil {
+		return "", fmt.Errorf("start regional streaming speech synthesis: %w", err)
+	}
+	if stream == nil {
+		return "", errors.New("regional streaming speech synthesis returned no stream")
+	}
+
+	configRequest, inputRequest := streamingSynthesizeRequests(text, s.voiceName)
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("send regional streaming speech configuration: %w", err)
+	}
+	if err := stream.Send(configRequest); err != nil {
+		return "", fmt.Errorf("send regional streaming speech configuration: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("send regional streaming speech input: %w", err)
+	}
+	if err := stream.Send(inputRequest); err != nil {
+		return "", fmt.Errorf("send regional streaming speech input: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("close regional streaming speech input: %w", err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		return "", fmt.Errorf("close regional streaming speech input: %w", err)
+	}
+	if err := receiveStreamingAudio(ctx, stream, onChunk); err != nil {
+		return "", err
+	}
+	return StreamingAudioContentType, nil
+}
+
+func streamingSynthesizeRequests(
+	text string,
+	voiceName string,
+) (*texttospeechpb.StreamingSynthesizeRequest, *texttospeechpb.StreamingSynthesizeRequest) {
+	configRequest := &texttospeechpb.StreamingSynthesizeRequest{
+		StreamingRequest: &texttospeechpb.StreamingSynthesizeRequest_StreamingConfig{
+			StreamingConfig: &texttospeechpb.StreamingSynthesizeConfig{
+				Voice: &texttospeechpb.VoiceSelectionParams{
+					LanguageCode: "ja-JP",
+					Name:         voiceName,
+				},
+				StreamingAudioConfig: &texttospeechpb.StreamingAudioConfig{
+					AudioEncoding:   texttospeechpb.AudioEncoding_PCM,
+					SampleRateHertz: StreamingSampleRateHertz,
+				},
+			},
+		},
+	}
+	inputRequest := &texttospeechpb.StreamingSynthesizeRequest{
+		StreamingRequest: &texttospeechpb.StreamingSynthesizeRequest_Input{
+			Input: &texttospeechpb.StreamingSynthesisInput{
+				InputSource: &texttospeechpb.StreamingSynthesisInput_Text{
+					Text: text,
+				},
+			},
+		},
+	}
+	return configRequest, inputRequest
+}
+
+func receiveStreamingAudio(
+	ctx context.Context,
+	stream streamingSynthesizeClient,
+	onChunk StreamChunkHandler,
+) error {
+	totalBytes := 0
+	chunkCount := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("receive regional streaming speech audio: %w", err)
+		}
+
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			if chunkCount == 0 {
+				return ErrNoStreamingAudio
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("receive regional streaming speech audio: %w", err)
+		}
+		if response == nil || len(response.AudioContent) == 0 {
+			return ErrEmptyStreamingChunk
+		}
+
+		chunkSize := len(response.AudioContent)
+		if chunkSize > maxStreamingAudioChunkSize {
+			return ErrStreamingChunkTooLarge
+		}
+		if chunkSize > maxStreamingAudioTotalSize-totalBytes {
+			return ErrStreamingAudioTooLarge
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("deliver regional streaming speech audio: %w", err)
+		}
+		if err := onChunk(response.AudioContent); err != nil {
+			return fmt.Errorf("deliver regional streaming speech audio: %w", err)
+		}
+
+		totalBytes += chunkSize
+		chunkCount++
+	}
 }

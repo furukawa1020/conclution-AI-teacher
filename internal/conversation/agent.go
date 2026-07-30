@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"iter"
 	"log/slog"
 	"math"
 	"net/url"
@@ -136,6 +137,20 @@ type ContentGenerator interface {
 	) (*genai.GenerateContentResponse, error)
 }
 
+// StreamingContentGenerator is an optional capability implemented by the
+// production Vertex client. Tests and alternate generators can keep using the
+// narrower ContentGenerator contract. Streaming does not change the selected
+// model; it lets KOTAE overlap the independent answer audit with the tail of
+// the same structured planner response.
+type StreamingContentGenerator interface {
+	GenerateContentStream(
+		ctx context.Context,
+		model string,
+		contents []*genai.Content,
+		config *genai.GenerateContentConfig,
+	) iter.Seq2[*genai.GenerateContentResponse, error]
+}
+
 type vertexAgent struct {
 	generator      ContentGenerator
 	codec          *StateCodec
@@ -218,6 +233,17 @@ type criticPolicy struct {
 	thinkingLevel         genai.ThinkingLevel
 	recoveryThinkingLevel genai.ThinkingLevel
 	sequenceTimeout       time.Duration
+}
+
+type speculativeAuditResult struct {
+	assessment answercontract.Assessment
+	err        error
+}
+
+type speculativeAudit struct {
+	candidate modelPlan
+	cancel    context.CancelFunc
+	result    <-chan speculativeAuditResult
 }
 
 func NewVertexAgent(
@@ -385,21 +411,81 @@ func (agent *vertexAgent) Process(
 	}
 
 	plannerStarted := time.Now()
+	var earlyAudit *speculativeAudit
+	defer func() {
+		if earlyAudit != nil {
+			earlyAudit.cancel()
+		}
+	}()
+	startEarlyAudit := func(candidate modelPlan) {
+		if earlyAudit != nil {
+			return
+		}
+		earlyAudit = agent.startSpeculativeAudit(
+			ctx,
+			normalized,
+			state,
+			candidate,
+		)
+	}
 	fastCtx, cancelFast := context.WithTimeout(
 		ctx,
 		fastInferenceSequenceTimeout,
 	)
-	fastPlan, err := agent.inferWithRetry(
+	fastPlan, err := agent.infer(
 		fastCtx,
 		agent.fastModel,
-		"fast",
 		genai.ThinkingLevelLow,
 		normalized,
 		state,
 		nil,
+		startEarlyAudit,
 	)
+	if err != nil &&
+		fastCtx.Err() == nil &&
+		retryableInferenceFailure(err) {
+		primaryErr := err
+		if earlyAudit != nil {
+			earlyAudit.cancel()
+			earlyAudit = nil
+		}
+		slog.WarnContext(
+			ctx,
+			"structured inference retrying",
+			"failure_class",
+			inferenceFailureClass(err),
+			"failure_stage",
+			inferenceFailureStage(err),
+			"model_role",
+			"fast",
+		)
+		fastPlan, err = agent.infer(
+			fastCtx,
+			agent.fastModel,
+			genai.ThinkingLevelLow,
+			normalized,
+			state,
+			nil,
+			startEarlyAudit,
+		)
+		if err != nil {
+			err = errors.Join(primaryErr, err)
+		}
+	}
 	fastContextErr := fastCtx.Err()
 	cancelFast()
+	if err == nil {
+		slog.InfoContext(
+			ctx,
+			"conversation stage completed",
+			"stage",
+			"fast_planner",
+			"duration_ms",
+			time.Since(plannerStarted).Milliseconds(),
+			"critic_overlapped",
+			earlyAudit != nil,
+		)
+	}
 	plannerRecoveredWithPrecision := false
 	if err != nil {
 		if ctx.Err() != nil {
@@ -463,6 +549,7 @@ func (agent *vertexAgent) Process(
 			genai.ThinkingLevelHigh,
 			normalized,
 			state,
+			nil,
 			nil,
 		)
 		recoveryContextErr := recoveryCtx.Err()
@@ -682,13 +769,41 @@ func (agent *vertexAgent) Process(
 			// and withholding the draft's self-reported contract. Keep the critic
 			// on the bounded-latency model so ordinary answers do not depend on a
 			// preview precision model completing within the voice deadline.
-			assessment, criticErr := agent.auditAnswerWithRetry(
-				ctx,
-				agent.fastModel,
-				criticPolicy,
+			criticStarted := time.Now()
+			criticOverlapped := canConsumeSpeculativeAudit(
+				earlyAudit,
 				normalized,
-				state,
 				finalPlan,
+				route,
+				criticPolicy,
+			)
+			var assessment answercontract.Assessment
+			var criticErr error
+			if criticOverlapped {
+				assessment, criticErr = awaitSpeculativeAudit(ctx, earlyAudit)
+			} else {
+				if earlyAudit != nil {
+					earlyAudit.cancel()
+					earlyAudit = nil
+				}
+				assessment, criticErr = agent.auditAnswerWithRetry(
+					ctx,
+					agent.fastModel,
+					criticPolicy,
+					normalized,
+					state,
+					finalPlan,
+				)
+			}
+			slog.InfoContext(
+				ctx,
+				"conversation stage completed",
+				"stage",
+				"answer_critic",
+				"duration_ms",
+				time.Since(criticStarted).Milliseconds(),
+				"overlapped",
+				criticOverlapped,
 			)
 			if criticErr != nil {
 				if ctx.Err() != nil {
@@ -1501,6 +1616,87 @@ func boundedRunes(value string, limit int) string {
 	return string(runes[:limit])
 }
 
+func (agent *vertexAgent) startSpeculativeAudit(
+	ctx context.Context,
+	turn VoiceTurn,
+	state conversationState,
+	candidate modelPlan,
+) *speculativeAudit {
+	// Only the ordinary assistant path can consume this result. PDF, ambient
+	// audio, and respondent reconstruction require the full high-risk policy.
+	// Starting no audit is preferable to speculating across those boundaries.
+	if ctx == nil ||
+		turn.Ambient ||
+		turn.PDF != nil ||
+		candidate.AssistanceTarget != "assistant" ||
+		candidate.RespondentStage != "none" {
+		return nil
+	}
+	auditCtx, cancel := context.WithCancel(ctx)
+	result := make(chan speculativeAuditResult, 1)
+	go func() {
+		assessment, err := agent.auditAnswerWithRetry(
+			auditCtx,
+			agent.fastModel,
+			criticPolicy{
+				thinkingLevel:         genai.ThinkingLevelLow,
+				recoveryThinkingLevel: genai.ThinkingLevelMedium,
+				sequenceTimeout:       ordinaryCriticSequenceTimeout,
+			},
+			turn,
+			state,
+			candidate,
+		)
+		result <- speculativeAuditResult{
+			assessment: assessment,
+			err:        err,
+		}
+	}()
+	return &speculativeAudit{
+		candidate: candidate,
+		cancel:    cancel,
+		result:    result,
+	}
+}
+
+func canConsumeSpeculativeAudit(
+	audit *speculativeAudit,
+	turn VoiceTurn,
+	plan modelPlan,
+	route string,
+	policy criticPolicy,
+) bool {
+	return audit != nil &&
+		!turn.Ambient &&
+		turn.PDF == nil &&
+		route == "fast" &&
+		policy.sequenceTimeout == ordinaryCriticSequenceTimeout &&
+		plan.ResearchAction == "none" &&
+		plan.AssistanceTarget == "assistant" &&
+		plan.RespondentStage == "none" &&
+		audit.candidate.AssistanceTarget == plan.AssistanceTarget &&
+		audit.candidate.RespondentStage == plan.RespondentStage &&
+		audit.candidate.AnswerAttempt == plan.AnswerAttempt &&
+		audit.candidate.SpokenReply == plan.SpokenReply
+}
+
+func awaitSpeculativeAudit(
+	ctx context.Context,
+	audit *speculativeAudit,
+) (answercontract.Assessment, error) {
+	if audit == nil {
+		return answercontract.Assessment{}, ErrModelUnavailable
+	}
+	select {
+	case result := <-audit.result:
+		audit.cancel()
+		return result.assessment, result.err
+	case <-ctx.Done():
+		audit.cancel()
+		return answercontract.Assessment{}, ctx.Err()
+	}
+}
+
 func (agent *vertexAgent) auditAnswerWithRetry(
 	ctx context.Context,
 	model string,
@@ -1622,6 +1818,7 @@ func (agent *vertexAgent) infer(
 	turn VoiceTurn,
 	state conversationState,
 	preliminary *modelPlan,
+	onCandidate func(modelPlan),
 ) (modelPlan, error) {
 	respondentAllowed := respondentModeAllowed(
 		turn.Utterance,
@@ -1656,33 +1853,56 @@ func (agent *vertexAgent) infer(
 	if turn.PDF != nil {
 		parts = append(parts, genai.NewPartFromBytes(turn.PDF.Data, turn.PDF.MIMEType))
 	}
-	response, err := agent.generator.GenerateContent(
-		ctx,
-		model,
-		[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)},
-		&genai.GenerateContentConfig{
-			SystemInstruction:  genai.NewContentFromText(systemInstruction, genai.RoleUser),
-			CandidateCount:     1,
-			MaxOutputTokens:    3_072,
-			ResponseMIMEType:   "application/json",
-			ResponseJsonSchema: modelResponseSchema(respondentAllowed),
-			ThinkingConfig: &genai.ThinkingConfig{
-				ThinkingLevel: thinkingLevel,
-			},
+	contents := []*genai.Content{
+		genai.NewContentFromParts(parts, genai.RoleUser),
+	}
+	config := &genai.GenerateContentConfig{
+		SystemInstruction:  genai.NewContentFromText(systemInstruction, genai.RoleUser),
+		CandidateCount:     1,
+		MaxOutputTokens:    3_072,
+		ResponseMIMEType:   "application/json",
+		ResponseJsonSchema: modelResponseSchema(respondentAllowed),
+		ThinkingConfig: &genai.ThinkingConfig{
+			ThinkingLevel: thinkingLevel,
 		},
-	)
-	if err != nil {
-		return modelPlan{}, ErrModelUnavailable
 	}
-	if finishErr := inferenceFinishFailure(response); finishErr != nil {
-		return modelPlan{}, finishErr
-	}
-	raw, err := responseText(response)
-	if err != nil {
-		return modelPlan{}, errors.Join(
-			ErrModelOutputInvalid,
-			errInferenceResponseShape,
+	var raw []byte
+	if streamer, ok := agent.generator.(StreamingContentGenerator); ok &&
+		onCandidate != nil {
+		raw, err = streamedInferenceText(
+			ctx,
+			streamer,
+			model,
+			contents,
+			config,
+			onCandidate,
 		)
+	} else {
+		var response *genai.GenerateContentResponse
+		response, err = agent.generator.GenerateContent(
+			ctx,
+			model,
+			contents,
+			config,
+		)
+		if err == nil {
+			if finishErr := inferenceFinishFailure(response); finishErr != nil {
+				return modelPlan{}, finishErr
+			}
+			raw, err = responseText(response)
+			if err != nil {
+				err = errors.Join(
+					ErrModelOutputInvalid,
+					errInferenceResponseShape,
+				)
+			}
+		}
+	}
+	if err != nil {
+		if errors.Is(err, ErrModelOutputInvalid) {
+			return modelPlan{}, err
+		}
+		return modelPlan{}, ErrModelUnavailable
 	}
 	defer wipe(raw)
 
@@ -1720,6 +1940,171 @@ func (agent *vertexAgent) infer(
 	return plan, nil
 }
 
+func streamedInferenceText(
+	ctx context.Context,
+	streamer StreamingContentGenerator,
+	model string,
+	contents []*genai.Content,
+	config *genai.GenerateContentConfig,
+	onCandidate func(modelPlan),
+) ([]byte, error) {
+	var raw []byte
+	candidatePublished := false
+	for response, streamErr := range streamer.GenerateContentStream(
+		ctx,
+		model,
+		contents,
+		config,
+	) {
+		if streamErr != nil {
+			return nil, streamErr
+		}
+		if finishErr := inferenceFinishFailure(response); finishErr != nil {
+			return nil, finishErr
+		}
+		chunk, err := streamedResponseChunkText(response)
+		if err != nil {
+			return nil, errors.Join(
+				ErrModelOutputInvalid,
+				errInferenceResponseShape,
+			)
+		}
+		if len(raw)+len(chunk) > maxModelResponseBytes {
+			return nil, errors.Join(
+				ErrModelOutputInvalid,
+				errInferenceResponseShape,
+			)
+		}
+		raw = append(raw, chunk...)
+		if !candidatePublished {
+			if candidate, ready := earlyCandidateFromJSON(raw); ready {
+				candidatePublished = true
+				onCandidate(candidate)
+			}
+		}
+	}
+	if len(raw) == 0 {
+		return nil, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceResponseShape,
+		)
+	}
+	return raw, nil
+}
+
+func streamedResponseChunkText(
+	response *genai.GenerateContentResponse,
+) ([]byte, error) {
+	if response == nil {
+		return nil, ErrModelOutputInvalid
+	}
+	if len(response.Candidates) == 0 {
+		// A prompt-feedback-only or terminal metadata frame carries no model
+		// text. inferenceFinishFailure has already rejected blocked feedback.
+		return nil, nil
+	}
+	if len(response.Candidates) != 1 || response.Candidates[0] == nil {
+		return nil, ErrModelOutputInvalid
+	}
+	content := response.Candidates[0].Content
+	if content == nil {
+		return nil, nil
+	}
+	var output []byte
+	for _, part := range content.Parts {
+		if part == nil {
+			return nil, ErrModelOutputInvalid
+		}
+		if part.Thought {
+			continue
+		}
+		if part.Text == "" || part.InlineData != nil || part.FileData != nil ||
+			part.FunctionCall != nil || part.FunctionResponse != nil ||
+			part.ExecutableCode != nil || part.CodeExecutionResult != nil ||
+			part.ToolCall != nil || part.ToolResponse != nil {
+			return nil, ErrModelOutputInvalid
+		}
+		output = append(output, part.Text...)
+	}
+	return output, nil
+}
+
+func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return modelPlan{}, false
+	}
+
+	var candidate modelPlan
+	seen := make(map[string]bool, 4)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return modelPlan{}, false
+		}
+		key, ok := keyToken.(string)
+		if !ok || seen[key] {
+			return modelPlan{}, false
+		}
+		seen[key] = true
+		switch key {
+		case "assistance_target":
+			if err := decoder.Decode(&candidate.AssistanceTarget); err != nil {
+				return modelPlan{}, false
+			}
+		case "respondent_stage":
+			if err := decoder.Decode(&candidate.RespondentStage); err != nil {
+				return modelPlan{}, false
+			}
+		case "answer_attempt":
+			if err := decoder.Decode(&candidate.AnswerAttempt); err != nil {
+				return modelPlan{}, false
+			}
+		case "spoken_reply":
+			if err := decoder.Decode(&candidate.SpokenReply); err != nil {
+				return modelPlan{}, false
+			}
+		default:
+			var ignored json.RawMessage
+			if err := decoder.Decode(&ignored); err != nil {
+				return modelPlan{}, false
+			}
+		}
+		if seen["assistance_target"] &&
+			seen["respondent_stage"] &&
+			seen["answer_attempt"] &&
+			seen["spoken_reply"] {
+			if !validEarlyCandidate(candidate) {
+				return modelPlan{}, false
+			}
+			return candidate, true
+		}
+	}
+	return modelPlan{}, false
+}
+
+func validEarlyCandidate(candidate modelPlan) bool {
+	if candidate.SpokenReply == "" ||
+		!utf8.ValidString(candidate.SpokenReply) ||
+		utf8.RuneCountInString(candidate.SpokenReply) > MaxSpokenReplyRunes ||
+		unsafeSpeechActuatorText(candidate.SpokenReply) ||
+		!utf8.ValidString(candidate.AnswerAttempt) ||
+		utf8.RuneCountInString(candidate.AnswerAttempt) > MaxSpokenReplyRunes {
+		return false
+	}
+	switch candidate.AssistanceTarget {
+	case "assistant":
+		return candidate.RespondentStage == "none" &&
+			candidate.AnswerAttempt == ""
+	case "respondent":
+		return candidate.RespondentStage == "awaiting_answer" ||
+			candidate.RespondentStage == "restructure"
+	default:
+		return false
+	}
+}
+
 func (agent *vertexAgent) inferWithRetry(
 	ctx context.Context,
 	model string,
@@ -1736,6 +2121,7 @@ func (agent *vertexAgent) inferWithRetry(
 		turn,
 		state,
 		preliminary,
+		nil,
 	)
 	if err == nil || ctx.Err() != nil || !retryableInferenceFailure(err) {
 		return plan, err
@@ -1757,6 +2143,7 @@ func (agent *vertexAgent) inferWithRetry(
 		turn,
 		state,
 		preliminary,
+		nil,
 	)
 	if retryErr != nil {
 		return modelPlan{}, errors.Join(err, retryErr)
@@ -2856,11 +3243,11 @@ func modelResponseSchema(respondentAllowed bool) map[string]any {
 		"type":                 "object",
 		"additionalProperties": false,
 		"propertyOrdering": []string{
-			"domain", "intent", "assistance_target", "respondent_stage",
-			"answer_attempt", "respondent_slot_evidence",
+			"assistance_target", "respondent_stage", "answer_attempt",
+			"spoken_reply", "domain", "intent", "respondent_slot_evidence",
 			"respondent_protected_spans", "research_action", "research_query",
 			"latent_question", "argument_structure",
-			"intervention_policy", "spoken_reply", "confidence",
+			"intervention_policy", "confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
 			"self_correction_grace", "intervention", "answer_contract",
 		},

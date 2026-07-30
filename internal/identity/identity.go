@@ -7,6 +7,7 @@ import (
 
 	"firebase.google.com/go/v4/appcheck"
 	"firebase.google.com/go/v4/auth"
+	"golang.org/x/sync/errgroup"
 )
 
 var ErrUnauthenticated = errors.New("unauthenticated")
@@ -21,9 +22,38 @@ type Verifier interface {
 	Verify(ctx context.Context, idToken, appCheckToken string) (Principal, error)
 }
 
+type authTokenVerifier interface {
+	VerifyIDTokenAndCheckRevoked(context.Context, string) (*auth.Token, error)
+}
+
+type appCheckTokenVerifier interface {
+	VerifyToken(context.Context, string) (*appcheck.DecodedAppCheckToken, error)
+}
+
+type firebaseAppCheckTokenVerifier struct {
+	client *appcheck.Client
+}
+
+func (v firebaseAppCheckTokenVerifier) VerifyToken(
+	ctx context.Context,
+	token string,
+) (*appcheck.DecodedAppCheckToken, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	decoded, err := v.client.VerifyToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
 type FirebaseVerifier struct {
-	authClient     *auth.Client
-	appCheckClient *appcheck.Client
+	authClient     authTokenVerifier
+	appCheckClient appCheckTokenVerifier
 	allowedAppIDs  map[string]struct{}
 }
 
@@ -36,7 +66,7 @@ func NewFirebaseVerifier(authClient *auth.Client, appCheckClient *appcheck.Clien
 	}
 	return &FirebaseVerifier{
 		authClient:     authClient,
-		appCheckClient: appCheckClient,
+		appCheckClient: firebaseAppCheckTokenVerifier{client: appCheckClient},
 		allowedAppIDs:  allowed,
 	}
 }
@@ -46,12 +76,28 @@ func (v *FirebaseVerifier) Verify(ctx context.Context, idToken, appCheckToken st
 		return Principal{}, ErrUnauthenticated
 	}
 
-	authToken, err := v.authClient.VerifyIDTokenAndCheckRevoked(ctx, idToken)
-	if err != nil {
-		return Principal{}, ErrUnauthenticated
-	}
-	appToken, err := v.appCheckClient.VerifyToken(appCheckToken)
-	if err != nil {
+	var (
+		authToken *auth.Token
+		appToken  *appcheck.DecodedAppCheckToken
+	)
+	group, verifyCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		token, err := v.authClient.VerifyIDTokenAndCheckRevoked(verifyCtx, idToken)
+		if err != nil {
+			return ErrUnauthenticated
+		}
+		authToken = token
+		return nil
+	})
+	group.Go(func() error {
+		token, err := v.appCheckClient.VerifyToken(verifyCtx, appCheckToken)
+		if err != nil {
+			return ErrUnauthenticated
+		}
+		appToken = token
+		return nil
+	})
+	if err := group.Wait(); err != nil || authToken == nil || appToken == nil {
 		return Principal{}, ErrUnauthenticated
 	}
 	if _, allowed := v.allowedAppIDs[appToken.AppID]; !allowed {

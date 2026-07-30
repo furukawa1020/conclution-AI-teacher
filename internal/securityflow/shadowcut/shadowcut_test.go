@@ -2,6 +2,7 @@ package shadowcut
 
 import (
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestSynthesizeObjectiveOrder(t *testing.T) {
 		{
 			name: "benign retention precedes lower cost",
 			traces: []Trace{
-				privilegedAttack(evidence, planner),
+				attackTrace(evidence | planner),
 				benignTrace(100, evidence),
 				benignTrace(10, planner),
 			},
@@ -29,8 +30,8 @@ func TestSynthesizeObjectiveOrder(t *testing.T) {
 		{
 			name: "control count precedes lower cost",
 			traces: []Trace{
-				privilegedAttack(evidence|egress, 0),
-				privilegedAttack(planner|egress, 0),
+				attackTrace(evidence | egress),
+				attackTrace(planner | egress),
 				benignTrace(1, 0),
 			},
 			want: egress,
@@ -38,7 +39,7 @@ func TestSynthesizeObjectiveOrder(t *testing.T) {
 		{
 			name: "cost precedes mask",
 			traces: []Trace{
-				privilegedAttack(evidence|planner, 0),
+				attackTrace(evidence | planner),
 				benignTrace(1, 0),
 			},
 			want: evidence,
@@ -46,7 +47,7 @@ func TestSynthesizeObjectiveOrder(t *testing.T) {
 		{
 			name: "mask is final deterministic tie break",
 			traces: []Trace{
-				privilegedAttack(memory|tool, 0),
+				attackTrace(memory | tool),
 				benignTrace(1, 0),
 			},
 			want: memory,
@@ -178,6 +179,22 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 			},
 		},
 		{
+			name: "control on nonexistent boundary",
+			mutate: func(trace *Trace) {
+				trace.Edges[0].Controls = mustMask(
+					t,
+					ControlSpeechBoundary,
+				)
+			},
+		},
+		{
+			name: "boundary kind substitution",
+			mutate: func(trace *Trace) {
+				trace.Edges[0].Kind = EdgeDerive
+				trace.Edges[0].Controls = 0
+			},
+		},
+		{
 			name: "dangling edge",
 			mutate: func(trace *Trace) {
 				trace.Edges[0].To = NodeID(99)
@@ -186,16 +203,11 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 		{
 			name: "cycle",
 			mutate: func(trace *Trace) {
-				trace.Nodes = append(trace.Nodes, Node{
-					ID:        6,
-					Kind:      NodeModel,
-					Integrity: IntegrityUntrusted,
+				trace.Edges = append(trace.Edges, Edge{
+					From: 6,
+					To:   2,
+					Kind: EdgePropose,
 				})
-				trace.Edges = append(
-					trace.Edges,
-					Edge{From: 2, To: 6, Kind: EdgeDerive},
-					Edge{From: 6, To: 2, Kind: EdgeDerive},
-				)
 			},
 		},
 		{
@@ -205,10 +217,98 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 			},
 		},
 		{
+			name: "binding substitution",
+			mutate: func(trace *Trace) {
+				trace.Nodes[5].BindingRef++
+			},
+		},
+		{
 			name: "sink capability not inherited",
 			mutate: func(trace *Trace) {
-				trace.Nodes[4].Authority = AuthorityExternalWrite
-				trace.Nodes[4].Requires = AuthorityExternalWrite
+				trace.Nodes[6].Authority = AuthorityExternalWrite
+				trace.Nodes[6].Requires = AuthorityExternalWrite
+			},
+		},
+		{
+			name: "grant carries surplus authority",
+			mutate: func(trace *Trace) {
+				trace.Nodes[4].Authority |= AuthorityExternalWrite
+				trace.Nodes[5].Authority |= AuthorityExternalWrite
+			},
+		},
+		{
+			name: "undeclared internal sink",
+			mutate: func(trace *Trace) {
+				trace.Nodes = append(trace.Nodes, Node{
+					ID:        8,
+					Kind:      NodeSink,
+					Integrity: IntegrityUntrusted,
+				})
+				trace.Edges = append(trace.Edges, Edge{
+					From: 2,
+					To:   8,
+					Kind: EdgeRespond,
+				})
+			},
+		},
+		{
+			name: "multiple sinks",
+			mutate: func(trace *Trace) {
+				trace.Nodes = append(trace.Nodes, Node{
+					ID:        8,
+					Kind:      NodeSink,
+					Integrity: IntegrityUntrusted,
+				})
+				trace.Edges = append(trace.Edges, Edge{
+					From: 2,
+					To:   8,
+					Kind: EdgeRespond,
+				})
+				trace.Sinks = append(trace.Sinks, 8)
+			},
+		},
+		{
+			name: "source and sink overlap",
+			mutate: func(trace *Trace) {
+				trace.Sources = append(trace.Sources, trace.Sinks[0])
+			},
+		},
+		{
+			name: "multiple grants consumed by one action",
+			mutate: func(trace *Trace) {
+				trace.Nodes = append(
+					trace.Nodes,
+					Node{
+						ID:         8,
+						Kind:       NodeAuthenticatedIntent,
+						Integrity:  IntegrityAuthenticated,
+						Authority:  AuthorityResearchRead,
+						Binding:    BindingExactScopeActionArgs,
+						BindingRef: 2,
+					},
+					Node{
+						ID:         9,
+						Kind:       NodeGrant,
+						Integrity:  IntegritySystem,
+						Authority:  AuthorityResearchRead,
+						Binding:    BindingExactScopeActionArgs,
+						BindingRef: 2,
+					},
+				)
+				trace.Edges = append(
+					trace.Edges,
+					Edge{From: 8, To: 9, Kind: EdgeIssueGrant},
+					Edge{From: 9, To: 5, Kind: EdgeConsume},
+				)
+			},
+		},
+		{
+			name: "grant consumed by unprivileged sink",
+			mutate: func(trace *Trace) {
+				trace.Nodes[6].Authority = 0
+				trace.Nodes[6].Requires = 0
+				trace.Nodes[6].Binding = BindingNone
+				trace.Nodes[6].BindingRef = 0
 			},
 		},
 	}
@@ -225,6 +325,49 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 				t.Fatalf("unsafe trace accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestPrivilegedBenignTraceRequiresEveryRootAndExactBinding(t *testing.T) {
+	evidence := mustMask(t, ControlEvidenceIngress)
+	planner := mustMask(t, ControlPlannerBoundary)
+	benign := privilegedAttack(evidence, planner)
+	benign.Class = TraceBenign
+	benign.Weight = 5
+	benign.Sources = []NodeID{1, 3}
+
+	corpus := []Trace{
+		privilegedAttack(evidence, planner),
+		benign,
+	}
+	candidate, certificate, err := Synthesize(corpus)
+	if err != nil {
+		t.Fatalf("valid privileged benign trace rejected: %v", err)
+	}
+	if err := Verify(corpus, candidate, certificate); err != nil {
+		t.Fatalf("valid privileged benign trace did not verify: %v", err)
+	}
+
+	undeclaredIntent := cloneTrace(benign)
+	undeclaredIntent.Sources = []NodeID{1}
+	if _, _, err := Synthesize(
+		[]Trace{
+			privilegedAttack(evidence, planner),
+			undeclaredIntent,
+		},
+	); !errors.Is(err, ErrInvalidTrace) {
+		t.Fatalf("undeclared benign intent root accepted: %v", err)
+	}
+
+	substitutedBinding := cloneTrace(benign)
+	substitutedBinding.Nodes[6].BindingRef = 2
+	if _, _, err := Synthesize(
+		[]Trace{
+			privilegedAttack(evidence, planner),
+			substitutedBinding,
+		},
+	); !errors.Is(err, ErrInvalidTrace) {
+		t.Fatalf("substituted sink binding accepted: %v", err)
 	}
 }
 
@@ -273,6 +416,59 @@ func TestSynthesisIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestConcurrentSynthesisIsDeterministic(t *testing.T) {
+	evidence := mustMask(t, ControlEvidenceIngress)
+	planner := mustMask(t, ControlPlannerBoundary)
+	traces := []Trace{
+		attackTrace(evidence | planner),
+		benignTrace(100, evidence),
+		benignTrace(10, planner),
+	}
+	wantCandidate, wantCertificate, err := Synthesize(traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 64
+	errs := make(chan error, workers)
+	var wait sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			candidate, certificate, err := Synthesize(traces)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if candidate != wantCandidate || certificate != wantCertificate {
+				errs <- ErrVerification
+				return
+			}
+			errs <- Verify(traces, candidate, certificate)
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent synthesis or verification failed: %v", err)
+		}
+	}
+}
+
+func TestCanonicalDuplicateTraceIsRejected(t *testing.T) {
+	evidence := mustMask(t, ControlEvidenceIngress)
+	benign := benignTrace(1, 0)
+	if _, _, err := Synthesize([]Trace{
+		attackTrace(evidence),
+		benign,
+		reversedTrace(benign),
+	}); !errors.Is(err, ErrInvalidCorpus) {
+		t.Fatalf("canonical duplicate trace accepted: %v", err)
+	}
+}
+
 func privilegedAttack(
 	firstControl ControlMask,
 	secondControl ControlMask,
@@ -292,41 +488,56 @@ func privilegedAttack(
 				Integrity: IntegrityUntrusted,
 			},
 			{
-				ID:        3,
-				Kind:      NodeAuthenticatedIntent,
-				Integrity: IntegrityAuthenticated,
-				Authority: AuthorityResearchRead,
-				Binding:   BindingExactScopeActionArgs,
-			},
-			{
-				ID:        4,
-				Kind:      NodeGrant,
-				Integrity: IntegritySystem,
-				Authority: AuthorityResearchRead,
-				Binding:   BindingExactScopeActionArgs,
-			},
-			{
-				ID:        5,
-				Kind:      NodeSink,
+				ID:        6,
+				Kind:      NodeModel,
 				Integrity: IntegrityUntrusted,
-				Authority: AuthorityResearchRead,
-				Requires:  AuthorityResearchRead,
-				Binding:   BindingExactScopeActionArgs,
+			},
+			{
+				ID:        7,
+				Kind:      NodeTool,
+				Integrity: IntegrityUntrusted,
+			},
+			{
+				ID:         3,
+				Kind:       NodeAuthenticatedIntent,
+				Integrity:  IntegrityAuthenticated,
+				Authority:  AuthorityResearchRead,
+				Binding:    BindingExactScopeActionArgs,
+				BindingRef: 1,
+			},
+			{
+				ID:         4,
+				Kind:       NodeGrant,
+				Integrity:  IntegritySystem,
+				Authority:  AuthorityResearchRead,
+				Binding:    BindingExactScopeActionArgs,
+				BindingRef: 1,
+			},
+			{
+				ID:         5,
+				Kind:       NodeSink,
+				Integrity:  IntegrityUntrusted,
+				Authority:  AuthorityResearchRead,
+				Requires:   AuthorityResearchRead,
+				Binding:    BindingExactScopeActionArgs,
+				BindingRef: 1,
 			},
 		},
 		Edges: []Edge{
 			{
 				From:     1,
 				To:       2,
-				Kind:     EdgeDerive,
+				Kind:     EdgeQuote,
 				Controls: firstControl,
 			},
 			{
 				From:     2,
-				To:       5,
+				To:       6,
 				Kind:     EdgePropose,
 				Controls: secondControl,
 			},
+			{From: 6, To: 7, Kind: EdgeToolCall},
+			{From: 7, To: 5, Kind: EdgeExecute},
 			{From: 3, To: 4, Kind: EdgeIssueGrant},
 			{From: 4, To: 5, Kind: EdgeConsume},
 		},
@@ -336,37 +547,90 @@ func privilegedAttack(
 }
 
 func benignTrace(weight uint32, control ControlMask) Trace {
+	trace := attackTrace(control)
+	trace.Class = TraceBenign
+	trace.Weight = weight
+	return trace
+}
+
+func attackTrace(controls ControlMask) Trace {
+	evidence := ControlMask(1 << (ControlEvidenceIngress - 1))
+	memory := ControlMask(1 << (ControlMemoryBoundary - 1))
+	planner := ControlMask(1 << (ControlPlannerBoundary - 1))
+	tool := ControlMask(1 << (ControlToolBoundary - 1))
+	speech := ControlMask(1 << (ControlSpeechBoundary - 1))
+	egress := ControlMask(1 << (ControlExternalEgress - 1))
+
+	nodes := []Node{
+		{ID: 1, Kind: NodePDF, Integrity: IntegrityUntrusted},
+		{ID: 2, Kind: NodeMemory, Integrity: IntegrityUntrusted},
+		{ID: 3, Kind: NodeModel, Integrity: IntegrityUntrusted},
+		{ID: 4, Kind: NodeModel, Integrity: IntegrityUntrusted},
+		{ID: 5, Kind: NodeTool, Integrity: IntegrityUntrusted},
+	}
+	edges := []Edge{
+		{
+			From:     1,
+			To:       2,
+			Kind:     EdgeQuote,
+			Controls: controls & evidence,
+		},
+		{
+			From:     2,
+			To:       3,
+			Kind:     EdgeRecall,
+			Controls: controls & memory,
+		},
+		{
+			From:     3,
+			To:       4,
+			Kind:     EdgePropose,
+			Controls: controls & planner,
+		},
+		{
+			From:     4,
+			To:       5,
+			Kind:     EdgeToolCall,
+			Controls: controls & tool,
+		},
+	}
+	if controls&egress != 0 {
+		nodes = append(nodes, Node{
+			ID:        6,
+			Kind:      NodeSink,
+			Integrity: IntegrityUntrusted,
+		})
+		edges = append(edges, Edge{
+			From:     5,
+			To:       6,
+			Kind:     EdgeExecute,
+			Controls: egress,
+		})
+	} else {
+		nodes = append(
+			nodes,
+			Node{ID: 6, Kind: NodeModel, Integrity: IntegrityUntrusted},
+			Node{ID: 7, Kind: NodeSink, Integrity: IntegrityUntrusted},
+		)
+		edges = append(
+			edges,
+			Edge{From: 5, To: 6, Kind: EdgeDerive},
+			Edge{
+				From:     6,
+				To:       7,
+				Kind:     EdgeRespond,
+				Controls: controls & speech,
+			},
+		)
+	}
+	sink := nodes[len(nodes)-1].ID
 	return Trace{
-		Class:  TraceBenign,
-		Weight: weight,
-		Nodes: []Node{
-			{
-				ID:        1,
-				Kind:      NodePDF,
-				Integrity: IntegrityUntrusted,
-			},
-			{
-				ID:        2,
-				Kind:      NodeModel,
-				Integrity: IntegrityUntrusted,
-			},
-			{
-				ID:        3,
-				Kind:      NodeSink,
-				Integrity: IntegrityUntrusted,
-			},
-		},
-		Edges: []Edge{
-			{
-				From:     1,
-				To:       2,
-				Kind:     EdgeDerive,
-				Controls: control,
-			},
-			{From: 2, To: 3, Kind: EdgeRespond},
-		},
+		Class:   TraceAttack,
+		Weight:  1,
+		Nodes:   nodes,
+		Edges:   edges,
 		Sources: []NodeID{1},
-		Sinks:   []NodeID{3},
+		Sinks:   []NodeID{sink},
 	}
 }
 

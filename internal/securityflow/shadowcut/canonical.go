@@ -88,6 +88,10 @@ func canonicalTraceBytes(trace Trace) []byte {
 			uint16(node.Requires),
 		)
 		canonical = append(canonical, byte(node.Binding))
+		canonical = binary.BigEndian.AppendUint16(
+			canonical,
+			uint16(node.BindingRef),
+		)
 	}
 
 	canonical = binary.BigEndian.AppendUint16(

@@ -83,6 +83,14 @@ type fakeLimiter struct {
 	keys    []string
 }
 
+type blockingLimiter struct {
+	wantKey string
+	scope   string
+	started chan<- string
+	release <-chan struct{}
+	err     error
+}
+
 type fakeVoiceService struct {
 	calls  int
 	input  VoiceTurnInput
@@ -114,6 +122,23 @@ func (l *fakeLimiter) Consume(_ context.Context, uid string, _ time.Time) error 
 		return errors.New("unexpected uid")
 	}
 	return l.err
+}
+
+func (l blockingLimiter) Consume(ctx context.Context, key string, _ time.Time) error {
+	if key != l.wantKey {
+		return errors.New("unexpected quota key")
+	}
+	select {
+	case l.started <- l.scope:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-l.release:
+		return l.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func testHandler(evaluator *fakeEvaluator, evaluationStore *fakeStore) http.Handler {
@@ -169,8 +194,8 @@ func testVoiceHandler(service *fakeVoiceService, limiter *fakeLimiter) http.Hand
 
 func testVoiceHandlerWithAppLimiter(
 	service *fakeVoiceService,
-	limiter *fakeLimiter,
-	appLimiter *fakeLimiter,
+	limiter guard.Limiter,
+	appLimiter guard.Limiter,
 ) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return NewWithVoice(
@@ -764,6 +789,197 @@ func TestVoiceAppQuotaStopsBeforeDecodeAndService(t *testing.T) {
 			uidLimiter.calls,
 			appLimiter.calls,
 		)
+	}
+}
+
+func TestVoiceQuotasAreConsumedConcurrently(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+
+	service := &fakeVoiceService{}
+	handler := testVoiceHandlerWithAppLimiter(
+		service,
+		blockingLimiter{
+			wantKey: "user-123",
+			scope:   "uid",
+			started: started,
+			release: release,
+		},
+		blockingLimiter{
+			wantKey: "app:app-123",
+			scope:   "app",
+			started: started,
+			release: release,
+		},
+	)
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/voice/turns",
+		`not-json`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+
+	scopes := make(map[string]bool, 2)
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for len(scopes) < 2 {
+		select {
+		case scope := <-started:
+			scopes[scope] = true
+		case <-timer.C:
+			t.Fatalf("quota checks did not overlap; started scopes = %v", scopes)
+		}
+	}
+	if !scopes["uid"] || !scopes["app"] {
+		t.Fatalf("started scopes = %v; want uid and app", scopes)
+	}
+	close(release)
+	released = true
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("voice handler did not wait for both quota checks to finish")
+	}
+	if response.Code != http.StatusBadRequest || service.calls != 0 {
+		t.Fatalf(
+			"status=%d service=%d body=%s",
+			response.Code,
+			service.calls,
+			response.Body.String(),
+		)
+	}
+}
+
+func TestVoiceQuotaRateLimitDeterministicallyBeatsStoreFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		uidErr error
+		appErr error
+	}{
+		{
+			name:   "app rate limit beats UID store failure",
+			uidErr: errors.New("uid Firestore unavailable"),
+			appErr: guard.ErrRateLimitExceeded,
+		},
+		{
+			name:   "UID rate limit beats app store failure",
+			uidErr: guard.ErrRateLimitExceeded,
+			appErr: errors.New("app Firestore unavailable"),
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			service := &fakeVoiceService{}
+			uidLimiter := &fakeLimiter{err: test.uidErr}
+			appLimiter := &fakeLimiter{
+				wantKey: "app:app-123",
+				err:     test.appErr,
+			}
+			handler := testVoiceHandlerWithAppLimiter(service, uidLimiter, appLimiter)
+			request := authenticatedRequest(
+				http.MethodPost,
+				"/api/v1/voice/turns",
+				`not-json`,
+			)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusTooManyRequests ||
+				service.calls != 0 ||
+				uidLimiter.calls != 1 ||
+				appLimiter.calls != 1 {
+				t.Fatalf(
+					"status=%d service=%d uid_quota=%d app_quota=%d body=%s",
+					response.Code,
+					service.calls,
+					uidLimiter.calls,
+					appLimiter.calls,
+					response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestVoiceQuotaStoreFailureUsesDeterministicUIDScope(t *testing.T) {
+	t.Parallel()
+
+	service := &fakeVoiceService{}
+	uidLimiter := &fakeLimiter{err: errors.New("uid Firestore unavailable")}
+	appLimiter := &fakeLimiter{
+		wantKey: "app:app-123",
+		err:     errors.New("app Firestore unavailable"),
+	}
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	handler := NewWithVoice(
+		logger,
+		fakeVerifier{principal: identity.Principal{
+			UID:   "user-123",
+			AppID: "app-123",
+			Roles: map[string]bool{"user": true},
+		}},
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		2*time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:         service,
+			RateLimiter:     uidLimiter,
+			AppRateLimiter:  appLimiter,
+			RequestTimeout:  2 * time.Second,
+			MaxRequestBytes: 13 * 1024 * 1024,
+		},
+	)
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/voice/turns",
+		`not-json`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable ||
+		service.calls != 0 ||
+		uidLimiter.calls != 1 ||
+		appLimiter.calls != 1 {
+		t.Fatalf(
+			"status=%d service=%d uid_quota=%d app_quota=%d body=%s",
+			response.Code,
+			service.calls,
+			uidLimiter.calls,
+			appLimiter.calls,
+			response.Body.String(),
+		)
+	}
+	logged := logOutput.String()
+	if !strings.Contains(logged, `"quota_scope":"uid"`) ||
+		strings.Contains(logged, `"quota_scope":"app"`) {
+		t.Fatalf("quota failure log is not deterministic: %s", logged)
 	}
 }
 

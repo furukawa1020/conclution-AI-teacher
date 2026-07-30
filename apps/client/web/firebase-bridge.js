@@ -27,6 +27,10 @@ import {
   shouldStopSessionForLifecycle,
   VOICE_SESSION_LIMITS,
 } from "./voice-session-policy.mjs";
+import {
+  createVoiceStreamParser,
+  VOICE_STREAM_LIMITS,
+} from "./voice-stream-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
@@ -35,7 +39,8 @@ const EXPECTED_MESSAGING_SENDER_ID = "551920539470";
 // reCAPTCHA Enterprise site keys are public identifiers. The matching secret
 // configuration and verification remain in Firebase App Check.
 const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
-const VOICE_ENDPOINT = "/api/v1/voice/turns";
+const VOICE_ENDPOINT =
+  "https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream";
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
@@ -938,7 +943,7 @@ function safeVoiceResponse(payload) {
 
   return Object.freeze({
     audioBase64: payload.audioBase64,
-    audioMimeType: hasAudio ? payload.audioMimeType : "",
+    audioMimeType: payload.audioMimeType,
     caption: typeof payload.caption === "string" ? payload.caption : null,
     detectedDomain: payload.detectedDomain,
     assistanceTarget: payload.assistanceTarget,
@@ -962,6 +967,252 @@ function mapVoiceResponseError(status) {
   return "voice_api_unavailable";
 }
 
+function isNdjsonContentType(value) {
+  return (
+    typeof value === "string" &&
+    /^application\/x-ndjson(?:\s*;\s*charset\s*=\s*"?utf-8"?)?$/iu.test(
+      value.trim(),
+    )
+  );
+}
+
+function pcm16AudioBuffer(audioBase64, decodedBytes, sampleRateHz) {
+  const encoded = new Uint8Array(base64ToArrayBuffer(audioBase64));
+  if (
+    encoded.byteLength !== decodedBytes ||
+    encoded.byteLength === 0 ||
+    encoded.byteLength % 2 !== 0 ||
+    sampleRateHz !== 24_000 ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    fail("voice_response_invalid");
+  }
+
+  const samples = new Float32Array(encoded.byteLength / 2);
+  const pcm = new DataView(
+    encoded.buffer,
+    encoded.byteOffset,
+    encoded.byteLength,
+  );
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = pcm.getInt16(index * 2, true) / 32_768;
+  }
+  const buffer = audioContext.createBuffer(
+    1,
+    samples.length,
+    sampleRateHz,
+  );
+  buffer.getChannelData(0).set(samples);
+  return buffer;
+}
+
+function createStreamingPlayback(expectedEpoch) {
+  if (
+    activePlayback ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    fail("audio_playback_blocked");
+  }
+
+  let nextStartAt = 0;
+  let pendingSources = 0;
+  let rejectCompletion;
+  let resolveCompletion;
+  let sealed = false;
+  let settled = false;
+  let streamedAudio = false;
+  const sources = new Set();
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  // stopSession can reject playback before finishTurn reaches its await.
+  void completion.catch(() => {});
+
+  const playback = {
+    completion,
+    hasStreamedAudio: () => streamedAudio,
+    reject(error) {
+      if (settled) return;
+      settled = true;
+      rejectCompletion(error);
+    },
+    schedule(event) {
+      if (
+        settled ||
+        sealed ||
+        expectedEpoch !== sessionEpoch ||
+        !audioContext ||
+        audioContext.state === "closed"
+      ) {
+        fail("request_cancelled");
+      }
+      const buffer = pcm16AudioBuffer(
+        event.audioBase64,
+        event.decodedBytes,
+        event.sampleRateHz,
+      );
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+
+      const startAt = Math.max(
+        nextStartAt,
+        audioContext.currentTime + 0.015,
+      );
+      pendingSources += 1;
+      sources.add(source);
+      source.addEventListener(
+        "ended",
+        () => {
+          sources.delete(source);
+          source.disconnect();
+          pendingSources -= 1;
+          if (sealed && pendingSources === 0 && !settled) {
+            settled = true;
+            if (activePlayback === playback) {
+              activePlayback = undefined;
+            }
+            resolveCompletion();
+          }
+        },
+        { once: true },
+      );
+      try {
+        source.start(startAt);
+      } catch {
+        sources.delete(source);
+        pendingSources -= 1;
+        source.disconnect();
+        fail("audio_playback_blocked");
+      }
+      nextStartAt = startAt + buffer.duration;
+
+      if (!streamedAudio) {
+        streamedAudio = true;
+        globalThis.dispatchEvent(
+          new CustomEvent("kotae:first-audio", {
+            detail: Object.freeze({ sequence: event.sequence, version: 1 }),
+          }),
+        );
+      }
+    },
+    seal() {
+      if (settled || sealed) {
+        fail("voice_response_invalid");
+      }
+      sealed = true;
+      if (pendingSources === 0) {
+        settled = true;
+        if (activePlayback === playback) {
+          activePlayback = undefined;
+        }
+        resolveCompletion();
+      }
+    },
+    sources,
+  };
+  activePlayback = playback;
+  return playback;
+}
+
+function haltStreamingPlayback(playback, error) {
+  if (!playback) return;
+  if (activePlayback === playback) {
+    activePlayback = undefined;
+  }
+  // Settle the owner before stopping sources: stopping dispatches "ended"
+  // synchronously in some browser engines.
+  playback.reject(error);
+  for (const source of playback.sources) {
+    try {
+      source.stop();
+    } catch {
+      // A source can have ended between validation and cancellation.
+    }
+    source.disconnect();
+  }
+  playback.sources.clear();
+}
+
+async function consumeVoiceStream(response, playback, expectedEpoch) {
+  if (
+    !isNdjsonContentType(response.headers.get("Content-Type")) ||
+    !response.body ||
+    typeof response.body.getReader !== "function"
+  ) {
+    fail("voice_response_invalid");
+  }
+  const contentLength = response.headers.get("Content-Length");
+  if (
+    contentLength !== null &&
+    (!/^[0-9]+$/u.test(contentLength) ||
+      Number(contentLength) > VOICE_STREAM_LIMITS.maximumResponseBytes)
+  ) {
+    fail("voice_response_invalid");
+  }
+
+  const parser = createVoiceStreamParser((result) =>
+    safeVoiceResponse(result),
+  );
+  const decoder = new TextDecoder("utf-8", {
+    fatal: true,
+    ignoreBOM: true,
+  });
+  const reader = response.body.getReader();
+  let responseBytes = 0;
+
+  function acceptEvents(events) {
+    for (const event of events) {
+      if (event.type === "audio") {
+        playback.schedule(event);
+      }
+    }
+  }
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (
+        !(value instanceof Uint8Array) ||
+        value.byteLength === 0 ||
+        value.byteLength >
+          VOICE_STREAM_LIMITS.maximumTransportChunkBytes
+      ) {
+        fail("voice_response_invalid");
+      }
+      responseBytes += value.byteLength;
+      if (responseBytes > VOICE_STREAM_LIMITS.maximumResponseBytes) {
+        fail("voice_response_invalid");
+      }
+      if (expectedEpoch !== sessionEpoch) {
+        fail("request_cancelled");
+      }
+      acceptEvents(parser.push(decoder.decode(value, { stream: true })));
+    }
+    acceptEvents(parser.push(decoder.decode()));
+    const completed = parser.finish();
+    acceptEvents(completed.events);
+    if (expectedEpoch !== sessionEpoch) {
+      fail("request_cancelled");
+    }
+    playback.seal();
+    await playback.completion;
+    return Object.freeze({
+      ...completed.finalResult,
+      streamedAudio: completed.audioEventCount > 0,
+    });
+  } catch (error) {
+    void reader.cancel(error).catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function finishTurn(serializedSessionState, turnMode) {
   const recording = activeRecording;
   if (!recording || finishGate.isBusy()) {
@@ -982,6 +1233,7 @@ async function finishTurn(serializedSessionState, turnMode) {
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
   let documentForTurn;
+  let playback;
   let requestController;
   try {
     if (!recording.stopLatch.isRequested()) {
@@ -1004,6 +1256,17 @@ async function finishTurn(serializedSessionState, turnMode) {
     if (expectedEpoch !== sessionEpoch) {
       fail("request_cancelled");
     }
+    setTracksEnabled(false);
+    if (!audioContext || audioContext.state === "closed") {
+      fail("audio_playback_blocked");
+    }
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+    if (expectedEpoch !== sessionEpoch) {
+      fail("request_cancelled");
+    }
+    playback = createStreamingPlayback(expectedEpoch);
 
     const payload = {
       audioBase64,
@@ -1023,7 +1286,8 @@ async function finishTurn(serializedSessionState, turnMode) {
     const response = await fetch(VOICE_ENDPOINT, {
       method: "POST",
       cache: "no-store",
-      credentials: "same-origin",
+      credentials: "omit",
+      mode: "cors",
       redirect: "error",
       referrerPolicy: "no-referrer",
       signal: requestController.signal,
@@ -1037,8 +1301,12 @@ async function finishTurn(serializedSessionState, turnMode) {
     if (!response.ok) {
       fail(mapVoiceResponseError(response.status));
     }
-    return safeVoiceResponse(await response.json());
+    return await consumeVoiceStream(response, playback, expectedEpoch);
   } catch (error) {
+    haltStreamingPlayback(
+      playback,
+      error instanceof Error ? error : new Error("voice_response_invalid"),
+    );
     if (error && typeof error === "object" && error.name === "AbortError") {
       fail("request_cancelled");
     }
@@ -1053,67 +1321,6 @@ async function finishTurn(serializedSessionState, turnMode) {
       activeRecording = undefined;
     }
   }
-}
-
-async function playResponse(audioBase64, audioMimeType) {
-  setTracksEnabled(false);
-  if (audioBase64 === "") {
-    return Object.freeze({ state: "silent" });
-  }
-  if (
-    !isBase64(audioBase64) ||
-    audioBase64.length > RESPONSE_AUDIO_MAX_BASE64_CHARS ||
-    typeof audioMimeType !== "string" ||
-    !audioMimeType.startsWith("audio/")
-  ) {
-    fail("voice_response_invalid");
-  }
-  if (!audioContext || audioContext.state === "closed") {
-    fail("audio_playback_blocked");
-  }
-
-  const expectedEpoch = sessionEpoch;
-  try {
-    if (audioContext.state === "suspended") {
-      await audioContext.resume();
-    }
-    const encoded = base64ToArrayBuffer(audioBase64);
-    const decoded = await audioContext.decodeAudioData(encoded.slice(0));
-    if (expectedEpoch !== sessionEpoch) {
-      fail("request_cancelled");
-    }
-
-    await new Promise((resolve, reject) => {
-      const source = audioContext.createBufferSource();
-      source.buffer = decoded;
-      source.connect(audioContext.destination);
-      source.addEventListener(
-        "ended",
-        () => {
-          if (activePlayback?.source === source) {
-            activePlayback = undefined;
-          }
-          source.disconnect();
-          resolve();
-        },
-        { once: true },
-      );
-      activePlayback = { reject, source };
-      try {
-        source.start();
-      } catch {
-        activePlayback = undefined;
-        source.disconnect();
-        reject(new Error("audio_playback_blocked"));
-      }
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === "request_cancelled") {
-      throw error;
-    }
-    fail("audio_playback_blocked");
-  }
-  return Object.freeze({ state: "played" });
 }
 
 function safeDocumentName(name) {
@@ -1189,11 +1396,15 @@ function stopSession() {
     const playback = activePlayback;
     activePlayback = undefined;
     playback.reject(new Error("request_cancelled"));
-    try {
-      playback.source.stop();
-    } catch {
-      // The source may already have ended.
+    for (const source of playback.sources) {
+      try {
+        source.stop();
+      } catch {
+        // A source may already have ended.
+      }
+      source.disconnect();
     }
+    playback.sources.clear();
   }
   releaseMicrophone();
   sessionClock.reset();
@@ -1243,7 +1454,6 @@ const publicBridge = Object.freeze({
   endTurn,
   finishTurn,
   getStatus,
-  playResponse,
   stopSession,
   waitForTurnEnd,
 });

@@ -20,6 +20,10 @@ import {
   turnModeForGestureEpoch,
   VOICE_SESSION_LIMITS,
 } from "../web/voice-session-policy.mjs";
+import {
+  createVoiceStreamParser,
+  VOICE_STREAM_LIMITS,
+} from "../web/voice-stream-policy.mjs";
 
 const researchRecord = Object.freeze({
   title: "A-first responses under working-memory load",
@@ -109,7 +113,7 @@ test("a replacement microphone stream rebuilds its analyser graph", async () => 
   assert.match(ensureGraph, /analyserStream = stream/u);
 });
 
-test("stopping a session settles playback before stopping its source", async () => {
+test("stopping a session settles playback before stopping every source", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -124,10 +128,162 @@ test("stopping a session settles playback before stopping its source", async () 
   const rejectAt = stop.indexOf(
     'playback.reject(new Error("request_cancelled"))',
   );
-  const stopAt = stop.indexOf("playback.source.stop()");
+  const sourcesAt = stop.indexOf("for (const source of playback.sources)");
+  const stopAt = stop.indexOf("source.stop()");
   assert.ok(detachAt >= 0);
   assert.ok(rejectAt > detachAt);
-  assert.ok(stopAt > rejectAt);
+  assert.ok(sourcesAt > rejectAt);
+  assert.ok(stopAt > sourcesAt);
+});
+
+function finalVoiceResult() {
+  return {
+    audioBase64: "",
+    audioMimeType: "audio/L16",
+    sessionState: "opaque",
+  };
+}
+
+function streamLine(value) {
+  return `${JSON.stringify(value)}\n`;
+}
+
+test("voice stream accepts split UTF-8 input with strict ordered PCM events", () => {
+  const parser = createVoiceStreamParser((result) =>
+    Object.freeze({ ...result }),
+  );
+  const ready = streamLine({ type: "ready", version: 1 });
+  const audio = streamLine({
+    type: "audio",
+    sequence: 0,
+    audioBase64: "AQIDBA==",
+    sampleRateHz: 24_000,
+  });
+  const final = JSON.stringify({
+    type: "final",
+    version: 1,
+    result: finalVoiceResult(),
+  });
+
+  assert.deepEqual(parser.push(ready.slice(0, 8)), []);
+  assert.deepEqual(parser.push(ready.slice(8)), [
+    { type: "ready", version: 1 },
+  ]);
+  assert.deepEqual(parser.push(audio), [
+    {
+      type: "audio",
+      sequence: 0,
+      audioBase64: "AQIDBA==",
+      decodedBytes: 4,
+      sampleRateHz: 24_000,
+    },
+  ]);
+  assert.deepEqual(parser.push(final), []);
+  const completed = parser.finish();
+  assert.equal(completed.audioEventCount, 1);
+  assert.equal(completed.totalAudioBytes, 4);
+  assert.deepEqual(completed.finalResult, finalVoiceResult());
+  assert.equal(completed.events[0].type, "final");
+});
+
+test("voice stream fails closed on missing ready, sequence gaps, and truncation", () => {
+  const audio = streamLine({
+    type: "audio",
+    sequence: 0,
+    audioBase64: "AQIDBA==",
+    sampleRateHz: 24_000,
+  });
+  const withoutReady = createVoiceStreamParser((result) => result);
+  assert.throws(() => withoutReady.push(audio), /voice_response_invalid/);
+
+  const sequenceGap = createVoiceStreamParser((result) => result);
+  sequenceGap.push(streamLine({ type: "ready", version: 1 }));
+  assert.throws(
+    () =>
+      sequenceGap.push(
+        streamLine({
+          type: "audio",
+          sequence: 1,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }),
+      ),
+    /voice_response_invalid/,
+  );
+
+  const truncated = createVoiceStreamParser((result) => result);
+  truncated.push(streamLine({ type: "ready", version: 1 }));
+  truncated.push(audio);
+  assert.throws(() => truncated.finish(), /voice_response_invalid/);
+});
+
+test("voice stream rejects odd PCM, extra fields, and anything after final", () => {
+  const oddPcm = createVoiceStreamParser((result) => result);
+  oddPcm.push(streamLine({ type: "ready", version: 1 }));
+  assert.throws(
+    () =>
+      oddPcm.push(
+        streamLine({
+          type: "audio",
+          sequence: 0,
+          audioBase64: "AQID",
+          sampleRateHz: 24_000,
+        }),
+      ),
+    /voice_response_invalid/,
+  );
+
+  const extraField = createVoiceStreamParser((result) => result);
+  assert.throws(
+    () =>
+      extraField.push(
+        streamLine({ type: "ready", version: 1, ignored: true }),
+      ),
+    /voice_response_invalid/,
+  );
+
+  const afterFinal = createVoiceStreamParser((result) => result);
+  afterFinal.push(streamLine({ type: "ready", version: 1 }));
+  afterFinal.push(
+    streamLine({
+      type: "final",
+      version: 1,
+      result: finalVoiceResult(),
+    }),
+  );
+  assert.throws(
+    () => afterFinal.push(streamLine({ type: "ready", version: 1 })),
+    /voice_response_invalid/,
+  );
+});
+
+test("stream bridge uses direct authenticated CORS with bounded PCM playback", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    bridge,
+    /https:\/\/kotae-api-r6kgkvtrmq-an\.a\.run\.app\/api\/v1\/voice\/turns:stream/u,
+  );
+  assert.doesNotMatch(
+    bridge,
+    /const VOICE_ENDPOINT = "\/api\/v1\/voice\/turns/u,
+  );
+  const fetchAt = bridge.indexOf("const response = await fetch(VOICE_ENDPOINT");
+  const fetchBlock = bridge.slice(fetchAt, fetchAt + 700);
+  assert.match(fetchBlock, /credentials: "omit"/u);
+  assert.match(fetchBlock, /mode: "cors"/u);
+  assert.match(fetchBlock, /Authorization: `Bearer \$\{idToken\}`/u);
+  assert.match(fetchBlock, /"X-Firebase-AppCheck": appCheckToken/u);
+  assert.match(bridge, /maximumTransportChunkBytes/u);
+  assert.match(bridge, /maximumResponseBytes/u);
+  assert.match(bridge, /new CustomEvent\("kotae:first-audio"/u);
+  assert.equal(VOICE_STREAM_LIMITS.maximumAudioChunkBytes, 1024 * 1024);
+  assert.equal(
+    VOICE_STREAM_LIMITS.maximumAudioTotalBytes,
+    16 * 1024 * 1024,
+  );
 });
 
 test("research discovery stays bounded, immutable, and explicitly unverified", () => {

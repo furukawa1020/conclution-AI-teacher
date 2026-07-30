@@ -128,6 +128,7 @@ impl CloudState {
 struct VoiceTurnResult {
     audio_base64: String,
     audio_mime_type: String,
+    streamed_audio: bool,
     session_state: String,
     detected_domain: String,
     assistance_target: String,
@@ -189,8 +190,10 @@ struct TurnEnd {
 
 #[cfg(target_arch = "wasm32")]
 mod cloud {
-    use super::{BridgeStatus, CloudState, DocumentInfo, TurnEnd, VoiceTurnResult};
-    use dioxus::prelude::{Signal, WritableExt};
+    use super::{
+        BridgeStatus, CloudState, DocumentInfo, TurnEnd, VoiceState, VoiceTurnResult,
+    };
+    use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
@@ -209,6 +212,20 @@ mod cloud {
         }
     }
 
+    pub(super) struct FirstAudioListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Drop for FirstAudioListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:first-audio",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
     #[wasm_bindgen]
     extern "C" {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = getStatus)]
@@ -222,12 +239,6 @@ mod cloud {
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = finishTurn)]
         async fn finish_turn_js(session_state: &str, turn_mode: &str) -> Result<JsValue, JsValue>;
-
-        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = playResponse)]
-        async fn play_response_js(
-            audio_base64: &str,
-            audio_mime_type: &str,
-        ) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = attachDocument)]
         async fn attach_document_js(input_id: &str) -> Result<JsValue, JsValue>;
@@ -277,16 +288,6 @@ mod cloud {
             .map_err(|_| "音声応答を確認できない　もう一度ためしてみて")
     }
 
-    pub async fn play_response(
-        audio_base64: &str,
-        audio_mime_type: &str,
-    ) -> Result<(), &'static str> {
-        play_response_js(audio_base64, audio_mime_type)
-            .await
-            .map(|_| ())
-            .map_err(user_message)
-    }
-
     pub async fn attach_document(input_id: &str) -> Result<DocumentInfo, &'static str> {
         let value = attach_document_js(input_id)
             .await
@@ -308,6 +309,24 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(DocumentClearListener { window, callback }))
+    }
+
+    pub fn install_first_audio_listener(
+        mut voice_state: Signal<VoiceState>,
+    ) -> Option<Rc<FirstAudioListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if *voice_state.peek() == VoiceState::Thinking {
+                voice_state.set(VoiceState::Speaking);
+            }
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:first-audio",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(FirstAudioListener { window, callback }))
     }
 
     pub fn stop_session() {
@@ -354,7 +373,7 @@ mod cloud {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
-    use super::{CloudState, DocumentInfo, VoiceTurnResult};
+    use super::{CloudState, DocumentInfo, VoiceState, VoiceTurnResult};
     use dioxus::prelude::Signal;
 
     #[derive(Clone)]
@@ -379,19 +398,18 @@ mod cloud {
         Err("WebAssembly版で使ってみて")
     }
 
-    pub async fn play_response(
-        _audio_base64: &str,
-        _audio_mime_type: &str,
-    ) -> Result<(), &'static str> {
-        Err("WebAssembly版で使ってみて")
-    }
-
     pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
     pub fn install_document_clear_listener(
         _document_info: Signal<Option<DocumentInfo>>,
+    ) -> Option<DocumentClearListener> {
+        None
+    }
+
+    pub fn install_first_audio_listener(
+        _voice_state: Signal<VoiceState>,
     ) -> Option<DocumentClearListener> {
         None
     }
@@ -533,7 +551,14 @@ fn submit_turn(
             }
         };
 
-        let spoke = !result.audio_base64.is_empty();
+        if !result.audio_base64.is_empty() || result.audio_mime_type != "audio/L16" {
+            cloud::stop_session();
+            voice_state.set(VoiceState::Error(
+                "音声応答を確認できない　もう一度ためしてみて",
+            ));
+            return;
+        }
+        let spoke = result.streamed_audio;
         let retry_intentional = next_turn_is_intentional(&result.route, spoke);
         session_state.set(result.session_state.clone());
         detected_domain.set(result.detected_domain.clone());
@@ -546,17 +571,8 @@ fn submit_turn(
             document_info.set(None);
         }
 
-        if spoke {
+        if spoke && *voice_state.peek() == VoiceState::Thinking {
             voice_state.set(VoiceState::Speaking);
-            if let Err(message) =
-                cloud::play_response(&result.audio_base64, &result.audio_mime_type).await
-            {
-                if *generation.peek() == operation {
-                    cloud::stop_session();
-                    voice_state.set(VoiceState::Error(message));
-                }
-                return;
-            }
         }
         if *generation.peek() != operation {
             return;
@@ -647,6 +663,8 @@ fn App() -> Element {
     let mut captions_visible = use_signal(|| false);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
+    let _first_audio_listener =
+        use_hook(|| cloud::install_first_audio_listener(voice_state));
     let cloud_status = use_resource(|| async { cloud::status().await });
 
     let state_snapshot = *voice_state.read();

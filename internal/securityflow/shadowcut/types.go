@@ -9,14 +9,15 @@ import "errors"
 const (
 	// SchemaVersion identifies the fixed-width canonical encoding used by this
 	// package.
-	SchemaVersion uint16 = 1
+	SchemaVersion uint16 = 2
 
 	MaxControls        = 16
 	MaxTraces          = 1_024
 	MaxNodesPerTrace   = 64
 	MaxEdgesPerTrace   = 128
 	MaxSourcesPerTrace = 16
-	MaxSinksPerTrace   = 16
+	MaxSinksPerTrace   = 1
+	maxSearchWork      = 50_000_000
 )
 
 var (
@@ -57,6 +58,7 @@ const (
 	EdgePropose
 	EdgeIssueGrant
 	EdgeConsume
+	EdgeToolCall
 	EdgeExecute
 	EdgeRespond
 	edgeKindLimit
@@ -99,6 +101,10 @@ const (
 	bindingLimit
 )
 
+// BindingRef is a trace-local, content-free equality witness. It is never a
+// UID, request ID, URL, query hash, or provider identifier.
+type BindingRef uint16
+
 // Control is a compile-time enforcement point. A model cannot add controls or
 // provide executable policy text.
 type Control uint8
@@ -131,12 +137,13 @@ const (
 
 // Node contains finite security labels only.
 type Node struct {
-	ID        NodeID
-	Kind      NodeKind
-	Integrity Integrity
-	Authority Authority
-	Requires  Authority
-	Binding   Binding
+	ID         NodeID
+	Kind       NodeKind
+	Integrity  Integrity
+	Authority  Authority
+	Requires   Authority
+	Binding    Binding
+	BindingRef BindingRef
 }
 
 // Edge contains finite provenance and enforcement labels only. An edge is

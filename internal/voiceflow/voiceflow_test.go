@@ -293,52 +293,86 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 ) {
 	t.Parallel()
 
-	speech := &fakeSpeech{
-		transcript: "この内容に答えてください",
-		confidence: 0.95,
-	}
-	agent := &fakeAgent{result: conversation.VoiceTurnResult{
-		Domain:             "other",
-		AssistanceTarget:   "assistant",
-		RespondentStage:    "none",
-		ResearchStatus:     "none",
-		ResearchRecords:    []conversation.ResearchRecord{},
-		Route:              "planner-unavailable",
-		StateToken:         "fresh-encrypted-state",
-		SpokenReply:        "今の話は聞き取れています。もう一度聞かせてください。",
-		NeedsClarification: true,
-		InterventionPolicy: "clarify",
-		Intervention: conversation.ArbiterDecision{
-			Act: "clarify",
+	for _, test := range []struct {
+		name             string
+		route            string
+		spokenReply      string
+		needsClarify     bool
+		ambient          bool
+		wantSynthesized  int
+		wantIntervention string
+	}{
+		{
+			name:             "intentional",
+			route:            "planner-unavailable",
+			spokenReply:      "今の話は聞き取れています。もう一度聞かせてください。",
+			needsClarify:     true,
+			wantSynthesized:  1,
+			wantIntervention: "clarify",
 		},
-	}}
-	pipeline, err := New(speech, agent)
-	if err != nil {
-		t.Fatal(err)
-	}
+		{
+			name:             "ambient",
+			route:            "planner-unavailable-silent",
+			ambient:          true,
+			wantSynthesized:  0,
+			wantIntervention: "silent",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	result, err := pipeline.Process(
-		context.Background(),
-		"uid",
-		httpapi.VoiceTurnInput{
-			Audio:    []byte("audio"),
-			MIMEType: "audio/webm",
-			Document: &httpapi.VoiceDocument{
-				MIMEType: "application/pdf",
-				Data:     []byte("%PDF"),
-			},
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Route != "planner-unavailable" ||
-		result.StateToken != "fresh-encrypted-state" ||
-		result.Caption != agent.result.SpokenReply ||
-		!result.NeedsPaper ||
-		speech.synthesizeCalls != 1 ||
-		speech.synthesizedText != agent.result.SpokenReply {
-		t.Fatalf("planner fallback result = %+v", result)
+			speech := &fakeSpeech{
+				transcript: "この内容に答えてください",
+				confidence: 0.95,
+			}
+			agent := &fakeAgent{result: conversation.VoiceTurnResult{
+				Domain:             "other",
+				AssistanceTarget:   "assistant",
+				RespondentStage:    "none",
+				ResearchStatus:     "none",
+				ResearchRecords:    []conversation.ResearchRecord{},
+				Route:              test.route,
+				StateToken:         "fresh-encrypted-state",
+				SpokenReply:        test.spokenReply,
+				NeedsClarification: test.needsClarify,
+				InterventionPolicy: "clarify",
+				Intervention: conversation.ArbiterDecision{
+					Act: test.wantIntervention,
+				},
+			}}
+			pipeline, err := New(speech, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := pipeline.Process(
+				context.Background(),
+				"uid",
+				httpapi.VoiceTurnInput{
+					Audio:    []byte("audio"),
+					MIMEType: "audio/webm",
+					Ambient:  test.ambient,
+					Document: &httpapi.VoiceDocument{
+						MIMEType: "application/pdf",
+						Data:     []byte("%PDF"),
+					},
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Route != test.route ||
+				result.StateToken != "fresh-encrypted-state" ||
+				result.Caption != test.spokenReply ||
+				!result.NeedsPaper ||
+				speech.synthesizeCalls != test.wantSynthesized {
+				t.Fatalf("planner fallback result = %+v", result)
+			}
+			if test.wantSynthesized > 0 &&
+				speech.synthesizedText != test.spokenReply {
+				t.Fatalf("synthesized text = %q", speech.synthesizedText)
+			}
+		})
 	}
 }
 

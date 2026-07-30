@@ -1204,20 +1204,33 @@ func TestAgentHighStakesDomainsAlwaysUsePrecision(t *testing.T) {
 }
 
 func TestAgentRejectsLowUrgencySafetyIntervention(t *testing.T) {
+	const secretDraft = "LOW-URGENCY-SAFETY-DRAFT-SECRET"
 	plan := validModelPlan()
 	plan.InterventionPolicy = "safety"
 	plan.Intervention.Urgency = 0.4
-	fake := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, plan)},
-		{body: encodeContract(t, plan.AnswerContract)},
-	}}
+	plan.SpokenReply = secretDraft
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
 	agent := newTestAgent(t, fake)
-	_, err := agent.Process(context.Background(), "uid-s", VoiceTurn{
+	result, err := agent.Process(context.Background(), "uid-s", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     "一般的な相談",
 	})
-	if !errors.Is(err, ErrModelOutputInvalid) {
-		t.Fatalf("low-urgency safety accepted: %v", err)
+	if err != nil ||
+		result.Route != "planner-unavailable" ||
+		result.SpokenReply != plannerUnavailableSpokenReply ||
+		!result.NeedsClarification ||
+		result.StateToken == "" ||
+		strings.Contains(result.SpokenReply, secretDraft) {
+		t.Fatalf("low-urgency safety did not fail closed: result=%#v err=%v", result, err)
+	}
+	if len(fake.calls) != 1 || fake.calls[0].model != DefaultFastModel {
+		t.Fatalf("hard safety guard retried or model-hopped: %#v", fake.calls)
+	}
+	state, err := agent.codec.open("uid-s", result.StateToken)
+	if err != nil || state.Turn != 1 {
+		t.Fatalf("fresh fallback state is invalid: state=%#v err=%v", state, err)
 	}
 }
 
@@ -2224,27 +2237,75 @@ func TestAgentStateTokenIsBoundToUIDBeforeGeneration(t *testing.T) {
 
 func TestAgentRejectsInvalidFastOutputAndSanitizesProviderError(t *testing.T) {
 	t.Run("unknown model field", func(t *testing.T) {
-		fake := &fakeGenerator{generations: []fakeGeneration{{body: `{"unexpected":true}`}}}
+		const secretDraft = "INVALID-FAST-DRAFT-SECRET"
+		invalid := `{"unexpected":"` + secretDraft + `"}`
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: invalid},
+			{body: invalid},
+			{body: invalid},
+		}}
 		agent := newTestAgent(t, fake)
-		_, err := agent.Process(context.Background(), "uid", VoiceTurn{
+		result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 			SchemaVersion: SchemaVersion,
 			Utterance:     "質問",
 		})
-		if !errors.Is(err, ErrModelOutputInvalid) {
-			t.Fatalf("got %v", err)
+		if err != nil ||
+			result.Route != "planner-unavailable" ||
+			result.SpokenReply != plannerUnavailableSpokenReply ||
+			!result.NeedsClarification ||
+			result.StateToken == "" ||
+			strings.Contains(result.SpokenReply, secretDraft) {
+			t.Fatalf("invalid planner output did not fail closed: result=%#v err=%v", result, err)
+		}
+		if len(fake.calls) != 3 ||
+			fake.calls[0].model != DefaultFastModel ||
+			fake.calls[1].model != DefaultFastModel ||
+			fake.calls[2].model != DefaultPrecisionModel {
+			t.Fatalf("unexpected structural recovery sequence: %#v", fake.calls)
+		}
+		state, err := agent.codec.open("uid", result.StateToken)
+		if err != nil || state.Turn != 1 {
+			t.Fatalf("fresh fallback state is invalid: state=%#v err=%v", state, err)
+		}
+		encodedState, err := json.Marshal(state)
+		if err != nil || strings.Contains(string(encodedState), secretDraft) {
+			t.Fatalf("invalid draft escaped into state: state=%s err=%v", encodedState, err)
 		}
 	})
 	t.Run("provider detail is not returned", func(t *testing.T) {
-		fake := &fakeGenerator{generations: []fakeGeneration{{
-			err: errors.New("provider leaked request body SECRET"),
-		}}}
+		const secretProviderDetail = "provider leaked request body SECRET"
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{err: errors.New(secretProviderDetail)},
+			{err: errors.New(secretProviderDetail)},
+		}}
 		agent := newTestAgent(t, fake)
-		_, err := agent.Process(context.Background(), "uid", VoiceTurn{
+		result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 			SchemaVersion: SchemaVersion,
 			Utterance:     "質問",
 		})
-		if !errors.Is(err, ErrModelUnavailable) || strings.Contains(err.Error(), "SECRET") {
-			t.Fatalf("unsanitized error: %v", err)
+		if err != nil ||
+			result.Route != "planner-unavailable" ||
+			result.SpokenReply != plannerUnavailableSpokenReply ||
+			!result.NeedsClarification ||
+			result.StateToken == "" ||
+			strings.Contains(result.SpokenReply, secretProviderDetail) {
+			t.Fatalf("provider failure was not sanitized: result=%#v err=%v", result, err)
+		}
+		if len(fake.calls) != 2 {
+			t.Fatalf("provider failure call count = %d; want two fast attempts", len(fake.calls))
+		}
+		for _, call := range fake.calls {
+			if call.model != DefaultFastModel {
+				t.Fatalf("provider failure model-hopped: %#v", fake.calls)
+			}
+		}
+		state, err := agent.codec.open("uid", result.StateToken)
+		if err != nil || state.Turn != 1 {
+			t.Fatalf("fresh fallback state is invalid: state=%#v err=%v", state, err)
+		}
+		encodedState, err := json.Marshal(state)
+		if err != nil || strings.Contains(string(encodedState), secretProviderDetail) {
+			t.Fatalf("provider detail escaped into state: state=%s err=%v", encodedState, err)
 		}
 	})
 }

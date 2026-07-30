@@ -45,13 +45,16 @@ const (
 	criticRecoveryTimeout             = 18 * time.Second
 	ordinaryCriticSequenceTimeout     = 8 * time.Second
 	highRiskCriticSequenceTimeout     = 24 * time.Second
+	voiceResponseReserve              = 5 * time.Second
 )
 
 var (
 	errCriticDeadline           = errors.New("conversation: critic deadline")
 	errCriticCanceled           = errors.New("conversation: critic canceled")
+	errCriticPromptBlocked      = errors.New("conversation: critic prompt blocked")
 	errCriticFinishSafety       = errors.New("conversation: critic safety finish")
 	errCriticFinishLimit        = errors.New("conversation: critic output limit")
+	errCriticFinishPolicy       = errors.New("conversation: critic policy finish")
 	errCriticResponseShape      = errors.New("conversation: critic response shape")
 	errCriticJSON               = errors.New("conversation: critic JSON")
 	errCriticContract           = errors.New("conversation: critic contract")
@@ -367,6 +370,27 @@ func (agent *vertexAgent) Process(
 				normalized.Ambient,
 			)
 		}
+		if !contextHasTimeBudget(
+			ctx,
+			plannerPrecisionRecoveryTimeout+
+				ordinaryCriticSequenceTimeout+
+				voiceResponseReserve,
+		) {
+			slog.WarnContext(
+				ctx,
+				"planner precision recovery skipped for response budget",
+				"failure_class", inferenceFailureClass(err),
+				"failure_stage", inferenceFailureStage(err),
+				"recovery_outcome", "skipped_budget",
+				"turn_mode", plannerTurnMode(normalized.Ambient),
+				"duration_ms", time.Since(plannerStarted).Milliseconds(),
+			)
+			return agent.completePlannerUnavailable(
+				uid,
+				state,
+				normalized.Ambient,
+			)
+		}
 
 		slog.WarnContext(
 			ctx,
@@ -452,7 +476,8 @@ func (agent *vertexAgent) Process(
 			"duration_ms", time.Since(plannerStarted).Milliseconds(),
 		)
 	}
-	if state.PendingAnswer.Active &&
+	if !plannerRecoveredWithPrecision &&
+		state.PendingAnswer.Active &&
 		fastPlan.AssistanceTarget == "respondent" &&
 		fastPlan.RespondentStage == "awaiting_answer" {
 		// A pending frame is only a hypothesis about what the next utterance
@@ -463,8 +488,12 @@ func (agent *vertexAgent) Process(
 		recoveryState.PendingAnswer = PendingAnswerFrame{
 			RequiredSlots: []answercontract.RequiredSlot{},
 		}
-		recoveredPlan, recoveryErr := agent.inferWithRetry(
+		pendingRecoveryCtx, cancelPendingRecovery := context.WithTimeout(
 			ctx,
+			fastInferenceSequenceTimeout,
+		)
+		recoveredPlan, recoveryErr := agent.inferWithRetry(
+			pendingRecoveryCtx,
 			agent.fastModel,
 			"fast-pending-recovery",
 			genai.ThinkingLevelLow,
@@ -472,23 +501,27 @@ func (agent *vertexAgent) Process(
 			recoveryState,
 			nil,
 		)
-		if recoveryErr != nil {
+		pendingRecoveryContextErr := pendingRecoveryCtx.Err()
+		cancelPendingRecovery()
+		if recoveryErr != nil || pendingRecoveryContextErr != nil {
+			if ctx.Err() != nil {
+				return VoiceTurnResult{}, ctx.Err()
+			}
 			if normalized.Ambient {
 				return agent.completeAmbientSilentFast(
 					uid,
-					recoveryState,
+					state,
 					fastPlan,
 				)
 			}
 			return agent.completeInterpretationClarification(
 				uid,
-				recoveryState,
+				state,
 				fastPlan,
 			)
 		}
 		state = recoveryState
 		fastPlan = recoveredPlan
-		plannerRecoveredWithPrecision = false
 	}
 	if canCompleteAmbientSilentFast(normalized, fastPlan) {
 		return agent.completeAmbientSilentFast(uid, state, fastPlan)
@@ -560,33 +593,58 @@ func (agent *vertexAgent) Process(
 			Outcome: answercontract.OutcomeKeep,
 		}
 	} else if !verificationUnavailable {
-		// Independence comes from a separate call, an isolated critic prompt,
-		// and withholding the draft's self-reported contract. Keep the critic
-		// on the bounded-latency model so ordinary answers do not depend on a
-		// preview precision model completing within the voice deadline.
-		assessment, criticErr := agent.auditAnswerWithRetry(
+		criticPolicy := criticPolicyFor(normalized, finalPlan, route)
+		if !contextHasTimeBudget(
 			ctx,
-			agent.fastModel,
-			criticPolicyFor(normalized, finalPlan, route),
-			normalized,
-			state,
-			finalPlan,
-		)
-		if criticErr != nil {
+			criticPolicy.sequenceTimeout+voiceResponseReserve,
+		) {
+			if ctx.Err() != nil {
+				return VoiceTurnResult{}, ctx.Err()
+			}
 			slog.WarnContext(
 				ctx,
-				"answer verification unavailable",
+				"answer verification skipped for response budget",
 				"failure_class",
-				criticFailureClass(criticErr),
+				"deadline",
 				"failure_stage",
-				criticFailureStage(criticErr),
+				"budget",
 				"critic_model_role",
 				"fast",
 			)
 			route = "verification-unavailable"
 			verificationUnavailable = true
 		} else {
-			finalPlan.answerAssessment = assessment
+			// Independence comes from a separate call, an isolated critic prompt,
+			// and withholding the draft's self-reported contract. Keep the critic
+			// on the bounded-latency model so ordinary answers do not depend on a
+			// preview precision model completing within the voice deadline.
+			assessment, criticErr := agent.auditAnswerWithRetry(
+				ctx,
+				agent.fastModel,
+				criticPolicy,
+				normalized,
+				state,
+				finalPlan,
+			)
+			if criticErr != nil {
+				if ctx.Err() != nil {
+					return VoiceTurnResult{}, ctx.Err()
+				}
+				slog.WarnContext(
+					ctx,
+					"answer verification unavailable",
+					"failure_class",
+					criticFailureClass(criticErr),
+					"failure_stage",
+					criticFailureStage(criticErr),
+					"critic_model_role",
+					"fast",
+				)
+				route = "verification-unavailable"
+				verificationUnavailable = true
+			} else {
+				finalPlan.answerAssessment = assessment
+			}
 		}
 	}
 
@@ -906,6 +964,17 @@ func plannerTurnMode(ambient bool) string {
 		return "ambient"
 	}
 	return "intentional"
+}
+
+func contextHasTimeBudget(ctx context.Context, required time.Duration) bool {
+	if required <= 0 {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(deadline) >= required
 }
 
 func canCompleteAmbientSilentFast(turn VoiceTurn, plan modelPlan) bool {
@@ -1709,6 +1778,12 @@ func (agent *vertexAgent) auditAnswer(
 }
 
 func criticFinishFailure(response *genai.GenerateContentResponse) error {
+	if response != nil && response.PromptFeedback != nil {
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errCriticPromptBlocked,
+		)
+	}
 	if response == nil || len(response.Candidates) != 1 ||
 		response.Candidates[0] == nil {
 		return nil
@@ -1724,7 +1799,7 @@ func criticFinishFailure(response *genai.GenerateContentResponse) error {
 	case genai.FinishReasonMaxTokens:
 		return errors.Join(ErrModelOutputInvalid, errCriticFinishLimit)
 	default:
-		return errors.Join(ErrModelOutputInvalid, errCriticResponseShape)
+		return errors.Join(ErrModelOutputInvalid, errCriticFinishPolicy)
 	}
 }
 
@@ -1783,8 +1858,10 @@ func canonicalizeAnswerContractDerivedFields(contract *answercontract.Contract) 
 func retryableCriticFailure(err error) bool {
 	if errors.Is(err, errCriticDeadline) ||
 		errors.Is(err, errCriticCanceled) ||
+		errors.Is(err, errCriticPromptBlocked) ||
 		errors.Is(err, errCriticFinishSafety) ||
-		errors.Is(err, errCriticFinishLimit) {
+		errors.Is(err, errCriticFinishLimit) ||
+		errors.Is(err, errCriticFinishPolicy) {
 		return false
 	}
 	return errors.Is(err, ErrModelUnavailable) ||
@@ -1794,8 +1871,12 @@ func retryableCriticFailure(err error) bool {
 }
 
 func recoverableCriticFailure(err error) bool {
-	if errors.Is(err, errCriticCanceled) ||
-		errors.Is(err, errCriticFinishSafety) {
+	if errors.Is(err, errCriticDeadline) ||
+		errors.Is(err, errCriticCanceled) ||
+		errors.Is(err, errCriticPromptBlocked) ||
+		errors.Is(err, errCriticFinishSafety) ||
+		errors.Is(err, errCriticFinishLimit) ||
+		errors.Is(err, errCriticFinishPolicy) {
 		return false
 	}
 	return errors.Is(err, ErrModelUnavailable) ||
@@ -1808,8 +1889,14 @@ func criticFailureClass(err error) string {
 		return "deadline"
 	case errors.Is(err, errCriticCanceled):
 		return "canceled"
+	case errors.Is(err, errCriticPromptBlocked):
+		return "prompt_blocked"
 	case errors.Is(err, errCriticFinishSafety):
 		return "safety"
+	case errors.Is(err, errCriticFinishLimit):
+		return "output_limit"
+	case errors.Is(err, errCriticFinishPolicy):
+		return "finish_policy"
 	case errors.Is(err, errCriticContract):
 		return "contract_invalid"
 	case errors.Is(err, ErrModelUnavailable):
@@ -1827,8 +1914,11 @@ func criticFailureStage(err error) string {
 		errors.Is(err, errCriticCanceled),
 		errors.Is(err, ErrModelUnavailable):
 		return "generate"
+	case errors.Is(err, errCriticPromptBlocked):
+		return "prompt_blocked"
 	case errors.Is(err, errCriticFinishSafety),
-		errors.Is(err, errCriticFinishLimit):
+		errors.Is(err, errCriticFinishLimit),
+		errors.Is(err, errCriticFinishPolicy):
 		return "finish"
 	case errors.Is(err, errCriticResponseShape):
 		return "response_shape"

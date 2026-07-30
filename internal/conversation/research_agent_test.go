@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -411,25 +412,32 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			plan := recentPapersPlan(test.query)
-			generator := &fakeGenerator{generations: []fakeGeneration{
-				{body: encodePlan(t, plan)},
-				{body: encodePlan(t, plan)},
-			}}
+			generator := &fakeGenerator{generations: []fakeGeneration{{
+				body: encodePlan(t, plan),
+			}}}
 			verifier := &fakeResearchVerifier{}
 			agent := newTestAgent(t, generator)
 			agent.research = verifier
 
-			_, err := agent.Process(context.Background(), "uid", VoiceTurn{
+			result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 				SchemaVersion: SchemaVersion,
 				Utterance:     test.utterance,
 				Ambient:       test.ambient,
 			})
-			if !errors.Is(err, ErrModelOutputInvalid) {
-				t.Fatalf("Process error = %v", err)
+			if err != nil {
+				t.Fatalf("Process: %v", err)
 			}
-			if len(verifier.calls) != 0 {
-				t.Fatalf("verifier called with %#v", verifier.calls)
-			}
+			assertResearchGuardPlannerFallback(
+				t,
+				agent,
+				generator,
+				verifier,
+				result,
+				test.ambient,
+				test.utterance,
+				test.query,
+				plan.SpokenReply,
+			)
 		})
 	}
 }
@@ -445,25 +453,32 @@ func TestAgentRejectsRespondentResearchCombinationBeforeVerifier(t *testing.T) {
 	plan.ResearchQuery = topic
 	plan.InterventionPolicy = "paper_check"
 	plan.Intervention.Act = "paper_check"
-	generator := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, plan)},
-		{body: encodePlan(t, plan)},
-	}}
+	generator := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
 	verifier := &fakeResearchVerifier{}
 	agent := newTestAgent(t, generator)
 	agent.research = verifier
 
-	_, err := agent.Process(context.Background(), "uid", VoiceTurn{
+	result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance: answerAttempt + "。" +
 			topic + "の最新論文を探して",
 	})
-	if !errors.Is(err, ErrModelOutputInvalid) {
-		t.Fatalf("Process error = %v", err)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
 	}
-	if len(verifier.calls) != 0 {
-		t.Fatalf("verifier called with %#v", verifier.calls)
-	}
+	assertResearchGuardPlannerFallback(
+		t,
+		agent,
+		generator,
+		verifier,
+		result,
+		false,
+		answerAttempt,
+		topic,
+		plan.SpokenReply,
+	)
 }
 
 func TestAgentDOILookupRequiresExplicitIntentBeforeVerifier(t *testing.T) {
@@ -477,24 +492,32 @@ func TestAgentDOILookupRequiresExplicitIntentBeforeVerifier(t *testing.T) {
 	plan.InterventionPolicy = "paper_check"
 	plan.SpokenReply = "DOIを確認します。"
 	plan.Intervention.Act = "paper_check"
-	generator := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, plan)},
-		{body: encodePlan(t, plan)},
-	}}
+	generator := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
 	verifier := &fakeResearchVerifier{}
 	agent := newTestAgent(t, generator)
 	agent.research = verifier
 
-	_, err := agent.Process(context.Background(), "uid", VoiceTurn{
+	utterance := "参考文献のDOIは" + doi + "です"
+	result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 		SchemaVersion: SchemaVersion,
-		Utterance:     "参考文献のDOIは" + doi + "です",
+		Utterance:     utterance,
 	})
-	if !errors.Is(err, ErrModelOutputInvalid) {
-		t.Fatalf("Process error = %v", err)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
 	}
-	if len(verifier.calls) != 0 {
-		t.Fatalf("verifier called with %#v", verifier.calls)
-	}
+	assertResearchGuardPlannerFallback(
+		t,
+		agent,
+		generator,
+		verifier,
+		result,
+		false,
+		utterance,
+		doi,
+		plan.SpokenReply,
+	)
 }
 
 func TestAuthorizedResearchQueryAcceptsExplicitIntentionalDOI(t *testing.T) {
@@ -720,6 +743,57 @@ func TestAgentResearchPropagatesParentCancellation(t *testing.T) {
 	}
 	if verifier.calls != 1 {
 		t.Fatalf("verifier calls = %d", verifier.calls)
+	}
+}
+
+func assertResearchGuardPlannerFallback(
+	t *testing.T,
+	agent *vertexAgent,
+	generator *fakeGenerator,
+	verifier *fakeResearchVerifier,
+	result VoiceTurnResult,
+	ambient bool,
+	forbidden ...string,
+) {
+	t.Helper()
+	wantRoute := "planner-unavailable"
+	wantSpokenReply := plannerUnavailableSpokenReply
+	wantClarification := true
+	if ambient {
+		wantRoute = "planner-unavailable-silent"
+		wantSpokenReply = ""
+		wantClarification = false
+	}
+	if result.Route != wantRoute ||
+		result.SpokenReply != wantSpokenReply ||
+		result.NeedsClarification != wantClarification ||
+		result.ResearchStatus != "none" ||
+		len(result.ResearchRecords) != 0 ||
+		result.StateToken == "" ||
+		len(generator.calls) != 1 {
+		t.Fatalf(
+			"unsafe research guard fallback: result=%#v calls=%#v",
+			result,
+			generator.calls,
+		)
+	}
+	if len(verifier.calls) != 0 {
+		t.Fatalf("verifier called with %#v", verifier.calls)
+	}
+	state, err := agent.codec.open("uid", result.StateToken)
+	if err != nil {
+		t.Fatalf("open fallback state: %v", err)
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal fallback state: %v", err)
+	}
+	for _, value := range forbidden {
+		if value != "" &&
+			(strings.Contains(result.SpokenReply, value) ||
+				strings.Contains(string(stateJSON), value)) {
+			t.Fatalf("invalid planner content escaped fallback: %q", value)
+		}
 	}
 }
 

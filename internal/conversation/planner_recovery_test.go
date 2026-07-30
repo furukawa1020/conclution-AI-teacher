@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 	"google.golang.org/genai"
@@ -49,6 +50,54 @@ func TestAgentRecoversRepeatedStructuralPlannerFailureWithPrecision(t *testing.T
 		fake.calls[3].model != DefaultFastModel ||
 		!strings.Contains(fake.calls[3].prompt, "<lac_critic_data>") {
 		t.Fatalf("unsafe or redundant recovery call sequence: %#v", fake.calls)
+	}
+}
+
+func TestAgentPrecisionRecoveryCannotEscalateToOutboundResearch(t *testing.T) {
+	const (
+		topic       = "量子エラー訂正"
+		secretDraft = "RECOVERED-RESEARCH-DRAFT-MUST-NOT-ESCAPE"
+	)
+	recovered := recentPapersPlan(topic)
+	recovered.SpokenReply = secretDraft
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: "{"},
+		{body: "{"},
+		{body: encodePlan(t, recovered)},
+	}}
+	verifier := &fakeResearchVerifier{}
+	agent := newTestAgent(t, fake)
+	agent.research = verifier
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-planner-recovery-research",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     japaneseRecentRequest(topic),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "planner-unavailable" ||
+		result.SpokenReply != plannerUnavailableSpokenReply ||
+		!result.NeedsClarification ||
+		result.ResearchStatus != "none" ||
+		len(result.ResearchRecords) != 0 ||
+		result.StateToken == "" ||
+		strings.Contains(result.SpokenReply, secretDraft) {
+		t.Fatalf("recovery escalated research capability: %#v", result)
+	}
+	if len(verifier.calls) != 0 {
+		t.Fatalf("precision recovery reached outbound verifier: %#v", verifier.calls)
+	}
+	if len(fake.calls) != 3 ||
+		fake.calls[0].model != DefaultFastModel ||
+		fake.calls[1].model != DefaultFastModel ||
+		fake.calls[2].model != DefaultPrecisionModel ||
+		strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
+		t.Fatalf("unexpected recovery call sequence: %#v", fake.calls)
 	}
 }
 
@@ -197,6 +246,185 @@ func TestAgentPlannerUnavailablePreservesStateAndAmbientSilence(t *testing.T) {
 		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
 		next.LastIntervention.Act != "silent" {
 		t.Fatalf("fallback changed semantic state: got=%#v want=%#v", next, initial)
+	}
+}
+
+func TestAgentPrecisionRecoveryDoesNotRepeatPendingPlannerOrPrecision(t *testing.T) {
+	recovered := respondentAwaitingPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: "{"},
+		{body: "{"},
+		{body: encodePlan(t, recovered)},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := plannerRecoveryState()
+	token, err := agent.codec.seal("uid-pending-precision-recovery", initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-pending-precision-recovery",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "導入目的をどう答えるか考えています",
+			StateToken:    token,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "respondent-awaiting-precision-recovery" ||
+		result.SpokenReply != respondentAwaitingSpokenReply ||
+		len(fake.calls) != 3 ||
+		fake.calls[0].model != DefaultFastModel ||
+		fake.calls[1].model != DefaultFastModel ||
+		fake.calls[2].model != DefaultPrecisionModel {
+		t.Fatalf(
+			"precision recovery repeated a pending planner: result=%#v calls=%#v",
+			result,
+			fake.calls,
+		)
+	}
+}
+
+func TestAgentFailedPendingRecoveryPreservesPendingState(t *testing.T) {
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, respondentAwaitingPlan())},
+		{err: errors.New("pending recovery provider detail one")},
+		{err: errors.New("pending recovery provider detail two")},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := plannerRecoveryState()
+	token, err := agent.codec.seal("uid-pending-failed-closed", initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-pending-failed-closed",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "今日は別の話をしたいです",
+			StateToken:    token,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "interpretation-clarify-fast" ||
+		result.StateToken == "" ||
+		len(fake.calls) != 3 {
+		t.Fatalf(
+			"pending recovery failure was not bounded: result=%#v calls=%#v",
+			result,
+			fake.calls,
+		)
+	}
+	next, err := agent.codec.open(
+		"uid-pending-failed-closed",
+		result.StateToken,
+	)
+	if err != nil {
+		t.Fatalf("open fallback state: %v", err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
+		next.SelfCorrectionGrace != initial.SelfCorrectionGrace {
+		t.Fatalf("failed pending recovery changed state: got=%#v want=%#v", next, initial)
+	}
+}
+
+func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
+	t.Run("planner precision recovery is skipped without post budget", func(t *testing.T) {
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: "{"},
+			{body: "{"},
+		}}
+		agent := newTestAgent(t, fake)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		result, err := agent.Process(
+			ctx,
+			"uid-planner-budget",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "この質問に答えてください",
+			},
+		)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "planner-unavailable" ||
+			result.SpokenReply != plannerUnavailableSpokenReply ||
+			len(fake.calls) != 2 {
+			t.Fatalf(
+				"planner consumed response reserve: result=%#v calls=%#v",
+				result,
+				fake.calls,
+			)
+		}
+	})
+
+	t.Run("critic is skipped without speech reserve", func(t *testing.T) {
+		plan := validModelPlan()
+		fake := &fakeGenerator{generations: []fakeGeneration{{
+			body: encodePlan(t, plan),
+		}}}
+		agent := newTestAgent(t, fake)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		result, err := agent.Process(
+			ctx,
+			"uid-critic-budget",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "結論を一つだけ教えてください",
+			},
+		)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "verification-unavailable" ||
+			result.SpokenReply !=
+				"回答の意味を安全に確認できませんでした。もう一度試してもらえますか？" ||
+			result.StateToken == "" ||
+			len(fake.calls) != 1 {
+			t.Fatalf(
+				"critic consumed speech reserve: result=%#v calls=%#v",
+				result,
+				fake.calls,
+			)
+		}
+	})
+}
+
+func plannerRecoveryState() conversationState {
+	return conversationState{
+		Turn: 4,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{"既存の目標"},
+			Claims:         []string{"既存の主張"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "導入目的",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention:    ArbiterDecision{Act: "clarify"},
 	}
 }
 

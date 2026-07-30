@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,6 +140,38 @@ func TestAgentResearchRecentPapersMapsBoundedDiscoveryMetadata(t *testing.T) {
 		!query.From.Equal(time.Date(2026, time.June, 29, 0, 0, 0, 0, time.UTC)) ||
 		!query.Until.Equal(time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("outbound query = %#v", query)
+	}
+}
+
+func TestAgentSpeculativeTurnCannotPerformOutboundResearch(t *testing.T) {
+	const topic = "量子エラー訂正"
+	plan := recentPapersPlan(topic)
+	generator := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodePlan(t, plan)},
+	}}
+	verifier := &fakeResearchVerifier{}
+	agent := newTestAgent(t, generator)
+	attachResearchVerifier(t, agent, verifier)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-speculative-research",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     japaneseRecentRequest(topic),
+			RequestID:     "0123456789abcdef01234567",
+			Speculative:   true,
+		},
+	)
+	if !errors.Is(err, ErrSpeculativeExternalAction) {
+		t.Fatalf("Process error = %v; want ErrSpeculativeExternalAction", err)
+	}
+	if !reflect.DeepEqual(result, VoiceTurnResult{}) {
+		t.Fatalf("speculative external action returned a result: %#v", result)
+	}
+	if len(verifier.calls) != 0 {
+		t.Fatalf("speculative turn made %d outbound research calls", len(verifier.calls))
 	}
 }
 

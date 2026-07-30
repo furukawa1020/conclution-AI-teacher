@@ -711,6 +711,9 @@ func (agent *vertexAgent) Process(
 	researchStatus := "none"
 	researchRecords := []ResearchRecord{}
 	researchReply := ""
+	if normalized.Speculative && finalPlan.ResearchAction != "none" {
+		return VoiceTurnResult{}, ErrSpeculativeExternalAction
+	}
 	if !precisionUnavailable && finalPlan.ResearchAction != "none" {
 		var researchErr error
 		researchStatus, researchRecords, researchReply, researchErr =

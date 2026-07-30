@@ -34,18 +34,29 @@ var (
 	ErrInvalidStateToken  = errors.New("conversation: invalid state token")
 	ErrModelUnavailable   = errors.New("conversation: model unavailable")
 	ErrModelOutputInvalid = errors.New("conversation: invalid model output")
+	// ErrSpeculativeExternalAction means a provisional transcript asked for
+	// an outbound action. Callers must discard that provisional run and repeat
+	// the finalized turn non-speculatively; provisional audio must never be
+	// released.
+	ErrSpeculativeExternalAction = errors.New(
+		"conversation: speculative turn requires an external action",
+	)
 )
 
 // VoiceTurn is the semantic input to the agent after speech recognition.
 // Ambient distinguishes passive transcript fragments from an intentional user turn.
 // Process consumes PDF.Data and clears the caller-provided byte slice before returning.
 type VoiceTurn struct {
-	SchemaVersion int        `json:"schemaVersion"`
-	Utterance     string     `json:"utterance"`
-	StateToken    string     `json:"stateToken,omitempty"`
-	RequestID     string     `json:"-"`
-	Ambient       bool       `json:"ambient,omitempty"`
-	PDF           *InlinePDF `json:"pdf,omitempty"`
+	SchemaVersion int    `json:"schemaVersion"`
+	Utterance     string `json:"utterance"`
+	StateToken    string `json:"stateToken,omitempty"`
+	RequestID     string `json:"-"`
+	Ambient       bool   `json:"ambient,omitempty"`
+	// Speculative permits pure model computation while speech recognition is
+	// still provisional. It never widens authority: outbound research and any
+	// future executable action must fail before execution.
+	Speculative bool       `json:"-"`
+	PDF         *InlinePDF `json:"pdf,omitempty"`
 }
 
 type InlinePDF struct {

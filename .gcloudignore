@@ -5,6 +5,7 @@
 .tools
 .cache
 .gocache-*
+.tmp-go-cache-*
 target
 dist
 apps

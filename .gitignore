@@ -2,6 +2,7 @@
 .tools/
 .cache/
 .gocache-*/
+.tmp-go-cache-*/
 bin/
 coverage.out
 *.test

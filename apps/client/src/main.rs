@@ -508,7 +508,6 @@ fn arm_listening(
     operation: u64,
     announce_permission: bool,
     turn_mode: VoiceTurnMode,
-    intentional_retry_available: bool,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     session_state: Signal<String>,
@@ -569,20 +568,13 @@ fn arm_listening(
                     caption,
                 );
             } else {
-                // A transport/capture miss does not consume the explicit
-                // gesture. Preserve it for one bounded replacement window;
-                // later automatic listening remains foreground-only.
-                let replacement_mode =
-                    if turn_mode == VoiceTurnMode::Intentional && intentional_retry_available {
-                        VoiceTurnMode::Intentional
-                    } else {
-                        VoiceTurnMode::Foreground
-                    };
+                // The explicit gesture authorizes only this finite recording
+                // window. Any automatically opened replacement can expect a
+                // reply, but it must not inherit intentional-turn authority.
                 arm_listening(
                     operation,
                     false,
-                    replacement_mode,
-                    false,
+                    VoiceTurnMode::Foreground,
                     voice_state,
                     generation,
                     session_state,
@@ -650,7 +642,6 @@ fn resume_foreground_interruption(
                 operation,
                 false,
                 VoiceTurnMode::Foreground,
-                false,
                 voice_state,
                 generation,
                 session_state,
@@ -780,7 +771,6 @@ fn submit_turn(
             operation,
             false,
             VoiceTurnMode::Foreground,
-            false,
             voice_state,
             generation,
             session_state,
@@ -814,7 +804,6 @@ fn start_or_resume(
         operation,
         true,
         turn_mode_for_gesture_epoch(true),
-        true,
         voice_state,
         generation,
         session_state,

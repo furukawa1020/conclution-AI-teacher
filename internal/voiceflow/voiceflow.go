@@ -19,7 +19,7 @@ import (
 const (
 	minUsableTranscriptConfidence = 0.65
 	minSpeculativeStability       = 0.85
-	minSpeculativeCandidateRunes  = 6
+	minSpeculativeCandidateRunes  = 8
 	minSpeculativeStableDuration  = 160 * time.Millisecond
 	maxSpeculativeTTSBufferBytes  = 24_000
 	lowConfidencePrompt           = "今の一文だけ、もう一度聞かせてください。"
@@ -692,11 +692,6 @@ func (p *Pipeline) processLive(
 			time.Since(synthesisStarted).Milliseconds()
 		if synthesisErr != nil ||
 			audioMIME != speechio.StreamingAudioContentType {
-			// Once synthesis has started, never return the audited state beside
-			// a failed audio stream. In particular, callers other than the
-			// WebSocket transport must not observe a state token after partial
-			// audio delivery.
-			result = httpapi.VoiceTurnResult{}
 			result.LiveTimings = liveTimings()
 			return result, httpapi.NewVoicePipelineFailure(
 				httpapi.VoicePipelineStageSynthesize,

@@ -30,6 +30,7 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
   maximumSocketBufferedBytes: 16 * 1024,
   outboundChunkBytes: 640,
   confirmedSpeechLeadInMs: 100,
+  handoffReadyTimeoutMs: 450,
   readyTimeoutMs: 4_000,
   terminalCloseTimeoutMs: 1_500,
 });

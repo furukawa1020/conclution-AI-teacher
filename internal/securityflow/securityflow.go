@@ -44,7 +44,10 @@ const (
 type SourceSet uint16
 
 const (
-	SourceCurrentUserSpeech SourceSet = 1 << iota
+	// SourceDeclaredIntentionalAudio means only that an App Check-authenticated
+	// application request declared this turn intentional. It is not evidence of
+	// speaker identity, liveness, or resistance to replayed audio.
+	SourceDeclaredIntentionalAudio SourceSet = 1 << iota
 	SourceAmbientSpeech
 	SourcePDF
 	SourceConversationState
@@ -52,7 +55,7 @@ const (
 	SourceToolOutput
 )
 
-const allSources = SourceCurrentUserSpeech |
+const allSources = SourceDeclaredIntentionalAudio |
 	SourceAmbientSpeech |
 	SourcePDF |
 	SourceConversationState |
@@ -102,9 +105,10 @@ type DefenseEvent struct {
 	Sources  SourceSet
 }
 
-// Scope binds authority to one authenticated user, encrypted conversation and
-// server-generated request. Scope values are never copied into grants, leases
-// or DefenseEvent.
+// Scope binds authority to one authenticated application principal, encrypted
+// conversation and server-generated request. In the current frontend the UID
+// is anonymous Firebase Auth, not a verified natural person. Scope values are
+// never copied into grants, leases or DefenseEvent.
 type Scope struct {
 	UID       string
 	SessionID string
@@ -141,9 +145,10 @@ func (ActionProposal) MarshalJSON() ([]byte, error) {
 	return []byte(`"securityflow.ActionProposal{redacted}"`), nil
 }
 
-// CurrentUserSpeech is an opaque, one-shot authority grant. Its fields are
+// DeclaredIntentionalAudioGrant is an opaque, one-shot request authority grant.
+// It does not attest speaker identity or audio liveness. Its fields are
 // unexported so JSON/model output cannot manufacture it.
-type CurrentUserSpeech struct {
+type DeclaredIntentionalAudioGrant struct {
 	issuer    [nonceBytes]byte
 	nonce     [nonceBytes]byte
 	scope     [sha256.Size]byte
@@ -156,14 +161,14 @@ type CurrentUserSpeech struct {
 	signature [sha256.Size]byte
 }
 
-func (CurrentUserSpeech) String() string {
-	return "securityflow.CurrentUserSpeech{redacted}"
+func (DeclaredIntentionalAudioGrant) String() string {
+	return "securityflow.DeclaredIntentionalAudioGrant{redacted}"
 }
-func (CurrentUserSpeech) GoString() string {
-	return "securityflow.CurrentUserSpeech{redacted}"
+func (DeclaredIntentionalAudioGrant) GoString() string {
+	return "securityflow.DeclaredIntentionalAudioGrant{redacted}"
 }
-func (CurrentUserSpeech) MarshalJSON() ([]byte, error) {
-	return []byte(`"securityflow.CurrentUserSpeech{redacted}"`), nil
+func (DeclaredIntentionalAudioGrant) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.DeclaredIntentionalAudioGrant{redacted}"`), nil
 }
 
 // Lease is an opaque one-shot execution capability.
@@ -359,7 +364,7 @@ func (guard *Guard) ProposeCrossref(
 		sources == 0 ||
 		sources&^allSources != 0 ||
 		!sources.Has(SourceModelOutput) ||
-		!sources.Has(SourceCurrentUserSpeech) ||
+		!sources.Has(SourceDeclaredIntentionalAudio) ||
 		sources.Has(SourceAmbientSpeech) {
 		return ActionProposal{}, event, ErrDenied
 	}
@@ -376,31 +381,32 @@ func (guard *Guard) ProposeCrossref(
 	}, event, nil
 }
 
-// BindCurrentUserSpeechForCrossref is called only after trusted deterministic
-// parsing has rebound the proposal to the authenticated, intentional current
-// speech. Data from PDF, state, tools or models cannot call this method.
-func (guard *Guard) BindCurrentUserSpeechForCrossref(
+// BindDeclaredIntentionalAudioForCrossref is called after deterministic parsing
+// has rebound the proposal to the current nonambient transcript. It establishes
+// request authority, not speaker authentication; future speaker/liveness proof
+// must be a separate required capability.
+func (guard *Guard) BindDeclaredIntentionalAudioForCrossref(
 	scope Scope,
 	query research.Query,
 	ttl time.Duration,
-) (CurrentUserSpeech, DefenseEvent, error) {
+) (DeclaredIntentionalAudioGrant, DefenseEvent, error) {
 	event := guard.event(
 		ActionCrossrefDiscovery,
 		DecisionDeny,
 		ReasonInvalidAuthority,
-		SourceCurrentUserSpeech,
+		SourceDeclaredIntentionalAudio,
 	)
 	if guard == nil || !validScope(scope) || !guard.validTTL(ttl) {
 		event.Reason = ReasonInvalidScope
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	args, err := guard.queryDigest(query)
 	if err != nil {
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	now := guard.now().UTC()
 	scopeDigest := guard.scopeDigest(scope)
-	grant := CurrentUserSpeech{
+	grant := DeclaredIntentionalAudioGrant{
 		issuer:    guard.issuer,
 		scope:     scopeDigest,
 		args:      args,
@@ -408,10 +414,10 @@ func (guard *Guard) BindCurrentUserSpeechForCrossref(
 		action:    ActionCrossrefDiscovery,
 		issuedAt:  now.UnixNano(),
 		expiresAt: now.Add(ttl).UnixNano(),
-		authority: SourceCurrentUserSpeech,
+		authority: SourceDeclaredIntentionalAudio,
 	}
 	if err := guard.readRandom(grant.nonce[:]); err != nil {
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	grant.signature = guard.signGrant(grant)
 
@@ -424,19 +430,19 @@ func (guard *Guard) BindCurrentUserSpeechForCrossref(
 	)
 	if _, exists := guard.issued[issuance]; exists {
 		event.Reason = ReasonReplay
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	if guard.outstandingLocked()+2 > maxOutstandingRecords {
 		event.Reason = ReasonCapacity
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	if _, exists := guard.grants[grant.nonce]; exists {
 		event.Reason = ReasonTampered
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	if _, exists := guard.leases[grant.nonce]; exists {
 		event.Reason = ReasonTampered
-		return CurrentUserSpeech{}, event, ErrDenied
+		return DeclaredIntentionalAudioGrant{}, event, ErrDenied
 	}
 	guard.issued[issuance] = now.Add(guard.issuanceTTL).UnixNano()
 	guard.grants[grant.nonce] = grant.expiresAt
@@ -446,7 +452,7 @@ func (guard *Guard) BindCurrentUserSpeechForCrossref(
 }
 
 func (guard *Guard) MintCrossref(
-	grant CurrentUserSpeech,
+	grant DeclaredIntentionalAudioGrant,
 	scope Scope,
 	proposal ActionProposal,
 	ttl time.Duration,
@@ -462,7 +468,7 @@ func (guard *Guard) MintCrossref(
 		!guard.validTTL(ttl) ||
 		proposal.action != ActionCrossrefDiscovery ||
 		!proposal.sources.Has(SourceModelOutput) ||
-		!proposal.sources.Has(SourceCurrentUserSpeech) ||
+		!proposal.sources.Has(SourceDeclaredIntentionalAudio) ||
 		proposal.sources.Has(SourceAmbientSpeech) {
 		return Lease{}, event, ErrDenied
 	}
@@ -473,7 +479,7 @@ func (guard *Guard) MintCrossref(
 	switch {
 	case grant.issuer != guard.issuer ||
 		grant.action != ActionCrossrefDiscovery ||
-		grant.authority != SourceCurrentUserSpeech ||
+		grant.authority != SourceDeclaredIntentionalAudio ||
 		grant.policy != guard.policyDigest ||
 		!hmac.Equal(grant.signature[:], expectedGrantSignature[:]):
 		event.Reason = ReasonTampered
@@ -551,7 +557,7 @@ func (guard *Guard) ConsumeCrossref(
 		!validScope(scope) ||
 		proposal.action != ActionCrossrefDiscovery ||
 		!proposal.sources.Has(SourceModelOutput) ||
-		!proposal.sources.Has(SourceCurrentUserSpeech) ||
+		!proposal.sources.Has(SourceDeclaredIntentionalAudio) ||
 		proposal.sources.Has(SourceAmbientSpeech) {
 		return event, ErrDenied
 	}
@@ -664,7 +670,9 @@ func (guard *Guard) keyedDigest(parts ...[]byte) [sha256.Size]byte {
 	return result
 }
 
-func (guard *Guard) signGrant(grant CurrentUserSpeech) [sha256.Size]byte {
+func (guard *Guard) signGrant(
+	grant DeclaredIntentionalAudioGrant,
+) [sha256.Size]byte {
 	var envelope bytes.Buffer
 	envelope.WriteString("kotae-authority-grant-v1\x00")
 	envelope.Write(grant.issuer[:])

@@ -23,6 +23,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/securityflow"
+	"golang.org/x/text/unicode/norm"
 	"google.golang.org/genai"
 )
 
@@ -80,6 +81,7 @@ var (
 	errInferenceResearchGuard   = errors.New("conversation: inference research guard")
 	errInferenceDocumentGuard   = errors.New("conversation: inference document guard")
 	errInferenceArbiterGuard    = errors.New("conversation: inference arbiter guard")
+	errInferenceSpeechActuator  = errors.New("conversation: inference speech actuator guard")
 	errInferenceAnswerContract  = errors.New("conversation: inference answer contract")
 	errInferenceStateDelta      = errors.New("conversation: inference state delta")
 	errResearchCapabilityDenied = errors.New("conversation: research capability denied")
@@ -800,7 +802,10 @@ func (agent *vertexAgent) Process(
 	graph := sanitizeGraph(state.Graph, normalized.Utterance)
 	pendingAnswer := state.PendingAnswer
 	nextSelfCorrectionGrace := finalPlan.SelfCorrectionGrace
-	if verificationUnavailable {
+	// Ambient audio may be a television, nearby speaker, replay, or another
+	// person. It can trigger a bounded safety response, but it cannot author
+	// semantic cross-turn memory until speaker/liveness provenance exists.
+	if verificationUnavailable || normalized.Ambient {
 		nextSelfCorrectionGrace = state.SelfCorrectionGrace
 	} else {
 		graph = mergeGraph(state.Graph, finalPlan.ThoughtStateDelta, normalized.Utterance)
@@ -1255,7 +1260,7 @@ func (agent *vertexAgent) performResearch(
 	if err != nil {
 		return agent.denyResearchCapability(ctx, event)
 	}
-	authority, event, err := agent.security.BindCurrentUserSpeechForCrossref(
+	authority, event, err := agent.security.BindDeclaredIntentionalAudioForCrossref(
 		scope,
 		query,
 		researchAuthorityGrantTTL,
@@ -1354,7 +1359,7 @@ func (agent *vertexAgent) denyResearchCapability(
 }
 
 func researchInfluenceSources(turn VoiceTurn) securityflow.SourceSet {
-	sources := securityflow.SourceCurrentUserSpeech |
+	sources := securityflow.SourceDeclaredIntentionalAudio |
 		securityflow.SourceModelOutput
 	if turn.Ambient {
 		sources |= securityflow.SourceAmbientSpeech
@@ -1766,6 +1771,7 @@ func precisionPlannerRecoveryAllowed(err error) bool {
 		errors.Is(err, errInferenceResearchGuard) ||
 		errors.Is(err, errInferenceDocumentGuard) ||
 		errors.Is(err, errInferenceArbiterGuard) ||
+		errors.Is(err, errInferenceSpeechActuator) ||
 		errors.Is(err, errInferenceStateDelta) {
 		return false
 	}
@@ -1821,6 +1827,8 @@ func inferenceFailureStage(err error) string {
 		return "document_guard"
 	case errors.Is(err, errInferenceArbiterGuard):
 		return "arbiter_guard"
+	case errors.Is(err, errInferenceSpeechActuator):
+		return "speech_actuator_guard"
 	case errors.Is(err, errInferenceAnswerContract):
 		return "answer_contract"
 	case errors.Is(err, errInferenceStateDelta):
@@ -1941,7 +1949,7 @@ func (agent *vertexAgent) auditAnswer(
 		)
 	}
 	if assessment.Outcome == answercontract.OutcomeRestructure &&
-		(containsUnspeakableMarkup(assessment.ReconstructedAnswer) ||
+		(unsafeSpeechActuatorText(assessment.ReconstructedAnswer) ||
 			utf8.RuneCountInString(assessment.ReconstructedAnswer) > MaxSpokenReplyRunes) {
 		return answercontract.Assessment{}, errors.Join(
 			ErrModelOutputInvalid,
@@ -2214,12 +2222,6 @@ func normalizeAndValidatePlan(
 			errInferenceDocumentGuard,
 		)
 	}
-	if containsUnspeakableMarkup(plan.SpokenReply) {
-		return errors.Join(
-			ErrModelOutputInvalid,
-			errInferencePlanEnvelope,
-		)
-	}
 	decision := ArbiterDecision{
 		Benefit:          plan.Intervention.Benefit,
 		InterruptionCost: plan.Intervention.InterruptionCost,
@@ -2244,6 +2246,12 @@ func normalizeAndValidatePlan(
 		return errors.Join(
 			ErrModelOutputInvalid,
 			errInferenceArbiterGuard,
+		)
+	}
+	if unsafeSpeechActuatorText(plan.SpokenReply) {
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceSpeechActuator,
 		)
 	}
 	if decision.Act == "silent" {
@@ -2649,6 +2657,11 @@ var (
 	)
 	stateLongNumberPattern  = regexp.MustCompile(`\d(?:[\s().+_-]*\d){6,}`)
 	stateOpaqueTokenPattern = regexp.MustCompile(`(?:[A-Za-z0-9_-]{24,}|[A-Fa-f0-9]{32,})`)
+	speechCredentialPattern = regexp.MustCompile(
+		`(?i)(?:authorization\s*:\s*bearer|` +
+			`(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|` +
+			`id[-_ ]?token|password|passwd|secret)\s*[:=]\s*\S+)`,
+	)
 )
 
 func containsSensitiveStateText(value string) bool {
@@ -2681,7 +2694,7 @@ func exactlyOneQuestion(candidate string) string {
 		return "何をいちばん知りたいか、もう少し具体的に教えてもらえますか？"
 	}
 	candidate = strings.TrimSpace(candidate[:index+width])
-	if candidate == "" || containsUnspeakableMarkup(candidate) {
+	if candidate == "" || unsafeSpeechActuatorText(candidate) {
 		return "何をいちばん知りたいか、もう少し具体的に教えてもらえますか？"
 	}
 	return candidate
@@ -2693,6 +2706,42 @@ func containsUnspeakableMarkup(value string) bool {
 		strings.Contains(lower, "https://") ||
 		strings.Contains(lower, "<speak") ||
 		strings.Contains(value, "```")
+}
+
+// unsafeSpeechActuatorText treats synthesized audio as an actuator, not merely
+// display text. It blocks common cross-device wake words and bounded credential
+// patterns before either TTS or its mirrored caption can be produced. This is a
+// deterministic guard, not complete PII removal or speaker authentication.
+func unsafeSpeechActuatorText(value string) bool {
+	if containsUnspeakableMarkup(value) ||
+		stateEmailPattern.MatchString(value) ||
+		stateLongNumberPattern.MatchString(value) ||
+		stateOpaqueTokenPattern.MatchString(value) ||
+		speechCredentialPattern.MatchString(value) {
+		return true
+	}
+	normalized := strings.ToLower(norm.NFKC.String(value))
+	var compact strings.Builder
+	for _, char := range normalized {
+		if unicode.IsLetter(char) || unicode.IsNumber(char) {
+			compact.WriteRune(char)
+		}
+	}
+	speech := compact.String()
+	for _, wakeWord := range []string{
+		"heysiri", "siri", "ヘイシリ", "へいしり",
+		"okgoogle", "okaygoogle", "heygoogle",
+		"オーケーグーグル", "オッケーグーグル",
+		"ねえグーグル", "ねぇグーグル",
+		"alexa", "アレクサ", "あれくさ",
+		"cortana", "コルタナ",
+		"bixby", "ビクスビー",
+	} {
+		if strings.Contains(speech, wakeWord) {
+			return true
+		}
+	}
+	return false
 }
 
 func validUnitInterval(value float64) bool {

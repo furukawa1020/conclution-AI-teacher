@@ -185,7 +185,7 @@ func TestAgentResearchUnavailableReturnsNoRecords(t *testing.T) {
 func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
 	const (
 		topic       = "量子エラー訂正"
-		secretDraft = "MODEL-RESEARCH-DRAFT-MUST-NOT-ESCAPE"
+		secretDraft = "モデルが作った未検証の研究回答は出してはいけない"
 	)
 	for _, test := range []struct {
 		name      string

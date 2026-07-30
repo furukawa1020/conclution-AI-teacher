@@ -40,24 +40,36 @@ func (verifier *panicVerifier) Verify(
 	panic("PRIVATE-QUERY-MUST-NOT-ESCAPE")
 }
 
+type atomicVerifier struct {
+	calls atomic.Int32
+}
+
+func (verifier *atomicVerifier) Verify(
+	_ context.Context,
+	query research.Query,
+) (research.Verification, error) {
+	verifier.calls.Add(1)
+	return research.Verification{QueryKind: query.Kind}, nil
+}
+
 func TestCrossrefLeaseRequiresBoundCurrentSpeechAndIsOneShot(t *testing.T) {
 	guard, now := newTestGuard(t)
 	scope := testScope()
 	query := testQuery(t, "quantum error correction")
 	proposal, _, err := guard.ProposeCrossref(
 		query,
-		SourceCurrentUserSpeech|SourceModelOutput|SourcePDF,
+		SourceDeclaredIntentionalAudio|SourceModelOutput|SourcePDF,
 	)
 	if err != nil {
 		t.Fatalf("ProposeCrossref: %v", err)
 	}
-	grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+	grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
 		scope,
 		query,
 		2*time.Second,
 	)
 	if err != nil {
-		t.Fatalf("BindCurrentUserSpeechForCrossref: %v", err)
+		t.Fatalf("BindDeclaredIntentionalAudioForCrossref: %v", err)
 	}
 	lease, _, err := guard.MintCrossref(
 		grant,
@@ -90,12 +102,12 @@ func TestCrossrefExecutorEnforcesLeaseAndFinalArgumentBinding(t *testing.T) {
 	otherQuery := testQuery(t, "protein folding")
 	proposal, _, err := guard.ProposeCrossref(
 		query,
-		SourceCurrentUserSpeech|SourceModelOutput|SourcePDF,
+		SourceDeclaredIntentionalAudio|SourceModelOutput|SourcePDF,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+	grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
 		scope,
 		query,
 		2*time.Second,
@@ -254,12 +266,12 @@ func TestCrossrefExecutorNormalizesProviderFailureAndPanic(t *testing.T) {
 			query := testQuery(t, "quantum error correction")
 			proposal, _, err := guard.ProposeCrossref(
 				query,
-				SourceCurrentUserSpeech|SourceModelOutput,
+				SourceDeclaredIntentionalAudio|SourceModelOutput,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+			grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
 				scope,
 				query,
 				2*time.Second,
@@ -328,14 +340,14 @@ func TestCrossrefLeaseRejectsAuthorityAndArgumentEscalation(t *testing.T) {
 	otherQuery := testQuery(t, "protein folding")
 	proposal, _, err := guard.ProposeCrossref(
 		query,
-		SourceCurrentUserSpeech|SourceModelOutput,
+		SourceDeclaredIntentionalAudio|SourceModelOutput,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	otherProposal, _, err := guard.ProposeCrossref(
 		otherQuery,
-		SourceCurrentUserSpeech|
+		SourceDeclaredIntentionalAudio|
 			SourceModelOutput|
 			SourceConversationState,
 	)
@@ -345,7 +357,7 @@ func TestCrossrefLeaseRejectsAuthorityAndArgumentEscalation(t *testing.T) {
 
 	t.Run("no current speech authority", func(t *testing.T) {
 		_, event, err := guard.MintCrossref(
-			CurrentUserSpeech{},
+			DeclaredIntentionalAudioGrant{},
 			scope,
 			proposal,
 			time.Second,
@@ -357,7 +369,7 @@ func TestCrossrefLeaseRejectsAuthorityAndArgumentEscalation(t *testing.T) {
 	})
 
 	t.Run("argument substitution", func(t *testing.T) {
-		grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+		grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
 			scope,
 			query,
 			2*time.Second,
@@ -378,7 +390,15 @@ func TestCrossrefLeaseRejectsAuthorityAndArgumentEscalation(t *testing.T) {
 	})
 
 	t.Run("grant replay", func(t *testing.T) {
-		grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+		replayGuard, _ := newTestGuard(t)
+		replayProposal, _, err := replayGuard.ProposeCrossref(
+			query,
+			SourceDeclaredIntentionalAudio|SourceModelOutput,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grant, _, err := replayGuard.BindDeclaredIntentionalAudioForCrossref(
 			scope,
 			query,
 			2*time.Second,
@@ -386,18 +406,18 @@ func TestCrossrefLeaseRejectsAuthorityAndArgumentEscalation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := guard.MintCrossref(
+		if _, _, err := replayGuard.MintCrossref(
 			grant,
 			scope,
-			proposal,
+			replayProposal,
 			time.Second,
 		); err != nil {
 			t.Fatal(err)
 		}
-		_, event, err := guard.MintCrossref(
+		_, event, err := replayGuard.MintCrossref(
 			grant,
 			scope,
-			proposal,
+			replayProposal,
 			time.Second,
 		)
 		if !errors.Is(err, ErrDenied) || event.Reason != ReasonReplay {
@@ -415,12 +435,12 @@ func TestCrossrefLeaseBindsUIDSessionRequestAndIntegrity(t *testing.T) {
 			query := testQuery(t, "quantum error correction")
 			proposal, _, err := guard.ProposeCrossref(
 				query,
-				SourceCurrentUserSpeech|SourceModelOutput,
+				SourceDeclaredIntentionalAudio|SourceModelOutput,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+			grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
 				scope,
 				query,
 				2*time.Second,
@@ -460,9 +480,9 @@ func TestCrossrefLeaseBindsUIDSessionRequestAndIntegrity(t *testing.T) {
 		query := testQuery(t, "quantum error correction")
 		proposal, _, _ := guard.ProposeCrossref(
 			query,
-			SourceCurrentUserSpeech|SourceModelOutput,
+			SourceDeclaredIntentionalAudio|SourceModelOutput,
 		)
-		grant, _, _ := guard.BindCurrentUserSpeechForCrossref(
+		grant, _, _ := guard.BindDeclaredIntentionalAudioForCrossref(
 			scope,
 			query,
 			2*time.Second,
@@ -488,9 +508,9 @@ func TestCrossrefLeaseExpiresAndConcurrentCopiesHaveOneWinner(t *testing.T) {
 		query := testQuery(t, "quantum error correction")
 		proposal, _, _ := guard.ProposeCrossref(
 			query,
-			SourceCurrentUserSpeech|SourceModelOutput,
+			SourceDeclaredIntentionalAudio|SourceModelOutput,
 		)
-		grant, _, _ := guard.BindCurrentUserSpeechForCrossref(
+		grant, _, _ := guard.BindDeclaredIntentionalAudioForCrossref(
 			scope,
 			query,
 			time.Second,
@@ -514,9 +534,9 @@ func TestCrossrefLeaseExpiresAndConcurrentCopiesHaveOneWinner(t *testing.T) {
 		query := testQuery(t, "quantum error correction")
 		proposal, _, _ := guard.ProposeCrossref(
 			query,
-			SourceCurrentUserSpeech|SourceModelOutput,
+			SourceDeclaredIntentionalAudio|SourceModelOutput,
 		)
-		grant, _, _ := guard.BindCurrentUserSpeechForCrossref(
+		grant, _, _ := guard.BindDeclaredIntentionalAudioForCrossref(
 			scope,
 			query,
 			2*time.Second,
@@ -559,6 +579,126 @@ func TestCrossrefLeaseExpiresAndConcurrentCopiesHaveOneWinner(t *testing.T) {
 	})
 }
 
+func TestCrossrefExecutorConcurrentCopiesReachSinkOnce(t *testing.T) {
+	guard, _ := newTestGuard(t)
+	scope := testScope()
+	query := testQuery(t, "quantum error correction")
+	proposal, _, err := guard.ProposeCrossref(
+		query,
+		SourceDeclaredIntentionalAudio|SourceModelOutput,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
+		scope,
+		query,
+		2*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, _, err := guard.MintCrossref(
+		grant,
+		scope,
+		proposal,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := &atomicVerifier{}
+	executor, err := NewCrossrefExecutor(guard, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 64
+	var allowed atomic.Int32
+	var denied atomic.Int32
+	var unexpected atomic.Int32
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for range workers {
+		go func() {
+			defer wait.Done()
+			if _, _, err := executor.Verify(
+				context.Background(),
+				lease,
+				scope,
+				proposal,
+				query,
+			); err == nil {
+				allowed.Add(1)
+			} else if errors.Is(err, ErrDenied) {
+				denied.Add(1)
+			} else {
+				unexpected.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	if allowed.Load() != 1 ||
+		denied.Load() != workers-1 ||
+		unexpected.Load() != 0 ||
+		verifier.calls.Load() != 1 {
+		t.Fatalf(
+			"allowed=%d denied=%d unexpected=%d sink_calls=%d",
+			allowed.Load(),
+			denied.Load(),
+			unexpected.Load(),
+			verifier.calls.Load(),
+		)
+	}
+}
+
+func TestCrossrefAuthorityIssuesOncePerRequestAndAction(t *testing.T) {
+	guard, now := newTestGuard(t)
+	scope := testScope()
+	query := testQuery(t, "quantum error correction")
+	otherQuery := testQuery(t, "protein folding")
+	if _, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
+		scope,
+		query,
+		time.Second,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []research.Query{query, otherQuery} {
+		if _, event, err := guard.BindDeclaredIntentionalAudioForCrossref(
+			scope,
+			candidate,
+			time.Second,
+		); !errors.Is(err, ErrDenied) ||
+			event.Reason != ReasonReplay {
+			t.Fatalf(
+				"duplicate request authority issued: event=%#v err=%v",
+				event,
+				err,
+			)
+		}
+	}
+
+	otherRequest := scope
+	otherRequest.RequestID = "1123456789abcdef01234567"
+	if _, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
+		otherRequest,
+		query,
+		time.Second,
+	); err != nil {
+		t.Fatalf("new request was denied: %v", err)
+	}
+
+	*now = now.Add(time.Minute)
+	if _, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
+		scope,
+		query,
+		time.Second,
+	); err != nil {
+		t.Fatalf("expired request issuance was not cleaned: %v", err)
+	}
+}
+
 func TestDefenseArtifactsContainNoContentOrIdentifiers(t *testing.T) {
 	guard, _ := newTestGuard(t)
 	scope := testScope()
@@ -566,12 +706,12 @@ func TestDefenseArtifactsContainNoContentOrIdentifiers(t *testing.T) {
 	query := testQuery(t, topic)
 	proposal, proposalEvent, err := guard.ProposeCrossref(
 		query,
-		SourceCurrentUserSpeech|SourceModelOutput|SourcePDF,
+		SourceDeclaredIntentionalAudio|SourceModelOutput|SourcePDF,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, grantEvent, err := guard.BindCurrentUserSpeechForCrossref(
+	grant, grantEvent, err := guard.BindDeclaredIntentionalAudioForCrossref(
 		scope,
 		query,
 		2*time.Second,
@@ -636,7 +776,7 @@ func TestGuardRejectsUntrustedOnlyProposalAndInvalidConfiguration(t *testing.T) 
 		SourceConversationState,
 		SourceToolOutput,
 		SourceModelOutput,
-		SourceCurrentUserSpeech | SourceModelOutput | SourceAmbientSpeech,
+		SourceDeclaredIntentionalAudio | SourceModelOutput | SourceAmbientSpeech,
 		SourceSet(1 << 15),
 	} {
 		if _, event, err := guard.ProposeCrossref(query, sources); !errors.Is(err, ErrDenied) ||
@@ -669,12 +809,12 @@ func FuzzCrossrefLeaseTamperNeverAuthorizes(f *testing.F) {
 		query := testQuery(t, "quantum error correction")
 		proposal, _, err := guard.ProposeCrossref(
 			query,
-			SourceCurrentUserSpeech|SourceModelOutput|SourcePDF,
+			SourceDeclaredIntentionalAudio|SourceModelOutput|SourcePDF,
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+		grant, _, err := guard.BindDeclaredIntentionalAudioForCrossref(
 			scope,
 			query,
 			2*time.Second,

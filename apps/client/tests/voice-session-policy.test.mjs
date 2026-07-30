@@ -180,24 +180,26 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
   assert.ok(encodeAt > joinedAt);
 });
 
-test("empty capture rollover drops intentional authority", async () => {
+test("the first empty capture preserves one bounded intentional retry", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
-  const marker = client.indexOf(
-    "The explicit gesture authorizes only this finite recording",
-  );
+  const marker = client.indexOf("A transport/capture miss does not consume");
   assert.notEqual(marker, -1);
-  const rollover = client.slice(marker, marker + 650);
+  const rollover = client.slice(marker, marker + 900);
 
   assert.match(
     rollover,
-    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+    /turn_mode == VoiceTurnMode::Intentional[\s\S]*intentional_retry_available/u,
   );
-  assert.doesNotMatch(
+  assert.match(
     rollover,
-    /VoiceTurnMode::Intentional/u,
+    /VoiceTurnMode::Intentional[\s\S]*VoiceTurnMode::Foreground/u,
+  );
+  assert.match(
+    rollover,
+    /arm_listening\(\s*operation,\s*false,\s*replacement_mode,\s*false,/u,
   );
 });
 
@@ -267,7 +269,7 @@ test("automatic rearm is foreground and only a fresh gesture is intentional", as
   );
   assert.match(
     resume,
-    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,\s*false,/u,
   );
 });
 
@@ -1578,7 +1580,7 @@ test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("barge-in covers model wait and preserves foreground response mode", async () => {
+test("barge-in starts with first audio and preserves foreground response mode", async () => {
   const [bridge, client] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
@@ -1610,10 +1612,9 @@ test("barge-in covers model wait and preserves foreground response mode", async 
   const finishAt = bridge.indexOf("async function finishTurn(");
   const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
   const finish = bridge.slice(finishAt, finishEnd);
-  assert.equal(
-    finish.match(/startBargeInMonitoring\(playback, expectedEpoch\)/gu)?.length,
-    2,
-    "live and HTTP paths must retain speech spoken while the model is thinking",
+  assert.doesNotMatch(
+    finish,
+    /startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
   const scheduleAt = bridge.indexOf("function scheduleBuffer(");
   const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);

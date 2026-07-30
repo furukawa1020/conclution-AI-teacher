@@ -368,9 +368,9 @@ func TestGuardRejectsUntrustedOnlyProposalAndInvalidConfiguration(t *testing.T) 
 		}
 	}
 	if _, err := NewGuard(Config{
-		Key:           bytes.Repeat([]byte{1}, 31),
-		PolicyVersion: "pccm-v1",
-		MaxTTL:        time.Second,
+		Key:    bytes.Repeat([]byte{1}, 31),
+		Policy: PolicyPCCMPhase1,
+		MaxTTL: time.Second,
 	}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("short key accepted: %v", err)
 	}
@@ -456,11 +456,11 @@ func newTestGuard(t *testing.T) (*Guard, *time.Time) {
 		randomBytes[index] = byte(index % 251)
 	}
 	guard, err := NewGuard(Config{
-		Key:           bytes.Repeat([]byte{0x42}, keyBytes),
-		PolicyVersion: "pccm-v1",
-		MaxTTL:        5 * time.Second,
-		Now:           func() time.Time { return now },
-		Random:        bytes.NewReader(randomBytes),
+		Key:    bytes.Repeat([]byte{0x42}, keyBytes),
+		Policy: PolicyPCCMPhase1,
+		MaxTTL: 5 * time.Second,
+		Now:     func() time.Time { return now },
+		Random:  bytes.NewReader(randomBytes),
 	})
 	if err != nil {
 		t.Fatalf("NewGuard: %v", err)

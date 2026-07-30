@@ -53,7 +53,7 @@ const (
 	ordinaryCriticSequenceTimeout     = 8 * time.Second
 	highRiskCriticSequenceTimeout     = 24 * time.Second
 	voiceResponseReserve              = 5 * time.Second
-	securityflowPolicyVersion         = "pccm-phase1-v1"
+	securityflowPolicy                = securityflow.PolicyPCCMPhase1
 )
 
 var (
@@ -294,9 +294,9 @@ func newAgent(
 	}
 	securityKey := deriveSecurityflowKey(stateKey)
 	securityGuard, err := securityflow.NewGuard(securityflow.Config{
-		Key:           securityKey,
-		PolicyVersion: securityflowPolicyVersion,
-		MaxTTL:        researchAuthorityGrantTTL,
+		Key:    securityKey,
+		Policy: securityflowPolicy,
+		MaxTTL: researchAuthorityGrantTTL,
 	})
 	wipe(securityKey)
 	if err != nil {
@@ -1213,11 +1213,11 @@ func (agent *vertexAgent) performResearch(
 		return agent.denyResearchCapability(
 			ctx,
 			securityflow.DefenseEvent{
-				PolicyVersion: securityflowPolicyVersion,
-				Action:        securityflow.ActionCrossrefDiscovery,
-				Decision:      securityflow.DecisionDeny,
-				Reason:        securityflow.ReasonInvalidScope,
-				Sources:       researchInfluenceSources(turn),
+				Policy:   securityflowPolicy,
+				Action:   securityflow.ActionCrossrefDiscovery,
+				Decision: securityflow.DecisionDeny,
+				Reason:   securityflow.ReasonInvalidScope,
+				Sources:  researchInfluenceSources(turn),
 			},
 		)
 	}
@@ -1315,7 +1315,7 @@ func (agent *vertexAgent) denyResearchCapability(
 	slog.WarnContext(
 		ctx,
 		"research capability denied",
-		"policy_version", event.PolicyVersion,
+		"policy_id", int(event.Policy),
 		"action", int(event.Action),
 		"decision", int(event.Decision),
 		"reason", int(event.Reason),

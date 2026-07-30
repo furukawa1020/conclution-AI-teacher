@@ -82,14 +82,21 @@ const (
 	ReasonCapacity
 )
 
+type PolicyID uint8
+
+const (
+	PolicyUnknown PolicyID = iota
+	PolicyPCCMPhase1
+)
+
 // DefenseEvent is deliberately finite and content-free. It contains no
 // transcript, query, identifier, token, digest, n-gram, or provider detail.
 type DefenseEvent struct {
-	PolicyVersion string
-	Action        Action
-	Decision      Decision
-	Reason        ReasonCode
-	Sources       SourceSet
+	Policy   PolicyID
+	Action   Action
+	Decision Decision
+	Reason   ReasonCode
+	Sources  SourceSet
 }
 
 // Scope binds authority to one authenticated user, encrypted conversation and
@@ -103,11 +110,11 @@ type Scope struct {
 
 // Config deliberately has no model or network dependency.
 type Config struct {
-	Key           []byte
-	PolicyVersion string
-	MaxTTL        time.Duration
-	Now           func() time.Time
-	Random        io.Reader
+	Key     []byte
+	Policy  PolicyID
+	MaxTTL  time.Duration
+	Now     func() time.Time
+	Random  io.Reader
 }
 
 // ActionProposal is safe to construct from model output. It carries only a
@@ -116,6 +123,12 @@ type ActionProposal struct {
 	action  Action
 	args    [sha256.Size]byte
 	sources SourceSet
+}
+
+func (ActionProposal) String() string   { return "securityflow.ActionProposal{redacted}" }
+func (ActionProposal) GoString() string { return "securityflow.ActionProposal{redacted}" }
+func (ActionProposal) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.ActionProposal{redacted}"`), nil
 }
 
 // CurrentUserSpeech is an opaque, one-shot authority grant. Its fields are
@@ -133,6 +146,16 @@ type CurrentUserSpeech struct {
 	signature [sha256.Size]byte
 }
 
+func (CurrentUserSpeech) String() string {
+	return "securityflow.CurrentUserSpeech{redacted}"
+}
+func (CurrentUserSpeech) GoString() string {
+	return "securityflow.CurrentUserSpeech{redacted}"
+}
+func (CurrentUserSpeech) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.CurrentUserSpeech{redacted}"`), nil
+}
+
 // Lease is an opaque one-shot execution capability.
 type Lease struct {
 	issuer    [nonceBytes]byte
@@ -148,10 +171,16 @@ type Lease struct {
 	signature [sha256.Size]byte
 }
 
+func (Lease) String() string   { return "securityflow.Lease{redacted}" }
+func (Lease) GoString() string { return "securityflow.Lease{redacted}" }
+func (Lease) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.Lease{redacted}"`), nil
+}
+
 type Guard struct {
 	key           [keyBytes]byte
 	issuer        [nonceBytes]byte
-	policyVersion string
+	policy        PolicyID
 	policyDigest  [sha256.Size]byte
 	maxTTL        time.Duration
 	now           func() time.Time
@@ -165,7 +194,7 @@ type Guard struct {
 
 func NewGuard(config Config) (*Guard, error) {
 	if len(config.Key) != keyBytes ||
-		!validPolicyVersion(config.PolicyVersion) ||
+		config.Policy != PolicyPCCMPhase1 ||
 		config.MaxTTL <= 0 ||
 		config.MaxTTL > time.Minute {
 		return nil, ErrInvalidConfig
@@ -179,12 +208,12 @@ func NewGuard(config Config) (*Guard, error) {
 		randomSource = rand.Reader
 	}
 	guard := &Guard{
-		policyVersion: config.PolicyVersion,
-		maxTTL:        config.MaxTTL,
-		now:           now,
-		random:        randomSource,
-		grants:        make(map[[nonceBytes]byte]int64),
-		leases:        make(map[[nonceBytes]byte]int64),
+		policy: config.Policy,
+		maxTTL: config.MaxTTL,
+		now:    now,
+		random: randomSource,
+		grants: make(map[[nonceBytes]byte]int64),
+		leases: make(map[[nonceBytes]byte]int64),
 	}
 	copy(guard.key[:], config.Key)
 	if _, err := io.ReadFull(guard.random, guard.issuer[:]); err != nil {
@@ -192,7 +221,7 @@ func NewGuard(config Config) (*Guard, error) {
 	}
 	guard.policyDigest = guard.keyedDigest(
 		[]byte("policy\x00"),
-		[]byte(guard.policyVersion),
+		[]byte{byte(guard.policy)},
 	)
 	return guard, nil
 }
@@ -449,7 +478,7 @@ func (guard *Guard) event(
 		Sources:  sources,
 	}
 	if guard != nil {
-		event.PolicyVersion = guard.policyVersion
+		event.Policy = guard.policy
 	}
 	return event
 }
@@ -559,24 +588,6 @@ func validScopeField(value string) bool {
 		len(value) <= maxScopeFieldBytes &&
 		utf8.ValidString(value) &&
 		value == strings.TrimSpace(value)
-}
-
-func validPolicyVersion(value string) bool {
-	if value == "" || len(value) > 64 {
-		return false
-	}
-	for _, char := range value {
-		if (char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '.' ||
-			char == '_' ||
-			char == '-' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func writeBoundedString(buffer *bytes.Buffer, value string) {

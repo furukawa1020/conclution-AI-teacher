@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile as readFileRaw } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -42,6 +42,13 @@ import {
   VOICE_LIVE_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
+
+async function readFile(path, encoding) {
+  const contents = await readFileRaw(path, encoding);
+  return typeof contents === "string"
+    ? contents.replaceAll("\r\n", "\n")
+    : contents;
+}
 
 const researchRecord = Object.freeze({
   title: "A-first responses under working-memory load",
@@ -146,11 +153,11 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
   const recordingAt = begin.indexOf(
     "const recording = createRecording(stream)",
   );
+  const assignmentAt = begin.indexOf("activeLiveSession = liveSession");
   assert.ok(liveAt >= 0);
   assert.ok(recordingAt > liveAt);
-  assert.ok(
-    begin.indexOf("activeLiveSession = liveSession") < recordingAt,
-  );
+  assert.ok(assignmentAt > liveAt);
+  assert.ok(assignmentAt < recordingAt);
   assert.doesNotMatch(begin, /voice_live_capture_late/u);
 });
 

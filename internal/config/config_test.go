@@ -88,6 +88,19 @@ func TestLoadRejectsMalformedPriorityFlag(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsAuditedSpeechFallback(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_SPEECH_MODEL", "long")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SpeechModel != "long" {
+		t.Fatalf("speech model = %q; want long", cfg.SpeechModel)
+	}
+}
+
 func TestLoadAllowsThirteenMiBVoiceEnvelopeButNoMore(t *testing.T) {
 	setTestEnvironment(t)
 	t.Setenv("KOTAE_MAX_VOICE_BYTES", "13631488")

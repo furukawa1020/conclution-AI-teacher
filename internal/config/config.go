@@ -19,6 +19,7 @@ const (
 	defaultPrecisionModel = "vertexai/gemini-3.1-pro-preview"
 	defaultSpeechLocation = "asia-northeast1"
 	defaultSpeechModel    = "chirp_3"
+	fallbackSpeechModel   = "long"
 	defaultSpeechVoice    = "ja-JP-Chirp3-HD-Kore"
 )
 
@@ -160,8 +161,13 @@ func Load() (Config, error) {
 	if cfg.SpeechLocation != defaultSpeechLocation {
 		return Config{}, fmt.Errorf("KOTAE_SPEECH_LOCATION must be %s", defaultSpeechLocation)
 	}
-	if cfg.SpeechModel != defaultSpeechModel {
-		return Config{}, fmt.Errorf("KOTAE_SPEECH_MODEL must be %s", defaultSpeechModel)
+	if cfg.SpeechModel != defaultSpeechModel &&
+		cfg.SpeechModel != fallbackSpeechModel {
+		return Config{}, fmt.Errorf(
+			"KOTAE_SPEECH_MODEL must be %s or %s",
+			defaultSpeechModel,
+			fallbackSpeechModel,
+		)
 	}
 	if cfg.SpeechVoice != defaultSpeechVoice {
 		return Config{}, fmt.Errorf(

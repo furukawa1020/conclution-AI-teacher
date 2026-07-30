@@ -154,6 +154,8 @@ gcloud run deploy kotae-api `
   --source=. `
   --project=$ProjectId `
   --region=asia-northeast1 `
+  --ingress=all `
+  --allow-unauthenticated `
   --service-account=$RuntimeSa `
   --cpu=1 `
   --memory=1Gi `
@@ -167,6 +169,8 @@ gcloud run deploy kotae-api `
 ```
 
 `--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い60秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
+
+Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 
 UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。匿名UIDを作り直してもproject全体の費用上限を素通りできないための二段目です。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
 

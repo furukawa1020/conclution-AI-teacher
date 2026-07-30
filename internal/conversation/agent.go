@@ -379,7 +379,7 @@ func (agent *vertexAgent) Process(
 	if state.Turn >= maxStateTurns {
 		return VoiceTurnResult{}, ErrInvalidStateToken
 	}
-	capabilityFallbackState := state
+	preTurnState := state
 	if isStandalonePhaticGreeting(normalized, state) {
 		return agent.completePhaticLocal(uid, state)
 	}
@@ -575,7 +575,7 @@ func (agent *vertexAgent) Process(
 		fastPlan = recoveredPlan
 	}
 	if canCompleteAmbientSilentFast(normalized, fastPlan) {
-		return agent.completeAmbientSilentFast(uid, state, fastPlan)
+		return agent.completeAmbientSilentFast(uid, preTurnState, fastPlan)
 	}
 	if canCompleteInterpretationClarification(normalized, fastPlan) {
 		return agent.completeInterpretationClarification(uid, state, fastPlan)
@@ -638,7 +638,7 @@ func (agent *vertexAgent) Process(
 			if errors.Is(researchErr, errResearchCapabilityDenied) {
 				return agent.completePlannerUnavailable(
 					uid,
-					capabilityFallbackState,
+					preTurnState,
 					normalized.Ambient,
 				)
 			}
@@ -799,17 +799,28 @@ func (agent *vertexAgent) Process(
 	// summaries. Even an abstract-looking summary can preserve a partial quote,
 	// identifier, or document secret. Keep only independently filtered graph
 	// nodes and fixed-size control metadata.
-	graph := sanitizeGraph(state.Graph, normalized.Utterance)
-	pendingAnswer := state.PendingAnswer
-	nextSelfCorrectionGrace := finalPlan.SelfCorrectionGrace
+	isolateSemanticState := verificationUnavailable ||
+		normalized.Ambient ||
+		normalized.PDF != nil
+	semanticBaseState := state
+	if isolateSemanticState {
+		semanticBaseState = preTurnState
+	}
+	graph := semanticBaseState.Graph
+	pendingAnswer := semanticBaseState.PendingAnswer
+	nextSelfCorrectionGrace := semanticBaseState.SelfCorrectionGrace
+	nextLastIntervention := isolatedStateIntervention(
+		semanticBaseState.LastIntervention,
+		normalized.Ambient,
+	)
 	// Ambient audio may be a television, nearby speaker, replay, or another
 	// person. A raw PDF is also untrusted active content. Both can affect the
 	// bounded current response, but neither can author semantic cross-turn
 	// memory until speaker and document-span provenance exists.
-	if verificationUnavailable || normalized.Ambient || normalized.PDF != nil {
-		nextSelfCorrectionGrace = state.SelfCorrectionGrace
-	} else {
+	if !isolateSemanticState {
 		graph = mergeGraph(state.Graph, finalPlan.ThoughtStateDelta, normalized.Utterance)
+		nextSelfCorrectionGrace = finalPlan.SelfCorrectionGrace
+		nextLastIntervention = decision
 		switch {
 		case finalPlan.AssistanceTarget == "respondent" &&
 			finalPlan.RespondentStage == "awaiting_answer":
@@ -855,7 +866,7 @@ func (agent *vertexAgent) Process(
 		DocumentSummary:     "",
 		PendingAnswer:       pendingAnswer,
 		SelfCorrectionGrace: nextSelfCorrectionGrace,
-		LastIntervention:    decision,
+		LastIntervention:    nextLastIntervention,
 	}
 	stateToken, err := agent.codec.seal(uid, nextState)
 	if err != nil {
@@ -876,7 +887,7 @@ func (agent *vertexAgent) Process(
 		SpokenReply:         spokenReply,
 		Confidence:          finalPlan.Confidence,
 		Intervention:        decision,
-		SelfCorrectionGrace: finalPlan.SelfCorrectionGrace,
+		SelfCorrectionGrace: nextSelfCorrectionGrace,
 		AnswerContract:      finalPlan.answerAssessment.Metrics,
 		Route:               route,
 		NeedsClarification:  decision.Act == "clarify",
@@ -1072,6 +1083,10 @@ func (agent *vertexAgent) completeAmbientSilentFast(
 	plan modelPlan,
 ) (VoiceTurnResult, error) {
 	decision := ArbiterDecision{Act: "silent"}
+	lastIntervention := isolatedStateIntervention(
+		state.LastIntervention,
+		true,
+	)
 	nextState := conversationState{
 		SessionID:           state.SessionID,
 		Turn:                state.Turn + 1,
@@ -1080,7 +1095,7 @@ func (agent *vertexAgent) completeAmbientSilentFast(
 		DocumentSummary:     "",
 		PendingAnswer:       state.PendingAnswer,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
-		LastIntervention:    decision,
+		LastIntervention:    lastIntervention,
 	}
 	stateToken, err := agent.codec.seal(uid, nextState)
 	if err != nil {
@@ -1102,6 +1117,25 @@ func (agent *vertexAgent) completeAmbientSilentFast(
 		Route:               "ambient-silent-fast",
 		StateToken:          stateToken,
 	}, nil
+}
+
+func isolatedStateIntervention(
+	previous ArbiterDecision,
+	ambient bool,
+) ArbiterDecision {
+	if validateArbiter(previous) == nil {
+		return previous
+	}
+	if ambient {
+		return ArbiterDecision{Act: "silent"}
+	}
+	return ArbiterDecision{
+		Benefit:          0.5,
+		InterruptionCost: 0.1,
+		Confidence:       1,
+		Score:            0.4,
+		Act:              "clarify",
+	}
 }
 
 func canCompleteInterpretationClarification(
@@ -2658,10 +2692,23 @@ var (
 	)
 	stateLongNumberPattern  = regexp.MustCompile(`\d(?:[\s().+_-]*\d){6,}`)
 	stateOpaqueTokenPattern = regexp.MustCompile(`(?:[A-Za-z0-9_-]{24,}|[A-Fa-f0-9]{32,})`)
+	speechLongNumberPattern = regexp.MustCompile(
+		`[0-9](?:[\p{Z}\p{P}\p{S}]*[0-9]){6,}`,
+	)
 	speechCredentialPattern = regexp.MustCompile(
 		`(?i)(?:authorization\s*:\s*bearer|` +
 			`(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|` +
 			`id[-_ ]?token|password|passwd|secret)\s*[:=]\s*\S+)`,
+	)
+	speechEnglishWakeWordPattern = regexp.MustCompile(
+		`(?i)(?:^|[^\p{L}\p{N}])` +
+			`(?:siri|alexa|cortana|bixby)` +
+			`(?:$|[^\p{L}\p{N}])`,
+	)
+	speechGoogleWakeWordPattern = regexp.MustCompile(
+		`(?i)(?:^|[^\p{L}\p{N}])` +
+			`(?:o[^\p{L}\p{N}]*k|okay|hey)[^\p{L}\p{N}]*google` +
+			`(?:$|[^\p{L}\p{N}])`,
 	)
 )
 
@@ -2714,35 +2761,58 @@ func containsUnspeakableMarkup(value string) bool {
 // patterns before either TTS or its mirrored caption can be produced. This is a
 // deterministic guard, not complete PII removal or speaker authentication.
 func unsafeSpeechActuatorText(value string) bool {
-	if containsUnspeakableMarkup(value) ||
-		stateEmailPattern.MatchString(value) ||
-		stateLongNumberPattern.MatchString(value) ||
-		stateOpaqueTokenPattern.MatchString(value) ||
-		speechCredentialPattern.MatchString(value) {
+	normalized := normalizeSpeechSecurityText(value)
+	if containsUnspeakableMarkup(normalized) ||
+		stateEmailPattern.MatchString(normalized) ||
+		speechLongNumberPattern.MatchString(normalized) ||
+		stateOpaqueTokenPattern.MatchString(normalized) ||
+		speechCredentialPattern.MatchString(normalized) ||
+		speechEnglishWakeWordPattern.MatchString(normalized) ||
+		speechGoogleWakeWordPattern.MatchString(normalized) {
 		return true
 	}
-	normalized := strings.ToLower(norm.NFKC.String(value))
 	var compact strings.Builder
-	for _, char := range normalized {
+	for _, char := range strings.ToLower(normalized) {
 		if unicode.IsLetter(char) || unicode.IsNumber(char) {
 			compact.WriteRune(char)
 		}
 	}
 	speech := compact.String()
+	// "アレクサ" is also the prefix of ordinary proper nouns such as
+	// "アレクサンダー". Remove those complete lexical forms before checking
+	// the compact wake phrase. This keeps separator-obfuscated wake phrases
+	// blocked without rejecting ordinary historical or geographical speech.
+	for _, ordinaryTerm := range []string{
+		"アレクサンダー", "あれくさんだー",
+		"アレクサンドリア", "あれくさんどりあ",
+		"アレクサンドロス", "あれくさんどろす",
+	} {
+		speech = strings.ReplaceAll(speech, ordinaryTerm, "")
+	}
 	for _, wakeWord := range []string{
-		"heysiri", "siri", "ヘイシリ", "へいしり",
-		"okgoogle", "okaygoogle", "heygoogle",
+		"ヘイシリ", "へいしり",
 		"オーケーグーグル", "オッケーグーグル",
 		"ねえグーグル", "ねぇグーグル",
-		"alexa", "アレクサ", "あれくさ",
-		"cortana", "コルタナ",
-		"bixby", "ビクスビー",
+		"アレクサ", "あれくさ",
+		"コルタナ", "ビクスビー",
 	} {
 		if strings.Contains(speech, wakeWord) {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizeSpeechSecurityText(value string) string {
+	var normalized strings.Builder
+	for _, char := range norm.NFKC.String(value) {
+		if unicode.In(char, unicode.Cf) ||
+			(unicode.IsControl(char) && !unicode.IsSpace(char)) {
+			continue
+		}
+		normalized.WriteRune(char)
+	}
+	return normalized.String()
 }
 
 func validUnitInterval(value float64) bool {

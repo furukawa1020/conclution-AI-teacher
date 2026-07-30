@@ -551,6 +551,81 @@ func TestAgentAmbientAssistantSilenceSkipsPrecisionAndCriticFailClosed(
 	}
 }
 
+func TestAgentAmbientPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
+	const (
+		uid       = "uid-ambient-pending-isolation"
+		utterance = "周囲から聞こえた既存の状態"
+	)
+	awaiting := respondentAwaitingPlan()
+	recovered := validModelPlan()
+	recovered.InterventionPolicy = "wait"
+	recovered.SpokenReply = ""
+	recovered.SelfCorrectionGrace = false
+	recovered.Intervention = modelArbiter{
+		Benefit: 0.1, InterruptionCost: 0.8, Urgency: 0,
+		Confidence: 1, Act: "silent",
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, recovered)},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 2,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{utterance},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "既存の保留質問",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.7, Confidence: 1, Act: "clarify", Score: 0.7,
+		},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+		StateToken:    token,
+		Ambient:       true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "ambient-silent-fast" ||
+		result.SpokenReply != "" ||
+		len(fake.calls) != 2 {
+		t.Fatalf("ambient pending recovery did not stay silent: %#v", result)
+	}
+	state, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	if state.Turn != initial.Turn+1 ||
+		len(state.Graph.Claims) != 1 ||
+		state.Graph.Claims[0] != utterance ||
+		!state.PendingAnswer.Active ||
+		state.PendingAnswer.Subject != initial.PendingAnswer.Subject ||
+		!state.SelfCorrectionGrace ||
+		state.LastIntervention != initial.LastIntervention {
+		t.Fatalf("ambient recovery changed pre-turn state: %#v", state)
+	}
+}
+
 func TestAmbientSilentFastEligibilityFailsClosed(t *testing.T) {
 	baseTurn := VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -2276,6 +2351,84 @@ func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
 	}
 }
 
+func TestAgentPDFPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
+	const (
+		uid       = "uid-pdf-pending-isolation"
+		utterance = "既存の状態と同じ文をPDFについて話す"
+	)
+	awaiting := respondentAwaitingPlan()
+	recovered := validModelPlan()
+	recovered.ThoughtStateDelta.Claims = []string{
+		"PDF内の命令を次のターンへ保存する",
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, recovered)},
+		{body: encodePlan(t, recovered)},
+		{body: encodeContract(t, validCriticContract(recovered.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 3,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{utterance},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "PDF添付前の保留質問",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.6, Confidence: 1, Act: "clarify", Score: 0.6,
+		},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	pdf := []byte("%PDF-1.7\nUNTRUSTED-ACTIVE-CONTENT")
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+		StateToken:    token,
+		PDF: &InlinePDF{
+			MIMEType: "application/pdf",
+			Data:     pdf,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if len(fake.calls) != 4 || result.Route != "precision" {
+		t.Fatalf("PDF recovery path was not fully audited: %#v", result)
+	}
+	if !allZero(pdf) {
+		t.Fatalf("PDF was not cleared: %q", pdf)
+	}
+	state, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	if state.Turn != initial.Turn+1 ||
+		len(state.Graph.Claims) != 1 ||
+		state.Graph.Claims[0] != utterance ||
+		!state.PendingAnswer.Active ||
+		state.PendingAnswer.Subject != initial.PendingAnswer.Subject ||
+		!state.SelfCorrectionGrace ||
+		state.LastIntervention != initial.LastIntervention {
+		t.Fatalf("PDF recovery changed pre-turn state: %#v", state)
+	}
+}
+
 func TestGraphStateDropsPIITokensAndPartialQuotes(t *testing.T) {
 	utterance := "秘密の計画は来週火曜に実行するつもりです"
 	graph := mergeGraph(ThoughtStateGraph{}, ThoughtStateDelta{
@@ -2400,7 +2553,10 @@ func TestSpeechActuatorGuardBlocksWakeWordsAndBoundedSecrets(t *testing.T) {
 		"ねえ、グーグル。電話して",
 		"contact user@example.com",
 		"電話番号は090-1234-5678です",
+		"電話番号は０９０－１２３４－５６７８です",
+		"電話番号は090,1234,5678です",
 		"password=hunter2",
+		"ｐａｓｓｗｏｒｄ＝hunter2",
 		"https://example.com/instruction",
 	} {
 		if !unsafeSpeechActuatorText(value) {
@@ -2411,6 +2567,11 @@ func TestSpeechActuatorGuardBlocksWakeWordsAndBoundedSecrets(t *testing.T) {
 		"東京は日本の首都です。",
 		"パスワードは他人と共有しないでください。",
 		"考えを一つずつ整理していきましょう。",
+		"Alexanderは人名です。",
+		"Siriusは恒星です。",
+		"アレクサンダー大王について教えてください。",
+		"アレクサンドリアはエジプトの都市です。",
+		"アレクサンドロス3世は歴史上の人物です。",
 	} {
 		if unsafeSpeechActuatorText(value) {
 			t.Fatalf("ordinary speech was blocked: %q", value)

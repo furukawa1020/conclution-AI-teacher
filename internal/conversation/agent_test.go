@@ -21,6 +21,23 @@ type fakeGeneration struct {
 	waitForContext bool
 }
 
+func TestVertexHTTPOptionsKeepPriorityExplicitAndExact(t *testing.T) {
+	standard := vertexHTTPOptions(false)
+	if standard.APIVersion != "v1" || len(standard.Headers) != 0 {
+		t.Fatalf("standard HTTP options = %#v", standard)
+	}
+
+	priority := vertexHTTPOptions(true)
+	if priority.APIVersion != "v1" ||
+		len(priority.Headers) != 2 ||
+		priority.Headers.Get("X-Vertex-AI-LLM-Request-Type") != "shared" ||
+		priority.Headers.Get(
+			"X-Vertex-AI-LLM-Shared-Request-Type",
+		) != "priority" {
+		t.Fatalf("priority HTTP options = %#v", priority)
+	}
+}
+
 type generatorCall struct {
 	model          string
 	thinkingLevel  genai.ThinkingLevel

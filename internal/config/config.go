@@ -30,6 +30,7 @@ type Config struct {
 	VertexLocation     string
 	FastModel          string
 	PrecisionModel     string
+	VertexPriority     bool
 	SpeechLocation     string
 	SpeechModel        string
 	SpeechVoice        string
@@ -104,6 +105,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	vertexPriority, err := envStrictBool("KOTAE_VERTEX_PRIORITY", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		AppEnv:          envOr("KOTAE_ENV", "production"),
@@ -113,6 +118,7 @@ func Load() (Config, error) {
 		VertexLocation:  envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
 		FastModel:       envOr("KOTAE_FAST_MODEL", defaultFastModel),
 		PrecisionModel:  envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
+		VertexPriority:  vertexPriority,
 		SpeechLocation:  envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
 		SpeechModel:     envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
 		SpeechVoice:     envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
@@ -144,6 +150,12 @@ func Load() (Config, error) {
 	}
 	if !cfg.AllowInsecureDev && len(cfg.StateKey) != 32 {
 		return Config{}, errors.New("KOTAE_STATE_KEY_BASE64 must decode to exactly 32 bytes")
+	}
+	if cfg.VertexPriority && cfg.VertexLocation != defaultVertexLocation {
+		return Config{}, fmt.Errorf(
+			"KOTAE_VERTEX_PRIORITY requires GOOGLE_CLOUD_LOCATION=%s",
+			defaultVertexLocation,
+		)
 	}
 	if cfg.SpeechLocation != defaultSpeechLocation {
 		return Config{}, fmt.Errorf("KOTAE_SPEECH_LOCATION must be %s", defaultSpeechLocation)
@@ -213,6 +225,18 @@ func firstNonEmpty(values ...string) string {
 func envBool(key string) bool {
 	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(key)))
 	return err == nil && value
+}
+
+func envStrictBool(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", key)
+	}
+	return parsed, nil
 }
 
 func envDurationOr(key string, fallback time.Duration) time.Duration {

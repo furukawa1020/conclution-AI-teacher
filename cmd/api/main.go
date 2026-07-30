@@ -122,6 +122,7 @@ func main() {
 			cfg.FastModel,
 			cfg.PrecisionModel,
 			cfg.StateKey,
+			cfg.VertexPriority,
 		)
 		if err != nil {
 			logger.Error("initialize conversation agent", "error", err)
@@ -188,6 +189,7 @@ func main() {
 			"environment", cfg.AppEnv,
 			"vertex_location", cfg.VertexLocation,
 			"model_logical_id", "fast-judge",
+			"vertex_priority", cfg.VertexPriority,
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
 		)

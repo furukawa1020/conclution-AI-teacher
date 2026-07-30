@@ -20,6 +20,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_MAX_VOICE_BYTES", "")
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
+	t.Setenv("KOTAE_VERTEX_PRIORITY", "")
 }
 
 func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
@@ -52,6 +53,38 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 			"speech voice = %q; want ja-JP-Chirp3-HD-Kore",
 			cfg.SpeechVoice,
 		)
+	}
+	if cfg.VertexPriority {
+		t.Fatal("Vertex priority must remain opt-in")
+	}
+}
+
+func TestLoadAcceptsPriorityOnlyOnTheGlobalVertexEndpoint(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_VERTEX_PRIORITY", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VertexPriority {
+		t.Fatal("Vertex priority was not enabled")
+	}
+
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_VERTEX_PRIORITY") {
+		t.Fatalf("regional priority error = %v", err)
+	}
+}
+
+func TestLoadRejectsMalformedPriorityFlag(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_VERTEX_PRIORITY", "sometimes")
+
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_VERTEX_PRIORITY") {
+		t.Fatalf("malformed priority error = %v", err)
 	}
 }
 

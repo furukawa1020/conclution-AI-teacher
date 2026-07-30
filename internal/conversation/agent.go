@@ -12,6 +12,7 @@ import (
 	"iter"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -253,6 +254,7 @@ func NewVertexAgent(
 	fastModel,
 	precisionModel string,
 	stateKey []byte,
+	priority bool,
 ) (Agent, error) {
 	if ctx == nil || strings.TrimSpace(project) == "" {
 		return nil, errors.New("conversation: Vertex AI project is required")
@@ -260,13 +262,16 @@ func NewVertexAgent(
 	if strings.TrimSpace(location) == "" {
 		location = "global"
 	}
+	if priority && strings.TrimSpace(location) != "global" {
+		return nil, errors.New(
+			"conversation: Vertex AI priority requires the global endpoint",
+		)
+	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Project:  strings.TrimSpace(project),
-		Location: strings.TrimSpace(location),
-		Backend:  genai.BackendVertexAI,
-		HTTPOptions: genai.HTTPOptions{
-			APIVersion: "v1",
-		},
+		Project:     strings.TrimSpace(project),
+		Location:    strings.TrimSpace(location),
+		Backend:     genai.BackendVertexAI,
+		HTTPOptions: vertexHTTPOptions(priority),
 	})
 	if err != nil {
 		return nil, errors.New("conversation: initialize Vertex AI client")
@@ -288,6 +293,17 @@ func NewVertexAgent(
 		stateKey,
 		verifier,
 	)
+}
+
+func vertexHTTPOptions(priority bool) genai.HTTPOptions {
+	options := genai.HTTPOptions{APIVersion: "v1"}
+	if !priority {
+		return options
+	}
+	options.Headers = make(http.Header, 2)
+	options.Headers.Set("X-Vertex-AI-LLM-Request-Type", "shared")
+	options.Headers.Set("X-Vertex-AI-LLM-Shared-Request-Type", "priority")
+	return options
 }
 
 func NewAgent(

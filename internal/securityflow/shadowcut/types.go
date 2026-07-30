@@ -11,10 +11,10 @@ const (
 	// package.
 	SchemaVersion uint16 = 1
 
-	MaxControls       = 16
-	MaxTraces         = 1_024
-	MaxNodesPerTrace  = 64
-	MaxEdgesPerTrace  = 128
+	MaxControls        = 16
+	MaxTraces          = 1_024
+	MaxNodesPerTrace   = 64
+	MaxEdgesPerTrace   = 128
 	MaxSourcesPerTrace = 16
 	MaxSinksPerTrace   = 16
 )

@@ -482,15 +482,16 @@ func TestPipelineLiveNoFrameCloseAndCancellationDoNotLeak(t *testing.T) {
 	})
 }
 
-func TestSpeculativeCandidateRequiresRepeatedStableCanonicalText(t *testing.T) {
+func TestSpeculativeCandidateRequiresRepeatedStableExactText(t *testing.T) {
 	t.Parallel()
 	started := time.Unix(100, 0)
 	tracker := speculativeCandidateTracker{}
 	decomposed := "Cafe\u0301  について　教えて"
 	composed := "Café について 教えて"
+	collapsedDecomposed := "Cafe\u0301 について 教えて"
 
 	candidate, ready := tracker.observe(decomposed, true, started)
-	if ready || candidate != composed {
+	if ready || candidate != collapsedDecomposed {
 		t.Fatalf("first observation candidate=%q ready=%v", candidate, ready)
 	}
 	if _, ready = tracker.observe(
@@ -498,12 +499,12 @@ func TestSpeculativeCandidateRequiresRepeatedStableCanonicalText(t *testing.T) {
 		true,
 		started.Add(minSpeculativeStableDuration-time.Millisecond),
 	); ready {
-		t.Fatal("candidate became stable before 160ms")
+		t.Fatal("canonically distinct candidate became stable immediately")
 	}
 	if _, ready = tracker.observe(
 		composed,
 		true,
-		started.Add(minSpeculativeStableDuration),
+		started.Add(2*minSpeculativeStableDuration-time.Millisecond),
 	); !ready {
 		t.Fatal("repeated candidate did not become stable at 160ms")
 	}
@@ -537,16 +538,205 @@ func TestSpeculativeCandidateRequiresRepeatedStableCanonicalText(t *testing.T) {
 		t.Fatalf("joined candidate=%q", joined)
 	}
 	if !speculationTextsMatch(
-		"この質問を説明して？ ",
-		"この質問を説明して!",
+		"この  質問を説明して ",
+		"この 質問を説明して",
 	) {
-		t.Fatal("trailing allowed punctuation should not prevent adoption")
+		t.Fatal("conversation whitespace normalization should permit adoption")
 	}
 	if speculationTextsMatch(
-		"この？質問を説明して",
-		"この！質問を説明して",
+		"この質問を説明して？",
+		"この質問を説明して!",
 	) {
-		t.Fatal("internal punctuation was incorrectly ignored")
+		t.Fatal("punctuation difference was incorrectly ignored")
+	}
+	if speculationTextsMatch(decomposed, composed) {
+		t.Fatal("Unicode normalization collision was incorrectly adopted")
+	}
+}
+
+func TestSpeculativeAudioCommitBufferBoundsBlocksAndPreservesOrder(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var delivered []byte
+	buffer := newSpeculativeAudioCommitBuffer(
+		ctx,
+		func(chunk []byte) error {
+			delivered = append(delivered, chunk...)
+			return nil
+		},
+	)
+	audio := bytes.Repeat(
+		[]byte{1, 0},
+		maxSpeculativeTTSBufferBytes/2+1,
+	)
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- buffer.write(ctx, audio)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for buffer.peakBufferedBytes() != maxSpeculativeTTSBufferBytes {
+		if time.Now().After(deadline) {
+			t.Fatal("commit buffer never reached its byte bound")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-writeDone:
+		t.Fatalf("provider callback did not block at the bound: %v", err)
+	default:
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("pending audio escaped: %d bytes", len(delivered))
+	}
+
+	releaseMS, err := buffer.release(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if releaseMS < 0 {
+		t.Fatalf("release_ms=%d", releaseMS)
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("release did not unblock the provider callback")
+	}
+	if !bytes.Equal(delivered, audio) {
+		t.Fatalf(
+			"delivered %d bytes out of order; want %d",
+			len(delivered),
+			len(audio),
+		)
+	}
+	if buffer.peakBufferedBytes() != maxSpeculativeTTSBufferBytes {
+		t.Fatalf("peak bytes=%d", buffer.peakBufferedBytes())
+	}
+}
+
+func TestSpeculativeAudioCommitBufferCancellationWipesAndWakes(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	delivered := 0
+	buffer := newSpeculativeAudioCommitBuffer(
+		ctx,
+		func(chunk []byte) error {
+			delivered += len(chunk)
+			return nil
+		},
+	)
+	full := bytes.Repeat([]byte{2, 0}, maxSpeculativeTTSBufferBytes/2)
+	if err := buffer.write(ctx, full); err != nil {
+		t.Fatal(err)
+	}
+	buffer.mu.Lock()
+	bufferedCopy := buffer.chunks[0]
+	buffer.mu.Unlock()
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- buffer.write(ctx, []byte{3, 0})
+	}()
+	select {
+	case err := <-writeDone:
+		t.Fatalf("full writer returned before cancellation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("cancelled writer returned nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("context cancellation did not wake the full writer")
+	}
+	if delivered != 0 {
+		t.Fatalf("cancelled buffer delivered %d bytes", delivered)
+	}
+	if !bytes.Equal(bufferedCopy, make([]byte, len(bufferedCopy))) {
+		t.Fatal("discarded PCM was not zeroized")
+	}
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	if buffer.state != speculativeAudioDiscarded ||
+		buffer.bufferedBytes != 0 ||
+		len(buffer.chunks) != 0 {
+		t.Fatalf(
+			"state=%d bytes=%d chunks=%d",
+			buffer.state,
+			buffer.bufferedBytes,
+			len(buffer.chunks),
+		)
+	}
+}
+
+func TestSpeculativeAudioCommitBufferDiscardDoesNotWaitForDelivery(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deliverStarted := make(chan struct{})
+	allowDelivery := make(chan struct{})
+	buffer := newSpeculativeAudioCommitBuffer(
+		ctx,
+		func([]byte) error {
+			close(deliverStarted)
+			<-allowDelivery
+			return nil
+		},
+	)
+	if err := buffer.write(ctx, []byte{4, 0}); err != nil {
+		t.Fatal(err)
+	}
+	releaseDone := make(chan error, 1)
+	go func() {
+		_, err := buffer.release(ctx)
+		releaseDone <- err
+	}()
+	select {
+	case <-deliverStarted:
+	case <-time.After(time.Second):
+		t.Fatal("release never entered delivery")
+	}
+
+	discardDone := make(chan struct{})
+	go func() {
+		buffer.discard(errSpeculativeAudioDiscarded)
+		close(discardDone)
+	}()
+	select {
+	case <-discardDone:
+	case <-time.After(time.Second):
+		t.Fatal("discard waited on a blocked external delivery")
+	}
+	close(allowDelivery)
+	select {
+	case err := <-releaseDone:
+		if err == nil {
+			t.Fatal("discarded release returned nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("release did not finish after delivery unblocked")
+	}
+}
+
+func TestSpeculativeAudioCommitBufferRejectsUnalignedPCM(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	buffer := newSpeculativeAudioCommitBuffer(
+		ctx,
+		func([]byte) error { return nil },
+	)
+	if err := buffer.write(ctx, []byte{1}); !errors.Is(
+		err,
+		errSpeculativeAudioChunk,
+	) {
+		t.Fatalf("write error=%v", err)
 	}
 }
 
@@ -567,7 +757,7 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 		},
 		speechio.StreamingTranscriptionEvent{
 			Kind: speechio.StreamingTranscriptionFinal,
-			Text: utterance + "。",
+			Text: utterance,
 		},
 	)
 	session.eventGates = map[int]<-chan struct{}{2: finalGate}
@@ -652,8 +842,14 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 	if outcome.result.LiveTimings.SpecHit != 1 ||
 		outcome.result.LiveTimings.SpecMiss != 0 ||
 		outcome.result.LiveTimings.SpecCancel != 0 ||
+		outcome.result.LiveTimings.TTSPrestarted != 1 ||
+		outcome.result.LiveTimings.TTSBufferedBytes != 2 ||
+		outcome.result.LiveTimings.TTSReleaseMS < 0 ||
 		outcome.result.LiveTimings.FinalToFirstAudioMS < 0 {
 		t.Fatalf("timings=%+v", outcome.result.LiveTimings)
+	}
+	if speech.streamCalls != 1 {
+		t.Fatalf("synthesis calls=%d want 1", speech.streamCalls)
 	}
 	turns := agent.recordedTurns()
 	if len(turns) != 1 ||

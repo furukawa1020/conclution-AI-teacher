@@ -9,13 +9,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
-	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -99,6 +97,8 @@ type speculativeAudioCommitBuffer struct {
 
 	stopWatcher     chan struct{}
 	stopWatcherOnce sync.Once
+	full            chan struct{}
+	fullOnce        sync.Once
 }
 
 type speculativeSynthesisResult struct {
@@ -115,6 +115,11 @@ type speculativeSynthesis struct {
 	result       speculativeSynthesisResult
 	startedAt    time.Time
 	firstChunkAt time.Time
+}
+
+type liveTranscriptionSendResult struct {
+	err       error
+	committed bool
 }
 
 type liveStreamingSpeech interface {
@@ -263,31 +268,42 @@ func (p *Pipeline) ProcessLive(
 		)
 	}
 
-	sendDone := make(chan error, 1)
+	sendDone := make(chan liveTranscriptionSendResult, 1)
 	go func() {
 		sentAudio := false
 		for {
 			select {
 			case <-transcriptionCtx.Done():
-				sendDone <- transcriptionCtx.Err()
+				sendDone <- liveTranscriptionSendResult{
+					err: transcriptionCtx.Err(),
+				}
 				return
 			case chunk, open := <-audio:
 				if !open {
 					if !sentAudio {
 						if err := session.CloseSend(); err != nil {
-							sendDone <- err
+							sendDone <- liveTranscriptionSendResult{
+								err:       err,
+								committed: true,
+							}
 							return
 						}
-						sendDone <- speechio.ErrNoSpeech
+						sendDone <- liveTranscriptionSendResult{
+							err:       speechio.ErrNoSpeech,
+							committed: true,
+						}
 						return
 					}
-					sendDone <- session.CloseSend()
+					sendDone <- liveTranscriptionSendResult{
+						err:       session.CloseSend(),
+						committed: true,
+					}
 					return
 				}
 				err := session.SendPCM(chunk)
 				clear(chunk)
 				if err != nil {
-					sendDone <- err
+					sendDone <- liveTranscriptionSendResult{err: err}
 					return
 				}
 				sentAudio = true
@@ -400,12 +416,12 @@ func (p *Pipeline) ProcessLive(
 			}
 		}
 	}
+	sendResult := <-sendDone
 	cancelTranscription()
-	sendErr := <-sendDone
 	if receiveErr != nil ||
-		(sendErr != nil &&
-			!errors.Is(sendErr, context.Canceled) &&
-			!errors.Is(sendErr, speechio.ErrNoSpeech)) {
+		!sendResult.committed ||
+		(sendResult.err != nil &&
+			!errors.Is(sendResult.err, speechio.ErrNoSpeech)) {
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
@@ -429,6 +445,7 @@ func (p *Pipeline) ProcessLive(
 	ttsBufferedBytes := int64(0)
 	ttsReleaseMS := int64(-1)
 	prestartedTTSDone := false
+	terminalSynthesisFailure := false
 	cancelSpeculation := func() {
 		if speculation == nil {
 			return
@@ -506,33 +523,55 @@ func (p *Pipeline) ProcessLive(
 				synthesisReady := outcome.err == nil &&
 					(outcome.decision.SpokenReply == "" ||
 						outcome.synthesis != nil)
+				if outcome.err == nil {
+					conversationMS = outcome.durationMS
+				}
 				if synthesisReady && outcome.synthesis != nil {
 					ttsPrestarted = 1
-					ttsReleaseMS, err =
-						outcome.synthesis.buffer.release(ctx)
-					synthesisResult := outcome.synthesis.await(ctx)
+					synthesisResult, synthesisCompleted :=
+						outcome.synthesis.commitBoundary(ctx)
+					if synthesisCompleted {
+						err = synthesisResult.err
+						if err == nil &&
+							synthesisResult.mimeType !=
+								speechio.StreamingAudioContentType {
+							err = errSpeculativeAudioMIME
+						}
+						if err == nil &&
+							outcome.synthesis.firstChunkMS() < 0 {
+							err = errSpeculativeAudioChunk
+						}
+					}
+					if err == nil {
+						ttsReleaseMS, err =
+							outcome.synthesis.buffer.release(ctx)
+					}
+					if err == nil && !synthesisCompleted {
+						synthesisResult = outcome.synthesis.await(ctx)
+						err = synthesisResult.err
+						if err == nil &&
+							synthesisResult.mimeType !=
+								speechio.StreamingAudioContentType {
+							err = errSpeculativeAudioMIME
+						}
+					}
 					ttsBufferedBytes =
 						outcome.synthesis.buffer.peakBufferedBytes()
 					firstTTSChunkMS =
 						outcome.synthesis.firstChunkMS()
 					if err == nil {
-						err = synthesisResult.err
-					}
-					if err == nil &&
-						synthesisResult.mimeType !=
-							speechio.StreamingAudioContentType {
-						err = errSpeculativeAudioMIME
-					}
-					if err == nil {
 						prestartedTTSDone = true
 					} else {
 						outcome.synthesis.abort(err)
 						synthesisReady = false
+						firstOutputMu.Lock()
+						terminalSynthesisFailure =
+							!firstOutputAt.IsZero()
+						firstOutputMu.Unlock()
 					}
 				}
 				if synthesisReady {
 					specHit = 1
-					conversationMS = outcome.durationMS
 					result = voiceResultFromDecision(input, outcome.decision)
 					spokenReply = outcome.decision.SpokenReply
 					adoptedSpeculation = true
@@ -555,6 +594,13 @@ func (p *Pipeline) ProcessLive(
 				specMiss = 1
 				specCancel = 1
 			}
+		}
+		if terminalSynthesisFailure {
+			result = httpapi.VoiceTurnResult{}
+			result.LiveTimings = liveTimings()
+			return result, httpapi.NewVoicePipelineFailure(
+				httpapi.VoicePipelineStageSynthesize,
+			)
 		}
 		if !adoptedSpeculation {
 			// Chirp 3's confidence field is not a calibrated utterance score.
@@ -740,6 +786,7 @@ func newSpeculativeAudioCommitBuffer(
 		state:       speculativeAudioPending,
 		deliver:     deliver,
 		stopWatcher: make(chan struct{}),
+		full:        make(chan struct{}),
 	}
 	buffer.changed = sync.NewCond(&buffer.mu)
 	go func() {
@@ -781,6 +828,11 @@ func (buffer *speculativeAudioCommitBuffer) write(
 			buffer.bufferedBytes += count
 			if buffer.bufferedBytes > buffer.peakBytes {
 				buffer.peakBytes = buffer.bufferedBytes
+			}
+			if buffer.bufferedBytes == maxSpeculativeTTSBufferBytes {
+				buffer.fullOnce.Do(func() {
+					close(buffer.full)
+				})
 			}
 			buffer.mu.Unlock()
 			offset += count
@@ -954,6 +1006,35 @@ func (synthesis *speculativeSynthesis) firstChunkMS() int64 {
 	return synthesis.firstChunkAt.Sub(synthesis.startedAt).Milliseconds()
 }
 
+// commitBoundary waits until the entire short stream is validated or the
+// bounded PCM buffer is full. A completed stream can be MIME-checked before
+// any release. At the 24 KB boundary, progress relies on StreamingService's
+// raw PCM contract and the final return value is still checked after release.
+func (synthesis *speculativeSynthesis) commitBoundary(
+	ctx context.Context,
+) (speculativeSynthesisResult, bool) {
+	select {
+	case <-synthesis.done:
+		return synthesis.resultSnapshot(), true
+	default:
+	}
+	select {
+	case <-synthesis.done:
+		return synthesis.resultSnapshot(), true
+	case <-synthesis.buffer.full:
+		// Prefer a result that raced with the full-buffer notification.
+		select {
+		case <-synthesis.done:
+			return synthesis.resultSnapshot(), true
+		default:
+			return speculativeSynthesisResult{}, false
+		}
+	case <-ctx.Done():
+		synthesis.abort(ctx.Err())
+		return speculativeSynthesisResult{err: ctx.Err()}, true
+	}
+}
+
 func (synthesis *speculativeSynthesis) await(
 	ctx context.Context,
 ) speculativeSynthesisResult {
@@ -963,6 +1044,10 @@ func (synthesis *speculativeSynthesis) await(
 		synthesis.abort(ctx.Err())
 		return speculativeSynthesisResult{err: ctx.Err()}
 	}
+	return synthesis.resultSnapshot()
+}
+
+func (synthesis *speculativeSynthesis) resultSnapshot() speculativeSynthesisResult {
 	synthesis.mu.Lock()
 	defer synthesis.mu.Unlock()
 	return synthesis.result
@@ -1014,26 +1099,15 @@ func joinTranscript(finalFragments []string, latestInterim string) string {
 }
 
 func canonicalSpeculationText(value string) string {
-	return strings.Join(strings.Fields(norm.NFC.String(value)), " ")
+	// This must remain byte-for-byte equivalent to conversation.normalizeTurn.
+	// Unicode normalization, case folding, and punctuation stripping can merge
+	// distinct user instructions and are therefore forbidden at adoption time.
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func speculationTextsMatch(candidate string, finalTranscript string) bool {
-	return trimSpeculationSuffix(canonicalSpeculationText(candidate)) ==
-		trimSpeculationSuffix(canonicalSpeculationText(finalTranscript))
-}
-
-func trimSpeculationSuffix(value string) string {
-	return strings.TrimRightFunc(value, func(r rune) bool {
-		if unicode.IsSpace(r) {
-			return true
-		}
-		switch r {
-		case '。', '！', '？', '!', '?':
-			return true
-		default:
-			return false
-		}
-	})
+	return canonicalSpeculationText(candidate) ==
+		canonicalSpeculationText(finalTranscript)
 }
 
 func (p *Pipeline) prepareTurn(

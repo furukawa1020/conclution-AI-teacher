@@ -176,9 +176,9 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       45 * time.Second,
-		WriteTimeout:      58 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}
 

@@ -1,0 +1,528 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+)
+
+const (
+	liveTestIDToken       = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEyMyJ9.signature"
+	liveTestAppCheckToken = "eyJhbGciOiJub25lIn0.eyJhcHBfaWQiOiJhcHAtMTIzIn0.signature"
+)
+
+type liveTestVerifier struct {
+	mu            sync.Mutex
+	idToken       string
+	appCheckToken string
+	err           error
+}
+
+func (verifier *liveTestVerifier) Verify(
+	_ context.Context,
+	idToken string,
+	appCheckToken string,
+) (identity.Principal, error) {
+	verifier.mu.Lock()
+	verifier.idToken = idToken
+	verifier.appCheckToken = appCheckToken
+	verifier.mu.Unlock()
+	if verifier.err != nil {
+		return identity.Principal{}, verifier.err
+	}
+	return identity.Principal{
+		UID:   "user-123",
+		AppID: "app-123",
+		Roles: map[string]bool{"user": true},
+	}, nil
+}
+
+type liveTestVoiceService struct {
+	mu              sync.Mutex
+	input           VoiceTurnInput
+	audio           [][]byte
+	output          [][]byte
+	result          VoiceTurnResult
+	err             error
+	waitForCancel   bool
+	cancelObserved  chan struct{}
+	cancelSignalOne sync.Once
+}
+
+func (service *liveTestVoiceService) Process(
+	context.Context,
+	string,
+	VoiceTurnInput,
+) (VoiceTurnResult, error) {
+	return VoiceTurnResult{}, errors.New("buffered voice method called")
+}
+
+func (service *liveTestVoiceService) ProcessLive(
+	ctx context.Context,
+	uid string,
+	input VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+) (VoiceTurnResult, error) {
+	if uid != "user-123" {
+		return VoiceTurnResult{}, errors.New("unexpected uid")
+	}
+	service.mu.Lock()
+	service.input = input
+	service.mu.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			service.signalCanceled()
+			return VoiceTurnResult{}, ctx.Err()
+		case chunk, open := <-audio:
+			if !open {
+				goto committed
+			}
+			copied := append([]byte(nil), chunk...)
+			service.mu.Lock()
+			service.audio = append(service.audio, copied)
+			service.mu.Unlock()
+		}
+	}
+
+committed:
+	if service.waitForCancel {
+		<-ctx.Done()
+		service.signalCanceled()
+		return VoiceTurnResult{}, ctx.Err()
+	}
+	for _, chunk := range service.output {
+		if err := onAudio(chunk); err != nil {
+			return VoiceTurnResult{}, err
+		}
+	}
+	return service.result, service.err
+}
+
+func (service *liveTestVoiceService) signalCanceled() {
+	service.cancelSignalOne.Do(func() {
+		if service.cancelObserved != nil {
+			close(service.cancelObserved)
+		}
+	})
+}
+
+func newVoiceLiveTestServer(
+	t *testing.T,
+	service VoiceTurnService,
+	verifier identity.Verifier,
+	uidLimiter guard.Limiter,
+	appLimiter guard.Limiter,
+) *httptest.Server {
+	t.Helper()
+	handler := NewWithVoice(
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		verifier,
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:         service,
+			RateLimiter:     uidLimiter,
+			AppRateLimiter:  appLimiter,
+			RequestTimeout:  2 * time.Second,
+			MaxRequestBytes: 13 * 1024 * 1024,
+		},
+	)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func dialVoiceLive(
+	ctx context.Context,
+	serverURL string,
+	header http.Header,
+) (*websocket.Conn, *http.Response, error) {
+	if header == nil {
+		header = make(http.Header)
+	}
+	if header.Get("Origin") == "" {
+		header.Set("Origin", allowedWebOrigin)
+	}
+	return websocket.Dial(
+		ctx,
+		"ws"+strings.TrimPrefix(serverURL, "http")+voiceLivePath,
+		&websocket.DialOptions{HTTPHeader: header},
+	)
+}
+
+func writeVoiceLiveStart(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+	t.Helper()
+	frame := voiceLiveStartFrame{
+		Type:          "start",
+		Version:       voiceLiveVersion,
+		IDToken:       liveTestIDToken,
+		AppCheckToken: liveTestAppCheckToken,
+		SessionState:  "",
+		TurnMode:      VoiceTurnIntentional,
+		SampleRateHz:  voiceLiveSampleRateHz,
+	}
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readVoiceLiveJSON(
+	t *testing.T,
+	ctx context.Context,
+	conn *websocket.Conn,
+) map[string]any {
+	t.Helper()
+	messageType, payload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("message type=%v want text", messageType)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(payload, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
+	t.Parallel()
+	verifier := &liveTestVerifier{}
+	service := &liveTestVoiceService{
+		output: [][]byte{{4, 0, 5, 0}, {6, 0}},
+		result: VoiceTurnResult{
+			Caption:          "Aです。理由はBです。",
+			StateToken:       "sealed-final-state",
+			DetectedDomain:   "daily",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "fast",
+			LiveTimings: VoiceLiveTimings{
+				STTFirstInterimMS: 1,
+				STTFinalMS:        2,
+				ConversationMS:    3,
+				TTSFirstChunkMS:   4,
+			},
+		},
+	}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{wantKey: "app:app-123"}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		verifier,
+		uidLimiter,
+		appLimiter,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, response, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatalf("dial response=%v err=%v", response, err)
+	}
+	defer conn.CloseNow()
+	if response == nil ||
+		response.Header.Get("Cross-Origin-Resource-Policy") != "cross-origin" ||
+		response.Header.Get("Sec-WebSocket-Extensions") != "" {
+		t.Fatalf("WebSocket security headers=%v", response)
+	}
+
+	writeVoiceLiveStart(t, ctx, conn)
+	ready := readVoiceLiveJSON(t, ctx, conn)
+	if ready["type"] != "ready" ||
+		ready["version"] != float64(voiceLiveVersion) ||
+		len(ready) != 2 {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		[]byte{1, 0, 2, 0},
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, _ := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+
+	for index, want := range service.output {
+		messageType, payload, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("audio %d: %v", index, err)
+		}
+		if messageType != websocket.MessageBinary ||
+			string(payload) != string(want) {
+			t.Fatalf("audio %d type=%v payload=%v", index, messageType, payload)
+		}
+	}
+	final := readVoiceLiveJSON(t, ctx, conn)
+	if final["type"] != "final" ||
+		final["version"] != float64(voiceLiveVersion) {
+		t.Fatalf("final=%#v", final)
+	}
+	result, ok := final["result"].(map[string]any)
+	if !ok ||
+		result["sessionState"] != "sealed-final-state" ||
+		result["audioMimeType"] != "audio/L16" ||
+		result["audioBase64"] != "" ||
+		result["caption"] != "Aです。理由はBです。" {
+		t.Fatalf("final result=%#v", final["result"])
+	}
+	if uidLimiter.calls != 1 || appLimiter.calls != 1 {
+		t.Fatalf("quota calls uid=%d app=%d", uidLimiter.calls, appLimiter.calls)
+	}
+	verifier.mu.Lock()
+	gotIDToken := verifier.idToken
+	gotAppCheckToken := verifier.appCheckToken
+	verifier.mu.Unlock()
+	if gotIDToken != liveTestIDToken ||
+		gotAppCheckToken != liveTestAppCheckToken {
+		t.Fatal("first-frame tokens were not verified")
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if len(service.audio) != 1 ||
+		string(service.audio[0]) != string([]byte{1, 0, 2, 0}) ||
+		service.input.RequestID == "" {
+		t.Fatalf("live service audio=%v input=%+v", service.audio, service.input)
+	}
+}
+
+func TestVoiceLiveRejectsWrongOriginAndHandshakeCredentials(t *testing.T) {
+	t.Parallel()
+	server := newVoiceLiveTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	badOrigin := make(http.Header)
+	badOrigin.Set("Origin", "https://evil.example")
+	if conn, response, err := dialVoiceLive(
+		ctx,
+		server.URL,
+		badOrigin,
+	); err == nil || conn != nil || response == nil ||
+		response.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong origin conn=%v response=%v err=%v", conn, response, err)
+	}
+
+	headerCredentials := make(http.Header)
+	headerCredentials.Set("Origin", allowedWebOrigin)
+	headerCredentials.Set("Authorization", "Bearer secret")
+	if conn, response, err := dialVoiceLive(
+		ctx,
+		server.URL,
+		headerCredentials,
+	); err == nil || conn != nil || response == nil ||
+		response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("header auth conn=%v response=%v err=%v", conn, response, err)
+	}
+
+	if conn, response, err := websocket.Dial(
+		ctx,
+		"ws"+strings.TrimPrefix(server.URL, "http")+
+			voiceLivePath+"?idToken=secret",
+		&websocket.DialOptions{HTTPHeader: http.Header{
+			"Origin": []string{allowedWebOrigin},
+		}},
+	); err == nil || conn != nil || response == nil ||
+		response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("query auth conn=%v response=%v err=%v", conn, response, err)
+	}
+}
+
+func TestVoiceLiveRejectsDuplicateStartKeysAndInvalidAudioOrder(t *testing.T) {
+	t.Parallel()
+	server := newVoiceLiveTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateStart := `{"type":"start","version":1,"version":1,` +
+		`"idToken":"` + liveTestIDToken + `",` +
+		`"appCheckToken":"` + liveTestAppCheckToken + `",` +
+		`"sessionState":"","turnMode":"intentional","sampleRateHz":16000}`
+	if err := conn.Write(
+		ctx,
+		websocket.MessageText,
+		[]byte(duplicateStart),
+	); err != nil {
+		t.Fatal(err)
+	}
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeResponseInvalid {
+		t.Fatalf("duplicate-key frame=%#v", frame)
+	}
+	conn.CloseNow()
+
+	conn, _, err = dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		[]byte{1},
+	); err != nil {
+		t.Fatal(err)
+	}
+	frame = readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeResponseInvalid {
+		t.Fatalf("odd PCM frame=%#v", frame)
+	}
+}
+
+func TestVoiceLiveCommitWithoutAudioFailsClosed(t *testing.T) {
+	t.Parallel()
+	server := newVoiceLiveTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+	commit, _ := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeNoSpeech {
+		t.Fatalf("empty commit frame=%#v", frame)
+	}
+}
+
+func TestVoiceLiveDisconnectCancelsPipeline(t *testing.T) {
+	t.Parallel()
+	cancelObserved := make(chan struct{})
+	service := &liveTestVoiceService{
+		waitForCancel:  true,
+		cancelObserved: cancelObserved,
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		[]byte{1, 0},
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, _ := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	conn.CloseNow()
+	select {
+	case <-cancelObserved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pipeline context was not canceled after disconnect")
+	}
+}
+
+func TestVoiceLiveStartRequiresJWTAlphabetAndCanonicalState(t *testing.T) {
+	t.Parallel()
+	base := voiceLiveStartFrame{
+		Type:          "start",
+		Version:       voiceLiveVersion,
+		IDToken:       liveTestIDToken,
+		AppCheckToken: liveTestAppCheckToken,
+		SessionState:  "v1.canonical-state",
+		TurnMode:      VoiceTurnIntentional,
+		SampleRateHz:  voiceLiveSampleRateHz,
+	}
+	if !validVoiceLiveStart(base) {
+		t.Fatal("valid start frame was rejected")
+	}
+	for _, mutate := range []func(*voiceLiveStartFrame){
+		func(frame *voiceLiveStartFrame) { frame.IDToken = "header.payload" },
+		func(frame *voiceLiveStartFrame) { frame.IDToken = "header.pay+load.signature" },
+		func(frame *voiceLiveStartFrame) { frame.IDToken = "header.payload.signature=" },
+		func(frame *voiceLiveStartFrame) { frame.AppCheckToken = "header..signature" },
+		func(frame *voiceLiveStartFrame) { frame.SessionState = " state" },
+		func(frame *voiceLiveStartFrame) {
+			frame.SessionState = strings.Repeat("x", maxStateBytes+1)
+		},
+	} {
+		frame := base
+		mutate(&frame)
+		if validVoiceLiveStart(frame) {
+			t.Fatalf("invalid start frame was accepted: %+v", frame)
+		}
+	}
+}

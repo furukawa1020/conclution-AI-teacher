@@ -21,6 +21,7 @@ const (
 	voiceLiveVersion            = 1
 	voiceLiveSampleRateHz       = 16_000
 	voiceLiveFirstFrameTimeout  = 3 * time.Second
+	voiceLiveGuardTimeout       = 5 * time.Second
 	voiceLiveMaxCaptureDuration = 55 * time.Second
 	voiceLiveMaxStartBytes      = 40 * 1024
 	voiceLiveMaxPCMFrameBytes   = 15 * 1024
@@ -29,16 +30,13 @@ const (
 )
 
 const (
-	voiceLiveCodeInvalidStart         = "invalid_start"
-	voiceLiveCodeUnauthenticated      = "unauthenticated"
-	voiceLiveCodeRateLimitExceeded    = "rate_limit_exceeded"
-	voiceLiveCodeRateLimitUnavailable = "rate_limit_unavailable"
-	voiceLiveCodeInvalidFrame         = "invalid_frame"
-	voiceLiveCodeAudioLimitExceeded   = "audio_limit_exceeded"
-	voiceLiveCodeEmptyAudio           = "empty_audio"
-	voiceLiveCodeCaptureTimeout       = "capture_timeout"
-	voiceLiveCodeVoiceTurnInvalid     = "voice_turn_invalid"
-	voiceLiveCodeVoiceTurnUnavailable = "voice_turn_unavailable"
+	voiceLiveCodeAuthenticationFailed = "authentication_failed"
+	voiceLiveCodeRateLimited          = "rate_limited"
+	voiceLiveCodeAPIUnavailable       = "voice_api_unavailable"
+	voiceLiveCodeResponseInvalid      = "voice_response_invalid"
+	voiceLiveCodeTurnTooLarge         = "voice_turn_too_large"
+	voiceLiveCodeNoSpeech             = "no_speech"
+	voiceLiveCodeTurnInvalid          = "voice_turn_invalid"
 )
 
 type voiceLiveStartFrame struct {
@@ -88,6 +86,47 @@ type voiceLiveRead struct {
 	err         error
 }
 
+type voiceLiveOutputMetrics struct {
+	mu            sync.Mutex
+	firstOutputAt time.Time
+	frames        int
+	bytes         int
+}
+
+func (metrics *voiceLiveOutputMetrics) deliver(
+	ctx context.Context,
+	conn *websocket.Conn,
+	audio []byte,
+) error {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if len(audio) == 0 ||
+		len(audio)%2 != 0 ||
+		len(audio) > voiceStreamMaxChunkBytes ||
+		metrics.frames >= voiceStreamMaxChunks ||
+		len(audio) > voiceStreamMaxAudioBytes-metrics.bytes {
+		return errors.New("live synthesized audio is outside bounds")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, audio); err != nil {
+		return err
+	}
+	if metrics.firstOutputAt.IsZero() {
+		metrics.firstOutputAt = time.Now()
+	}
+	metrics.frames++
+	metrics.bytes += len(audio)
+	return nil
+}
+
+func (metrics *voiceLiveOutputMetrics) snapshot() (time.Time, int, int) {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	return metrics.firstOutputAt, metrics.frames, metrics.bytes
+}
+
 func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	origins := r.Header.Values("Origin")
@@ -112,7 +151,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns:  []string{allowedWebOrigin},
+		OriginPatterns:  []string{"kotae-ai.web.app"},
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
@@ -137,7 +176,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		finishVoiceLiveWithError(
 			r.Context(),
 			conn,
-			voiceLiveCodeInvalidStart,
+			voiceLiveCodeResponseInvalid,
 			websocket.StatusPolicyViolation,
 		)
 		return
@@ -145,7 +184,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 
 	verifyCtx, cancelVerify := context.WithTimeout(
 		r.Context(),
-		s.voice.RequestTimeout,
+		voiceLiveGuardTimeout,
 	)
 	principal, err := s.verifier.Verify(
 		verifyCtx,
@@ -159,7 +198,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		finishVoiceLiveWithError(
 			r.Context(),
 			conn,
-			voiceLiveCodeUnauthenticated,
+			voiceLiveCodeAuthenticationFailed,
 			websocket.StatusPolicyViolation,
 		)
 		return
@@ -170,11 +209,17 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		voiceLiveMaxCaptureDuration+s.voice.RequestTimeout,
 	)
 	defer cancelLive()
-	if code := s.consumeVoiceLiveQuota(
+	quotaCtx, cancelQuota := context.WithTimeout(
 		liveCtx,
+		voiceLiveGuardTimeout,
+	)
+	code := s.consumeVoiceLiveQuota(
+		quotaCtx,
 		principal,
 		time.Now().UTC(),
-	); code != "" {
+	)
+	cancelQuota()
+	if code != "" {
 		finishVoiceLiveWithError(
 			liveCtx,
 			conn,
@@ -212,9 +257,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	outputFrames := 0
-	outputBytes := 0
-	firstOutputAt := time.Time{}
+	outputMetrics := &voiceLiveOutputMetrics{}
 	outcomeChannel := make(chan voiceLiveOutcome, 1)
 	go func() {
 		result, processErr := liveService.ProcessLive(
@@ -223,29 +266,11 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			input,
 			audioInput,
 			func(audio []byte) error {
-				if len(audio) == 0 ||
-					len(audio)%2 != 0 ||
-					len(audio) > voiceStreamMaxChunkBytes ||
-					outputFrames >= voiceStreamMaxChunks ||
-					len(audio) > voiceStreamMaxAudioBytes-outputBytes {
-					return errors.New("live synthesized audio is outside bounds")
-				}
-				if err := liveCtx.Err(); err != nil {
-					return err
-				}
-				if err := conn.Write(
+				return outputMetrics.deliver(
 					liveCtx,
-					websocket.MessageBinary,
+					conn,
 					audio,
-				); err != nil {
-					return err
-				}
-				if firstOutputAt.IsZero() {
-					firstOutputAt = time.Now()
-				}
-				outputFrames++
-				outputBytes += len(audio)
-				return nil
+				)
 			},
 		)
 		outcomeChannel <- voiceLiveOutcome{result: result, err: processErr}
@@ -272,23 +297,21 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 
 		select {
 		case outcome := <-outcomeChannel:
-			cancelLive()
 			s.finishUnexpectedVoiceLiveOutcome(
 				r.Context(),
 				conn,
 				outcome,
 			)
+			cancelLive()
 			s.logVoiceLiveSession(
 				liveCtx,
 				started,
 				authReadyMS,
 				firstInputAt,
 				commitAt,
-				firstOutputAt,
 				inputFrames,
 				inputBytes,
-				outputFrames,
-				outputBytes,
+				outputMetrics,
 				outcome.result.LiveTimings,
 				true,
 			)
@@ -302,11 +325,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					authReadyMS,
 					firstInputAt,
 					commitAt,
-					firstOutputAt,
 					inputFrames,
 					inputBytes,
-					outputFrames,
-					outputBytes,
+					outputMetrics,
 					emptyVoiceLiveTimings(),
 					true,
 				)
@@ -320,7 +341,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					finishVoiceLiveWithError(
 						liveCtx,
 						conn,
-						voiceLiveCodeInvalidFrame,
+						voiceLiveCodeResponseInvalid,
 						websocket.StatusPolicyViolation,
 					)
 					cancelLive()
@@ -333,7 +354,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					finishVoiceLiveWithError(
 						liveCtx,
 						conn,
-						voiceLiveCodeAudioLimitExceeded,
+						voiceLiveCodeTurnTooLarge,
 						websocket.StatusMessageTooBig,
 					)
 					cancelLive()
@@ -348,12 +369,12 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					inputBytes += len(read.payload)
 				case outcome := <-outcomeChannel:
 					clear(read.payload)
-					cancelLive()
 					s.finishUnexpectedVoiceLiveOutcome(
 						r.Context(),
 						conn,
 						outcome,
 					)
+					cancelLive()
 					return
 				case <-liveCtx.Done():
 					clear(read.payload)
@@ -370,7 +391,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					finishVoiceLiveWithError(
 						liveCtx,
 						conn,
-						voiceLiveCodeInvalidFrame,
+						voiceLiveCodeResponseInvalid,
 						websocket.StatusPolicyViolation,
 					)
 					cancelLive()
@@ -382,7 +403,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					finishVoiceLiveWithError(
 						liveCtx,
 						conn,
-						voiceLiveCodeEmptyAudio,
+						voiceLiveCodeNoSpeech,
 						websocket.StatusPolicyViolation,
 					)
 					cancelLive()
@@ -395,7 +416,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				finishVoiceLiveWithError(
 					liveCtx,
 					conn,
-					voiceLiveCodeInvalidFrame,
+					voiceLiveCodeResponseInvalid,
 					websocket.StatusPolicyViolation,
 				)
 				cancelLive()
@@ -405,7 +426,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			finishVoiceLiveWithError(
 				r.Context(),
 				conn,
-				voiceLiveCodeCaptureTimeout,
+				voiceLiveCodeAPIUnavailable,
 				websocket.StatusPolicyViolation,
 			)
 			cancelLive()
@@ -428,11 +449,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			authReadyMS,
 			firstInputAt,
 			commitAt,
-			firstOutputAt,
 			inputFrames,
 			inputBytes,
-			outputFrames,
-			outputBytes,
+			outputMetrics,
 			emptyVoiceLiveTimings(),
 			true,
 		)
@@ -444,21 +463,19 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			authReadyMS,
 			firstInputAt,
 			commitAt,
-			firstOutputAt,
 			inputFrames,
 			inputBytes,
-			outputFrames,
-			outputBytes,
+			outputMetrics,
 			emptyVoiceLiveTimings(),
 			true,
 		)
 		return
 	}
 	if outcome.err != nil {
-		code := voiceLiveCodeVoiceTurnUnavailable
+		code := voiceLiveCodeAPIUnavailable
 		if errors.Is(outcome.err, ErrVoiceNotRecognized) ||
 			errors.Is(outcome.err, ErrVoiceStateInvalid) {
-			code = voiceLiveCodeVoiceTurnInvalid
+			code = voiceLiveCodeTurnInvalid
 		}
 		finishVoiceLiveWithError(
 			liveCtx,
@@ -472,23 +489,22 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			authReadyMS,
 			firstInputAt,
 			commitAt,
-			firstOutputAt,
 			inputFrames,
 			inputBytes,
-			outputFrames,
-			outputBytes,
+			outputMetrics,
 			outcome.result.LiveTimings,
 			false,
 		)
 		return
 	}
 
+	_, outputFrames, _ := outputMetrics.snapshot()
 	spoke := outputFrames > 0
 	if err := validateStreamedVoiceResult(outcome.result, spoke); err != nil {
 		finishVoiceLiveWithError(
 			liveCtx,
 			conn,
-			voiceLiveCodeVoiceTurnUnavailable,
+			voiceLiveCodeResponseInvalid,
 			websocket.StatusInternalError,
 		)
 		return
@@ -523,11 +539,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		authReadyMS,
 		firstInputAt,
 		commitAt,
-		firstOutputAt,
 		inputFrames,
 		inputBytes,
-		outputFrames,
-		outputBytes,
+		outputMetrics,
 		outcome.result.LiveTimings,
 		false,
 	)
@@ -538,14 +552,11 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 	if start.Type != "start" ||
 		start.Version != voiceLiveVersion ||
 		start.SampleRateHz != voiceLiveSampleRateHz ||
-		start.IDToken == "" ||
-		start.AppCheckToken == "" ||
-		len(start.IDToken) > voiceLiveMaxTokenBytes ||
-		len(start.AppCheckToken) > voiceLiveMaxTokenBytes ||
-		strings.TrimSpace(start.IDToken) != start.IDToken ||
-		strings.TrimSpace(start.AppCheckToken) != start.AppCheckToken ||
+		!validVoiceLiveJWT(start.IDToken) ||
+		!validVoiceLiveJWT(start.AppCheckToken) ||
 		len(start.SessionState) > maxStateBytes ||
-		!utf8.ValidString(start.SessionState) {
+		!utf8.ValidString(start.SessionState) ||
+		strings.TrimSpace(start.SessionState) != start.SessionState {
 		return false
 	}
 	switch start.TurnMode {
@@ -557,6 +568,9 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 }
 
 func decodeStrictVoiceLiveJSON(payload []byte, destination any) error {
+	if err := rejectDuplicateTopLevelJSONKeys(payload); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
@@ -566,6 +580,77 @@ func decodeStrictVoiceLiveJSON(payload []byte, destination any) error {
 		return errors.New("WebSocket frame must contain exactly one JSON value")
 	}
 	return nil
+}
+
+func rejectDuplicateTopLevelJSONKeys(payload []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return errors.New("WebSocket JSON frame must be an object")
+	}
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return errors.New("WebSocket JSON object key is invalid")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("WebSocket JSON object contains a duplicate key")
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("WebSocket frame contains trailing JSON")
+		}
+		return err
+	}
+	return nil
+}
+
+func validVoiceLiveJWT(value string) bool {
+	if value == "" ||
+		len(value) > voiceLiveMaxTokenBytes ||
+		strings.TrimSpace(value) != value {
+		return false
+	}
+	dots := 0
+	segmentLength := 0
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		switch {
+		case character >= 'A' && character <= 'Z',
+			character >= 'a' && character <= 'z',
+			character >= '0' && character <= '9',
+			character == '-',
+			character == '_':
+			segmentLength++
+		case character == '.':
+			if segmentLength == 0 {
+				return false
+			}
+			dots++
+			segmentLength = 0
+		default:
+			return false
+		}
+	}
+	return dots == 2 && segmentLength > 0
 }
 
 func writeVoiceLiveJSON(
@@ -601,10 +686,10 @@ func (s *Server) finishUnexpectedVoiceLiveOutcome(
 	conn *websocket.Conn,
 	outcome voiceLiveOutcome,
 ) {
-	code := voiceLiveCodeVoiceTurnUnavailable
+	code := voiceLiveCodeAPIUnavailable
 	if errors.Is(outcome.err, ErrVoiceNotRecognized) ||
 		errors.Is(outcome.err, ErrVoiceStateInvalid) {
-		code = voiceLiveCodeVoiceTurnInvalid
+		code = voiceLiveCodeTurnInvalid
 	}
 	finishVoiceLiveWithError(
 		ctx,
@@ -644,7 +729,7 @@ func (s *Server) consumeVoiceLiveQuota(
 	group.Wait()
 	for _, err := range errs {
 		if errors.Is(err, guard.ErrRateLimitExceeded) {
-			return voiceLiveCodeRateLimitExceeded
+			return voiceLiveCodeRateLimited
 		}
 	}
 	for index, err := range errs {
@@ -654,7 +739,7 @@ func (s *Server) consumeVoiceLiveQuota(
 				"quota_scope", checks[index].scope,
 				"error_class", "voice_rate_limit_store_failure",
 			)
-			return voiceLiveCodeRateLimitUnavailable
+			return voiceLiveCodeAPIUnavailable
 		}
 	}
 	return ""
@@ -675,14 +760,13 @@ func (s *Server) logVoiceLiveSession(
 	authReadyMS int64,
 	firstInputAt time.Time,
 	commitAt time.Time,
-	firstOutputAt time.Time,
 	inputFrames int,
 	inputBytes int,
-	outputFrames int,
-	outputBytes int,
+	outputMetrics *voiceLiveOutputMetrics,
 	timings VoiceLiveTimings,
 	cancelled bool,
 ) {
+	firstOutputAt, outputFrames, outputBytes := outputMetrics.snapshot()
 	firstInputMS := durationFrom(started, firstInputAt)
 	commitMS := durationFrom(started, commitAt)
 	commitToFirstAudioMS := int64(-1)

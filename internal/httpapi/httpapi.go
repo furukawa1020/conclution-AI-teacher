@@ -90,10 +90,14 @@ type VoiceTurnResult struct {
 }
 
 type VoiceLiveTimings struct {
-	STTFirstInterimMS int64
-	STTFinalMS        int64
-	ConversationMS    int64
-	TTSFirstChunkMS   int64
+	STTFirstInterimMS   int64
+	STTFinalMS          int64
+	ConversationMS      int64
+	TTSFirstChunkMS     int64
+	FinalToFirstAudioMS int64
+	SpecHit             int64
+	SpecMiss            int64
+	SpecCancel          int64
 }
 
 type ResearchRecord struct {

@@ -747,10 +747,11 @@ func (s *Server) consumeVoiceLiveQuota(
 
 func emptyVoiceLiveTimings() VoiceLiveTimings {
 	return VoiceLiveTimings{
-		STTFirstInterimMS: -1,
-		STTFinalMS:        -1,
-		ConversationMS:    -1,
-		TTSFirstChunkMS:   -1,
+		STTFirstInterimMS:   -1,
+		STTFinalMS:          -1,
+		ConversationMS:      -1,
+		TTSFirstChunkMS:     -1,
+		FinalToFirstAudioMS: -1,
 	}
 }
 
@@ -785,6 +786,11 @@ func (s *Server) logVoiceLiveSession(
 		"stt_final_ms", finiteLatency(timings.STTFinalMS),
 		"conversation_ms", finiteLatency(timings.ConversationMS),
 		"tts_first_chunk_ms", finiteLatency(timings.TTSFirstChunkMS),
+		"final_to_first_audio_ms",
+		finiteLatency(timings.FinalToFirstAudioMS),
+		"spec_hit", timings.SpecHit,
+		"spec_miss", timings.SpecMiss,
+		"spec_cancel", timings.SpecCancel,
 		"commit_to_first_audio_ms", commitToFirstAudioMS,
 		"total_ms", finiteLatency(time.Since(started).Milliseconds()),
 		"input_frames", inputFrames,

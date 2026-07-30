@@ -927,8 +927,6 @@ async function beginTurn(serializedSessionState, turnMode) {
         }
 
         setStreamTracksEnabled(stream, true);
-        const recording = createRecording(stream);
-        activeRecording = recording;
         const liveSession = await startVoiceLiveSession({
           ...credentials,
           expectedEpoch,
@@ -936,30 +934,17 @@ async function beginTurn(serializedSessionState, turnMode) {
           stream,
           turnMode,
         });
-        if (
-          liveSession &&
-          recording.liveSpeechConfirmed &&
-          Number.isFinite(recording.liveSpeechStartedAt) &&
-          liveSession.captureStartedAt() >
-            recording.liveSpeechStartedAt
-        ) {
-          liveSession.cancel(new Error("voice_live_capture_late"));
-          activeLiveSession = undefined;
-        } else {
-          if (
-            liveSession &&
-            recording.liveSpeechConfirmed &&
-            Number.isFinite(recording.liveSpeechStartedAt)
-          ) {
-            activeLiveSession = liveSession.confirmSpeech(
-              recording.liveSpeechStartedAt,
-            )
-              ? liveSession
-              : undefined;
-          } else {
-            activeLiveSession = liveSession;
-          }
+        if (expectedEpoch !== sessionEpoch) {
+          liveSession?.cancel(new Error("request_cancelled"));
+          fail("request_cancelled");
         }
+        // Attach the privacy-gated PCM capture before arming VAD. A user may
+        // start talking immediately after pressing the button; arming VAD
+        // first could confirm speech while the AudioWorklet was still loading
+        // and force the live turn to cancel after its first PCM frame.
+        activeLiveSession = liveSession;
+        const recording = createRecording(stream);
+        activeRecording = recording;
         return Object.freeze({ state: "listening" });
       },
       () => {
@@ -1435,7 +1420,6 @@ async function startVoiceLiveSession({
           clientTransport.pushFrame(frame),
         )
       : undefined;
-  let captureStartedAt = 0;
   let captureStopped = false;
   let authReadyMs = preflightAuthReadyMs;
   let authReadyTimer;
@@ -1713,9 +1697,6 @@ async function startVoiceLiveSession({
 
   session = {
     playback: undefined,
-    captureStartedAt() {
-      return captureStartedAt;
-    },
     canFallback() {
       return !commitSent;
     },
@@ -1960,7 +1941,6 @@ async function startVoiceLiveSession({
         onFrame: acceptCaptureFrame,
       });
       adoptedCapture = captureHandoff;
-      captureStartedAt = Math.max(0, preRollCutoffAt);
       for (const frame of preRoll) {
         acceptCaptureFrame(frame);
       }
@@ -1970,7 +1950,6 @@ async function startVoiceLiveSession({
       return undefined;
     }
   } else {
-    captureStartedAt = performance.now();
     captureSource.connect(captureNode);
   }
   return session;

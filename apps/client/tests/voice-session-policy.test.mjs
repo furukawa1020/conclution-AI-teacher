@@ -127,6 +127,33 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.ok(microphoneAt > warmAt);
 });
 
+test("live PCM capture is attached before VAD can confirm immediate speech", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const beginStart = bridge.indexOf("async function beginTurn(");
+  const beginEnd = bridge.indexOf(
+    "\n}\n\nasync function waitForTurnEnd",
+    beginStart,
+  );
+  assert.notEqual(beginStart, -1);
+  assert.notEqual(beginEnd, -1);
+  const begin = bridge.slice(beginStart, beginEnd);
+  const liveAt = begin.indexOf(
+    "const liveSession = await startVoiceLiveSession(",
+  );
+  const recordingAt = begin.indexOf(
+    "const recording = createRecording(stream)",
+  );
+  assert.ok(liveAt >= 0);
+  assert.ok(recordingAt > liveAt);
+  assert.ok(
+    begin.indexOf("activeLiveSession = liveSession") < recordingAt,
+  );
+  assert.doesNotMatch(begin, /voice_live_capture_late/u);
+});
+
 test("voice upload conversion overlaps refreshed credentials", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),

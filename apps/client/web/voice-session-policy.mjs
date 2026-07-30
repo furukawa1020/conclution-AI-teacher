@@ -284,6 +284,24 @@ export function createTurnGate() {
   });
 }
 
+export function createRetryableInitializer(initialize) {
+  if (typeof initialize !== "function") {
+    throw new TypeError("initializer_invalid");
+  }
+
+  let pending;
+  return () => {
+    if (pending === undefined) {
+      const attempt = Promise.resolve().then(() => initialize());
+      pending = attempt.catch((error) => {
+        pending = undefined;
+        throw error;
+      });
+    }
+    return pending;
+  };
+}
+
 export function createCaptureBuffer({
   maximumBytes,
   preRollByteLimit = VOICE_SESSION_LIMITS.preRollByteLimit,
@@ -389,35 +407,6 @@ export function createCaptureBuffer({
       clearArrays();
       promoted = false;
       return Object.freeze({ chunks, totalBytes });
-    },
-  });
-}
-
-export function createCapturePhase() {
-  let boundaryPending = false;
-  let speechConfirmed = false;
-
-  return Object.freeze({
-    classifyChunk() {
-      if (!speechConfirmed) return "pre-roll";
-      if (boundaryPending) {
-        boundaryPending = false;
-        return "discard-boundary";
-      }
-      return "retain";
-    },
-    confirmSpeech() {
-      if (speechConfirmed) return false;
-      speechConfirmed = true;
-      boundaryPending = true;
-      return true;
-    },
-    reset() {
-      boundaryPending = false;
-      speechConfirmed = false;
-    },
-    snapshot() {
-      return Object.freeze({ boundaryPending, speechConfirmed });
     },
   });
 }

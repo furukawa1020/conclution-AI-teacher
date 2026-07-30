@@ -13,7 +13,7 @@ import {
 import {
   advanceVad,
   createCaptureBuffer,
-  createCapturePhase,
+  createRetryableInitializer,
   createSessionClock,
   createTurnGate,
   createVadState,
@@ -48,8 +48,7 @@ const ALLOWED_CONFIG_KEYS = Object.freeze([
   "projectId",
 ]);
 
-let appServicesPromise;
-let authenticatedUserPromise;
+let authInstance;
 let mediaStream;
 let audioContext;
 let analyser;
@@ -146,31 +145,25 @@ async function initializeAppServices() {
   return Object.freeze({ app, appCheck });
 }
 
-function appServices() {
-  appServicesPromise ??= initializeAppServices();
-  return appServicesPromise;
-}
+const appServices = createRetryableInitializer(initializeAppServices);
 
 async function initializeAuthenticatedUser() {
   const { app } = await appServices();
-  const auth = initializeAuth(app, {
+  authInstance ??= initializeAuth(app, {
     persistence: browserSessionPersistence,
   });
+  const auth = authInstance;
   const credential = auth.currentUser
     ? { user: auth.currentUser }
     : await signInAnonymously(auth);
   return Object.freeze({ user: credential.user });
 }
 
-function authenticatedUser() {
-  authenticatedUserPromise ??= initializeAuthenticatedUser();
-  return authenticatedUserPromise;
-}
+const authenticatedUser = createRetryableInitializer(
+  initializeAuthenticatedUser,
+);
 
-async function getStatus() {
-  if (!siteKeyConfigured()) {
-    return Object.freeze({ state: "configuration-required" });
-  }
+async function secureCredentials() {
   try {
     const [{ appCheck }, { user }] = await Promise.all([
       appServices(),
@@ -180,6 +173,24 @@ async function getStatus() {
       getIdToken(user, false),
       getAppCheckToken(appCheck, false),
     ]);
+    return Object.freeze({
+      appCheckToken: appCheckResult.token,
+      idToken,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "app_check_not_configured") {
+      throw error;
+    }
+    fail("authentication_failed");
+  }
+}
+
+async function getStatus() {
+  if (!siteKeyConfigured()) {
+    return Object.freeze({ state: "configuration-required" });
+  }
+  try {
+    const { appCheckToken, idToken } = await secureCredentials();
     const response = await fetch("/api/v1/me", {
       method: "GET",
       cache: "no-store",
@@ -188,7 +199,7 @@ async function getStatus() {
       referrerPolicy: "no-referrer",
       headers: {
         Authorization: `Bearer ${idToken}`,
-        "X-Firebase-AppCheck": appCheckResult.token,
+        "X-Firebase-AppCheck": appCheckToken,
       },
     });
     if (!response.ok) {
@@ -242,7 +253,6 @@ function releaseMicrophone() {
   if (activeRecording) {
     activeRecording.discard = true;
     activeRecording.captureBuffer.clear();
-    activeRecording.capturePhase.reset();
     activeRecording.totalBytes = 0;
     requestRecordingStop(activeRecording, "cancelled");
     activeRecording = undefined;
@@ -379,13 +389,65 @@ function stopVad(recording) {
   }
 }
 
+function recordingErrorCode(recording) {
+  return recording.stopReason === "too-large"
+    ? "voice_turn_too_large"
+    : "request_cancelled";
+}
+
+function rejectRecording(recording, code) {
+  if (recording.settled) return;
+  recording.settled = true;
+  recording.discard = true;
+  stopVad(recording);
+  setStreamTracksEnabled(recording.stream, false);
+  recording.captureBuffer.clear();
+  recording.totalBytes = 0;
+  recording.rejectEnd(new Error(code));
+}
+
+function resolveRecording(recording) {
+  if (recording.settled) return;
+  recording.settled = true;
+  stopVad(recording);
+  setStreamTracksEnabled(recording.stream, false);
+  const captured = recording.captureBuffer.take();
+  const mimeType =
+    recording.recorder.mimeType ||
+    captured.chunks[0]?.type ||
+    "audio/webm";
+  const blob = new Blob(captured.chunks, { type: mimeType });
+  recording.resolveEnd(
+    Object.freeze({
+      blob,
+      hasSpeech:
+        recording.hasSpeech && recording.captureStarted && blob.size > 0,
+      mimeType,
+      reason: recording.stopReason,
+    }),
+  );
+}
+
 function requestRecordingStop(recording, reason) {
-  if (!recording || recording.recorder.state === "inactive") {
+  if (!recording || recording.settled || recording.stopRequested) {
     return;
   }
   recording.stopReason = reason;
+  recording.stopRequested = true;
   stopVad(recording);
-  recording.recorder.stop();
+  if (!recording.captureStarted) {
+    if (recording.discard) {
+      rejectRecording(recording, recordingErrorCode(recording));
+    } else {
+      resolveRecording(recording);
+    }
+    return;
+  }
+  try {
+    recording.recorder.stop();
+  } catch {
+    rejectRecording(recording, "voice_turn_invalid");
+  }
 }
 
 function armVad(recording) {
@@ -395,7 +457,8 @@ function armVad(recording) {
   recording.vadTimer = setInterval(() => {
     if (
       recording.discard ||
-      recording.recorder.state !== "recording" ||
+      recording.settled ||
+      recording.stopRequested ||
       !analyser
     ) {
       return;
@@ -416,21 +479,14 @@ function armVad(recording) {
     recording.hasSpeech = vadState.hasSpeech;
     recording.lastVoiceAt = vadState.lastVoiceAt ?? 0;
     if (!hadSpeech && recording.hasSpeech) {
-      // A delayed first Blob may contain everything heard before VAD
-      // confirmation. Force a boundary and discard that Blob below.
-      recording.capturePhase.confirmSpeech();
-      if (typeof recording.recorder.requestData !== "function") {
-        recording.discard = true;
-        recording.captureBuffer.clear();
-        requestRecordingStop(recording, "boundary-failed");
-        return;
-      }
+      // Do not record background audio while waiting for speech. Starting a
+      // fresh recorder here also guarantees that the retained WebM begins
+      // with its own container header.
       try {
-        recording.recorder.requestData();
+        recording.recorder.start(250);
+        recording.captureStarted = true;
       } catch {
-        recording.discard = true;
-        recording.captureBuffer.clear();
-        requestRecordingStop(recording, "boundary-failed");
+        rejectRecording(recording, "voice_turn_invalid");
         return;
       }
     }
@@ -459,7 +515,7 @@ function createRecording(stream) {
   void endPromise.catch(() => {});
   const recording = {
     captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
-    capturePhase: createCapturePhase(),
+    captureStarted: false,
     discard: false,
     endPromise,
     hasSpeech: false,
@@ -467,8 +523,11 @@ function createRecording(stream) {
     recorder,
     resolveEnd,
     rejectEnd,
+    settled: false,
     startedAt: performance.now(),
     stopReason: "",
+    stopRequested: false,
+    stream,
     totalBytes: 0,
     vadTimer: undefined,
   };
@@ -477,17 +536,7 @@ function createRecording(stream) {
     if (recording.discard || !event.data || event.data.size === 0) {
       return;
     }
-    const disposition = recording.capturePhase.classifyChunk();
-    if (disposition === "discard-boundary") {
-      // Privacy takes priority over retaining the first ~200 ms of speech.
-      recording.captureBuffer.clear();
-      recording.totalBytes = 0;
-      return;
-    }
-    const captureState = recording.captureBuffer.append(
-      event.data,
-      disposition === "retain",
-    );
+    const captureState = recording.captureBuffer.append(event.data, true);
     recording.totalBytes = captureState.totalBytes;
     if (captureState.tooLarge) {
       recording.discard = true;
@@ -498,11 +547,7 @@ function createRecording(stream) {
   recorder.addEventListener(
     "error",
     () => {
-      stopVad(recording);
-      setStreamTracksEnabled(stream, false);
-      recording.captureBuffer.clear();
-      recording.capturePhase.reset();
-      recording.rejectEnd(new Error("voice_turn_invalid"));
+      rejectRecording(recording, "voice_turn_invalid");
     },
     { once: true },
   );
@@ -510,47 +555,15 @@ function createRecording(stream) {
   recorder.addEventListener(
     "stop",
     () => {
-      stopVad(recording);
-      setStreamTracksEnabled(stream, false);
       if (recording.discard) {
-        recording.captureBuffer.clear();
-        recording.capturePhase.reset();
-        recording.rejectEnd(
-          new Error(
-            recording.stopReason === "too-large"
-              ? "voice_turn_too_large"
-              : "request_cancelled",
-          ),
-        );
+        rejectRecording(recording, recordingErrorCode(recording));
         return;
       }
-
-      const captured = recording.captureBuffer.take();
-      recording.capturePhase.reset();
-      const mimeType =
-        recorder.mimeType ||
-        captured.chunks[0]?.type ||
-        "audio/webm";
-      const blob = new Blob(captured.chunks, {
-        type: mimeType,
-      });
-      recording.resolveEnd(
-        Object.freeze({
-          blob,
-          hasSpeech: recording.hasSpeech && blob.size > 0,
-          mimeType,
-          reason: recording.stopReason,
-        }),
-      );
+      resolveRecording(recording);
     },
     { once: true },
   );
 
-  try {
-    recorder.start(250);
-  } catch {
-    fail("microphone_unsupported");
-  }
   armVad(recording);
   return recording;
 }
@@ -578,6 +591,10 @@ async function beginTurn() {
     const expectedEpoch = sessionEpoch;
     return await initializeWithCleanup(
       async () => {
+        await secureCredentials();
+        if (expectedEpoch !== sessionEpoch) {
+          fail("request_cancelled");
+        }
         const stream = await ensureMediaStream(expectedEpoch);
         await ensureAudioGraph(stream, expectedEpoch);
         if (expectedEpoch !== sessionEpoch) {
@@ -586,7 +603,6 @@ async function beginTurn() {
 
         setStreamTracksEnabled(stream, true);
         activeRecording = createRecording(stream);
-        void authenticatedUser().catch(() => {});
         return Object.freeze({ state: "listening" });
       },
       () => {
@@ -816,14 +832,7 @@ async function finishTurn(serializedSessionState, turnMode) {
       clearPendingDocument("consumed");
     }
     audioBase64 = arrayBufferToBase64(await capture.blob.arrayBuffer());
-    const [{ appCheck }, { user }] = await Promise.all([
-      appServices(),
-      authenticatedUser(),
-    ]);
-    const [idToken, appCheckResult] = await Promise.all([
-      getIdToken(user, false),
-      getAppCheckToken(appCheck, false),
-    ]);
+    const { appCheckToken, idToken } = await secureCredentials();
     if (expectedEpoch !== sessionEpoch) {
       fail("request_cancelled");
     }
@@ -853,7 +862,7 @@ async function finishTurn(serializedSessionState, turnMode) {
       headers: {
         Authorization: `Bearer ${idToken}`,
         "Content-Type": "application/json",
-        "X-Firebase-AppCheck": appCheckResult.token,
+        "X-Firebase-AppCheck": appCheckToken,
       },
       body: JSON.stringify(payload),
     });

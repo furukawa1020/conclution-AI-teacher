@@ -21,7 +21,14 @@ impl VoiceState {
             Self::Thinking => "背景まで読んでいます",
             Self::Speaking => "言葉で返しています",
             Self::Paused => "会話を止めています",
+            Self::Error(message) => message,
+        }
+    }
+
+    const fn eyebrow(self) -> &'static str {
+        match self {
             Self::Error(_) => "接続を続けられませんでした",
+            _ => self.label(),
         }
     }
 
@@ -33,7 +40,7 @@ impl VoiceState {
             Self::Thinking => "あなたの意味を変えず　聞かれた答えだけを前へ出す",
             Self::Speaking => "返事のあと　そのまままた聴きはじめる",
             Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
-            Self::Error(message) => message,
+            Self::Error(_) => "丸いボタンか下の「もう一度接続する」からやり直せる",
         }
     }
 
@@ -65,6 +72,26 @@ impl VoiceState {
 
     const fn session_active(self) -> bool {
         !matches!(self, Self::Ready)
+    }
+
+    const fn session_control_reconnects(self) -> bool {
+        matches!(self, Self::Paused | Self::Error(_))
+    }
+
+    const fn session_control_label(self) -> &'static str {
+        match self {
+            Self::Paused => "再開",
+            Self::Error(_) => "もう一度接続する",
+            _ => "一時停止",
+        }
+    }
+
+    const fn session_control_icon(self) -> &'static str {
+        match self {
+            Self::Paused => "▶",
+            Self::Error(_) => "↻",
+            _ => "Ⅱ",
+        }
     }
 }
 
@@ -726,8 +753,8 @@ fn App() -> Element {
                                     }
                                 }
                             }
-                            if state_snapshot == VoiceState::Ready {
-                                span { class: "voice-orb__cta", "話しはじめる" }
+                            if matches!(state_snapshot, VoiceState::Ready | VoiceState::Error(_)) {
+                                span { class: "voice-orb__cta", {state_snapshot.orb_action()} }
                             }
                             span { class: "sr-only", {state_snapshot.orb_action()} }
                         }
@@ -745,7 +772,7 @@ fn App() -> Element {
                             if state_snapshot == VoiceState::Listening {
                                 span { class: "live-dot", aria_hidden: "true" }
                             }
-                            {state_snapshot.label()}
+                            {state_snapshot.eyebrow()}
                         }
                         h1 { id: "voice-heading",
                             if state_snapshot == VoiceState::Ready {
@@ -797,7 +824,7 @@ fn App() -> Element {
                                 r#type: "button",
                                 onclick: move |_| {
                                     let current_state = *voice_state.peek();
-                                    if current_state == VoiceState::Paused {
+                                    if current_state.session_control_reconnects() {
                                         start_or_resume(
                                             voice_state,
                                             generation,
@@ -819,13 +846,11 @@ fn App() -> Element {
                                         cloud::stop_session();
                                     }
                                 },
-                                if state_snapshot == VoiceState::Paused {
-                                    span { aria_hidden: "true", "▶" }
-                                    "再開"
-                                } else {
-                                    span { aria_hidden: "true", "Ⅱ" }
-                                    "一時停止"
+                                span {
+                                    aria_hidden: "true",
+                                    {state_snapshot.session_control_icon()}
                                 }
+                                {state_snapshot.session_control_label()}
                             }
                             button {
                                 class: "control-button control-button--end",
@@ -1030,12 +1055,35 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::next_turn_is_intentional;
+    use super::{VoiceState, next_turn_is_intentional};
 
     #[test]
     fn recognition_clarification_keeps_the_explicit_turn_open() {
         assert!(next_turn_is_intentional("stt-clarify"));
         assert!(!next_turn_is_intentional("stt-silent"));
         assert!(!next_turn_is_intentional("direct-answer"));
+    }
+
+    #[test]
+    fn voice_error_exposes_the_specific_message_and_retry_action() {
+        let state = VoiceState::Error("マイクが許可されていない");
+
+        assert_eq!(state.label(), "マイクが許可されていない");
+        assert_eq!(state.eyebrow(), "接続を続けられませんでした");
+        assert_eq!(
+            state.hint(),
+            "丸いボタンか下の「もう一度接続する」からやり直せる"
+        );
+        assert!(state.session_control_reconnects());
+        assert_eq!(state.session_control_label(), "もう一度接続する");
+        assert_eq!(state.session_control_icon(), "↻");
+    }
+
+    #[test]
+    fn paused_and_active_session_controls_keep_distinct_actions() {
+        assert!(VoiceState::Paused.session_control_reconnects());
+        assert_eq!(VoiceState::Paused.session_control_label(), "再開");
+        assert!(!VoiceState::Listening.session_control_reconnects());
+        assert_eq!(VoiceState::Listening.session_control_label(), "一時停止");
     }
 }

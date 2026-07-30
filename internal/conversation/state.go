@@ -17,6 +17,7 @@ import (
 const (
 	stateTokenPrefix = "v1."
 	stateTokenTTL    = 15 * time.Minute
+	sessionIDBytes   = 16
 	maxStateTurns    = 10_000
 	maxUIDBytes      = 256
 )
@@ -33,6 +34,7 @@ type conversationState struct {
 	Version             int                `json:"v"`
 	IssuedAt            int64              `json:"iat"`
 	ExpiresAt           int64              `json:"exp"`
+	SessionID           string             `json:"sid,omitempty"`
 	Turn                int                `json:"turn"`
 	Graph               ThoughtStateGraph  `json:"thought_state_graph"`
 	ConversationSummary string             `json:"conversation_summary,omitempty"`
@@ -66,6 +68,12 @@ func (codec *StateCodec) seal(uid string, state conversationState) (string, erro
 	normalized, err := normalizeConversationState(state)
 	if err != nil {
 		return "", ErrInvalidStateToken
+	}
+	if normalized.SessionID == "" {
+		normalized.SessionID, err = codec.newSessionID()
+		if err != nil {
+			return "", ErrInvalidStateToken
+		}
 	}
 
 	now := codec.now().UTC().Truncate(time.Second)
@@ -144,7 +152,42 @@ func (codec *StateCodec) open(uid, token string) (conversationState, error) {
 	return state, nil
 }
 
+func (codec *StateCodec) ensureSessionID(
+	state conversationState,
+) (conversationState, error) {
+	if codec == nil {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	if state.SessionID != "" {
+		if !validSessionID(state.SessionID) {
+			return conversationState{}, ErrInvalidStateToken
+		}
+		return state, nil
+	}
+	sessionID, err := codec.newSessionID()
+	if err != nil {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	state.SessionID = sessionID
+	return state, nil
+}
+
+func (codec *StateCodec) newSessionID() (string, error) {
+	if codec == nil || codec.random == nil {
+		return "", ErrInvalidStateToken
+	}
+	raw := make([]byte, sessionIDBytes)
+	if _, err := io.ReadFull(codec.random, raw); err != nil {
+		return "", ErrInvalidStateToken
+	}
+	defer wipe(raw)
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
 func normalizeConversationState(state conversationState) (conversationState, error) {
+	if state.SessionID != "" && !validSessionID(state.SessionID) {
+		return conversationState{}, ErrInvalidStateToken
+	}
 	graph, err := normalizeGraph(state.Graph)
 	if err != nil {
 		return conversationState{}, err
@@ -171,6 +214,17 @@ func normalizeConversationState(state conversationState) (conversationState, err
 		return conversationState{}, ErrInvalidStateToken
 	}
 	return state, nil
+}
+
+func validSessionID(value string) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return false
+	}
+	valid := len(raw) == sessionIDBytes &&
+		base64.RawURLEncoding.EncodeToString(raw) == value
+	wipe(raw)
+	return valid
 }
 
 func validUID(uid string) bool {

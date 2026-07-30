@@ -43,6 +43,7 @@ type VoiceTurn struct {
 	SchemaVersion int        `json:"schemaVersion"`
 	Utterance     string     `json:"utterance"`
 	StateToken    string     `json:"stateToken,omitempty"`
+	RequestID     string     `json:"-"`
 	Ambient       bool       `json:"ambient,omitempty"`
 	PDF           *InlinePDF `json:"pdf,omitempty"`
 }
@@ -148,6 +149,11 @@ func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 		return VoiceTurn{}, ErrInvalidTurn
 	}
 	if turn.StateToken != strings.TrimSpace(turn.StateToken) {
+		return VoiceTurn{}, ErrInvalidTurn
+	}
+	if !utf8.ValidString(turn.RequestID) ||
+		len(turn.RequestID) > 64 ||
+		turn.RequestID != strings.TrimSpace(turn.RequestID) {
 		return VoiceTurn{}, ErrInvalidTurn
 	}
 

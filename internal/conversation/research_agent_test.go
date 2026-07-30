@@ -85,6 +85,7 @@ func TestAgentResearchRecentPapersMapsBoundedDiscoveryMetadata(t *testing.T) {
 	result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     utterance,
+		RequestID:     "0123456789abcdef01234567",
 	})
 	if err != nil {
 		t.Fatalf("Process: %v", err)
@@ -166,6 +167,107 @@ func TestAgentResearchUnavailableReturnsNoRecords(t *testing.T) {
 	}
 	if len(verifier.calls) != 1 {
 		t.Fatalf("verifier calls = %d", len(verifier.calls))
+	}
+}
+
+func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
+	const (
+		topic       = "量子エラー訂正"
+		secretDraft = "MODEL-RESEARCH-DRAFT-MUST-NOT-ESCAPE"
+	)
+	for _, test := range []struct {
+		name      string
+		requestID string
+		disable   bool
+	}{
+		{
+			name:    "reference monitor unavailable",
+			disable: true,
+		},
+		{
+			name:      "server request id unavailable",
+			requestID: "request-id-unavailable",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			plan := recentPapersPlan(topic)
+			plan.SpokenReply = secretDraft
+			generator := &fakeGenerator{generations: []fakeGeneration{
+				{body: encodePlan(t, plan)},
+				{body: encodePlan(t, plan)},
+			}}
+			verifier := &fakeResearchVerifier{}
+			agent := newTestAgent(t, generator)
+			agent.research = verifier
+			if test.disable {
+				agent.security = nil
+			}
+			agent.now = func() time.Time {
+				return time.Date(
+					2026,
+					time.July,
+					29,
+					0,
+					0,
+					0,
+					0,
+					time.UTC,
+				)
+			}
+
+			result, err := agent.Process(
+				context.Background(),
+				"uid-research-capability-deny",
+				VoiceTurn{
+					SchemaVersion: SchemaVersion,
+					Utterance:     japaneseRecentRequest(topic),
+					RequestID:     test.requestID,
+				},
+			)
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if result.Route != "planner-unavailable" ||
+				result.SpokenReply != plannerUnavailableSpokenReply ||
+				!result.NeedsClarification ||
+				result.ResearchStatus != "none" ||
+				len(result.ResearchRecords) != 0 ||
+				result.StateToken == "" ||
+				len(generator.calls) != 2 ||
+				strings.Contains(result.SpokenReply, secretDraft) ||
+				strings.Contains(result.SpokenReply, topic) {
+				t.Fatalf(
+					"capability deny did not fail-speaking: "+
+						"result=%#v calls=%#v",
+					result,
+					generator.calls,
+				)
+			}
+			if len(verifier.calls) != 0 {
+				t.Fatalf(
+					"denied capability reached verifier: %#v",
+					verifier.calls,
+				)
+			}
+			state, err := agent.codec.open(
+				"uid-research-capability-deny",
+				result.StateToken,
+			)
+			if err != nil {
+				t.Fatalf("open fallback state: %v", err)
+			}
+			encodedState, err := json.Marshal(state)
+			if err != nil ||
+				strings.Contains(string(encodedState), secretDraft) ||
+				strings.Contains(string(encodedState), topic) {
+				t.Fatalf(
+					"denied proposal escaped into state: state=%s err=%v",
+					encodedState,
+					err,
+				)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,10 @@ package conversation
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -18,6 +22,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/securityflow"
 	"google.golang.org/genai"
 )
 
@@ -38,6 +43,8 @@ const (
 	maxRespondentProtectedRunes       = 160
 	maxResearchQueryRunes             = research.MaxTopicRunes
 	researchDiscoveryTimeout          = 7 * time.Second
+	researchAuthorityGrantTTL         = 3 * time.Second
+	researchCapabilityLeaseTTL        = 2 * time.Second
 	fastInferenceSequenceTimeout      = 8 * time.Second
 	plannerPrecisionRecoveryTimeout   = 6 * time.Second
 	precisionInferenceSequenceTimeout = 10 * time.Second
@@ -46,6 +53,7 @@ const (
 	ordinaryCriticSequenceTimeout     = 8 * time.Second
 	highRiskCriticSequenceTimeout     = 24 * time.Second
 	voiceResponseReserve              = 5 * time.Second
+	securityflowPolicyVersion         = "pccm-phase1-v1"
 )
 
 var (
@@ -73,6 +81,7 @@ var (
 	errInferenceArbiterGuard    = errors.New("conversation: inference arbiter guard")
 	errInferenceAnswerContract  = errors.New("conversation: inference answer contract")
 	errInferenceStateDelta      = errors.New("conversation: inference state delta")
+	errResearchCapabilityDenied = errors.New("conversation: research capability denied")
 
 	explicitJapaneseRecentResearchPattern = regexp.MustCompile(
 		`^(?:(?i:crossref)|クロスレフ|外部検索)で\s*` +
@@ -130,6 +139,7 @@ type vertexAgent struct {
 	fastModel      string
 	precisionModel string
 	research       research.Verifier
+	security       *securityflow.Guard
 	now            func() time.Time
 }
 
@@ -282,12 +292,23 @@ func newAgent(
 	if err != nil {
 		return nil, err
 	}
+	securityKey := deriveSecurityflowKey(stateKey)
+	securityGuard, err := securityflow.NewGuard(securityflow.Config{
+		Key:           securityKey,
+		PolicyVersion: securityflowPolicyVersion,
+		MaxTTL:        researchAuthorityGrantTTL,
+	})
+	wipe(securityKey)
+	if err != nil {
+		return nil, errors.New("conversation: initialize capability guard")
+	}
 	return &vertexAgent{
 		generator:      generator,
 		codec:          codec,
 		fastModel:      fastModel,
 		precisionModel: precisionModel,
 		research:       researchVerifier,
+		security:       securityGuard,
 		now:            time.Now,
 	}, nil
 }
@@ -325,6 +346,10 @@ func (agent *vertexAgent) Process(
 		if err != nil {
 			return VoiceTurnResult{}, err
 		}
+	}
+	state, err = agent.codec.ensureSessionID(state)
+	if err != nil {
+		return VoiceTurnResult{}, err
 	}
 	if state.Turn >= maxStateTurns {
 		return VoiceTurnResult{}, ErrInvalidStateToken
@@ -576,8 +601,21 @@ func (agent *vertexAgent) Process(
 	if !precisionUnavailable && finalPlan.ResearchAction != "none" {
 		var researchErr error
 		researchStatus, researchRecords, researchReply, researchErr =
-			agent.performResearch(ctx, normalized, finalPlan)
+			agent.performResearch(
+				ctx,
+				uid,
+				state.SessionID,
+				normalized,
+				finalPlan,
+			)
 		if researchErr != nil {
+			if errors.Is(researchErr, errResearchCapabilityDenied) {
+				return agent.completePlannerUnavailable(
+					uid,
+					state,
+					normalized.Ambient,
+				)
+			}
 			return VoiceTurnResult{}, researchErr
 		}
 		finalPlan.SpokenReply = researchReply
@@ -780,6 +818,7 @@ func (agent *vertexAgent) Process(
 		route = "research-unavailable-" + route
 	}
 	nextState := conversationState{
+		SessionID:           state.SessionID,
 		Turn:                state.Turn + 1,
 		Graph:               graph,
 		ConversationSummary: "",
@@ -864,6 +903,7 @@ func (agent *vertexAgent) completePhaticLocal(
 		Act:              "reflect",
 	}
 	nextState := conversationState{
+		SessionID:           state.SessionID,
 		Turn:                state.Turn + 1,
 		Graph:               state.Graph,
 		ConversationSummary: "",
@@ -927,6 +967,7 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		argumentStructure = "direct_answer"
 	}
 	nextState := conversationState{
+		SessionID:           state.SessionID,
 		Turn:                state.Turn + 1,
 		Graph:               state.Graph,
 		ConversationSummary: "",
@@ -1002,6 +1043,7 @@ func (agent *vertexAgent) completeAmbientSilentFast(
 ) (VoiceTurnResult, error) {
 	decision := ArbiterDecision{Act: "silent"}
 	nextState := conversationState{
+		SessionID:           state.SessionID,
 		Turn:                state.Turn + 1,
 		Graph:               state.Graph,
 		ConversationSummary: "",
@@ -1061,6 +1103,7 @@ func (agent *vertexAgent) completeInterpretationClarification(
 		Score:            0.6,
 	}
 	nextState := conversationState{
+		SessionID:           state.SessionID,
 		Turn:                state.Turn + 1,
 		Graph:               state.Graph,
 		ConversationSummary: "",
@@ -1146,6 +1189,8 @@ func pendingAnswerFromPlan(plan modelPlan, utterance string) PendingAnswerFrame 
 
 func (agent *vertexAgent) performResearch(
 	ctx context.Context,
+	uid string,
+	sessionID string,
 	turn VoiceTurn,
 	plan modelPlan,
 ) (string, []ResearchRecord, string, error) {
@@ -1162,6 +1207,50 @@ func (agent *vertexAgent) performResearch(
 	query, err := authorizedResearchQuery(plan, turn, now)
 	if err != nil {
 		return "", []ResearchRecord{}, "", ErrModelOutputInvalid
+	}
+	requestID, err := capabilityRequestID(turn.RequestID)
+	if err != nil {
+		return agent.denyResearchCapability(
+			ctx,
+			securityflow.DefenseEvent{
+				PolicyVersion: securityflowPolicyVersion,
+				Action:        securityflow.ActionCrossrefDiscovery,
+				Decision:      securityflow.DecisionDeny,
+				Reason:        securityflow.ReasonInvalidScope,
+				Sources:       researchInfluenceSources(turn),
+			},
+		)
+	}
+	scope := securityflow.Scope{
+		UID:       uid,
+		SessionID: sessionID,
+		RequestID: requestID,
+	}
+	sources := researchInfluenceSources(turn)
+	proposal, event, err := agent.security.ProposeCrossref(query, sources)
+	if err != nil {
+		return agent.denyResearchCapability(ctx, event)
+	}
+	authority, event, err := agent.security.BindCurrentUserSpeechForCrossref(
+		scope,
+		query,
+		researchAuthorityGrantTTL,
+	)
+	if err != nil {
+		return agent.denyResearchCapability(ctx, event)
+	}
+	lease, event, err := agent.security.MintCrossref(
+		authority,
+		scope,
+		proposal,
+		researchCapabilityLeaseTTL,
+	)
+	if err != nil {
+		return agent.denyResearchCapability(ctx, event)
+	}
+	event, err = agent.security.ConsumeCrossref(lease, scope, proposal)
+	if err != nil {
+		return agent.denyResearchCapability(ctx, event)
 	}
 
 	researchCtx, cancel := context.WithTimeout(ctx, researchDiscoveryTimeout)
@@ -1217,6 +1306,62 @@ func (agent *vertexAgent) performResearch(
 			"件見つけました。内容や主張はまだ検証していません。"
 	}
 	return string(research.StatusNeedsPrimaryEvidence), records, reply, nil
+}
+
+func (agent *vertexAgent) denyResearchCapability(
+	ctx context.Context,
+	event securityflow.DefenseEvent,
+) (string, []ResearchRecord, string, error) {
+	slog.WarnContext(
+		ctx,
+		"research capability denied",
+		"policy_version", event.PolicyVersion,
+		"action", int(event.Action),
+		"decision", int(event.Decision),
+		"reason", int(event.Reason),
+		"source_bits", uint16(event.Sources),
+	)
+	return "", []ResearchRecord{}, "", errResearchCapabilityDenied
+}
+
+func researchInfluenceSources(turn VoiceTurn) securityflow.SourceSet {
+	sources := securityflow.SourceCurrentUserSpeech |
+		securityflow.SourceModelOutput
+	if turn.Ambient {
+		sources |= securityflow.SourceAmbientSpeech
+	}
+	if turn.PDF != nil {
+		sources |= securityflow.SourcePDF
+	}
+	if turn.StateToken != "" {
+		sources |= securityflow.SourceConversationState
+	}
+	return sources
+}
+
+func capabilityRequestID(value string) (string, error) {
+	if value != "" {
+		decoded, err := hex.DecodeString(value)
+		if err != nil ||
+			len(decoded) != 12 ||
+			hex.EncodeToString(decoded) != value {
+			wipe(decoded)
+			return "", errResearchCapabilityDenied
+		}
+		wipe(decoded)
+		return value, nil
+	}
+	var randomID [12]byte
+	if _, err := rand.Read(randomID[:]); err != nil {
+		return "", errResearchCapabilityDenied
+	}
+	return hex.EncodeToString(randomID[:]), nil
+}
+
+func deriveSecurityflowKey(rootKey []byte) []byte {
+	mac := hmac.New(sha256.New, rootKey)
+	_, _ = mac.Write([]byte("kotae-securityflow-capability-v1\x00"))
+	return mac.Sum(nil)
 }
 
 func crossrefDiscoverySource() research.SourceDescriptor {

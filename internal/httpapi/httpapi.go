@@ -57,6 +57,7 @@ type VoiceTurnInput struct {
 	Audio         []byte
 	MIMEType      string
 	StateToken    string
+	RequestID     string
 	TurnMode      VoiceTurnMode
 	Ambient       bool
 	Document      *VoiceDocument
@@ -244,6 +245,10 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_voice_turn", "The voice turn could not be accepted.")
 		return
 	}
+	// RequestID is minted by the server middleware and never accepted from the
+	// client JSON. Downstream capability leases bind privileged actions to this
+	// exact authenticated request.
+	input.RequestID = requestIDFromContext(ctx)
 	defer clearVoiceInput(&input)
 
 	result, err := s.voice.Service.Process(ctx, principal.UID, input)

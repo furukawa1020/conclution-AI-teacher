@@ -270,6 +270,7 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
 		Audio:      []byte("audio"),
 		MIMEType:   "audio/webm",
+		RequestID:  "0123456789abcdef01234567",
 		Ambient:    true,
 		STTLocale:  "ja-JP",
 		StateToken: "",
@@ -283,7 +284,9 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	if speech.synthesizeCalls != 0 {
 		t.Fatalf("synthesis calls = %d; want 0", speech.synthesizeCalls)
 	}
-	if !agent.turn.Ambient || agent.turn.Utterance == "" {
+	if !agent.turn.Ambient ||
+		agent.turn.Utterance == "" ||
+		agent.turn.RequestID != "0123456789abcdef01234567" {
 		t.Fatalf("agent turn = %+v", agent.turn)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -527,6 +528,20 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 		service.input.TurnMode != VoiceTurnIntentional ||
 		service.input.Ambient {
 		t.Fatalf("voice input = %+v", service.input)
+	}
+	requestID := response.Header().Get("X-Request-ID")
+	if len(requestID) != 24 {
+		t.Fatalf("request id length = %d; want 24", len(requestID))
+	}
+	if _, err := hex.DecodeString(requestID); err != nil {
+		t.Fatalf("request id is not server-generated hex: %q", requestID)
+	}
+	if service.input.RequestID != requestID {
+		t.Fatalf(
+			"voice request id = %q; want middleware id %q",
+			service.input.RequestID,
+			requestID,
+		)
 	}
 	if strings.Contains(response.Body.String(), "RIFF-safe-test-audio") {
 		t.Fatal("response exposed input audio")

@@ -76,6 +76,7 @@ func (p *Pipeline) Process(
 		SchemaVersion: conversation.SchemaVersion,
 		Utterance:     transcript,
 		StateToken:    input.StateToken,
+		RequestID:     input.RequestID,
 		Ambient:       input.Ambient,
 	}
 	if input.Document != nil {

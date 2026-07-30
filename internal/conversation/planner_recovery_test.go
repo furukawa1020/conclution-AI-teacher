@@ -249,6 +249,80 @@ func TestAgentPlannerUnavailablePreservesStateAndGivesAmbientNotice(t *testing.T
 	}
 }
 
+func TestAgentPlannerUnavailableForegroundGetsFixedNoticeAndIsolatesState(
+	t *testing.T,
+) {
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: "{"},
+		{body: "{"},
+		{body: "{"},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 2,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の主張"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorOpen,
+			Subject:       "既存の問い",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPosition},
+		},
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.6, Confidence: 1, Act: "clarify", Score: 0.6,
+		},
+	}
+	token, err := agent.codec.seal("uid-foreground-planner", initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	result, err := agent.Process(
+		context.Background(),
+		"uid-foreground-planner",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "続きの質問です",
+			StateToken:    token,
+			Ambient:       true,
+			Foreground:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "planner-unavailable" ||
+		result.SpokenReply != plannerUnavailableSpokenReply ||
+		!result.NeedsClarification {
+		t.Fatalf("foreground planner fallback did not speak fixed notice: %#v", result)
+	}
+	next, err := agent.codec.open(
+		"uid-foreground-planner",
+		result.StateToken,
+	)
+	if err != nil {
+		t.Fatalf("open fallback state: %v", err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
+		next.LastIntervention != initial.LastIntervention {
+		t.Fatalf("foreground fallback changed isolated state: %#v", next)
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"foreground":true`) {
+			t.Fatalf("call %d omitted foreground planner data: %s", index, call.prompt)
+		}
+	}
+}
+
 func TestAgentPrecisionRecoveryDoesNotRepeatPendingPlannerOrPrecision(t *testing.T) {
 	recovered := respondentAwaitingPlan()
 	fake := &fakeGenerator{generations: []fakeGeneration{

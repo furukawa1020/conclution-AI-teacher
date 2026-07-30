@@ -180,28 +180,30 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
   assert.ok(encodeAt > joinedAt);
 });
 
-test("empty capture rollover ends the explicit gesture epoch", async () => {
+test("the first empty capture preserves one bounded intentional retry", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
-  const marker = client.indexOf(
-    "The explicit gesture authorizes only this finite recording",
-  );
+  const marker = client.indexOf("A transport/capture miss does not consume");
   assert.notEqual(marker, -1);
-  const rollover = client.slice(marker, marker + 600);
+  const rollover = client.slice(marker, marker + 900);
 
   assert.match(
     rollover,
-    /arm_listening\(\s*operation,\s*false,\s*intentional_for_gesture_epoch\(false\),/u,
+    /turn_mode == VoiceTurnMode::Intentional[\s\S]*intentional_retry_available/u,
   );
-  assert.doesNotMatch(
+  assert.match(
     rollover,
-    /arm_listening\(\s*operation,\s*false,\s*intentional,/u,
+    /VoiceTurnMode::Intentional[\s\S]*VoiceTurnMode::Foreground/u,
+  );
+  assert.match(
+    rollover,
+    /arm_listening\(\s*operation,\s*false,\s*replacement_mode,\s*false,/u,
   );
 });
 
-test("terminal barge-in commits final state before ambient continuation", async () => {
+test("terminal barge-in commits final state before foreground continuation", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
@@ -215,13 +217,13 @@ test("terminal barge-in commits final state before ambient continuation", async 
     "session_state.set(result.session_state.clone())",
   );
   const interruptedAt = submit.indexOf("if result.interrupted");
-  const ambientResumeAt = submit.indexOf(
-    "resume_ambient_interruption(",
+  const foregroundResumeAt = submit.indexOf(
+    "resume_foreground_interruption(",
     interruptedAt,
   );
   assert.ok(stateCommitAt >= 0);
   assert.ok(interruptedAt > stateCommitAt);
-  assert.ok(ambientResumeAt > interruptedAt);
+  assert.ok(foregroundResumeAt > interruptedAt);
 });
 
 test("barge-in racing terminal playback preserves the validated final", async () => {
@@ -246,18 +248,16 @@ test("barge-in racing terminal playback preserves the validated final", async ()
   );
 });
 
-test("automatic rearm is ambient and only a fresh gesture is intentional", async () => {
+test("automatic rearm is foreground and only a fresh gesture is intentional", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
-  const automatic = client.indexOf(
-    "intentional_for_gesture_epoch(false)",
-  );
-  const explicit = client.indexOf("intentional_for_gesture_epoch(true)");
+  const automatic = client.indexOf("VoiceTurnMode::Foreground");
+  const explicit = client.indexOf("turn_mode_for_gesture_epoch(true)");
   assert.ok(automatic >= 0);
   assert.ok(explicit >= 0);
-  const resumeStart = client.indexOf("fn resume_ambient_interruption(");
+  const resumeStart = client.indexOf("fn resume_foreground_interruption(");
   const resumeEnd = client.indexOf(
     "\n}\n\n#[allow(clippy::too_many_arguments)]\nfn submit_turn",
     resumeStart,
@@ -265,11 +265,11 @@ test("automatic rearm is ambient and only a fresh gesture is intentional", async
   const resume = client.slice(resumeStart, resumeEnd);
   assert.match(
     resume,
-    /submit_turn\(\s*operation,\s*false,/u,
+    /submit_turn\(\s*operation,\s*VoiceTurnMode::Foreground,/u,
   );
   assert.match(
     resume,
-    /arm_listening\(\s*operation,\s*false,\s*false,/u,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,\s*false,/u,
   );
 });
 
@@ -1077,6 +1077,17 @@ test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
 });
 
 test("live commit preserves exact frames and fails on backpressure", () => {
+  const emptySocket = new MockWebSocket();
+  const empty = createVoiceLiveClientTransport(
+    emptySocket,
+    { ...liveStartFrame(), turnMode: "foreground" },
+  );
+  empty.open();
+  empty.markReady();
+  assert.throws(() => empty.commit(), /voice_api_unavailable/);
+  assert.equal(emptySocket.sent.length, 1);
+  assert.equal(empty.snapshot().inputFrameCount, 0);
+
   const partialSocket = new MockWebSocket();
   const partial = createVoiceLiveClientTransport(
     partialSocket,
@@ -1191,11 +1202,11 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     providerEndpointAt: 1_300,
   };
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 1_439 }),
+    shouldCommitHybridEndpoint({ ...short, now: 1_699 }),
     false,
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 1_440 }),
+    shouldCommitHybridEndpoint({ ...short, now: 1_700 }),
     true,
   );
   assert.equal(
@@ -1208,7 +1219,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     "speech resumed after the provider endpoint",
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 2_501 }),
+    shouldCommitHybridEndpoint({ ...short, now: 3_301 }),
     false,
     "a stale provider endpoint cannot stop a later thought",
   );
@@ -1222,20 +1233,20 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
-      now: 3_259,
+      now: 4_199,
     }),
     false,
   );
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
-      now: 3_260,
+      now: 4_200,
     }),
     true,
   );
 });
 
-test("live endpoint cannot appear before ready or after commit", () => {
+test("live endpoint is rejected before ready and ignored after commit", () => {
   const beforeReady = createVoiceLiveServerProtocol((result) => result);
   assert.throws(
     () =>
@@ -1248,9 +1259,28 @@ test("live endpoint cannot appear before ready or after commit", () => {
   const afterCommit = createVoiceLiveServerProtocol((result) => result);
   afterCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   afterCommit.markCommitted();
+  assert.deepEqual(
+    afterCommit.acceptText(
+      JSON.stringify({ type: "endpoint", version: 1 }),
+    ),
+    { type: "endpoint", version: 1 },
+  );
+  assert.equal(afterCommit.snapshot().endpointReceived, true);
   assert.throws(
     () =>
       afterCommit.acceptText(
+        JSON.stringify({ type: "endpoint", version: 1 }),
+      ),
+    /voice_response_invalid/,
+  );
+
+  const afterAudio = createVoiceLiveServerProtocol((result) => result);
+  afterAudio.acceptText(JSON.stringify({ type: "ready", version: 1 }));
+  afterAudio.markCommitted();
+  afterAudio.acceptBinary(new ArrayBuffer(4));
+  assert.throws(
+    () =>
+      afterAudio.acceptText(
         JSON.stringify({ type: "endpoint", version: 1 }),
       ),
     /voice_response_invalid/,
@@ -1337,6 +1367,20 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   assert.match(
     bridge,
     /activeRecording === recording/u,
+  );
+  const endpointAt = liveSession.indexOf(
+    'if (message.type === "endpoint")',
+  );
+  const endpointHandler = liveSession.slice(endpointAt, endpointAt + 900);
+  assert.ok(endpointAt >= 0, "live endpoint handler must exist");
+  assert.match(
+    endpointHandler,
+    /if \(state === "committed"\) \{\s*return;\s*\}/u,
+  );
+  assert.ok(
+    endpointHandler.indexOf('state === "committed"') <
+      endpointHandler.indexOf('state !== "ready"'),
+    "an in-flight endpoint advisory must be ignored after local commit",
   );
 });
 
@@ -1536,7 +1580,7 @@ test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("barge-in aborts pre-final audio and preserves ambient authority", async () => {
+test("barge-in starts with first audio and preserves foreground response mode", async () => {
   const [bridge, client] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
@@ -1565,17 +1609,18 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(bridge, /rampPlaybackGain\(playback, 0\.1, 0\.008\)/u);
   assert.match(bridge, /rampPlaybackGain\(playback, 1, 0\.02\)/u);
   assert.match(bridge, /source\.connect\(gainNode\)/u);
-  const playbackAt = bridge.lastIndexOf(
-    "playback = createStreamingPlayback(expectedEpoch)",
-  );
-  const requestWindow = bridge.slice(playbackAt, playbackAt + 2_500);
-  assert.match(
-    requestWindow,
+  const finishAt = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finish = bridge.slice(finishAt, finishEnd);
+  assert.doesNotMatch(
+    finish,
     /startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
-  assert.ok(
-    requestWindow.indexOf("startBargeInMonitoring") <
-      requestWindow.indexOf("fetch(VOICE_ENDPOINT"),
+  const scheduleAt = bridge.indexOf("function scheduleBuffer(");
+  const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);
+  assert.match(
+    schedule,
+    /if \(!streamedAudio\)[\s\S]*startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
   const handoffAt = bridge.indexOf("handoffAmbient({");
   const handoff = bridge.slice(handoffAt, handoffAt + 2_000);
@@ -1584,7 +1629,7 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(handoff, /appCheckToken,/u);
   assert.match(handoff, /idToken,/u);
   assert.match(handoff, /sessionState,/u);
-  assert.match(handoff, /turnMode: "ambient"/u);
+  assert.match(handoff, /turnMode: "foreground"/u);
   assert.match(
     handoff,
     /candidateStartedAt - BARGE_PCM_LIMITS\.leadInMs/u,
@@ -1620,13 +1665,13 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(monitor, /ring\.clear\(\)/u);
 
   const interruptionAt = client.indexOf(
-    "fn resume_ambient_interruption(",
+    "fn resume_foreground_interruption(",
   );
   const continuation = client.slice(interruptionAt, interruptionAt + 2_500);
   assert.match(continuation, /cloud::wait_for_turn_end\(\)\.await/u);
   assert.match(
     continuation,
-    /submit_turn\(\s*operation,\s*false,/u,
+    /submit_turn\(\s*operation,\s*VoiceTurnMode::Foreground,/u,
   );
   assert.doesNotMatch(
     continuation,
@@ -2341,7 +2386,7 @@ test("retryable initializer shares an attempt, retries a failure, and caches suc
   assert.equal(calls, 2);
 });
 
-test("gesture epoch, not session state, selects explicit versus ambient mode", () => {
+test("gesture epoch separates intentional authority from foreground response mode", () => {
   const resumedTurn = {
     sessionState: "opaque-encrypted-state",
     turnMode: turnModeForGestureEpoch(true),
@@ -2353,7 +2398,7 @@ test("gesture epoch, not session state, selects explicit versus ambient mode", (
     sessionState: resumedTurn.sessionState,
     turnMode: turnModeForGestureEpoch(false),
   };
-  assert.equal(automaticFollowUp.turnMode, "ambient");
+  assert.equal(automaticFollowUp.turnMode, "foreground");
   assert.equal(isValidTurnMode(automaticFollowUp.turnMode), true);
   assert.equal(isValidTurnMode("derived-from-session-state"), false);
   assert.throws(() => turnModeForGestureEpoch("first"), /gesture_epoch_invalid/);

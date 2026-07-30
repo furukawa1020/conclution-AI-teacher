@@ -987,11 +987,12 @@ func TestVoiceTurnModeIsExplicitAndIndependentOfState(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		mode      VoiceTurnMode
-		state     string
-		wantError bool
-		ambient   bool
+		name       string
+		mode       VoiceTurnMode
+		state      string
+		wantError  bool
+		ambient    bool
+		foreground bool
 	}{
 		{
 			name:  "intentional with state remains intentional",
@@ -1002,6 +1003,12 @@ func TestVoiceTurnModeIsExplicitAndIndependentOfState(t *testing.T) {
 			name:    "ambient can be first turn",
 			mode:    VoiceTurnAmbient,
 			ambient: true,
+		},
+		{
+			name:       "foreground expects a reply without intentional authority",
+			mode:       VoiceTurnForeground,
+			ambient:    true,
+			foreground: true,
 		},
 		{
 			name:      "missing mode",
@@ -1034,7 +1041,9 @@ func TestVoiceTurnModeIsExplicitAndIndependentOfState(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer clearVoiceInput(&input)
-			if input.Ambient != test.ambient || input.TurnMode != test.mode {
+			if input.Ambient != test.ambient ||
+				input.Foreground != test.foreground ||
+				input.TurnMode != test.mode {
 				t.Fatalf("voice mode = %+v", input)
 			}
 		})

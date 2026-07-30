@@ -1625,6 +1625,11 @@ async function startVoiceLiveSession({
           return;
         }
         if (message.type === "endpoint") {
+          // Local VAD may send commit while the provider endpoint advisory is
+          // already in flight in the opposite WebSocket direction.
+          if (state === "committed") {
+            return;
+          }
           if (state !== "ready") {
             fail("voice_response_invalid");
           }
@@ -1735,7 +1740,7 @@ async function startVoiceLiveSession({
         ),
         sessionState,
         stream: nextStream,
-        turnMode: "ambient",
+        turnMode: "foreground",
       });
     },
     matches(expectedSessionState, expectedTurnMode) {
@@ -2868,7 +2873,6 @@ async function finishTurn(serializedSessionState, turnMode) {
         fail("request_cancelled");
       }
       playback = createStreamingPlayback(expectedEpoch);
-      startBargeInMonitoring(playback, expectedEpoch);
       try {
         return await liveSession.commit(
           playback,
@@ -2921,10 +2925,9 @@ async function finishTurn(serializedSessionState, turnMode) {
       fail("request_cancelled");
     }
     playback = createStreamingPlayback(expectedEpoch);
-    // Begin guarded cancellation while the model is thinking. The guard is
-    // restarted when the first PCM frame begins unless a user-voice
-    // candidate is already retaining its leading phoneme.
-    startBargeInMonitoring(playback, expectedEpoch);
+    // Barge-in starts only when the first response audio frame is scheduled.
+    // Until then, a resumed phrase belongs to the foreground conversation
+    // rather than interrupting an answer that has not begun.
 
     const payload = {
       audioBase64,

@@ -219,13 +219,23 @@ func dialVoiceLive(
 
 func writeVoiceLiveStart(t *testing.T, ctx context.Context, conn *websocket.Conn) {
 	t.Helper()
+	writeVoiceLiveStartMode(t, ctx, conn, VoiceTurnIntentional)
+}
+
+func writeVoiceLiveStartMode(
+	t *testing.T,
+	ctx context.Context,
+	conn *websocket.Conn,
+	mode VoiceTurnMode,
+) {
+	t.Helper()
 	frame := voiceLiveStartFrame{
 		Type:          "start",
 		Version:       voiceLiveVersion,
 		IDToken:       liveTestIDToken,
 		AppCheckToken: liveTestAppCheckToken,
 		SessionState:  "",
-		TurnMode:      VoiceTurnIntentional,
+		TurnMode:      mode,
 		SampleRateHz:  voiceLiveSampleRateHz,
 	}
 	payload, err := json.Marshal(frame)
@@ -234,6 +244,70 @@ func writeVoiceLiveStart(t *testing.T, ctx context.Context, conn *websocket.Conn
 	}
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVoiceLiveForegroundKeepsAmbientAuthorityAndExpectsReply(t *testing.T) {
+	t.Parallel()
+	service := &liveTestVoiceService{
+		result: VoiceTurnResult{
+			StateToken:       "sealed-foreground-state",
+			DetectedDomain:   "daily",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "foreground-test",
+		},
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLiveStartMode(t, ctx, conn, VoiceTurnForeground)
+	ready := readVoiceLiveJSON(t, ctx, conn)
+	if ready["type"] != "ready" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		liveTestPCMFrame(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	final := readVoiceLiveJSON(t, ctx, conn)
+	if final["type"] != "final" {
+		t.Fatalf("final=%#v", final)
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.input.TurnMode != VoiceTurnForeground ||
+		!service.input.Ambient ||
+		!service.input.Foreground {
+		t.Fatalf("foreground authority mapping=%+v", service.input)
 	}
 }
 

@@ -478,10 +478,11 @@ func TestAgentResearchRejectsMismatchedVerifierProvenance(t *testing.T) {
 
 func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 	tests := []struct {
-		name      string
-		utterance string
-		query     string
-		ambient   bool
+		name       string
+		utterance  string
+		query      string
+		ambient    bool
+		foreground bool
 	}{
 		{
 			name:      "not an exact utterance span",
@@ -604,6 +605,13 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 			ambient:   true,
 		},
 		{
+			name:       "foreground capture still has no outbound authority",
+			utterance:  japaneseRecentRequest("量子エラー訂正"),
+			query:      "量子エラー訂正",
+			ambient:    true,
+			foreground: true,
+		},
+		{
 			name:      "negated search request",
 			utterance: "量子エラー訂正の最新論文は検索しないで",
 			query:     "量子エラー訂正",
@@ -691,6 +699,7 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 				SchemaVersion: SchemaVersion,
 				Utterance:     test.utterance,
 				Ambient:       test.ambient,
+				Foreground:    test.foreground,
 			})
 			if err != nil {
 				t.Fatalf("Process: %v", err)
@@ -702,6 +711,7 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 				verifier,
 				result,
 				test.ambient,
+				test.foreground,
 				test.utterance,
 				test.query,
 				plan.SpokenReply,
@@ -743,6 +753,7 @@ func TestAgentRejectsRespondentResearchCombinationBeforeVerifier(t *testing.T) {
 		verifier,
 		result,
 		false,
+		false,
 		answerAttempt,
 		topic,
 		plan.SpokenReply,
@@ -781,6 +792,7 @@ func TestAgentDOILookupRequiresExplicitIntentBeforeVerifier(t *testing.T) {
 		generator,
 		verifier,
 		result,
+		false,
 		false,
 		utterance,
 		doi,
@@ -1021,6 +1033,7 @@ func assertResearchGuardPlannerFallback(
 	verifier *fakeResearchVerifier,
 	result VoiceTurnResult,
 	ambient bool,
+	foreground bool,
 	forbidden ...string,
 ) {
 	t.Helper()

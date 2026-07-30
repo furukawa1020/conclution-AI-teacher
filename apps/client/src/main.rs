@@ -12,6 +12,22 @@ enum VoiceState {
     Error(&'static str),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoiceTurnMode {
+    Intentional,
+    Foreground,
+}
+
+impl VoiceTurnMode {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Intentional => "intentional",
+            Self::Foreground => "foreground",
+        }
+    }
+}
+
 impl VoiceState {
     const fn label(self) -> &'static str {
         match self {
@@ -200,7 +216,7 @@ enum FinishTurnError {
 mod cloud {
     use super::{
         BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
-        VoiceTurnResult,
+        VoiceTurnMode, VoiceTurnResult,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -284,13 +300,11 @@ mod cloud {
         }
     }
 
-    pub async fn begin_turn(session_state: &str, intentional: bool) -> Result<(), &'static str> {
-        let turn_mode = if intentional {
-            "intentional"
-        } else {
-            "ambient"
-        };
-        begin_turn_js(session_state, turn_mode)
+    pub async fn begin_turn(
+        session_state: &str,
+        turn_mode: VoiceTurnMode,
+    ) -> Result<(), &'static str> {
+        begin_turn_js(session_state, turn_mode.as_str())
             .await
             .map(|_| ())
             .map_err(user_message)
@@ -305,14 +319,9 @@ mod cloud {
 
     pub async fn finish_turn(
         session_state: &str,
-        intentional: bool,
+        turn_mode: VoiceTurnMode,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
-        let turn_mode = if intentional {
-            "intentional"
-        } else {
-            "ambient"
-        };
-        let value = match finish_turn_js(session_state, turn_mode).await {
+        let value = match finish_turn_js(session_state, turn_mode.as_str()).await {
             Ok(value) => value,
             Err(error) if error_code(error.clone()).as_deref() == Some("voice_interrupted") => {
                 return Err(FinishTurnError::Interrupted);
@@ -435,7 +444,9 @@ mod cloud {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
-    use super::{CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnResult};
+    use super::{
+        CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnMode, VoiceTurnResult,
+    };
     use dioxus::prelude::Signal;
 
     #[derive(Clone)]
@@ -445,7 +456,10 @@ mod cloud {
         CloudState::Unavailable
     }
 
-    pub async fn begin_turn(_session_state: &str, _intentional: bool) -> Result<(), &'static str> {
+    pub async fn begin_turn(
+        _session_state: &str,
+        _turn_mode: VoiceTurnMode,
+    ) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -455,7 +469,7 @@ mod cloud {
 
     pub async fn finish_turn(
         _session_state: &str,
-        _intentional: bool,
+        _turn_mode: VoiceTurnMode,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
         Err(FinishTurnError::Message("WebAssembly版で使ってみて"))
     }
@@ -493,7 +507,8 @@ fn main() {
 fn arm_listening(
     operation: u64,
     announce_permission: bool,
-    intentional: bool,
+    turn_mode: VoiceTurnMode,
+    intentional_retry_available: bool,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     session_state: Signal<String>,
@@ -511,7 +526,7 @@ fn arm_listening(
 
     spawn(async move {
         let state_snapshot = session_state.peek().clone();
-        if let Err(message) = cloud::begin_turn(&state_snapshot, intentional).await {
+        if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode).await {
             if *generation.peek() == operation {
                 cloud::stop_session();
                 document_info.set(None);
@@ -541,7 +556,7 @@ fn arm_listening(
             if has_speech {
                 submit_turn(
                     operation,
-                    intentional,
+                    turn_mode,
                     voice_state,
                     generation,
                     session_state,
@@ -554,12 +569,20 @@ fn arm_listening(
                     caption,
                 );
             } else {
-                // The explicit gesture authorizes only this finite recording
-                // window. Any automatically opened replacement is ambient.
+                // A transport/capture miss does not consume the explicit
+                // gesture. Preserve it for one bounded replacement window;
+                // later automatic listening remains foreground-only.
+                let replacement_mode =
+                    if turn_mode == VoiceTurnMode::Intentional && intentional_retry_available {
+                        VoiceTurnMode::Intentional
+                    } else {
+                        VoiceTurnMode::Foreground
+                    };
                 arm_listening(
                     operation,
                     false,
-                    intentional_for_gesture_epoch(false),
+                    replacement_mode,
+                    false,
                     voice_state,
                     generation,
                     session_state,
@@ -577,7 +600,7 @@ fn arm_listening(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resume_ambient_interruption(
+fn resume_foreground_interruption(
     operation: u64,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
@@ -606,11 +629,11 @@ fn resume_ambient_interruption(
             return;
         }
         if has_speech {
-            // Acoustic interruption is never a fresh user gesture. This also
-            // keeps replayed output outside intentional-turn authority.
+            // Acoustic interruption expects a conversational response but is
+            // never granted fresh-gesture authority.
             submit_turn(
                 operation,
-                false,
+                VoiceTurnMode::Foreground,
                 voice_state,
                 generation,
                 session_state,
@@ -626,6 +649,7 @@ fn resume_ambient_interruption(
             arm_listening(
                 operation,
                 false,
+                VoiceTurnMode::Foreground,
                 false,
                 voice_state,
                 generation,
@@ -645,7 +669,7 @@ fn resume_ambient_interruption(
 #[allow(clippy::too_many_arguments)]
 fn submit_turn(
     operation: u64,
-    intentional: bool,
+    turn_mode: VoiceTurnMode,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     mut session_state: Signal<String>,
@@ -668,7 +692,7 @@ fn submit_turn(
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
-        let result = cloud::finish_turn(&state_snapshot, intentional).await;
+        let result = cloud::finish_turn(&state_snapshot, turn_mode).await;
         if *generation.peek() != operation {
             return;
         }
@@ -679,7 +703,7 @@ fn submit_turn(
                 if consumed_document {
                     document_info.set(None);
                 }
-                resume_ambient_interruption(
+                resume_foreground_interruption(
                     operation,
                     voice_state,
                     generation,
@@ -729,7 +753,7 @@ fn submit_turn(
         if result.interrupted {
             // The final frame reached a clean terminal EOF, so commit its
             // state before submitting the already-captured interruption.
-            resume_ambient_interruption(
+            resume_foreground_interruption(
                 operation,
                 voice_state,
                 generation,
@@ -755,7 +779,8 @@ fn submit_turn(
         arm_listening(
             operation,
             false,
-            intentional_for_gesture_epoch(false),
+            VoiceTurnMode::Foreground,
+            false,
             voice_state,
             generation,
             session_state,
@@ -788,7 +813,8 @@ fn start_or_resume(
     arm_listening(
         operation,
         true,
-        intentional_for_gesture_epoch(true),
+        turn_mode_for_gesture_epoch(true),
+        true,
         voice_state,
         generation,
         session_state,
@@ -810,8 +836,12 @@ fn human_file_size(bytes: u64) -> String {
     }
 }
 
-const fn intentional_for_gesture_epoch(fresh_gesture: bool) -> bool {
-    fresh_gesture
+const fn turn_mode_for_gesture_epoch(fresh_gesture: bool) -> VoiceTurnMode {
+    if fresh_gesture {
+        VoiceTurnMode::Intentional
+    } else {
+        VoiceTurnMode::Foreground
+    }
 }
 
 fn valid_streamed_audio_metadata(
@@ -1260,12 +1290,20 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{VoiceState, intentional_for_gesture_epoch, valid_streamed_audio_metadata};
+    use super::{
+        VoiceState, VoiceTurnMode, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
+    };
 
     #[test]
     fn only_a_fresh_gesture_can_create_intentional_authority() {
-        assert!(intentional_for_gesture_epoch(true));
-        assert!(!intentional_for_gesture_epoch(false));
+        assert!(matches!(
+            turn_mode_for_gesture_epoch(true),
+            VoiceTurnMode::Intentional
+        ));
+        assert!(matches!(
+            turn_mode_for_gesture_epoch(false),
+            VoiceTurnMode::Foreground
+        ));
     }
 
     #[test]

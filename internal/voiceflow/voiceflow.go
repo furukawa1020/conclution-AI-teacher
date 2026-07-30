@@ -430,12 +430,12 @@ func (p *Pipeline) processLive(
 		}
 	}()
 
-	intentional := !input.Ambient && input.TurnMode != httpapi.VoiceTurnAmbient
+	responseExpected := voiceResponseExpected(input)
 	// A speculative agent run must never share a PDF byte slice with a normal
 	// fallback. The current live protocol has no document frame, but keep this
 	// boundary explicit so a future protocol extension cannot accidentally
 	// race the agent's mandatory document wipe.
-	speculationEligible := intentional && input.Document == nil
+	speculationEligible := responseExpected && input.Document == nil
 	finalFragments := make([]string, 0, 4)
 	latestInterim := ""
 	candidateTracker := speculativeCandidateTracker{}
@@ -684,7 +684,7 @@ func (p *Pipeline) processLive(
 		spokenReply string
 	)
 	if finalTranscript == "" {
-		if intentional {
+		if responseExpected {
 			specMiss = 1
 			if speculation != nil {
 				cancelSpeculation()
@@ -692,16 +692,16 @@ func (p *Pipeline) processLive(
 			}
 		}
 		route := routeClarifyNoSpeech
-		if input.Ambient {
+		if passiveAmbientVoiceInput(input) {
 			route = routeSilentNoSpeech
 		}
 		result = silentRecognitionResult(input.StateToken, route)
-		if !input.Ambient {
+		if responseExpected {
 			spokenReply = lowConfidencePrompt
 		}
 	} else {
 		adoptedSpeculation := false
-		if intentional {
+		if responseExpected {
 			if speculation == nil {
 				specMiss = 1
 			} else if speculationTextsMatch(
@@ -875,6 +875,14 @@ func (p *Pipeline) currentTime() time.Time {
 		return time.Now()
 	}
 	return p.now()
+}
+
+func voiceResponseExpected(input httpapi.VoiceTurnInput) bool {
+	return !input.Ambient || input.Foreground
+}
+
+func passiveAmbientVoiceInput(input httpapi.VoiceTurnInput) bool {
+	return input.Ambient && !input.Foreground
 }
 
 func (p *Pipeline) startLiveSpeculation(
@@ -1368,7 +1376,7 @@ func (p *Pipeline) prepareTurn(
 			"failure_stage",
 			"transcribe_budget",
 		)
-		if input.Ambient {
+		if passiveAmbientVoiceInput(input) {
 			return silentRecognitionResult(
 				input.StateToken,
 				routeSilentNoSpeech,
@@ -1387,7 +1395,7 @@ func (p *Pipeline) prepareTurn(
 			"recognized", false,
 		)
 		if errors.Is(err, speechio.ErrNoSpeech) {
-			if input.Ambient {
+			if passiveAmbientVoiceInput(input) {
 				return silentRecognitionResult(
 					input.StateToken,
 					routeSilentNoSpeech,
@@ -1438,7 +1446,7 @@ func (p *Pipeline) prepareRecognizedTurn(
 	confidence float32,
 ) (httpapi.VoiceTurnResult, string, error) {
 	if transcriptConfidenceTooLow(confidence) {
-		if input.Ambient {
+		if passiveAmbientVoiceInput(input) {
 			return silentRecognitionResult(
 				input.StateToken,
 				routeSilentLowConfidence,
@@ -1453,6 +1461,29 @@ func (p *Pipeline) prepareRecognizedTurn(
 	turn := conversationTurn(input, transcript, false)
 	conversationStarted := time.Now()
 	decision, err := p.agent.Process(ctx, uid, turn)
+	if errors.Is(err, conversation.ErrExpiredStateToken) &&
+		input.StateToken != "" &&
+		input.Document == nil &&
+		ctx.Err() == nil {
+		// The encrypted state has already passed authenticity and structure
+		// checks; only its short continuity lease expired. A blank state is an
+		// existing caller capability, so restart this same recognized turn
+		// instead of discarding the utterance. Never apply this recovery to a
+		// tampered token or a consumed inline document.
+		slog.InfoContext(
+			ctx,
+			"expired conversation state refreshed",
+			"request_id",
+			input.RequestID,
+			"ambient",
+			input.Ambient,
+			"foreground",
+			input.Foreground,
+		)
+		input.StateToken = ""
+		turn = conversationTurn(input, transcript, false)
+		decision, err = p.agent.Process(ctx, uid, turn)
+	}
 	if err != nil {
 		if errors.Is(err, conversation.ErrInvalidStateToken) ||
 			errors.Is(err, conversation.ErrInvalidTurn) {
@@ -1487,6 +1518,7 @@ func conversationTurn(
 		StateToken:    input.StateToken,
 		RequestID:     input.RequestID,
 		Ambient:       input.Ambient,
+		Foreground:    input.Foreground,
 		Speculative:   speculative,
 	}
 	if input.Document == nil {

@@ -429,7 +429,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     typeof startFrame.appCheckToken !== "string" ||
     startFrame.appCheckToken.length === 0 ||
     typeof startFrame.sessionState !== "string" ||
-    !["ambient", "intentional"].includes(startFrame.turnMode) ||
+    !["ambient", "foreground", "intentional"].includes(startFrame.turnMode) ||
     startFrame.sampleRateHz !== VOICE_LIVE_LIMITS.inputSampleRateHz
   ) {
     throw new TypeError("voice_live_start_invalid");
@@ -438,6 +438,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
   const queue = createLivePcmQueue();
   let pendingStart = Object.freeze({ ...startFrame });
   let state = "connecting";
+  let inputFrameCount = 0;
 
   function socketReady() {
     if (
@@ -498,6 +499,9 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     },
     commit() {
       if (state !== "ready") invalid();
+      if (inputFrameCount === 0) {
+        throw new Error("voice_api_unavailable");
+      }
       flush(true);
       if (queue.size() !== 0) {
         queue.clear();
@@ -528,9 +532,11 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       }
       if (state === "ready") {
         queue.push(frame);
+        inputFrameCount += 1;
         flush(false);
       } else if (state === "connecting" || state === "awaiting-ready") {
         queue.push(frame);
+        inputFrameCount += 1;
       } else {
         erasePcmFrame(frame);
         invalid();
@@ -538,6 +544,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     },
     snapshot() {
       return Object.freeze({
+        inputFrameCount,
         queuedFrames: queue.size(),
         state,
       });
@@ -605,9 +612,13 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
       state = "ready";
       return event;
     }
-    if (state === "ready" && value.type === "endpoint") {
+    if (
+      (state === "ready" || state === "committed") &&
+      value.type === "endpoint"
+    ) {
       if (
         endpointReceived ||
+        (state === "committed" && audioEventCount !== 0) ||
         !hasExactKeys(value, ["type", "version"]) ||
         value.version !== 1
       ) {

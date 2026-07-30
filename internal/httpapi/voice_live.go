@@ -261,11 +261,13 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	input := VoiceTurnInput{
-		MIMEType:            "audio/L16",
-		StateToken:          start.SessionState,
-		RequestID:           requestIDFromContext(liveCtx),
-		TurnMode:            start.TurnMode,
-		Ambient:             start.TurnMode == VoiceTurnAmbient,
+		MIMEType:   "audio/L16",
+		StateToken: start.SessionState,
+		RequestID:  requestIDFromContext(liveCtx),
+		TurnMode:   start.TurnMode,
+		Ambient: start.TurnMode == VoiceTurnAmbient ||
+			start.TurnMode == VoiceTurnForeground,
+		Foreground:          start.TurnMode == VoiceTurnForeground,
 		STTLocale:           "ja-JP",
 		SchemaVersion:       voiceLiveVersion,
 		ProcessingTimeout:   s.voice.RequestTimeout,
@@ -708,7 +710,7 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		return false
 	}
 	switch start.TurnMode {
-	case VoiceTurnIntentional, VoiceTurnAmbient:
+	case VoiceTurnIntentional, VoiceTurnForeground, VoiceTurnAmbient:
 		return true
 	default:
 		return false

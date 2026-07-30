@@ -59,6 +59,7 @@ type VoiceTurnMode string
 
 const (
 	VoiceTurnIntentional VoiceTurnMode = "intentional"
+	VoiceTurnForeground  VoiceTurnMode = "foreground"
 	VoiceTurnAmbient     VoiceTurnMode = "ambient"
 )
 
@@ -69,6 +70,7 @@ type VoiceTurnInput struct {
 	RequestID     string
 	TurnMode      VoiceTurnMode
 	Ambient       bool
+	Foreground    bool
 	Document      *VoiceDocument
 	STTLocale     string
 	SchemaVersion int
@@ -423,8 +425,12 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		return VoiceTurnInput{}, errors.New("invalid voice metadata")
 	}
 	ambient := false
+	foreground := false
 	switch request.TurnMode {
 	case VoiceTurnIntentional:
+	case VoiceTurnForeground:
+		ambient = true
+		foreground = true
 	case VoiceTurnAmbient:
 		ambient = true
 	default:
@@ -442,6 +448,7 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		StateToken:    request.SessionState,
 		TurnMode:      request.TurnMode,
 		Ambient:       ambient,
+		Foreground:    foreground,
 		STTLocale:     "ja-JP",
 		SchemaVersion: 1,
 	}

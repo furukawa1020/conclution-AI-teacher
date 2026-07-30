@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -651,6 +652,95 @@ func TestAgentAmbientPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 	}
 }
 
+func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T) {
+	const (
+		uid       = "uid-foreground-isolation"
+		utterance = "日本の首都はどこ"
+	)
+	plan := validModelPlan()
+	plan.SpokenReply = "日本の首都は東京です。"
+	plan.ConversationSummary = "保存してはいけない前面会話summary"
+	plan.ThoughtStateDelta.Claims = []string{"保存してはいけない前面会話claim"}
+	plan.AnswerContract = validCriticContract(plan.SpokenReply)
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 6,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の主張"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "既存の保留質問",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.6, Confidence: 1, Act: "clarify", Score: 0.6,
+		},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+		StateToken:    token,
+		Ambient:       true,
+		Foreground:    true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.SpokenReply != plan.SpokenReply ||
+		result.Route == "ambient-silent-fast" ||
+		result.Intervention.Act == "silent" ||
+		len(fake.calls) != 2 {
+		t.Fatalf("foreground turn did not publish its bounded reply: %#v", result)
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"ambient":true`) ||
+			!strings.Contains(call.prompt, `"foreground":true`) {
+			t.Fatalf("call %d omitted foreground provenance: %s", index, call.prompt)
+		}
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
+		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
+		next.LastIntervention != initial.LastIntervention {
+		t.Fatalf("foreground turn changed ambient-isolated state: %#v", next)
+	}
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next state: %v", err)
+	}
+	for _, forbidden := range []string{
+		utterance,
+		plan.ConversationSummary,
+		plan.ThoughtStateDelta.Claims[0],
+	} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("foreground content entered semantic state: %s", encoded)
+		}
+	}
+}
+
 func TestAmbientSilentFastEligibilityFailsClosed(t *testing.T) {
 	baseTurn := VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -686,6 +776,12 @@ func TestAmbientSilentFastEligibilityFailsClosed(t *testing.T) {
 			name: "intentional",
 			configure: func(turn *VoiceTurn, _ *modelPlan) {
 				turn.Ambient = false
+			},
+		},
+		{
+			name: "foreground",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.Foreground = true
 			},
 		},
 		{

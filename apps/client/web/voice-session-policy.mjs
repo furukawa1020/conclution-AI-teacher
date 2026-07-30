@@ -4,9 +4,9 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   endOfTurnSilenceMs: 700,
   reflectiveEndOfTurnSilenceMs: 1_700,
   reflectiveSpeechSpanMs: 2_400,
-  hybridEndpointSilenceMs: 440,
-  hybridReflectiveEndpointSilenceMs: 760,
-  hybridEndpointAgreementWindowMs: 1_200,
+  hybridEndpointSilenceMs: 700,
+  hybridReflectiveEndpointSilenceMs: 1_700,
+  hybridEndpointAgreementWindowMs: 2_000,
   candidateCaptureLimitMs: 1_500,
   silentCaptureLimitMs: 30_000,
   spokenCaptureLimitMs: 55_000,
@@ -392,14 +392,18 @@ export function createCaptureBuffer({ maximumBytes } = {}) {
 }
 
 export function isValidTurnMode(turnMode) {
-  return turnMode === "intentional" || turnMode === "ambient";
+  return (
+    turnMode === "intentional" ||
+    turnMode === "foreground" ||
+    turnMode === "ambient"
+  );
 }
 
 export function turnModeForGestureEpoch(firstTurnAfterExplicitGesture) {
   if (typeof firstTurnAfterExplicitGesture !== "boolean") {
     throw new TypeError("gesture_epoch_invalid");
   }
-  return firstTurnAfterExplicitGesture ? "intentional" : "ambient";
+  return firstTurnAfterExplicitGesture ? "intentional" : "foreground";
 }
 
 export const CANDIDATE_CAPTURE_PHASES = Object.freeze({

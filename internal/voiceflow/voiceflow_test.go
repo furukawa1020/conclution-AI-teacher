@@ -59,6 +59,34 @@ type fakeAgent struct {
 	processingBudget time.Duration
 }
 
+type expiredStateRecoveryAgent struct {
+	calls []conversation.VoiceTurn
+}
+
+func (a *expiredStateRecoveryAgent) Process(
+	_ context.Context,
+	_ string,
+	turn conversation.VoiceTurn,
+) (conversation.VoiceTurnResult, error) {
+	a.calls = append(a.calls, turn)
+	if len(a.calls) == 1 {
+		return conversation.VoiceTurnResult{}, errors.Join(
+			conversation.ErrInvalidStateToken,
+			conversation.ErrExpiredStateToken,
+		)
+	}
+	return conversation.VoiceTurnResult{
+		Domain:           "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []conversation.ResearchRecord{},
+		Route:            "fast",
+		StateToken:       "fresh-encrypted-state",
+		SpokenReply:      "日本の首都は東京です。",
+	}, nil
+}
+
 func (a *fakeAgent) Process(
 	ctx context.Context,
 	_ string,
@@ -75,12 +103,22 @@ func (a *fakeAgent) Process(
 func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 	t.Parallel()
 
-	for _, ambient := range []bool{false, true} {
-		name := "intentional"
-		if ambient {
-			name = "ambient"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		ambient    bool
+		foreground bool
+		passive    bool
+	}{
+		{name: "intentional"},
+		{
+			name:       "foreground",
+			ambient:    true,
+			foreground: true,
+		},
+		{name: "ambient", ambient: true, passive: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
 			speech := &fakeSpeech{
 				transcript: "誤認したかもしれない高リスク発話",
 				confidence: 0.40,
@@ -95,7 +133,8 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				"uid",
 				httpapi.VoiceTurnInput{
 					Audio:      []byte("audio"),
-					Ambient:    ambient,
+					Ambient:    test.ambient,
+					Foreground: test.foreground,
 					StateToken: "existing-state",
 				},
 			)
@@ -111,7 +150,7 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				len(result.ResearchRecords) != 0 {
 				t.Fatalf("recognition fallback metadata = %+v", result)
 			}
-			if ambient {
+			if test.passive {
 				if result.Route != routeSilentLowConfidence ||
 					len(result.Audio) != 0 ||
 					result.Caption != "" ||
@@ -145,12 +184,22 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 		},
 	}
 	for _, noSpeech := range noSpeechErrors {
-		for _, ambient := range []bool{false, true} {
-			mode := "intentional"
-			if ambient {
-				mode = "ambient"
-			}
-			t.Run(noSpeech.name+"/"+mode, func(t *testing.T) {
+		for _, mode := range []struct {
+			name       string
+			ambient    bool
+			foreground bool
+			passive    bool
+		}{
+			{name: "intentional"},
+			{
+				name:       "foreground",
+				ambient:    true,
+				foreground: true,
+			},
+			{name: "ambient", ambient: true, passive: true},
+		} {
+			mode := mode
+			t.Run(noSpeech.name+"/"+mode.name, func(t *testing.T) {
 				speech := &fakeSpeech{transcribeErr: noSpeech.err}
 				agent := &fakeAgent{}
 				pipeline, err := New(speech, agent)
@@ -162,11 +211,12 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 					"uid",
 					httpapi.VoiceTurnInput{
 						Audio:      []byte("audio"),
-						Ambient:    ambient,
+						Ambient:    mode.ambient,
+						Foreground: mode.foreground,
 						StateToken: "existing-state",
 					},
 				)
-				if ambient {
+				if mode.passive {
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -194,7 +244,7 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 					t.Fatalf("no-speech turn reached the model: %d", agent.calls)
 				}
 				wantSynthesisCalls := 1
-				if ambient {
+				if mode.passive {
 					wantSynthesisCalls = 0
 				}
 				if speech.synthesizeCalls != wantSynthesisCalls {
@@ -282,6 +332,51 @@ func TestPipelineTreatsZeroSTTConfidenceAsUnavailableNotLow(t *testing.T) {
 	}
 }
 
+func TestPipelineForegroundPropagatesAmbientAuthorityAndSynthesizes(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{transcript: "続きの質問です"}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		Domain:           "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []conversation.ResearchRecord{},
+		Route:            "fast",
+		StateToken:       "state",
+		SpokenReply:      "続きへ答えます。",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{
+			Audio:      []byte("audio"),
+			TurnMode:   httpapi.VoiceTurnForeground,
+			Ambient:    true,
+			Foreground: true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.calls != 1 ||
+		!agent.turn.Ambient ||
+		!agent.turn.Foreground ||
+		result.Caption != "続きへ答えます。" ||
+		speech.synthesizeCalls != 1 {
+		t.Fatalf(
+			"foreground turn lost reply or ambient authority: turn=%+v result=%+v synth=%d",
+			agent.turn,
+			result,
+			speech.synthesizeCalls,
+		)
+	}
+}
+
 func TestTranscriptConfidenceBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +460,7 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 		spokenReply      string
 		needsClarify     bool
 		ambient          bool
+		foreground       bool
 		wantSynthesized  int
 		wantIntervention string
 	}{
@@ -382,6 +478,16 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
 			needsClarify:     true,
 			ambient:          true,
+			wantSynthesized:  1,
+			wantIntervention: "clarify",
+		},
+		{
+			name:             "foreground",
+			route:            "planner-unavailable",
+			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
+			needsClarify:     true,
+			ambient:          true,
+			foreground:       true,
 			wantSynthesized:  1,
 			wantIntervention: "clarify",
 		},
@@ -417,9 +523,10 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 				context.Background(),
 				"uid",
 				httpapi.VoiceTurnInput{
-					Audio:    []byte("audio"),
-					MIMEType: "audio/webm",
-					Ambient:  test.ambient,
+					Audio:      []byte("audio"),
+					MIMEType:   "audio/webm",
+					Ambient:    test.ambient,
+					Foreground: test.foreground,
 					Document: &httpapi.VoiceDocument{
 						MIMEType: "application/pdf",
 						Data:     []byte("%PDF"),
@@ -595,6 +702,79 @@ func TestPipelineRejectsInvalidEncryptedState(t *testing.T) {
 	})
 	if !errors.Is(err, httpapi.ErrVoiceStateInvalid) {
 		t.Fatalf("error = %v; want invalid state", err)
+	}
+}
+
+func TestPipelineRefreshesAuthenticatedExpiredStateWithoutLosingTurn(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const transcript = "日本の首都はどこ"
+	speech := &fakeSpeech{transcript: transcript, confidence: 0.95}
+	agent := &expiredStateRecoveryAgent{}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{
+			Audio:      []byte("audio"),
+			StateToken: "expired-authenticated-state",
+			RequestID:  "request-expired-state",
+			TurnMode:   httpapi.VoiceTurnIntentional,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if len(agent.calls) != 2 {
+		t.Fatalf("agent calls = %d; want 2", len(agent.calls))
+	}
+	if agent.calls[0].StateToken == "" ||
+		agent.calls[1].StateToken != "" ||
+		agent.calls[0].Utterance != transcript ||
+		agent.calls[1].Utterance != transcript {
+		t.Fatalf("retry turns = %+v", agent.calls)
+	}
+	if result.StateToken != "fresh-encrypted-state" ||
+		speech.synthesizeCalls != 1 ||
+		speech.synthesizedText != "日本の首都は東京です。" {
+		t.Fatalf(
+			"result = %+v; synthesize calls = %d, text = %q",
+			result,
+			speech.synthesizeCalls,
+			speech.synthesizedText,
+		)
+	}
+}
+
+func TestPipelineDoesNotRefreshTamperedState(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{transcript: "続きです", confidence: 0.95}
+	agent := &fakeAgent{err: conversation.ErrInvalidStateToken}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{
+			Audio:      []byte("audio"),
+			StateToken: "tampered-state",
+		},
+	)
+	if !errors.Is(err, httpapi.ErrVoiceStateInvalid) {
+		t.Fatalf("error = %v; want invalid state", err)
+	}
+	if agent.calls != 1 {
+		t.Fatalf("agent calls = %d; want 1", agent.calls)
 	}
 }
 

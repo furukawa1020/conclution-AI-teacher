@@ -622,11 +622,19 @@ func TestPipelineLiveReusesNoSpeechClarificationAndAmbientSilence(t *testing.T) 
 	for _, test := range []struct {
 		name       string
 		ambient    bool
+		foreground bool
 		wantRoute  string
 		wantStream int
 	}{
 		{
 			name:       "intentional",
+			wantRoute:  routeClarifyNoSpeech,
+			wantStream: 1,
+		},
+		{
+			name:       "foreground",
+			ambient:    true,
+			foreground: true,
 			wantRoute:  routeClarifyNoSpeech,
 			wantStream: 1,
 		},
@@ -660,6 +668,7 @@ func TestPipelineLiveReusesNoSpeechClarificationAndAmbientSilence(t *testing.T) 
 				"uid",
 				httpapi.VoiceTurnInput{
 					Ambient:    test.ambient,
+					Foreground: test.foreground,
 					StateToken: "existing-state",
 				},
 				audio,
@@ -2082,20 +2091,32 @@ func TestPipelineLiveSpeculativeCancellationDoesNotLeak(t *testing.T) {
 	}
 }
 
-func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T) {
+func TestPipelineLiveSpeculationRequiresReplyExpectedDocumentFreeTurn(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name     string
-		ambient  bool
-		document *httpapi.VoiceDocument
+		name       string
+		ambient    bool
+		foreground bool
+		document   *httpapi.VoiceDocument
+		wantSpec   bool
+		wantHit    int64
+		wantMiss   int64
 	}{
 		{name: "ambient", ambient: true},
+		{
+			name:       "foreground",
+			ambient:    true,
+			foreground: true,
+			wantSpec:   true,
+			wantHit:    1,
+		},
 		{
 			name: "document",
 			document: &httpapi.VoiceDocument{
 				MIMEType: "application/pdf",
 				Data:     []byte("pdf"),
 			},
+			wantMiss: 1,
 		},
 	} {
 		test := test
@@ -2148,8 +2169,9 @@ func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T
 				context.Background(),
 				"uid",
 				httpapi.VoiceTurnInput{
-					Ambient:  test.ambient,
-					Document: test.document,
+					Ambient:    test.ambient,
+					Foreground: test.foreground,
+					Document:   test.document,
 				},
 				audio,
 				func([]byte) error { return nil },
@@ -2158,15 +2180,13 @@ func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T
 				t.Fatal(err)
 			}
 			turns := agent.recordedTurns()
-			if len(turns) != 1 || turns[0].Speculative {
+			if len(turns) != 1 ||
+				turns[0].Speculative != test.wantSpec ||
+				turns[0].Foreground != test.foreground {
 				t.Fatalf("turns=%+v", turns)
 			}
-			wantMiss := int64(1)
-			if test.ambient {
-				wantMiss = 0
-			}
-			if result.LiveTimings.SpecHit != 0 ||
-				result.LiveTimings.SpecMiss != wantMiss ||
+			if result.LiveTimings.SpecHit != test.wantHit ||
+				result.LiveTimings.SpecMiss != test.wantMiss ||
 				result.LiveTimings.SpecCancel != 0 {
 				t.Fatalf("timings=%+v", result.LiveTimings)
 			}

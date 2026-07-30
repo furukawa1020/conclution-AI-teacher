@@ -30,8 +30,13 @@ const (
 )
 
 var (
-	ErrInvalidTurn        = errors.New("conversation: invalid turn")
-	ErrInvalidStateToken  = errors.New("conversation: invalid state token")
+	ErrInvalidTurn       = errors.New("conversation: invalid turn")
+	ErrInvalidStateToken = errors.New("conversation: invalid state token")
+	// ErrExpiredStateToken is joined with ErrInvalidStateToken only after a
+	// state token has passed authenticated decryption and structural checks.
+	// It lets a voice caller start a fresh state without treating a tampered
+	// token as recoverable.
+	ErrExpiredStateToken  = errors.New("conversation: expired state token")
 	ErrModelUnavailable   = errors.New("conversation: model unavailable")
 	ErrModelOutputInvalid = errors.New("conversation: invalid model output")
 	// ErrSpeculativeExternalAction means a provisional transcript asked for
@@ -44,7 +49,9 @@ var (
 )
 
 // VoiceTurn is the semantic input to the agent after speech recognition.
-// Ambient distinguishes passive transcript fragments from an intentional user turn.
+// Ambient marks speech whose provenance has no intentional-turn authority.
+// Foreground marks an active-conversation continuation that expects a reply
+// while retaining all ambient authority restrictions.
 // Process consumes PDF.Data and clears the caller-provided byte slice before returning.
 type VoiceTurn struct {
 	SchemaVersion int    `json:"schemaVersion"`
@@ -52,6 +59,7 @@ type VoiceTurn struct {
 	StateToken    string `json:"stateToken,omitempty"`
 	RequestID     string `json:"-"`
 	Ambient       bool   `json:"ambient,omitempty"`
+	Foreground    bool   `json:"foreground,omitempty"`
 	// Speculative permits pure model computation while speech recognition is
 	// still provisional. It never widens authority: outbound research and any
 	// future executable action must fail before execution.
@@ -147,6 +155,9 @@ func (turn VoiceTurn) Validate() error {
 
 func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 	if turn.SchemaVersion != SchemaVersion {
+		return VoiceTurn{}, ErrInvalidTurn
+	}
+	if turn.Foreground && !turn.Ambient {
 		return VoiceTurn{}, ErrInvalidTurn
 	}
 	if !utf8.ValidString(turn.Utterance) {

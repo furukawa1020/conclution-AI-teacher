@@ -296,6 +296,53 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+func (s *Server) consumeVoiceQuota(
+	w http.ResponseWriter,
+	ctx context.Context,
+	principal identity.Principal,
+	at time.Time,
+) bool {
+	quotaChecks := []struct {
+		limiter guard.Limiter
+		key     string
+		scope   string
+	}{
+		{limiter: s.voice.RateLimiter, key: principal.UID, scope: "uid"},
+		{limiter: s.voice.AppRateLimiter, key: "app:" + principal.AppID, scope: "app"},
+	}
+	quotaErrors := make([]error, len(quotaChecks))
+	var quotaGroup sync.WaitGroup
+	quotaGroup.Add(len(quotaChecks))
+	for index := range quotaChecks {
+		index := index
+		go func() {
+			defer quotaGroup.Done()
+			check := quotaChecks[index]
+			quotaErrors[index] = check.limiter.Consume(ctx, check.key, at)
+		}()
+	}
+	quotaGroup.Wait()
+
+	for _, err := range quotaErrors {
+		if errors.Is(err, guard.ErrRateLimitExceeded) {
+			writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The voice conversation limit has been reached.")
+			return false
+		}
+	}
+	for index, err := range quotaErrors {
+		if err != nil {
+			s.logger.ErrorContext(ctx, "voice rate-limit guard failed",
+				"request_id", requestIDFromContext(ctx),
+				"quota_scope", quotaChecks[index].scope,
+				"error_class", "voice_rate_limit_store_failure",
+			)
+			writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
+			return false
+		}
+	}
+	return true
+}
+
 func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	mimeType := normalizedAudioMIME(request.MIMEType)
 	if mimeType == "" || len(request.SessionState) > maxStateBytes {

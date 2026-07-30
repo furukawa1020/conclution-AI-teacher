@@ -10,9 +10,9 @@
 
 ```text
 マイク
-  │ 端末RAM: MediaRecorder + VAD
+  │ 端末RAM: AudioWorklet + VAD
   ▼
-Firebase Hosting /api rewrite
+認証済みWSS（tokenはURLではなく最初のframe）
   ▼
 Cloud Run kotae-api（asia-northeast1）
   ├─ raw audio ──→ Cloud Speech-to-Text V2（asia-northeast1）
@@ -40,14 +40,17 @@ Cloud Run kotae-api（asia-northeast1）
 
 STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
 
-STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。`short`は数秒の単発発話向けで、固定の合成日本語による確認でも自然な会話を冒頭だけで確定したため、自動fallbackには使いません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
+STTは`asia-northeast1`・`ja-JP`の`chirp_3`だけを使い、短いendpointingを有効にします。別modelへの自動fallbackは行いません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、東京域外へも自動退避しません。
 
 ## マイクとセッション制御
 
 - 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
 - 各requestは`turnMode: intentional | ambient`を必須とし、状態tokenの有無からambientを推測しない
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
-- AI処理中と合成音声の再生中はマイクトラックを無効にする
+- 通常の入力は20 ms単位とし、発話を確認するまでroom audioを送らない。確認時だけzeroize可能な400 ms ringから100 msのpre-rollを送る
+- `autoGainControl`と`noiseSuppression`を無効、`echoCancellation`だけを有効にし、STTへ非可逆な端末加工を重ねない
+- AI再生中は160 ms以上続く利用者音声だけを割り込みとして確定し、再生中・待機中の音声を停止・破棄して100 msのpre-rollを次ターンへ渡す
+- STT側endpointは助言情報として扱い、端末側の無音判定との一致と明示的なcommitなしに音声処理権限を確定しない
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
 - 無発話が3分続いた時、または開始から30分経過した時にセッションを終了する
 - 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、PDFは7 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする

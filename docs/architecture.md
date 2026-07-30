@@ -34,11 +34,11 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 ┌──────────────────────────────────────────────┐
 │ Browser                                      │
 │ Rust / Dioxus / Wasm                         │
-│  └─ JS bridge: MediaRecorder / Web Audio VAD │
+│  └─ JS bridge: AudioWorklet / Web Audio VAD  │
 │                 Firebase Auth / App Check    │
 └───────────────────┬──────────────────────────┘
-                    │ same-origin HTTPS
-                    │ POST /api/v1/voice/turns
+                    │ authenticated WSS
+                    │ 20 ms PCM /api/v1/voice/live
                     ▼
 ┌──────────────────────────────────────────────┐
 │ Cloud Run / Go（asia-northeast1）             │
@@ -49,7 +49,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 ┌──────────────────┐   ┌─────────────────────────────┐
 │ Cloud STT V2     │   │ Vertex AI（global）          │
 │ asia-northeast1  │   │ Gemini fast / precision     │
-│ long, no fallback│   │ Thought Graph + EVI + LAC   │
+│ chirp_3, fixed   │   │ Thought Graph + EVI + LAC   │
 └────────┬─────────┘   └────────────┬────────────────┘
          └──── transcript ──────────┘
                                     │ silence / reply text
@@ -117,8 +117,9 @@ LACの指標は内部評価用で、画面へ分析文を大量表示しませ�
 
 - 静的なWasm UI: Firebase Hosting
 - REST API: Firebase Hostingの`/api/**` rewriteからCloud Run `kotae-api`
-- 一発話ごとの音声request: `POST /api/v1/voice/turns`
+- 通常の音声経路: Cloud Runへの認証済み`WSS /api/v1/voice/live`
+- 互換fallback: `POST /api/v1/voice/turns`
 - Cloud Run、Speech-to-Text、Text-to-Speech: `asia-northeast1`
 - Vertex AI: `global`
 
-現在はWebSocketやVertex Live APIを使いません。一発話ごとのHTTPS requestに収め、処理中と音声再生中はマイクを無効にします。full-duplex、barge-in、話者本人認証、保存音声履歴、Vault、任意Web巡回、論文本文のclaim-level検証、無人の後日再評価は将来候補であり、現在の公開経路の保証には含めません。
+通常経路は、Firebase ID tokenとApp Check tokenをURLへ入れず最初のWebSocket frameで検証してから、20 msのPCMをCloud Runへ送ります。Cloud STTのendpoint通知と端末VADの無音判定が一致した時だけ早期commitし、どちらか片方だけでは推論開始を確定しません。安定した途中認識では同じGemini推論とTTSを先読みしますが、合成音声は最大24,000 byte（500 ms）をcommit bufferへ隔離し、最終文字起こし・監査済み応答との一致が確定した時だけ解放します。不一致、外部操作、cancel、形式不正ではbufferをzeroizeして破棄します。応答再生中もエコー除去付きVADで利用者の声を確認でき、割り込み確定時には再生中・待機中の音声を破棄して次ターンへ100 msのpre-rollを引き継ぎます。Vertex Live APIは使わず、話者本人認証、保存音声履歴、Vault、任意Web巡回、論文本文のclaim-level検証、無人の後日再評価は現在の公開経路の保証に含めません。

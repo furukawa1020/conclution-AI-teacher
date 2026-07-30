@@ -419,7 +419,7 @@ func TestVoiceLiveEndpointKeepsSingleReaderUntilExplicitCommit(t *testing.T) {
 
 	// An endpoint is advisory. The same sole reader must accept more PCM and
 	// only stop after the client explicitly commits.
-	second := make([]byte, voiceLivePCMFrameBytes)
+	second := make([]byte, 3_200)
 	second[0] = 2
 	if err := conn.Write(
 		ctx,
@@ -679,7 +679,67 @@ func TestVoiceLiveStartRequiresJWTAlphabetAndCanonicalState(t *testing.T) {
 	}
 }
 
-func TestVoiceLiveRequiresExactTwentyMillisecondPCMFrames(t *testing.T) {
+func TestVoiceLivePCMValidationBoundsShapeMessagesAndTotal(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name        string
+		frameBytes  int
+		inputFrames int
+		inputBytes  int
+		wantCode    string
+	}{
+		{name: "640 bytes", frameBytes: 640},
+		{name: "3200 bytes", frameBytes: 3_200},
+		{name: "638 bytes", frameBytes: 638},
+		{name: "1280 bytes", frameBytes: 1_280},
+		{
+			name:       "total exact",
+			frameBytes: 2,
+			inputBytes: voiceLiveMaxPCMTotalBytes - 2,
+		},
+		{
+			name:       "empty",
+			wantCode:   voiceLiveCodeResponseInvalid,
+			frameBytes: 0,
+		},
+		{
+			name:       "odd",
+			frameBytes: 639,
+			wantCode:   voiceLiveCodeResponseInvalid,
+		},
+		{
+			name:       "frame too large",
+			frameBytes: voiceLiveMaxPCMFrameBytes + 2,
+			wantCode:   voiceLiveCodeTurnTooLarge,
+		},
+		{
+			name:        "message count exhausted",
+			frameBytes:  2,
+			inputFrames: voiceLiveMaxPCMFrames,
+			wantCode:    voiceLiveCodeTurnTooLarge,
+		},
+		{
+			name:       "total exceeded",
+			frameBytes: 4,
+			inputBytes: voiceLiveMaxPCMTotalBytes - 2,
+			wantCode:   voiceLiveCodeTurnTooLarge,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := voiceLivePCMValidationCode(
+				test.frameBytes,
+				test.inputFrames,
+				test.inputBytes,
+			); got != test.wantCode {
+				t.Fatalf("validation code=%q want %q", got, test.wantCode)
+			}
+		})
+	}
+}
+
+func TestVoiceLiveAcceptsBoundedEvenPCMFrameSizes(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name     string
@@ -687,9 +747,10 @@ func TestVoiceLiveRequiresExactTwentyMillisecondPCMFrames(t *testing.T) {
 		accepted bool
 	}{
 		{name: "twenty milliseconds", size: 640, accepted: true},
-		{name: "old client batch", size: 3_200},
-		{name: "arbitrary even frame", size: 638},
-		{name: "two frames batched", size: 1_280},
+		{name: "old client batch", size: 3_200, accepted: true},
+		{name: "arbitrary even frame", size: 638, accepted: true},
+		{name: "two frames batched", size: 1_280, accepted: true},
+		{name: "empty", size: 0},
 		{name: "one byte short", size: 639},
 		{name: "one byte long", size: 641},
 	} {

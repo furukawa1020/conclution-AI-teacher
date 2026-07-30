@@ -87,7 +87,6 @@ let activeRecording;
 let activeRequestController;
 let activePlayback;
 let activeLiveSession;
-let pendingLiveSession;
 let pendingDocument;
 let pendingDocumentTimer;
 let voiceTransportPrimed = false;
@@ -112,10 +111,10 @@ function boundedLatency(value) {
 function dispatchVoiceLatency({
   authReadyMs = 0,
   bargeHaltMs = 0,
-  commitToEstimatedAudibleMs = 0,
+  commitToAudibleMs = 0,
   commitToFirstAudioMs = 0,
   firstBinaryMs = 0,
-  speechEndToEstimatedAudibleMs = 0,
+  speechEndToAudibleMs = 0,
   turnTotalMs = 0,
   wsOpenMs = 0,
 }) {
@@ -124,15 +123,13 @@ function dispatchVoiceLatency({
       detail: Object.freeze({
         auth_ready_ms: boundedLatency(authReadyMs),
         barge_halt_ms: boundedLatency(bargeHaltMs),
-        commit_to_estimated_audible_ms: boundedLatency(
-          commitToEstimatedAudibleMs,
-        ),
+        commit_to_audible_ms: boundedLatency(commitToAudibleMs),
         commit_to_first_audio_ms: boundedLatency(
           commitToFirstAudioMs,
         ),
         first_binary_ms: boundedLatency(firstBinaryMs),
-        speech_end_to_estimated_audible_ms: boundedLatency(
-          speechEndToEstimatedAudibleMs,
+        speech_end_to_audible_ms: boundedLatency(
+          speechEndToAudibleMs,
         ),
         turn_total_ms: boundedLatency(turnTotalMs),
         version: 2,
@@ -402,10 +399,10 @@ async function ensureMediaStream(expectedEpoch) {
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        autoGainControl: true,
+        autoGainControl: false,
         channelCount: 1,
         echoCancellation: true,
-        noiseSuppression: true,
+        noiseSuppression: false,
       },
       video: false,
     });
@@ -894,7 +891,6 @@ async function beginTurn(serializedSessionState, turnMode) {
     !isValidTurnMode(turnMode) ||
     activeRecording ||
     activeLiveSession ||
-    pendingLiveSession ||
     beginGate.isBusy() ||
     finishGate.isBusy()
   ) {
@@ -974,11 +970,6 @@ async function waitForTurnEnd() {
       error instanceof Error ? error : new Error("request_cancelled"),
     );
     activeLiveSession = undefined;
-    if (pendingLiveSession?.recording === recording) {
-      retirePendingLiveSession(
-        error instanceof Error ? error : new Error("request_cancelled"),
-      );
-    }
     stopVad(recording);
     recording.discard = true;
     requestRecordingStop(recording, "cancelled");
@@ -993,9 +984,6 @@ async function waitForTurnEnd() {
   if (!capture.hasSpeech) {
     activeLiveSession?.cancel(new Error("no_speech"));
     activeLiveSession = undefined;
-    if (pendingLiveSession?.recording === recording) {
-      retirePendingLiveSession(new Error("no_speech"));
-    }
     activeRecording = undefined;
   } else {
     sessionClock.markSpeech();
@@ -1424,11 +1412,11 @@ async function startVoiceLiveSession({
   let authReadyMs = preflightAuthReadyMs;
   let authReadyTimer;
   let commitAt;
-  let commitToEstimatedAudibleMs;
+  let commitToAudibleMs;
   let commitToFirstAudioMs;
   let firstBinaryMs;
   let speechEndedAt;
-  let speechEndToEstimatedAudibleMs;
+  let speechEndToAudibleMs;
   let speechConfirmed = captureHandoff !== undefined;
   let commitSent = false;
   let latencyDispatched = false;
@@ -1492,10 +1480,10 @@ async function startVoiceLiveSession({
     dispatchVoiceLatency({
       authReadyMs,
       bargeHaltMs,
-      commitToEstimatedAudibleMs,
+      commitToAudibleMs,
       commitToFirstAudioMs,
       firstBinaryMs,
-      speechEndToEstimatedAudibleMs,
+      speechEndToAudibleMs,
       turnTotalMs: performance.now() - liveStartedAt,
       wsOpenMs,
     });
@@ -1676,14 +1664,13 @@ async function startVoiceLiveSession({
         protocol.acceptBinary(event.data),
       );
       if (
-        commitToEstimatedAudibleMs === undefined &&
+        commitToAudibleMs === undefined &&
         commitAt !== undefined &&
         Number.isFinite(audibleAt)
       ) {
-        commitToEstimatedAudibleMs = audibleAt - commitAt;
+        commitToAudibleMs = audibleAt - commitAt;
         if (Number.isFinite(speechEndedAt)) {
-          speechEndToEstimatedAudibleMs =
-            audibleAt - speechEndedAt;
+          speechEndToAudibleMs = audibleAt - speechEndedAt;
         }
       }
     } catch (error) {
@@ -2233,84 +2220,6 @@ async function startBargePcmMonitoring(
   }
 }
 
-function retirePendingLiveSession(
-  error = new Error("request_cancelled"),
-  expectedPending = pendingLiveSession,
-) {
-  const pending = expectedPending;
-  if (!pending) return;
-  if (pendingLiveSession === pending) {
-    pendingLiveSession = undefined;
-  }
-  if (pending.retired) return;
-  pending.retired = true;
-  void pending.promise
-    .then((liveSession) => liveSession?.cancel(error))
-    .catch(() => {});
-}
-
-async function takePendingLiveSession(recording, expectedEpoch) {
-  const pending = pendingLiveSession;
-  if (
-    !pending ||
-    pending.recording !== recording ||
-    pending.expectedEpoch !== expectedEpoch
-  ) {
-    return undefined;
-  }
-
-  let timeout;
-  const timedOut = Symbol("voice_live_handoff_timeout");
-  let nextLiveSession;
-  try {
-    nextLiveSession = await Promise.race([
-      pending.promise,
-      new Promise((resolve) => {
-        timeout = setTimeout(
-          () => resolve(timedOut),
-          VOICE_LIVE_LIMITS.handoffReadyTimeoutMs,
-        );
-      }),
-    ]);
-  } catch {
-    nextLiveSession = undefined;
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
-
-  if (nextLiveSession === timedOut) {
-    retirePendingLiveSession(
-      new Error("voice_live_handoff_timeout"),
-      pending,
-    );
-    return undefined;
-  }
-  if (pendingLiveSession !== pending) {
-    if (
-      nextLiveSession &&
-      activeLiveSession === nextLiveSession &&
-      expectedEpoch === sessionEpoch &&
-      activeRecording === recording
-    ) {
-      return nextLiveSession;
-    }
-    return undefined;
-  }
-  pendingLiveSession = undefined;
-  if (
-    !nextLiveSession ||
-    pending.retired ||
-    expectedEpoch !== sessionEpoch ||
-    activeRecording !== recording ||
-    (activeLiveSession && activeLiveSession !== nextLiveSession)
-  ) {
-    nextLiveSession?.cancel(new Error("request_cancelled"));
-    return undefined;
-  }
-  activeLiveSession = nextLiveSession;
-  return nextLiveSession;
-}
-
 function confirmBargeIn(playback, recording, candidate) {
   if (
     playback.interrupted ||
@@ -2367,29 +2276,9 @@ function confirmBargeIn(playback, recording, candidate) {
     dispatchVoiceLatency({ bargeHaltMs });
   }
   if (handoffPromise) {
-    retirePendingLiveSession(new Error("voice_interrupted"));
-    const pending = {
-      expectedEpoch: handoffEpoch,
-      promise: Promise.resolve(handoffPromise),
-      recording,
-      retired: false,
-    };
-    pendingLiveSession = pending;
-    void pending.promise
+    void handoffPromise
       .then((nextLiveSession) => {
-        if (!nextLiveSession) {
-          if (pendingLiveSession === pending) {
-            pendingLiveSession = undefined;
-          }
-          return;
-        }
-        if (pendingLiveSession !== pending || pending.retired) {
-          nextLiveSession.cancel(new Error("request_cancelled"));
-          return;
-        }
-        if (recording.settled) {
-          return;
-        }
+        if (!nextLiveSession) return;
         const claimed = claimAmbientLiveHandoff(
           nextLiveSession,
           {
@@ -2402,15 +2291,9 @@ function confirmBargeIn(playback, recording, candidate) {
         );
         if (claimed) {
           activeLiveSession = claimed;
-          if (pendingLiveSession === pending) {
-            pendingLiveSession = undefined;
-          }
         }
       })
       .catch(() => {
-        if (pendingLiveSession === pending) {
-          pendingLiveSession = undefined;
-        }
         // The MediaRecorder candidate remains the ambient HTTP fallback.
       });
   }
@@ -2836,12 +2719,6 @@ async function finishTurn(serializedSessionState, turnMode) {
       clearPendingDocument("consumed");
     }
     liveSession = activeLiveSession;
-    if (!liveSession) {
-      liveSession = await takePendingLiveSession(
-        recording,
-        expectedEpoch,
-      );
-    }
     if (
       liveSession &&
       !liveSession.matches(serializedSessionState, turnMode)
@@ -2984,9 +2861,6 @@ async function finishTurn(serializedSessionState, turnMode) {
     if (activeLiveSession === liveSession) {
       activeLiveSession = undefined;
     }
-    if (pendingLiveSession?.recording === recording) {
-      retirePendingLiveSession(new Error("request_cancelled"));
-    }
     if (activeRecording === recording) {
       activeRecording = undefined;
     }
@@ -3049,7 +2923,6 @@ async function attachDocument(inputId) {
     activeLiveSession.cancel(new Error("voice_live_pdf_fallback"));
     activeLiveSession = undefined;
   }
-  retirePendingLiveSession(new Error("voice_live_pdf_fallback"));
   armPendingDocumentExpiry(pendingDocument, attachedAt);
   base64 = "";
   return Object.freeze({
@@ -3072,7 +2945,6 @@ function stopSession() {
     activeLiveSession = undefined;
     liveSession.cancel(new Error("request_cancelled"));
   }
-  retirePendingLiveSession(new Error("request_cancelled"));
   if (activePlayback) {
     const playback = activePlayback;
     activePlayback = undefined;
@@ -3102,7 +2974,6 @@ function hasActiveVoiceSession() {
     beginGate.isBusy() ||
     activeRequestController ||
     activeLiveSession ||
-    pendingLiveSession ||
     activePlayback ||
     finishGate.isBusy() ||
     pendingDocument ||

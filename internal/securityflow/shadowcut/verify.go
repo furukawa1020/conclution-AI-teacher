@@ -118,7 +118,7 @@ func verifySourceReachesSink(
 		index := stack[last]
 		stack = stack[:last]
 		if trace.sink[index] {
-			return true
+			return verifySinkExecutable(trace, index, cut)
 		}
 		for _, edgeIndex := range trace.outgoing[index] {
 			edge := trace.trace.Edges[edgeIndex]
@@ -133,6 +133,44 @@ func verifySourceReachesSink(
 		}
 	}
 	return false
+}
+
+func verifySinkExecutable(
+	trace *preparedTrace,
+	sink int,
+	cut ControlMask,
+) bool {
+	node := trace.trace.Nodes[sink]
+	if node.Requires == 0 {
+		return true
+	}
+	consumeSeen := false
+	for _, edgeIndex := range trace.incoming[sink] {
+		edge := trace.trace.Edges[edgeIndex]
+		if edge.Kind != EdgeConsume {
+			continue
+		}
+		if consumeSeen || edge.Controls&cut != 0 {
+			return false
+		}
+		consumeSeen = true
+		grantIndex := trace.index[edge.From]
+		issueSeen := false
+		for _, parentEdgeIndex := range trace.incoming[grantIndex] {
+			parentEdge := trace.trace.Edges[parentEdgeIndex]
+			if parentEdge.Kind != EdgeIssueGrant {
+				continue
+			}
+			if issueSeen || parentEdge.Controls&cut != 0 {
+				return false
+			}
+			issueSeen = true
+		}
+		if !issueSeen {
+			return false
+		}
+	}
+	return consumeSeen
 }
 
 func verifyBetter(candidate, incumbent objective) bool {

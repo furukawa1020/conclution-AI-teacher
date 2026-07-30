@@ -377,7 +377,7 @@ func sourceReachesSink(
 		index := queue[0]
 		queue = queue[1:]
 		if trace.sink[index] {
-			return true
+			return sinkExecutable(trace, index, cut)
 		}
 		for _, edgeIndex := range trace.outgoing[index] {
 			edge := trace.trace.Edges[edgeIndex]
@@ -388,6 +388,38 @@ func sourceReachesSink(
 			if !seen[to] {
 				seen[to] = true
 				queue = append(queue, to)
+			}
+		}
+	}
+	return false
+}
+
+// sinkExecutable models the one conjunction in the causal language: a
+// privileged effect requires both a data/control path to the sink and the
+// uncut exact-bound Intent -> Grant -> Consume chain. Ordinary response sinks
+// require only their data/control path.
+func sinkExecutable(
+	trace *preparedTrace,
+	sink int,
+	cut ControlMask,
+) bool {
+	node := trace.trace.Nodes[sink]
+	if node.Requires == 0 {
+		return true
+	}
+	for _, edgeIndex := range trace.incoming[sink] {
+		consume := trace.trace.Edges[edgeIndex]
+		if consume.Kind != EdgeConsume {
+			continue
+		}
+		if consume.Controls&cut != 0 {
+			return false
+		}
+		grantIndex := trace.index[consume.From]
+		for _, issueIndex := range trace.incoming[grantIndex] {
+			issue := trace.trace.Edges[issueIndex]
+			if issue.Kind == EdgeIssueGrant {
+				return issue.Controls&cut == 0
 			}
 		}
 	}

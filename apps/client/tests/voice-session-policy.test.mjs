@@ -49,6 +49,30 @@ test("bridge cancellation releases ownership before rejecting the recording", as
   assert.ok(rejectAt > detachAt);
 });
 
+test("bridge primes App Check before a fresh anonymous sign-in", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function initializeAuthenticatedUser()");
+  const end = bridge.indexOf(
+    "\n}\n\nconst authenticatedUser",
+    start,
+  );
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const initializeUser = bridge.slice(start, end);
+
+  const appCheckAt = initializeUser.indexOf(
+    "await getAppCheckToken(appCheck, false)",
+  );
+  const initializeAuthAt = initializeUser.indexOf("initializeAuth(app");
+  const anonymousSignInAt = initializeUser.indexOf("signInAnonymously(auth)");
+  assert.ok(appCheckAt >= 0);
+  assert.ok(initializeAuthAt > appCheckAt);
+  assert.ok(anonymousSignInAt > initializeAuthAt);
+});
+
 test("research discovery stays bounded, immutable, and explicitly unverified", () => {
   const discovery = normalizeResearchDiscovery("needs_primary_evidence", [
     researchRecord,

@@ -151,7 +151,11 @@ async function initializeAppServices() {
 const appServices = createRetryableInitializer(initializeAppServices);
 
 async function initializeAuthenticatedUser() {
-  const { app } = await appServices();
+  const { app, appCheck } = await appServices();
+  // Authentication has App Check enforcement enabled in production. Prime the
+  // attestation token before the first anonymous sign-in so a fresh browser
+  // never races Auth with the reCAPTCHA Enterprise exchange.
+  await getAppCheckToken(appCheck, false);
   authInstance ??= initializeAuth(app, {
     persistence: browserSessionPersistence,
   });

@@ -190,7 +190,7 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 	}
 	criticCall := fake.calls[1]
 	if criticCall.model != DefaultFastModel ||
-		criticCall.thinkingLevel != genai.ThinkingLevelHigh ||
+		criticCall.thinkingLevel != genai.ThinkingLevelLow ||
 		criticCall.responseMIME != "application/json" ||
 		!criticCall.hasJSONSchema ||
 		!strings.Contains(criticCall.prompt, "<lac_critic_data>") ||
@@ -203,6 +203,443 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 	}
 	if state.Turn != 1 || len(state.Graph.Claims) != 1 {
 		t.Fatalf("unexpected initial state: %#v", state)
+	}
+}
+
+func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
+	fake := &fakeGenerator{}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-welcome", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "こんにちは。",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("welcome called model %d times, want zero", len(fake.calls))
+	}
+	if phaticLocalSpokenReply !=
+		"こんにちは。質問でも考え途中でも、そのままどうぞ。まず答えて、必要なら一緒に整理します。" {
+		t.Fatalf("unexpected local greeting copy: %q", phaticLocalSpokenReply)
+	}
+	if result.Route != "phatic-local" ||
+		result.SpokenReply != phaticLocalSpokenReply ||
+		result.Domain != "daily" ||
+		result.Intent != "other" ||
+		result.AssistanceTarget != "assistant" ||
+		result.RespondentStage != "none" ||
+		result.ResearchStatus != "none" ||
+		result.NeedsClarification ||
+		result.StateToken == "" {
+		t.Fatalf("unexpected welcome result: %#v", result)
+	}
+	for name, value := range map[string]float64{
+		"confidence":           result.Confidence,
+		"benefit":              result.Intervention.Benefit,
+		"interruption_cost":    result.Intervention.InterruptionCost,
+		"urgency":              result.Intervention.Urgency,
+		"arbiter_confidence":   result.Intervention.Confidence,
+		"score":                result.Intervention.Score,
+		"hypothesis_gap":       result.AnswerContract.HypothesisGap,
+		"hypothesis_entropy":   result.AnswerContract.HypothesisEntropy,
+		"target_slot_coverage": result.AnswerContract.TargetSlotCoverage,
+		"meaning_preservation": result.AnswerContract.MeaningPreservation,
+	} {
+		if mathInvalid(value) {
+			t.Fatalf("%s is not finite and bounded: %v", name, value)
+		}
+	}
+
+	state, err := agent.codec.open("uid-welcome", result.StateToken)
+	if err != nil {
+		t.Fatalf("open welcome state: %v", err)
+	}
+	if state.Turn != 1 ||
+		len(state.Graph.Goals) != 0 ||
+		len(state.Graph.Claims) != 0 ||
+		len(state.Graph.Grounds) != 0 ||
+		len(state.Graph.Assumptions) != 0 ||
+		len(state.Graph.Constraints) != 0 ||
+		len(state.Graph.OpenLoops) != 0 ||
+		len(state.Graph.Contradictions) != 0 ||
+		len(state.Graph.Decisions) != 0 ||
+		state.ConversationSummary != "" ||
+		state.DocumentSummary != "" ||
+		state.PendingAnswer.Active {
+		t.Fatalf("welcome state is not minimal: %#v", state)
+	}
+}
+
+func TestAgentPhaticLocalAdvancesExistingPrivateStateWithoutStoringProse(
+	t *testing.T,
+) {
+	fake := &fakeGenerator{}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 3,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の安全な抽象"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			RequiredSlots: []answercontract.RequiredSlot{},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Act: "silent",
+		},
+	}
+	token, err := agent.codec.seal("uid-phatic-state", initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	utterance := "こんばんは！？"
+	result, err := agent.Process(context.Background(), "uid-phatic-state", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "phatic-local" || len(fake.calls) != 0 {
+		t.Fatalf("existing state escaped local phatic route: %#v", result)
+	}
+	opened, err := agent.codec.open("uid-phatic-state", result.StateToken)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if opened.Turn != 4 ||
+		len(opened.Graph.Claims) != 1 ||
+		opened.Graph.Claims[0] != "既存の安全な抽象" ||
+		opened.ConversationSummary != "" ||
+		opened.DocumentSummary != "" {
+		t.Fatalf("phatic greeting damaged private state: %#v", opened)
+	}
+	encoded, err := json.Marshal(opened)
+	if err != nil {
+		t.Fatalf("marshal next state: %v", err)
+	}
+	for _, forbidden := range []string{utterance, phaticLocalSpokenReply} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("greeting prose entered state: %s", encoded)
+		}
+	}
+}
+
+func TestStandaloneGreetingEligibilityIsStrict(t *testing.T) {
+	tests := []struct {
+		name  string
+		turn  VoiceTurn
+		state conversationState
+		want  bool
+	}{
+		{
+			name: "standalone Japanese greeting",
+			turn: VoiceTurn{Utterance: "こんにちは！"},
+			want: true,
+		},
+		{
+			name: "greeting plus question",
+			turn: VoiceTurn{Utterance: "こんにちは、今日は何ができますか？"},
+		},
+		{
+			name: "ambient greeting",
+			turn: VoiceTurn{Utterance: "こんにちは", Ambient: true},
+		},
+		{
+			name: "greeting with non-pending state",
+			turn: VoiceTurn{Utterance: "こんにちは", StateToken: "v1.existing"},
+			state: conversationState{
+				Turn: 1,
+			},
+			want: true,
+		},
+		{
+			name: "greeting while an answer is pending",
+			turn: VoiceTurn{Utterance: "こんにちは"},
+			state: conversationState{
+				Turn: 1,
+				PendingAnswer: PendingAnswerFrame{
+					Active: true,
+				},
+			},
+		},
+		{
+			name: "greeting with PDF",
+			turn: VoiceTurn{
+				Utterance: "こんにちは",
+				PDF: &InlinePDF{
+					MIMEType: "application/pdf",
+					Data:     []byte("%PDF-1.7"),
+				},
+			},
+		},
+		{
+			name: "embedded greeting",
+			turn: VoiceTurn{Utterance: "あの、こんにちは"},
+		},
+		{
+			name: "semantic suffix after punctuation",
+			turn: VoiceTurn{Utterance: "こんにちは。続きがあります"},
+		},
+		{
+			name: "non-punctuation suffix",
+			turn: VoiceTurn{Utterance: "こんにちはー"},
+		},
+		{
+			name: "trailing punctuation and whitespace",
+			turn: VoiceTurn{Utterance: "こんにちは！？ …  "},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isStandalonePhaticGreeting(
+				test.turn,
+				test.state,
+			); got != test.want {
+				t.Fatalf("eligibility = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAgentGreetingWithQuestionStillUsesAuditedModelPath(t *testing.T) {
+	plan := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-greeting-question", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "こんにちは、今日は何ができますか？",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "fast" || len(fake.calls) != 2 {
+		t.Fatalf("greeting plus question bypassed audited path: %#v", result)
+	}
+}
+
+func TestAgentAmbientAssistantSilenceSkipsPrecisionAndCriticFailClosed(
+	t *testing.T,
+) {
+	plan := validModelPlan()
+	plan.InterventionPolicy = "wait"
+	plan.SpokenReply = ""
+	plan.ThoughtStateDelta.Claims = []string{"保存してはいけないdraft差分"}
+	plan.SelfCorrectionGrace = false
+	plan.Intervention = modelArbiter{
+		Benefit: 0.1, InterruptionCost: 0.8, Urgency: 0,
+		Confidence: 0.9, Act: "silent",
+	}
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 4,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の抽象"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorOpen,
+			Subject:       "既存の問い",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPosition},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Act: "silent",
+		},
+	}
+	token, err := agent.codec.seal("uid-ambient-fast-silent", initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	utterance := "ええと、まだ考え途中"
+	result, err := agent.Process(
+		context.Background(),
+		"uid-ambient-fast-silent",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     utterance,
+			StateToken:    token,
+			Ambient:       true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "ambient-silent-fast" ||
+		result.SpokenReply != "" ||
+		result.Intervention.Act != "silent" ||
+		len(fake.calls) != 1 {
+		t.Fatalf("ambient silence did not stop after planner: %#v", result)
+	}
+	opened, err := agent.codec.open(
+		"uid-ambient-fast-silent",
+		result.StateToken,
+	)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if opened.Turn != 5 ||
+		len(opened.Graph.Claims) != 1 ||
+		opened.Graph.Claims[0] != "既存の抽象" ||
+		!opened.PendingAnswer.Active ||
+		opened.PendingAnswer.Subject != "既存の問い" ||
+		!opened.SelfCorrectionGrace {
+		t.Fatalf("ambient silent route changed semantic state: %#v", opened)
+	}
+	encoded, err := json.Marshal(opened)
+	if err != nil {
+		t.Fatalf("marshal next state: %v", err)
+	}
+	for _, forbidden := range []string{
+		utterance,
+		"保存してはいけないdraft差分",
+		plan.SpokenReply,
+	} {
+		if forbidden != "" && bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("ambient draft prose entered state: %s", encoded)
+		}
+	}
+}
+
+func TestAmbientSilentFastEligibilityFailsClosed(t *testing.T) {
+	baseTurn := VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "考え途中",
+		Ambient:       true,
+	}
+	basePlan := validModelPlan()
+	basePlan.InterventionPolicy = "wait"
+	basePlan.SpokenReply = ""
+	basePlan.Intervention.Act = "silent"
+
+	tests := []struct {
+		name      string
+		configure func(*VoiceTurn, *modelPlan)
+		want      bool
+	}{
+		{name: "bounded assistant silence", want: true},
+		{
+			name: "safe low confidence still stays silent",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Confidence = PrecisionConfidenceThreshold - 0.01
+			},
+			want: true,
+		},
+		{
+			name: "technical silence has no publishable draft",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "technical"
+			},
+			want: true,
+		},
+		{
+			name: "intentional",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.Ambient = false
+			},
+		},
+		{
+			name: "PDF",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.PDF = &InlinePDF{
+					MIMEType: "application/pdf",
+					Data:     []byte("%PDF-1.7"),
+				}
+			},
+		},
+		{
+			name: "respondent",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.AssistanceTarget = "respondent"
+				plan.RespondentStage = "awaiting_answer"
+			},
+		},
+		{
+			name: "research action",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.ResearchAction = "recent_papers"
+			},
+		},
+		{
+			name: "research domain",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "research"
+			},
+		},
+		{
+			name: "safety policy",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.InterventionPolicy = "safety"
+			},
+		},
+		{
+			name: "paper check policy",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.InterventionPolicy = "paper_check"
+			},
+		},
+		{
+			name: "candidate can speak",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.SpokenReply = "まだ話します。"
+			},
+		},
+		{
+			name: "high risk lexical signal",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.Utterance = "薬について考え途中"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			turn := baseTurn
+			plan := basePlan
+			if test.configure != nil {
+				test.configure(&turn, &plan)
+			}
+			if got := canCompleteAmbientSilentFast(turn, plan); got != test.want {
+				t.Fatalf("eligibility = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
+	for _, required := range []string{
+		"最初のターンが挨拶だけでも",
+		"挨拶を反復するだけで終えず",
+		"質問、考え途中、ぼやきもそのまま話せる",
+		"spoken_reply全体を二文以内",
+	} {
+		if !strings.Contains(systemInstruction, required) {
+			t.Fatalf("system instruction is missing %q", required)
+		}
 	}
 }
 
@@ -340,6 +777,8 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		}
 		if result.Route != "fast" ||
 			len(fake.calls) != 4 ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
 			fake.calls[3].model != DefaultPrecisionModel ||
 			fake.calls[3].thinkingLevel != genai.ThinkingLevelMedium {
 			t.Fatalf("precision critic recovery failed: result=%#v calls=%#v", result, fake.calls)
@@ -362,7 +801,10 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "fast" || len(fake.calls) != 3 {
+		if result.Route != "fast" ||
+			len(fake.calls) != 3 ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow {
 			t.Fatalf("provider critic retry failed: %#v", result)
 		}
 	})
@@ -383,7 +825,10 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "fast" || len(fake.calls) != 3 {
+		if result.Route != "fast" ||
+			len(fake.calls) != 3 ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow {
 			t.Fatalf("retryable critic failure was not recovered: %#v", result)
 		}
 		for _, call := range fake.calls[1:] {
@@ -552,7 +997,11 @@ func TestAgentHighStakesDomainsAlwaysUsePrecision(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Process: %v", err)
 			}
-			if result.Route != "precision" || len(fake.calls) != 3 {
+			if result.Route != "precision" ||
+				len(fake.calls) != 3 ||
+				fake.calls[2].model != DefaultFastModel ||
+				fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
+				!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
 				t.Fatalf("%s did not use precision: %#v", domain, result)
 			}
 		})
@@ -849,7 +1298,9 @@ func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *test
 		t.Fatalf("safe respondent restructure: %#v", second)
 	}
 	if len(fake.calls) != 3 ||
-		!strings.Contains(fake.calls[1].prompt, `"pending_answer":{"active":true`) {
+		!strings.Contains(fake.calls[1].prompt, `"pending_answer":{"active":true`) ||
+		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
 		t.Fatalf("pending frame did not reach the next planner: %#v", fake.calls)
 	}
 
@@ -1150,10 +1601,39 @@ func TestAgentAmbientLowEVIAndSelfRepairStaySilent(t *testing.T) {
 			}
 			if result.Intervention.Act != "silent" ||
 				result.SpokenReply != "" ||
-				result.InterventionPolicy != "wait" {
+				result.InterventionPolicy != "wait" ||
+				len(fake.calls) != 1 {
 				t.Fatalf("ambient turn interrupted: %#v", result)
 			}
 		})
+	}
+}
+
+func TestAgentIntentionalSilentPlanBecomesOneSafeClarifyingQuestion(t *testing.T) {
+	plan := validModelPlan()
+	plan.SpokenReply = ""
+	plan.InterventionPolicy = "wait"
+	plan.Intervention.Act = "silent"
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), "uid-intentional-silent", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "ええと",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.SpokenReply == "" ||
+		result.Intervention.Act != "clarify" ||
+		result.InterventionPolicy != "clarify" ||
+		!result.NeedsClarification ||
+		countQuestions(result.SpokenReply) != 1 ||
+		len(fake.calls) != 2 ||
+		!strings.Contains(fake.calls[1].prompt, "<lac_critic_data>") {
+		t.Fatalf("intentional silent plan was not safely clarified: %#v", result)
 	}
 }
 
@@ -1175,7 +1655,11 @@ func TestAgentAmbientUrgentSafetyIntervenes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Intervention.Act == "silent" || result.SpokenReply == "" {
+	if result.Intervention.Act == "silent" ||
+		result.SpokenReply == "" ||
+		len(fake.calls) != 2 ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[1].prompt, "<lac_critic_data>") {
 		t.Fatalf("urgent safety intervention was suppressed: %#v", result)
 	}
 }
@@ -1240,6 +1724,8 @@ func TestAgentLexicalHighRiskCannotBypassPrecision(t *testing.T) {
 	if result.Route != "precision" ||
 		len(fake.calls) != 3 ||
 		fake.calls[1].model != DefaultPrecisionModel ||
+		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") ||
 		result.SpokenReply != precision.SpokenReply {
 		t.Fatalf("lexical high-risk signal bypassed precision: %#v", result)
 	}
@@ -1273,7 +1759,9 @@ func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
 	}
 	if result.Route != "precision" ||
 		len(fake.calls) != 3 ||
-		fake.calls[1].model != DefaultPrecisionModel {
+		fake.calls[1].model != DefaultPrecisionModel ||
+		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
 		t.Fatalf("PDF did not force precision and independent audit: %#v", fake.calls)
 	}
 	if !allZero(pdf) {

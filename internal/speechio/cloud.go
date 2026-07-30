@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
-	"sync/atomic"
 	"unicode/utf8"
 
 	speech "cloud.google.com/go/speech/apiv2"
@@ -14,8 +12,6 @@ import (
 	texttospeech "cloud.google.com/go/texttospeech/apiv1"
 	"cloud.google.com/go/texttospeech/apiv1/texttospeechpb"
 	"google.golang.org/api/option"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -37,15 +33,12 @@ type Service interface {
 }
 
 type CloudService struct {
-	speechClient    *speech.Client
-	ttsClient       *texttospeech.Client
-	recognizer      string
-	speechModel     string
-	fallbackModel   string
-	voiceName       string
-	fallbackEnabled bool
-	fallbackActive  atomic.Bool
-	recognizeCall   func(
+	speechClient  *speech.Client
+	ttsClient     *texttospeech.Client
+	recognizer    string
+	speechModel   string
+	voiceName     string
+	recognizeCall func(
 		context.Context,
 		*speechpb.RecognizeRequest,
 	) (*speechpb.RecognizeResponse, error)
@@ -56,7 +49,6 @@ func NewCloudService(
 	projectID string,
 	location string,
 	speechModel string,
-	fallbackModel string,
 	voiceName string,
 ) (*CloudService, error) {
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(location) == "" {
@@ -87,10 +79,8 @@ func NewCloudService(
 			projectID,
 			location,
 		),
-		speechModel:     speechModel,
-		fallbackModel:   fallbackModel,
-		voiceName:       voiceName,
-		fallbackEnabled: guardedFallbackEnabled(location, speechModel, fallbackModel),
+		speechModel: speechModel,
+		voiceName:   voiceName,
 	}
 	service.recognizeCall = func(
 		callContext context.Context,
@@ -113,30 +103,7 @@ func (s *CloudService) Transcribe(
 		return "", 0, ErrNoSpeech
 	}
 
-	model := s.speechModel
-	if s.fallbackActive.Load() {
-		model = s.fallbackModel
-	}
-	response, err := s.recognize(ctx, audio, model)
-	if err != nil &&
-		ctx.Err() == nil &&
-		s.fallbackEnabled &&
-		model == s.speechModel &&
-		s.fallbackModel != "" &&
-		s.fallbackModel != s.speechModel &&
-		primaryModelUnavailable(err, s.speechModel) {
-		if s.fallbackActive.CompareAndSwap(false, true) {
-			slog.WarnContext(
-				ctx,
-				"regional speech primary model unavailable; enabling guarded fallback",
-				"primary_model",
-				s.speechModel,
-				"fallback_model",
-				s.fallbackModel,
-			)
-		}
-		response, err = s.recognize(ctx, audio, s.fallbackModel)
-	}
+	response, err := s.recognize(ctx, audio, s.speechModel)
 	if err != nil {
 		return "", 0, fmt.Errorf("regional speech recognition failed: %w", err)
 	}
@@ -174,33 +141,14 @@ func (s *CloudService) recognize(
 	})
 }
 
-func primaryModelUnavailable(err error, model string) bool {
-	rpcStatus, ok := status.FromError(err)
-	if !ok || rpcStatus.Code() != codes.PermissionDenied {
-		return false
-	}
-	message := strings.ToLower(strings.TrimSpace(rpcStatus.Message()))
-	modelMarker := " on model " + strings.ToLower(strings.TrimSpace(model)) +
-		" locale ja-jp. "
-	return strings.HasPrefix(message, "permission denied for project ") &&
-		strings.Contains(message, modelMarker) &&
-		strings.HasSuffix(message, "it is no longer generally available.")
-}
-
-func guardedFallbackEnabled(location, primaryModel, fallbackModel string) bool {
-	return location == "asia-northeast1" &&
-		primaryModel == "chirp_3" &&
-		fallbackModel == "short"
-}
-
 func recognizedText(response *speechpb.RecognizeResponse) (string, float32) {
 	if response == nil {
 		return "", 0
 	}
 
 	var text strings.Builder
-	var confidenceTotal float32
-	var confidenceCount int
+	var minimumPositiveConfidence float32
+	hasPositiveConfidence := false
 	for _, result := range response.Results {
 		if result == nil || len(result.Alternatives) == 0 || result.Alternatives[0] == nil {
 			continue
@@ -215,16 +163,22 @@ func recognizedText(response *speechpb.RecognizeResponse) (string, float32) {
 		}
 		text.WriteString(fragment)
 		if alternative.Confidence > 0 {
-			confidenceTotal += alternative.Confidence
-			confidenceCount++
+			if !hasPositiveConfidence ||
+				alternative.Confidence < minimumPositiveConfidence {
+				minimumPositiveConfidence = alternative.Confidence
+			}
+			hasPositiveConfidence = true
 		}
 	}
 
-	confidence := float32(0)
-	if confidenceCount > 0 {
-		confidence = confidenceTotal / float32(confidenceCount)
+	// Speech recognizers may omit utterance confidence and encode it as zero.
+	// Preserve zero when no fragment reports confidence. When confidence is
+	// available, use the minimum across nonempty top fragments so one uncertain
+	// section cannot be hidden by averaging it with confident sections.
+	if !hasPositiveConfidence {
+		return strings.TrimSpace(text.String()), 0
 	}
-	return strings.TrimSpace(text.String()), confidence
+	return strings.TrimSpace(text.String()), minimumPositiveConfidence
 }
 
 func (s *CloudService) Synthesize(

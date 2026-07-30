@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  advanceCandidateCapture,
   advanceVad,
   createCaptureBuffer,
+  createCandidateCaptureState,
   createRetryableInitializer,
   createSessionClock,
+  createStopLatch,
   createTurnGate,
   createVadState,
   initializeWithCleanup,
@@ -251,6 +254,32 @@ test("VAD requires 200 ms of voice then ends after 1.1 s of trailing silence", (
   assert.equal(state.action, "end-of-turn");
 });
 
+test("VAD keeps a weak word ending after speech is confirmed", () => {
+  const startedAt = 10_000;
+  let state = createVadState(startedAt);
+  for (let sample = 1; sample <= 5; sample += 1) {
+    state = advanceVad(state, {
+      now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
+      peak: 0.08,
+      rms: 0.03,
+    });
+  }
+  assert.equal(state.hasSpeech, true);
+
+  const weakTailAt =
+    startedAt +
+    VOICE_SESSION_LIMITS.minimumVoiceMs +
+    VOICE_SESSION_LIMITS.endOfTurnSilenceMs -
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  state = advanceVad(state, {
+    now: weakTailAt,
+    peak: 0.017,
+    rms: 0.011,
+  });
+  assert.equal(state.lastVoiceAt, weakTailAt);
+  assert.equal(state.action, null);
+});
+
 test("VAD caps a spoken capture at 55 seconds", () => {
   const startedAt = 20_000;
   let state = createVadState(startedAt);
@@ -275,6 +304,45 @@ test("VAD caps a spoken capture at 55 seconds", () => {
     rms: 0.03,
   });
   assert.equal(state.action, "duration-limit");
+});
+
+test("VAD refreshes the trailing-silence clock as soon as confirmed speech resumes", () => {
+  const startedAt = 30_000;
+  let state = createVadState(startedAt);
+  for (let sample = 1; sample <= 5; sample += 1) {
+    state = advanceVad(state, {
+      now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
+      peak: 0.08,
+      rms: 0.03,
+    });
+  }
+  assert.equal(state.hasSpeech, true);
+
+  for (let now = startedAt + 240; now <= startedAt + 1_240; now += 40) {
+    state = advanceVad(state, {
+      now,
+      peak: 0.003,
+      rms: 0.003,
+    });
+  }
+  assert.equal(state.action, null);
+
+  state = advanceVad(state, {
+    now: startedAt + 1_280,
+    peak: 0.08,
+    rms: 0.03,
+  });
+  assert.equal(state.voiceRunMs, VOICE_SESSION_LIMITS.vadIntervalMs);
+  assert.equal(state.lastVoiceAt, startedAt + 1_280);
+  assert.equal(state.action, null);
+
+  state = advanceVad(state, {
+    now: startedAt + 1_320,
+    peak: 0.08,
+    rms: 0.03,
+  });
+  assert.equal(state.lastVoiceAt, startedAt + 1_320);
+  assert.equal(state.action, null);
 });
 
 test("turn gate rejects double finish and ignores stale releases", () => {
@@ -353,6 +421,178 @@ test("capture buffer clears the complete payload at its byte ceiling", () => {
   assert.equal(overflow.totalBytes, 0);
   assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
   assert.equal(capture.snapshot().totalBytes, 0);
+});
+
+test("a false voice candidate is discarded before a fresh capture starts", () => {
+  const startedAt = 40_000;
+  let vadState = createVadState(startedAt);
+  let candidateState = createCandidateCaptureState();
+  const firstCapture = createCaptureBuffer({ maximumBytes: 1_000 });
+
+  let now = startedAt + VOICE_SESSION_LIMITS.vadIntervalMs;
+  vadState = advanceVad(vadState, {
+    now,
+    peak: 0.08,
+    rms: 0.03,
+  });
+  candidateState = advanceCandidateCapture(candidateState, vadState, now);
+  assert.deepEqual(candidateState, {
+    action: "start",
+    candidateStartedAt: now,
+    phase: "candidate",
+  });
+  firstCapture.append({ id: "first-webm-header", size: 20 });
+
+  for (let sample = 0; sample < 2; sample += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    vadState = advanceVad(vadState, {
+      now,
+      peak: 0.003,
+      rms: 0.003,
+    });
+  }
+  assert.equal(vadState.voiceRunMs, 0);
+  candidateState = advanceCandidateCapture(candidateState, vadState, now);
+  assert.deepEqual(candidateState, {
+    action: "discard",
+    candidateStartedAt: null,
+    phase: "armed",
+  });
+  firstCapture.clear();
+  assert.deepEqual(firstCapture.take(), { chunks: [], totalBytes: 0 });
+
+  now += VOICE_SESSION_LIMITS.vadIntervalMs;
+  vadState = advanceVad(vadState, {
+    now,
+    peak: 0.08,
+    rms: 0.03,
+  });
+  const nextCandidate = advanceCandidateCapture(candidateState, vadState, now);
+  assert.deepEqual(nextCandidate, {
+    action: "start",
+    candidateStartedAt: now,
+    phase: "candidate",
+  });
+
+  // A rearmed candidate owns a new buffer just as it owns a new
+  // MediaRecorder. The rejected container header can therefore never become
+  // the header of a later, confirmed utterance.
+  const secondCapture = createCaptureBuffer({ maximumBytes: 1_000 });
+  secondCapture.append({ id: "second-webm-header", size: 24 });
+  secondCapture.append({ id: "second-speech", size: 36 });
+  assert.equal(firstCapture.snapshot().totalBytes, 0);
+  assert.deepEqual(
+    secondCapture.take().chunks.map(({ id }) => id),
+    ["second-webm-header", "second-speech"],
+  );
+});
+
+test("capture starts on the first voiced frame but confirms only after 200 ms", () => {
+  const startedAt = 50_000;
+  let vadState = createVadState(startedAt);
+  let candidateState = createCandidateCaptureState();
+
+  for (let sample = 1; sample <= 5; sample += 1) {
+    const now = startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs;
+    vadState = advanceVad(vadState, {
+      now,
+      peak: 0.08,
+      rms: 0.03,
+    });
+    candidateState = advanceCandidateCapture(candidateState, vadState, now);
+
+    if (sample === 1) {
+      assert.deepEqual(candidateState, {
+        action: "start",
+        candidateStartedAt: now,
+        phase: "candidate",
+      });
+    } else if (sample < 5) {
+      assert.deepEqual(candidateState, {
+        action: null,
+        candidateStartedAt:
+          startedAt + VOICE_SESSION_LIMITS.vadIntervalMs,
+        phase: "candidate",
+      });
+    } else {
+      assert.equal(vadState.hasSpeech, true);
+      assert.deepEqual(candidateState, {
+        action: "confirm",
+        candidateStartedAt:
+          startedAt + VOICE_SESSION_LIMITS.vadIntervalMs,
+        phase: "confirmed",
+      });
+    }
+  }
+});
+
+test("candidate capture phase is finite and cannot regress after confirmation", () => {
+  const vadState = createVadState(60_000);
+
+  assert.throws(
+    () =>
+      advanceCandidateCapture(
+        {
+          action: null,
+          candidateStartedAt: null,
+          phase: "recording",
+        },
+        vadState,
+        60_000,
+      ),
+    /candidate_capture_state_invalid/,
+  );
+  assert.throws(
+    () =>
+      advanceCandidateCapture(
+        {
+          action: null,
+          candidateStartedAt: 60_000,
+          phase: "confirmed",
+        },
+        vadState,
+        60_000,
+      ),
+    /candidate_capture_transition_invalid/,
+  );
+});
+
+test("candidate capture has a finite privacy deadline", () => {
+  const startedAt = 70_000;
+  let state = advanceCandidateCapture(
+    createCandidateCaptureState(),
+    {
+      hasSpeech: false,
+      sampleVoiced: true,
+      voiceRunMs: VOICE_SESSION_LIMITS.vadIntervalMs,
+    },
+    startedAt,
+  );
+  assert.equal(state.action, "start");
+
+  state = advanceCandidateCapture(
+    state,
+    {
+      hasSpeech: false,
+      sampleVoiced: true,
+      voiceRunMs: VOICE_SESSION_LIMITS.vadIntervalMs,
+    },
+    startedAt + VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
+  );
+  assert.deepEqual(state, {
+    action: "discard",
+    candidateStartedAt: null,
+    phase: "armed",
+  });
+});
+
+test("manual stop latch accepts one reason and rejects duplicate POST paths", () => {
+  const latch = createStopLatch();
+  assert.equal(latch.request("manual"), true);
+  assert.equal(latch.isRequested(), true);
+  assert.equal(latch.reason(), "manual");
+  assert.equal(latch.request("end-of-turn"), false);
+  assert.equal(latch.reason(), "manual");
 });
 
 test("retryable initializer shares an attempt, retries a failure, and caches success", async () => {

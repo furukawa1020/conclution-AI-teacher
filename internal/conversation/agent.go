@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
@@ -23,6 +24,8 @@ import (
 const (
 	DefaultFastModel      = "gemini-3.6-flash"
 	DefaultPrecisionModel = "gemini-3.1-pro-preview"
+
+	phaticLocalSpokenReply = "こんにちは。質問でも考え途中でも、そのままどうぞ。まず答えて、必要なら一緒に整理します。"
 
 	PrecisionConfidenceThreshold = 0.78
 	AmbientEVIThreshold          = 0.35
@@ -296,6 +299,9 @@ func (agent *vertexAgent) Process(
 	if state.Turn >= maxStateTurns {
 		return VoiceTurnResult{}, ErrInvalidStateToken
 	}
+	if isStandalonePhaticGreeting(normalized, state) {
+		return agent.completePhaticLocal(uid, state)
+	}
 
 	fastPlan, err := agent.inferWithRetry(
 		ctx,
@@ -308,6 +314,9 @@ func (agent *vertexAgent) Process(
 	)
 	if err != nil {
 		return VoiceTurnResult{}, err
+	}
+	if canCompleteAmbientSilentFast(normalized, fastPlan) {
+		return agent.completeAmbientSilentFast(uid, state, fastPlan)
 	}
 	finalPlan := fastPlan
 	route := "fast"
@@ -460,8 +469,14 @@ func (agent *vertexAgent) Process(
 		spokenReply = exactlyOneQuestion(spokenReply)
 		interventionPolicy = "clarify"
 	} else if decision.Act == "silent" {
-		spokenReply = ""
-		interventionPolicy = "wait"
+		if normalized.Ambient {
+			spokenReply = ""
+			interventionPolicy = "wait"
+		} else {
+			decision.Act = "clarify"
+			spokenReply = exactlyOneQuestion("")
+			interventionPolicy = "clarify"
+		}
 	}
 
 	// Cross-turn state intentionally contains no model-authored free-text
@@ -544,6 +559,141 @@ func (agent *vertexAgent) Process(
 		AnswerContract:      finalPlan.answerAssessment.Metrics,
 		Route:               route,
 		NeedsClarification:  decision.Act == "clarify",
+		StateToken:          stateToken,
+	}, nil
+}
+
+func isStandalonePhaticGreeting(
+	turn VoiceTurn,
+	state conversationState,
+) bool {
+	if turn.Ambient ||
+		turn.PDF != nil ||
+		state.PendingAnswer.Active {
+		return false
+	}
+	greeting := strings.ToLower(strings.TrimRightFunc(
+		turn.Utterance,
+		func(value rune) bool {
+			if unicode.IsSpace(value) {
+				return true
+			}
+			switch value {
+			case '。', '．', '.', '、', '，', ',',
+				'！', '!', '？', '?', '…':
+				return true
+			default:
+				return false
+			}
+		},
+	))
+	switch greeting {
+	case "こんにちは",
+		"こんばんは",
+		"おはよう",
+		"おはようございます",
+		"もしもし":
+		return true
+	default:
+		return false
+	}
+}
+
+func (agent *vertexAgent) completePhaticLocal(
+	uid string,
+	state conversationState,
+) (VoiceTurnResult, error) {
+	decision := ArbiterDecision{
+		Benefit:          0.9,
+		InterruptionCost: 0.05,
+		Urgency:          0,
+		Confidence:       1,
+		Score:            0.85,
+		Act:              "reflect",
+	}
+	nextState := conversationState{
+		Turn:                state.Turn + 1,
+		Graph:               state.Graph,
+		ConversationSummary: "",
+		DocumentSummary:     "",
+		PendingAnswer:       state.PendingAnswer,
+		SelfCorrectionGrace: false,
+		LastIntervention:    decision,
+	}
+	stateToken, err := agent.codec.seal(uid, nextState)
+	if err != nil {
+		return VoiceTurnResult{}, err
+	}
+	return VoiceTurnResult{
+		SchemaVersion:       SchemaVersion,
+		Domain:              "daily",
+		Intent:              "other",
+		AssistanceTarget:    "assistant",
+		RespondentStage:     "none",
+		ResearchStatus:      "none",
+		ResearchRecords:     []ResearchRecord{},
+		LatentQuestion:      "",
+		ArgumentStructure:   "direct_answer",
+		InterventionPolicy:  "coach",
+		SpokenReply:         phaticLocalSpokenReply,
+		Confidence:          1,
+		Intervention:        decision,
+		SelfCorrectionGrace: false,
+		AnswerContract: answercontract.Metrics{
+			CommitmentFrontPosition: answercontract.PositionAbsent,
+		},
+		Route:              "phatic-local",
+		NeedsClarification: false,
+		StateToken:         stateToken,
+	}, nil
+}
+
+func canCompleteAmbientSilentFast(turn VoiceTurn, plan modelPlan) bool {
+	return turn.Ambient &&
+		turn.PDF == nil &&
+		plan.AssistanceTarget == "assistant" &&
+		plan.RespondentStage == "none" &&
+		plan.ResearchAction == "none" &&
+		plan.InterventionPolicy != "safety" &&
+		plan.InterventionPolicy != "paper_check" &&
+		plan.Intervention.Act == "silent" &&
+		plan.SpokenReply == "" &&
+		!requiresFailClosedPrecision(turn, plan)
+}
+
+func (agent *vertexAgent) completeAmbientSilentFast(
+	uid string,
+	state conversationState,
+	plan modelPlan,
+) (VoiceTurnResult, error) {
+	decision := ArbiterDecision{Act: "silent"}
+	nextState := conversationState{
+		Turn:                state.Turn + 1,
+		Graph:               state.Graph,
+		ConversationSummary: "",
+		DocumentSummary:     "",
+		PendingAnswer:       state.PendingAnswer,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		LastIntervention:    decision,
+	}
+	stateToken, err := agent.codec.seal(uid, nextState)
+	if err != nil {
+		return VoiceTurnResult{}, err
+	}
+	return VoiceTurnResult{
+		SchemaVersion:       SchemaVersion,
+		Domain:              plan.Domain,
+		Intent:              plan.Intent,
+		AssistanceTarget:    "assistant",
+		RespondentStage:     "none",
+		ResearchStatus:      "none",
+		ResearchRecords:     []ResearchRecord{},
+		ArgumentStructure:   plan.ArgumentStructure,
+		InterventionPolicy:  "wait",
+		Confidence:          plan.Confidence,
+		Intervention:        decision,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		Route:               "ambient-silent-fast",
 		StateToken:          stateToken,
 	}, nil
 }
@@ -749,10 +899,16 @@ func (agent *vertexAgent) auditAnswerWithRetry(
 	state conversationState,
 	candidatePlan modelPlan,
 ) (answercontract.Assessment, error) {
+	initialThinkingLevel := genai.ThinkingLevelMinimal
+	retryThinkingLevel := genai.ThinkingLevelLow
+	if model == agent.precisionModel {
+		initialThinkingLevel = genai.ThinkingLevelHigh
+		retryThinkingLevel = genai.ThinkingLevelHigh
+	}
 	assessment, err := agent.auditAnswer(
 		ctx,
 		model,
-		genai.ThinkingLevelHigh,
+		initialThinkingLevel,
 		criticTimeout,
 		turn,
 		state,
@@ -776,7 +932,7 @@ func (agent *vertexAgent) auditAnswerWithRetry(
 		retryAssessment, retryErr := agent.auditAnswer(
 			ctx,
 			model,
-			genai.ThinkingLevelHigh,
+			retryThinkingLevel,
 			criticTimeout,
 			turn,
 			state,
@@ -2026,6 +2182,7 @@ Latent Answer Contract:
 
 音声出力:
 - spoken_replyは自然で簡潔な日本語の話し言葉にする。
+- 最初のターンが挨拶だけでも、挨拶を反復するだけで終えず、質問、考え途中、ぼやきもそのまま話せる旨を一言添え、spoken_reply全体を二文以内にする。
 - Markdown、箇条書き、URL、SSML、コードブロックを含めない。
 - 利用者へ「結論から話す練習をして」「努力して」「普通は」と訓練・強制・非難を返さない。受け答え支援では本人の代わりに、本人の内容だけを整えた一文を返す。
 - research、technical、paper_checkでは不確実性と根拠の限界を明示し、PDFにない事実をPDF由来と断定しない。

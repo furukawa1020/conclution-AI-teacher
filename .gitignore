@@ -1,6 +1,7 @@
 # Local tools and generated artifacts
 .tools/
 .cache/
+.gocache-*/
 bin/
 coverage.out
 *.test

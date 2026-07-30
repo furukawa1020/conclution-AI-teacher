@@ -2,6 +2,7 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 200,
   endOfTurnSilenceMs: 1_100,
+  candidateCaptureLimitMs: 1_500,
   silentCaptureLimitMs: 30_000,
   spokenCaptureLimitMs: 55_000,
   idleSessionLimitMs: 3 * 60_000,
@@ -282,6 +283,27 @@ export function createTurnGate() {
   });
 }
 
+export function createStopLatch() {
+  let requestedReason = null;
+
+  return Object.freeze({
+    isRequested() {
+      return requestedReason !== null;
+    },
+    reason() {
+      return requestedReason;
+    },
+    request(reason) {
+      if (typeof reason !== "string" || reason.length === 0) {
+        throw new TypeError("stop_reason_invalid");
+      }
+      if (requestedReason !== null) return false;
+      requestedReason = reason;
+      return true;
+    },
+  });
+}
+
 export function createRetryableInitializer(initialize) {
   if (typeof initialize !== "function") {
     throw new TypeError("initializer_invalid");
@@ -375,12 +397,112 @@ export function turnModeForGestureEpoch(firstTurnAfterExplicitGesture) {
   return firstTurnAfterExplicitGesture ? "intentional" : "ambient";
 }
 
+export const CANDIDATE_CAPTURE_PHASES = Object.freeze({
+  armed: "armed",
+  candidate: "candidate",
+  confirmed: "confirmed",
+});
+
+export function createCandidateCaptureState() {
+  return Object.freeze({
+    action: null,
+    candidateStartedAt: null,
+    phase: CANDIDATE_CAPTURE_PHASES.armed,
+  });
+}
+
+export function advanceCandidateCapture(
+  previous,
+  vadState,
+  now,
+  {
+    candidateCaptureLimitMs =
+      VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
+  } = {},
+) {
+  if (
+    previous === null ||
+    typeof previous !== "object" ||
+    !Object.values(CANDIDATE_CAPTURE_PHASES).includes(previous.phase) ||
+    (previous.candidateStartedAt !== null &&
+      (!Number.isFinite(previous.candidateStartedAt) ||
+        previous.candidateStartedAt < 0)) ||
+    vadState === null ||
+    typeof vadState !== "object" ||
+    typeof vadState.hasSpeech !== "boolean" ||
+    typeof vadState.sampleVoiced !== "boolean" ||
+    !Number.isFinite(vadState.voiceRunMs) ||
+    vadState.voiceRunMs < 0 ||
+    !Number.isFinite(candidateCaptureLimitMs) ||
+    candidateCaptureLimitMs <= 0
+  ) {
+    throw new TypeError("candidate_capture_state_invalid");
+  }
+  const timestamp = finiteTimestamp(now, "candidate_capture_time");
+  if (
+    previous.candidateStartedAt !== null &&
+    timestamp < previous.candidateStartedAt
+  ) {
+    throw new TypeError("candidate_capture_time_invalid");
+  }
+
+  if (previous.phase === CANDIDATE_CAPTURE_PHASES.confirmed) {
+    if (!vadState.hasSpeech) {
+      throw new TypeError("candidate_capture_transition_invalid");
+    }
+    return Object.freeze({
+      action: null,
+      candidateStartedAt: previous.candidateStartedAt,
+      phase: CANDIDATE_CAPTURE_PHASES.confirmed,
+    });
+  }
+  if (previous.phase === CANDIDATE_CAPTURE_PHASES.armed) {
+    if (!vadState.sampleVoiced) {
+      return Object.freeze({
+        action: null,
+        candidateStartedAt: null,
+        phase: CANDIDATE_CAPTURE_PHASES.armed,
+      });
+    }
+    return Object.freeze({
+      action: "start",
+      candidateStartedAt: timestamp,
+      phase: vadState.hasSpeech
+        ? CANDIDATE_CAPTURE_PHASES.confirmed
+        : CANDIDATE_CAPTURE_PHASES.candidate,
+    });
+  }
+  if (vadState.hasSpeech) {
+    return Object.freeze({
+      action: "confirm",
+      candidateStartedAt: previous.candidateStartedAt,
+      phase: CANDIDATE_CAPTURE_PHASES.confirmed,
+    });
+  }
+  if (
+    vadState.voiceRunMs === 0 ||
+    timestamp - previous.candidateStartedAt >= candidateCaptureLimitMs
+  ) {
+    return Object.freeze({
+      action: "discard",
+      candidateStartedAt: null,
+      phase: CANDIDATE_CAPTURE_PHASES.armed,
+    });
+  }
+  return Object.freeze({
+    action: null,
+    candidateStartedAt: previous.candidateStartedAt,
+    phase: CANDIDATE_CAPTURE_PHASES.candidate,
+  });
+}
+
 export function createVadState(startedAt) {
   return Object.freeze({
     action: null,
     hasSpeech: false,
     lastVoiceAt: null,
     noiseFloor: 0.006,
+    sampleVoiced: false,
     startedAt: finiteTimestamp(startedAt, "vad_started_at"),
     voiceRunMs: 0,
   });
@@ -422,14 +544,20 @@ export function advanceVad(
     noiseFloor,
     voiceRunMs,
   } = previous;
-  const threshold = Math.max(0.014, noiseFloor * 2.8);
-  const soundsVoiced = rms >= threshold && peak >= threshold * 1.8;
+  const threshold = hasSpeech
+    ? Math.max(0.009, noiseFloor * 1.7)
+    : Math.max(0.014, noiseFloor * 2.8);
+  const peakMultiplier = hasSpeech ? 1.35 : 1.8;
+  const soundsVoiced = rms >= threshold && peak >= threshold * peakMultiplier;
 
   if (soundsVoiced) {
     voiceRunMs += intervalMs;
+    // Candidate capture starts here. Confirmation still requires the full
+    // minimum voice run, but every voiced sample anchors the trailing-silence
+    // deadline so a natural pause cannot cut off resumed speech.
+    lastVoiceAt = timestamp;
     if (voiceRunMs >= minimumVoiceMs) {
       hasSpeech = true;
-      lastVoiceAt = timestamp;
     }
   } else {
     if (!hasSpeech) {
@@ -438,7 +566,9 @@ export function advanceVad(
         Math.max(0.0025, noiseFloor * 0.94 + rms * 0.06),
       );
     }
-    voiceRunMs = Math.max(0, voiceRunMs - intervalMs * 2);
+    // Preserve brief gaps and unvoiced consonants without accepting an
+    // isolated noise spike as speech.
+    voiceRunMs = Math.max(0, voiceRunMs - intervalMs * 0.5);
   }
 
   let action = null;
@@ -462,6 +592,7 @@ export function advanceVad(
     hasSpeech,
     lastVoiceAt,
     noiseFloor,
+    sampleVoiced: soundsVoiced,
     startedAt: previous.startedAt,
     voiceRunMs,
   });

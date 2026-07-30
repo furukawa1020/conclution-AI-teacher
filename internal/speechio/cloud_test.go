@@ -3,9 +3,7 @@ package speechio
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync"
-	"sync/atomic"
+	"strings"
 	"testing"
 
 	"cloud.google.com/go/speech/apiv2/speechpb"
@@ -21,7 +19,7 @@ func TestRecognizedTextUsesOnlyTopAlternatives(t *testing.T) {
 			{
 				Alternatives: []*speechpb.SpeechRecognitionAlternative{
 					{Transcript: "今日は研究の話をしたい", Confidence: 0.8},
-					{Transcript: "採用してはいけない候補", Confidence: 0.99},
+					{Transcript: "採用してはいけない", Confidence: 0.99},
 				},
 			},
 			{
@@ -36,8 +34,45 @@ func TestRecognizedTextUsesOnlyTopAlternatives(t *testing.T) {
 	if text != "今日は研究の話をしたい 仮説がまだ曖昧です" {
 		t.Fatalf("text = %q", text)
 	}
-	if confidence < 0.69 || confidence > 0.71 {
-		t.Fatalf("confidence = %f; want about 0.70", confidence)
+	if confidence != 0.6 {
+		t.Fatalf("confidence = %f; want conservative minimum 0.60", confidence)
+	}
+}
+
+func TestRecognizedTextDoesNotAverageAwayALowConfidenceFragment(t *testing.T) {
+	t.Parallel()
+
+	response := &speechpb.RecognizeResponse{
+		Results: []*speechpb.SpeechRecognitionResult{
+			{
+				Alternatives: []*speechpb.SpeechRecognitionAlternative{
+					{Transcript: "前半", Confidence: 0.99},
+				},
+			},
+			{
+				Alternatives: []*speechpb.SpeechRecognitionAlternative{
+					{Transcript: "後半", Confidence: 0.31},
+				},
+			},
+		},
+	}
+
+	text, confidence := recognizedText(response)
+	if text != "前半 後半" {
+		t.Fatalf("text = %q", text)
+	}
+	if confidence != 0.31 {
+		t.Fatalf("confidence = %f; want conservative minimum 0.31", confidence)
+	}
+}
+
+func TestRecognizedTextKeepsZeroWhenConfidenceIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	response := recognizedResponse("confidenceは未提供です", 0)
+	text, confidence := recognizedText(response)
+	if text != "confidenceは未提供です" || confidence != 0 {
+		t.Fatalf("got (%q, %f); want transcript with unavailable confidence", text, confidence)
 	}
 }
 
@@ -50,93 +85,32 @@ func TestRecognizedTextHandlesEmptyResponse(t *testing.T) {
 	}
 }
 
-func TestPrimaryModelUnavailableOnlyMatchesModelAvailabilityDenials(t *testing.T) {
+func TestTranscribeUsesOnlyConfiguredLongModel(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{
-			name: "live control plane denial",
-			err: status.Error(
-				codes.PermissionDenied,
-				"Permission denied for project 123 on model chirp_3 locale ja-JP. It is no longer generally available.",
-			),
-			want: true,
-		},
-		{
-			name: "wrapped denial fails closed",
-			err: fmt.Errorf(
-				"recognize: %w",
-				status.Error(
-					codes.PermissionDenied,
-					"Permission denied for project 123 on model chirp_3 locale ja-JP. It is no longer generally available.",
-				),
-			),
-		},
-		{
-			name: "generic IAM denial must fail closed",
-			err: status.Error(
-				codes.PermissionDenied,
-				"Permission speech.recognizers.recognize denied.",
-			),
-		},
-		{
-			name: "different model denial",
-			err: status.Error(
-				codes.PermissionDenied,
-				"Permission denied for project 123 on model chirp_2 locale ja-JP. It is no longer generally available.",
-			),
-		},
-		{
-			name: "different locale denial",
-			err: status.Error(
-				codes.PermissionDenied,
-				"Permission denied for project 123 on model chirp_3 locale en-US. It is no longer generally available.",
-			),
-		},
-		{
-			name: "invalid audio does not downgrade",
-			err:  status.Error(codes.InvalidArgument, "Audio decoding failed."),
-		},
-		{
-			name: "ordinary error",
-			err:  errors.New("network failure"),
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			if got := primaryModelUnavailable(test.err, "chirp_3"); got != test.want {
-				t.Fatalf("primaryModelUnavailable() = %v; want %v", got, test.want)
-			}
-		})
-	}
-}
-
-func TestTranscribeFallsBackOnceAndCachesTheRegionalModel(t *testing.T) {
-	t.Parallel()
-
-	var models []string
+	var calls int
 	service := &CloudService{
-		speechModel:     "chirp_3",
-		fallbackModel:   "short",
-		fallbackEnabled: true,
+		speechModel: "long",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
-			models = append(models, request.Config.Model)
-			if request.Config.Model == "chirp_3" {
-				return nil, status.Error(
-					codes.PermissionDenied,
-					"Permission denied for project 123 on model chirp_3 locale ja-JP. It is no longer generally available.",
-				)
+			calls++
+			if request.Config.Model != "long" {
+				t.Fatalf("model = %q; want long", request.Config.Model)
 			}
-			return recognizedResponse("日本の首都はどこですか", 0.98), nil
+			if len(request.Config.LanguageCodes) != 1 ||
+				request.Config.LanguageCodes[0] != "ja-JP" {
+				t.Fatalf("language codes = %v; want [ja-JP]", request.Config.LanguageCodes)
+			}
+			if request.Config.GetAutoDecodingConfig() == nil {
+				t.Fatal("auto decoding is not configured")
+			}
+			if request.Config.Features == nil ||
+				!request.Config.Features.EnableAutomaticPunctuation {
+				t.Fatal("automatic punctuation is not enabled")
+			}
+			return recognizedResponse("研究テーマについて相談したいです", 0.98), nil
 		},
 	}
 
@@ -148,205 +122,70 @@ func TestTranscribeFallsBackOnceAndCachesTheRegionalModel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if transcript != "日本の首都はどこですか" || confidence != 0.98 {
+		if transcript != "研究テーマについて相談したいです" || confidence != 0.98 {
 			t.Fatalf("turn %d = (%q, %f)", turn, transcript, confidence)
 		}
 	}
-	wantModels := []string{"chirp_3", "short", "short"}
-	if fmt.Sprint(models) != fmt.Sprint(wantModels) {
-		t.Fatalf("models = %v; want %v", models, wantModels)
+	if calls != 2 {
+		t.Fatalf("recognition calls = %d; want 2", calls)
 	}
 }
 
-func TestTranscribeDoesNotDowngradeGenericPermissionDenials(t *testing.T) {
+func TestTranscribeReturnsProviderErrorWithoutRetry(t *testing.T) {
 	t.Parallel()
 
 	var calls int
 	service := &CloudService{
-		speechModel:     "chirp_3",
-		fallbackModel:   "short",
-		fallbackEnabled: true,
+		speechModel: "long",
 		recognizeCall: func(
 			_ context.Context,
-			_ *speechpb.RecognizeRequest,
+			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
+			if request.Config.Model != "long" {
+				t.Fatalf("model = %q; want long", request.Config.Model)
+			}
 			return nil, status.Error(
 				codes.PermissionDenied,
-				"Permission speech.recognizers.recognize denied.",
+				"regional model is unavailable",
 			)
 		},
 	}
 
-	if _, _, err := service.Transcribe(
+	_, _, err := service.Transcribe(
 		context.Background(),
 		[]byte("bounded synthetic audio"),
-	); err == nil {
-		t.Fatal("Transcribe succeeded; want permission failure")
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "regional speech recognition failed") {
+		t.Fatalf("error = %v; want wrapped provider error", err)
 	}
-	if calls != 1 || service.fallbackActive.Load() {
-		t.Fatalf("calls = %d, fallback active = %v", calls, service.fallbackActive.Load())
+	if calls != 1 {
+		t.Fatalf("recognition calls = %d; want 1", calls)
 	}
 }
 
-func TestTranscribeDoesNotRetryAfterContextCancellation(t *testing.T) {
+func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	var calls int
 	service := &CloudService{
-		speechModel:     "chirp_3",
-		fallbackModel:   "short",
-		fallbackEnabled: true,
+		speechModel: "long",
 		recognizeCall: func(
 			_ context.Context,
 			_ *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			return nil, status.Error(
-				codes.PermissionDenied,
-				"Permission denied for project 123 on model chirp_3 locale ja-JP. It is no longer generally available.",
-			)
+			return recognizedResponse("呼ばれてはいけない", 1), nil
 		},
 	}
 
-	if _, _, err := service.Transcribe(
-		ctx,
-		[]byte("bounded synthetic audio"),
-	); err == nil {
-		t.Fatal("Transcribe succeeded after cancellation")
+	_, _, err := service.Transcribe(context.Background(), nil)
+	if !errors.Is(err, ErrNoSpeech) {
+		t.Fatalf("error = %v; want ErrNoSpeech", err)
 	}
-	if calls != 1 || service.fallbackActive.Load() {
-		t.Fatalf("calls = %d, fallback active = %v", calls, service.fallbackActive.Load())
-	}
-}
-
-func TestFallbackFailureDoesNotRetryIndefinitely(t *testing.T) {
-	t.Parallel()
-
-	var models []string
-	service := &CloudService{
-		speechModel:     "chirp_3",
-		fallbackModel:   "short",
-		fallbackEnabled: true,
-		recognizeCall: func(
-			_ context.Context,
-			request *speechpb.RecognizeRequest,
-		) (*speechpb.RecognizeResponse, error) {
-			models = append(models, request.Config.Model)
-			if request.Config.Model == "chirp_3" {
-				return nil, status.Error(
-					codes.PermissionDenied,
-					"Permission denied for project 123 on model chirp_3 locale ja-JP. It is no longer generally available.",
-				)
-			}
-			return nil, status.Error(codes.Unavailable, "regional service unavailable")
-		},
-	}
-
-	for range 2 {
-		if _, _, err := service.Transcribe(
-			context.Background(),
-			[]byte("bounded synthetic audio"),
-		); err == nil {
-			t.Fatal("Transcribe succeeded; want fallback failure")
-		}
-	}
-	wantModels := []string{"chirp_3", "short", "short"}
-	if fmt.Sprint(models) != fmt.Sprint(wantModels) {
-		t.Fatalf("models = %v; want %v", models, wantModels)
-	}
-}
-
-func TestGuardedFallbackIsLimitedToReviewedTokyoModelPair(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		location string
-		primary  string
-		fallback string
-		want     bool
-	}{
-		{
-			location: "asia-northeast1",
-			primary:  "chirp_3",
-			fallback: "short",
-			want:     true,
-		},
-		{location: "us", primary: "chirp_3", fallback: "short"},
-		{location: "asia-northeast1", primary: "chirp_2", fallback: "short"},
-		{location: "asia-northeast1", primary: "chirp_3", fallback: "long"},
-	}
-	for _, test := range tests {
-		if got := guardedFallbackEnabled(
-			test.location,
-			test.primary,
-			test.fallback,
-		); got != test.want {
-			t.Fatalf(
-				"guardedFallbackEnabled(%q, %q, %q) = %v; want %v",
-				test.location,
-				test.primary,
-				test.fallback,
-				got,
-				test.want,
-			)
-		}
-	}
-}
-
-func TestConcurrentFallbackSelectionIsRaceSafe(t *testing.T) {
-	t.Parallel()
-
-	var primaryCalls atomic.Int32
-	var fallbackCalls atomic.Int32
-	service := &CloudService{
-		speechModel:     "chirp_3",
-		fallbackModel:   "short",
-		fallbackEnabled: true,
-		recognizeCall: func(
-			_ context.Context,
-			request *speechpb.RecognizeRequest,
-		) (*speechpb.RecognizeResponse, error) {
-			if request.Config.Model == "chirp_3" {
-				primaryCalls.Add(1)
-				return nil, status.Error(
-					codes.PermissionDenied,
-					"Permission denied for project 123 on model chirp_3 locale ja-JP. It is no longer generally available.",
-				)
-			}
-			fallbackCalls.Add(1)
-			return recognizedResponse("聞き取れました", 0.95), nil
-		},
-	}
-
-	const turns = 50
-	var wait sync.WaitGroup
-	errs := make(chan error, turns)
-	for range turns {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			_, _, err := service.Transcribe(
-				context.Background(),
-				[]byte("bounded synthetic audio"),
-			)
-			errs <- err
-		}()
-	}
-	wait.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if primaryCalls.Load() < 1 || primaryCalls.Load() > turns {
-		t.Fatalf("primary calls = %d", primaryCalls.Load())
-	}
-	if fallbackCalls.Load() != turns {
-		t.Fatalf("fallback calls = %d; want %d", fallbackCalls.Load(), turns)
+	if calls != 0 {
+		t.Fatalf("recognition calls = %d; want 0", calls)
 	}
 }
 

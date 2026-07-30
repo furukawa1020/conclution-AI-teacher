@@ -18,8 +18,7 @@ const (
 	defaultFastModel      = "vertexai/gemini-3.6-flash"
 	defaultPrecisionModel = "vertexai/gemini-3.1-pro-preview"
 	defaultSpeechLocation = "asia-northeast1"
-	defaultSpeechModel    = "chirp_3"
-	defaultSpeechFallback = "short"
+	defaultSpeechModel    = "long"
 	defaultSpeechVoice    = "ja-JP-Chirp3-HD-Kore"
 )
 
@@ -33,7 +32,6 @@ type Config struct {
 	PrecisionModel     string
 	SpeechLocation     string
 	SpeechModel        string
-	SpeechFallback     string
 	SpeechVoice        string
 	StateKey           []byte
 	RequestTimeout     time.Duration
@@ -117,7 +115,6 @@ func Load() (Config, error) {
 		PrecisionModel:  envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
 		SpeechLocation:  envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
 		SpeechModel:     envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
-		SpeechFallback:  envOr("KOTAE_SPEECH_FALLBACK_MODEL", defaultSpeechFallback),
 		SpeechVoice:     envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
 		StateKey:        stateKey,
 		RequestTimeout:  envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
@@ -154,14 +151,11 @@ func Load() (Config, error) {
 	if cfg.SpeechModel != defaultSpeechModel {
 		return Config{}, fmt.Errorf("KOTAE_SPEECH_MODEL must be %s", defaultSpeechModel)
 	}
-	if cfg.SpeechFallback != defaultSpeechFallback {
+	if cfg.SpeechVoice != defaultSpeechVoice {
 		return Config{}, fmt.Errorf(
-			"KOTAE_SPEECH_FALLBACK_MODEL must be %s",
-			defaultSpeechFallback,
+			"KOTAE_SPEECH_VOICE must be %s",
+			defaultSpeechVoice,
 		)
-	}
-	if strings.TrimSpace(cfg.SpeechVoice) == "" {
-		return Config{}, errors.New("speech voice must not be empty")
 	}
 	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 50*time.Second {
 		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 50s")

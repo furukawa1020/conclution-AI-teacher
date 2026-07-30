@@ -40,7 +40,7 @@ Cloud Run kotae-api（asia-northeast1）
 
 STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
 
-STTは`chirp_3`をprimaryにします。ただしlive APIが、このproject・`ja-JP`に限ってmodel固有の`PermissionDenied`と「no longer generally available」を同時に返した場合だけ、同じ`asia-northeast1`の`short`へ一度再試行し、そのCloud Run instance内でfallbackを保持します。一般的なIAM拒否、別model、別locale、timeout、decode失敗では品質を黙って下げずfail-closedにします。東京域外のChirpへは自動退避しません。fallbackは可用性のための限定経路であり、自然な独話に対する同等精度を保証しません。
+STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。`short`は数秒の単発発話向けで、固定の合成日本語による確認でも自然な会話を冒頭だけで確定したため、自動fallbackには使いません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 
 ## マイクとセッション制御
 
@@ -179,7 +179,7 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 
 参考:
 
-- [Cloud Speech-to-Text Chirp 3](https://cloud.google.com/speech-to-text/v2/docs/chirp-model)
+- [Cloud Speech-to-Text V2の対応モデルと地域](https://cloud.google.com/speech-to-text/docs/speech-to-text-supported-languages)
 - [Speech-to-Text data usage FAQ](https://cloud.google.com/speech-to-text/docs/data-usage-faq)
 - [Cloud Text-to-Speech Chirp 3 HD](https://cloud.google.com/text-to-speech/docs/chirp3-hd)
 - [Text-to-Speech regional endpoints](https://cloud.google.com/text-to-speech/docs/endpoints)

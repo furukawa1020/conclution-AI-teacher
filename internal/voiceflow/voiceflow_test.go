@@ -9,6 +9,7 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
 type fakeSpeech struct {
@@ -106,6 +107,84 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				t.Fatalf("intentional low-confidence turn did not clarify: %+v", result)
 			}
 		})
+	}
+}
+
+func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T) {
+	t.Parallel()
+
+	noSpeechErrors := []struct {
+		name string
+		err  error
+	}{
+		{name: "exact", err: speechio.ErrNoSpeech},
+		{
+			name: "wrapped",
+			err:  errors.Join(errors.New("provider detail"), speechio.ErrNoSpeech),
+		},
+	}
+	for _, noSpeech := range noSpeechErrors {
+		for _, ambient := range []bool{false, true} {
+			mode := "intentional"
+			if ambient {
+				mode = "ambient"
+			}
+			t.Run(noSpeech.name+"/"+mode, func(t *testing.T) {
+				speech := &fakeSpeech{transcribeErr: noSpeech.err}
+				agent := &fakeAgent{}
+				pipeline, err := New(speech, agent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := pipeline.Process(
+					context.Background(),
+					"uid",
+					httpapi.VoiceTurnInput{
+						Audio:      []byte("audio"),
+						Ambient:    ambient,
+						StateToken: "existing-state",
+					},
+				)
+				if ambient {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if result.Route != "stt-silent" ||
+						result.StateToken != "existing-state" ||
+						result.DetectedDomain != "unknown" ||
+						result.ResearchStatus != "none" ||
+						len(result.ResearchRecords) != 0 ||
+						len(result.Audio) != 0 ||
+						result.Caption != "" {
+						t.Fatalf("ambient no-speech result = %+v", result)
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if result.Route != "stt-clarify" ||
+						result.StateToken != "existing-state" ||
+						result.Caption != lowConfidencePrompt ||
+						len(result.Audio) == 0 {
+						t.Fatalf("intentional no-speech result = %+v", result)
+					}
+				}
+				if agent.calls != 0 {
+					t.Fatalf("no-speech turn reached the model: %d", agent.calls)
+				}
+				wantSynthesisCalls := 1
+				if ambient {
+					wantSynthesisCalls = 0
+				}
+				if speech.synthesizeCalls != wantSynthesisCalls {
+					t.Fatalf(
+						"no-speech synthesis calls = %d; want %d",
+						speech.synthesizeCalls,
+						wantSynthesisCalls,
+					)
+				}
+			})
+		}
 	}
 }
 
@@ -425,6 +504,15 @@ func TestPipelineUnexpectedErrorsExposeOnlyFiniteStage(t *testing.T) {
 			speech: &fakeSpeech{
 				transcript:    secretTranscript,
 				confidence:    0.40,
+				synthesizeErr: errors.New(secretProviderText),
+			},
+			agent:     &fakeAgent{},
+			wantStage: httpapi.VoicePipelineStageSynthesize,
+		},
+		{
+			name: "synthesize no-speech clarification",
+			speech: &fakeSpeech{
+				transcribeErr: speechio.ErrNoSpeech,
 				synthesizeErr: errors.New(secretProviderText),
 			},
 			agent:     &fakeAgent{},

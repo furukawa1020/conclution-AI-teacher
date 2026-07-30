@@ -11,10 +11,13 @@ import {
   ReCaptchaEnterpriseProvider,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app-check.js";
 import {
+  advanceCandidateCapture,
   advanceVad,
+  createCandidateCaptureState,
   createCaptureBuffer,
   createRetryableInitializer,
   createSessionClock,
+  createStopLatch,
   createTurnGate,
   createVadState,
   initializeWithCleanup,
@@ -395,33 +398,87 @@ function recordingErrorCode(recording) {
     : "request_cancelled";
 }
 
+function candidateEventIsCurrent(recording, candidate) {
+  return (
+    !recording.settled &&
+    !candidate.discarded &&
+    recording.candidate === candidate
+  );
+}
+
+function stopDetachedCandidate(candidate) {
+  candidate.discarded = true;
+  if (candidate.recorder.state === "inactive") {
+    return true;
+  }
+  try {
+    candidate.recorder.stop();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function discardCurrentCandidate(recording, reason = "candidate-rejected") {
+  const candidate = recording.candidate;
+  recording.candidate = undefined;
+  recording.totalBytes = 0;
+  if (!candidate) {
+    return true;
+  }
+  candidate.captureBuffer.clear();
+  candidate.stopReason = reason;
+  return stopDetachedCandidate(candidate);
+}
+
 function rejectRecording(recording, code) {
   if (recording.settled) return;
   recording.settled = true;
   recording.discard = true;
+  if (!recording.stopLatch.isRequested()) {
+    recording.stopLatch.request("failed");
+  }
   stopVad(recording);
   setStreamTracksEnabled(recording.stream, false);
-  recording.captureBuffer.clear();
-  recording.totalBytes = 0;
+  discardCurrentCandidate(recording);
   recording.rejectEnd(new Error(code));
 }
 
-function resolveRecording(recording) {
+function resolveRecording(recording, candidate) {
   if (recording.settled) return;
+  if (
+    candidate !== undefined &&
+    (!candidateEventIsCurrent(recording, candidate) || !candidate.confirmed)
+  ) {
+    rejectRecording(recording, "voice_turn_invalid");
+    return;
+  }
   recording.settled = true;
   stopVad(recording);
   setStreamTracksEnabled(recording.stream, false);
-  const captured = recording.captureBuffer.take();
+  const captured =
+    candidate === undefined
+      ? Object.freeze({ chunks: [], totalBytes: 0 })
+      : candidate.captureBuffer.take();
   const mimeType =
-    recording.recorder.mimeType ||
+    candidate?.recorder.mimeType ||
     captured.chunks[0]?.type ||
     "audio/webm";
-  const blob = new Blob(captured.chunks, { type: mimeType });
+  const confirmedSpeech =
+    candidate !== undefined &&
+    candidate.confirmed &&
+    captured.totalBytes > 0;
+  recording.candidate = undefined;
+  if (candidate) {
+    candidate.discarded = true;
+  }
+  const blob = new Blob(confirmedSpeech ? captured.chunks : [], {
+    type: mimeType,
+  });
   recording.resolveEnd(
     Object.freeze({
       blob,
-      hasSpeech:
-        recording.hasSpeech && recording.captureStarted && blob.size > 0,
+      hasSpeech: confirmedSpeech && blob.size > 0,
       mimeType,
       reason: recording.stopReason,
     }),
@@ -429,36 +486,145 @@ function resolveRecording(recording) {
 }
 
 function requestRecordingStop(recording, reason) {
-  if (!recording || recording.settled || recording.stopRequested) {
-    return;
+  if (
+    !recording ||
+    recording.settled ||
+    !recording.stopLatch.request(reason)
+  ) {
+    return false;
   }
   recording.stopReason = reason;
-  recording.stopRequested = true;
   stopVad(recording);
-  if (!recording.captureStarted) {
-    if (recording.discard) {
-      rejectRecording(recording, recordingErrorCode(recording));
-    } else {
-      resolveRecording(recording);
+  if (recording.discard) {
+    rejectRecording(recording, recordingErrorCode(recording));
+    return true;
+  }
+
+  const candidate = recording.candidate;
+  if (!candidate || !candidate.confirmed) {
+    if (!discardCurrentCandidate(recording)) {
+      rejectRecording(recording, "voice_turn_invalid");
+      return true;
     }
-    return;
+    resolveRecording(recording, undefined);
+    return true;
+  }
+  if (candidate.recorder.state !== "recording") {
+    rejectRecording(recording, "voice_turn_invalid");
+    return true;
   }
   try {
-    recording.recorder.stop();
+    candidate.recorder.stop();
   } catch {
     rejectRecording(recording, "voice_turn_invalid");
+  }
+  return true;
+}
+
+function startCandidateRecorder(recording, confirmed) {
+  if (
+    recording.candidate ||
+    recording.settled ||
+    recording.discard ||
+    recording.stopLatch.isRequested()
+  ) {
+    rejectRecording(recording, "voice_turn_invalid");
+    return false;
+  }
+
+  let recorder;
+  try {
+    recorder = new MediaRecorder(recording.stream, recorderOptions());
+  } catch {
+    rejectRecording(recording, "voice_turn_invalid");
+    return false;
+  }
+  const candidate = {
+    captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
+    confirmed,
+    discarded: false,
+    recorder,
+    stopReason: "",
+  };
+  recording.totalBytes = 0;
+  recording.candidate = candidate;
+  recorder.addEventListener("dataavailable", (event) => {
+    // A discarded recorder still emits a final Blob. Object identity keeps
+    // that stale event out of a newer candidate and its fresh container.
+    if (
+      !candidateEventIsCurrent(recording, candidate) ||
+      !event.data ||
+      event.data.size === 0
+    ) {
+      return;
+    }
+    const captureState = candidate.captureBuffer.append(event.data);
+    recording.totalBytes = captureState.totalBytes;
+    if (captureState.tooLarge) {
+      recording.discard = true;
+      requestRecordingStop(recording, "too-large");
+    }
+  });
+
+  recorder.addEventListener(
+    "error",
+    () => {
+      if (candidateEventIsCurrent(recording, candidate)) {
+        rejectRecording(recording, "voice_turn_invalid");
+      }
+    },
+    { once: true },
+  );
+
+  recorder.addEventListener(
+    "stop",
+    () => {
+      if (!candidateEventIsCurrent(recording, candidate)) {
+        return;
+      }
+      if (
+        recording.discard ||
+        !recording.stopLatch.isRequested() ||
+        !candidate.confirmed
+      ) {
+        rejectRecording(
+          recording,
+          recording.discard
+            ? recordingErrorCode(recording)
+            : "voice_turn_invalid",
+        );
+        return;
+      }
+      resolveRecording(recording, candidate);
+    },
+    { once: true },
+  );
+
+  try {
+    recorder.start(250);
+    return true;
+  } catch {
+    if (recording.candidate === candidate) {
+      recording.candidate = undefined;
+    }
+    candidate.discarded = true;
+    candidate.captureBuffer.clear();
+    recording.totalBytes = 0;
+    rejectRecording(recording, "voice_turn_invalid");
+    return false;
   }
 }
 
 function armVad(recording) {
   const pcm = new Float32Array(analyser.fftSize);
   let vadState = createVadState(recording.startedAt);
+  let candidateCapture = createCandidateCaptureState();
 
   recording.vadTimer = setInterval(() => {
     if (
       recording.discard ||
       recording.settled ||
-      recording.stopRequested ||
+      recording.stopLatch.isRequested() ||
       !analyser
     ) {
       return;
@@ -474,18 +640,35 @@ function armVad(recording) {
     }
     const rms = Math.sqrt(sumSquares / pcm.length);
     const now = performance.now();
-    const hadSpeech = recording.hasSpeech;
     vadState = advanceVad(vadState, { now, peak, rms });
-    recording.hasSpeech = vadState.hasSpeech;
-    recording.lastVoiceAt = vadState.lastVoiceAt ?? 0;
-    if (!hadSpeech && recording.hasSpeech) {
-      // Do not record background audio while waiting for speech. Starting a
-      // fresh recorder here also guarantees that the retained WebM begins
-      // with its own container header.
-      try {
-        recording.recorder.start(250);
-        recording.captureStarted = true;
-      } catch {
+    candidateCapture = advanceCandidateCapture(
+      candidateCapture,
+      vadState,
+      now,
+    );
+    if (candidateCapture.action === "start") {
+      // Start on the first voiced analysis frame, limiting loss at the start
+      // of a word to one VAD interval. Each candidate owns a fresh recorder
+      // and therefore a self-contained WebM/MP4 header.
+      if (
+        !startCandidateRecorder(
+          recording,
+          candidateCapture.phase === "confirmed",
+        )
+      ) {
+        return;
+      }
+    }
+    if (candidateCapture.action === "confirm") {
+      const candidate = recording.candidate;
+      if (!candidate || !candidateEventIsCurrent(recording, candidate)) {
+        rejectRecording(recording, "voice_turn_invalid");
+        return;
+      }
+      candidate.confirmed = true;
+    }
+    if (candidateCapture.action === "discard") {
+      if (!discardCurrentCandidate(recording)) {
         rejectRecording(recording, "voice_turn_invalid");
         return;
       }
@@ -497,13 +680,6 @@ function armVad(recording) {
 }
 
 function createRecording(stream) {
-  let recorder;
-  try {
-    recorder = new MediaRecorder(stream, recorderOptions());
-  } catch {
-    fail("microphone_unsupported");
-  }
-
   let resolveEnd;
   let rejectEnd;
   const endPromise = new Promise((resolve, reject) => {
@@ -514,55 +690,19 @@ function createRecording(stream) {
   // Mark the rejection handled without changing what later awaiters observe.
   void endPromise.catch(() => {});
   const recording = {
-    captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
-    captureStarted: false,
+    candidate: undefined,
     discard: false,
     endPromise,
-    hasSpeech: false,
-    lastVoiceAt: 0,
-    recorder,
     resolveEnd,
     rejectEnd,
     settled: false,
     startedAt: performance.now(),
+    stopLatch: createStopLatch(),
     stopReason: "",
-    stopRequested: false,
     stream,
     totalBytes: 0,
     vadTimer: undefined,
   };
-
-  recorder.addEventListener("dataavailable", (event) => {
-    if (recording.discard || !event.data || event.data.size === 0) {
-      return;
-    }
-    const captureState = recording.captureBuffer.append(event.data);
-    recording.totalBytes = captureState.totalBytes;
-    if (captureState.tooLarge) {
-      recording.discard = true;
-      requestRecordingStop(recording, "too-large");
-    }
-  });
-
-  recorder.addEventListener(
-    "error",
-    () => {
-      rejectRecording(recording, "voice_turn_invalid");
-    },
-    { once: true },
-  );
-
-  recorder.addEventListener(
-    "stop",
-    () => {
-      if (recording.discard) {
-        rejectRecording(recording, recordingErrorCode(recording));
-        return;
-      }
-      resolveRecording(recording);
-    },
-    { once: true },
-  );
 
   armVad(recording);
   return recording;
@@ -627,10 +767,8 @@ async function waitForTurnEnd() {
     capture = await recording.endPromise;
   } catch (error) {
     stopVad(recording);
-    if (recording.recorder.state !== "inactive") {
-      recording.discard = true;
-      requestRecordingStop(recording, "cancelled");
-    }
+    recording.discard = true;
+    requestRecordingStop(recording, "cancelled");
     if (activeRecording === recording) {
       activeRecording = undefined;
     }
@@ -646,8 +784,20 @@ async function waitForTurnEnd() {
   }
   return Object.freeze({
     hasSpeech: capture.hasSpeech,
-    reason: capture.reason,
+    manual: capture.reason === "manual",
   });
+}
+
+function endTurn() {
+  const recording = activeRecording;
+  if (!recording || recording.settled) {
+    fail("voice_turn_invalid");
+  }
+  // A manual click may race the automatic silence boundary or another click.
+  // The stop latch keeps all of those paths on the same single completion and
+  // therefore the same single POST.
+  requestRecordingStop(recording, "manual");
+  return Object.freeze({ state: "ending" });
 }
 
 function arrayBufferToBase64(buffer) {
@@ -816,7 +966,7 @@ async function finishTurn(serializedSessionState, turnMode) {
   let documentForTurn;
   let requestController;
   try {
-    if (recording.recorder.state === "recording") {
+    if (!recording.stopLatch.isRequested()) {
       requestRecordingStop(recording, "manual");
     }
     const capture = await recording.endPromise;
@@ -1070,6 +1220,7 @@ globalThis.addEventListener("pagehide", () => {
 const publicBridge = Object.freeze({
   attachDocument,
   beginTurn,
+  endTurn,
   finishTurn,
   getStatus,
   playResponse,

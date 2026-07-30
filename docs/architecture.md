@@ -49,7 +49,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 ┌──────────────────┐   ┌─────────────────────────────┐
 │ Cloud STT V2     │   │ Vertex AI（global）          │
 │ asia-northeast1  │   │ Gemini fast / precision     │
-│ chirp_3 → short  │   │ Thought Graph + EVI + LAC   │
+│ long, no fallback│   │ Thought Graph + EVI + LAC   │
 └────────┬─────────┘   └────────────┬────────────────┘
          └──── transcript ──────────┘
                                     │ silence / reply text

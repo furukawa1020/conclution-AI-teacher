@@ -12,7 +12,7 @@ import (
 
 const (
 	minUsableTranscriptConfidence = 0.65
-	lowConfidencePrompt           = "うまく聞き取れませんでした。もう一度、短く話してもらえますか？"
+	lowConfidencePrompt           = "今の一文だけ、もう一度聞かせてください。"
 )
 
 // Pipeline keeps the three trust boundaries explicit: regional speech
@@ -38,39 +38,21 @@ func (p *Pipeline) Process(
 	transcript, confidence, err := p.speech.Transcribe(ctx, input.Audio)
 	if err != nil {
 		if errors.Is(err, speechio.ErrNoSpeech) {
-			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNotRecognized
+			if input.Ambient {
+				return silentRecognitionResult(input.StateToken), nil
+			}
+			return p.recognitionClarification(ctx, input.StateToken)
 		}
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
 	if transcriptConfidenceTooLow(confidence) {
-		result := httpapi.VoiceTurnResult{
-			StateToken:       input.StateToken,
-			DetectedDomain:   "unknown",
-			AssistanceTarget: "assistant",
-			RespondentStage:  "none",
-			ResearchStatus:   "none",
-			ResearchRecords:  []httpapi.ResearchRecord{},
-			Route:            "stt-silent",
-		}
+		result := silentRecognitionResult(input.StateToken)
 		if input.Ambient {
 			return result, nil
 		}
-		audio, audioMIME, synthesizeErr := p.speech.Synthesize(
-			ctx,
-			lowConfidencePrompt,
-		)
-		if synthesizeErr != nil {
-			return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
-				httpapi.VoicePipelineStageSynthesize,
-			)
-		}
-		result.Audio = audio
-		result.AudioMIMEType = audioMIME
-		result.Caption = lowConfidencePrompt
-		result.Route = "stt-clarify"
-		return result, nil
+		return p.recognitionClarification(ctx, input.StateToken)
 	}
 
 	turn := conversation.VoiceTurn{
@@ -121,6 +103,36 @@ func (p *Pipeline) Process(
 	result.AudioMIMEType = audioMIME
 	result.Caption = decision.SpokenReply
 	return result, nil
+}
+
+func (p *Pipeline) recognitionClarification(
+	ctx context.Context,
+	stateToken string,
+) (httpapi.VoiceTurnResult, error) {
+	audio, audioMIME, err := p.speech.Synthesize(ctx, lowConfidencePrompt)
+	if err != nil {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
+	}
+	result := silentRecognitionResult(stateToken)
+	result.Audio = audio
+	result.AudioMIMEType = audioMIME
+	result.Caption = lowConfidencePrompt
+	result.Route = "stt-clarify"
+	return result, nil
+}
+
+func silentRecognitionResult(stateToken string) httpapi.VoiceTurnResult {
+	return httpapi.VoiceTurnResult{
+		StateToken:       stateToken,
+		DetectedDomain:   "unknown",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []httpapi.ResearchRecord{},
+		Route:            "stt-silent",
+	}
 }
 
 func researchRecords(records []conversation.ResearchRecord) []httpapi.ResearchRecord {

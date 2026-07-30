@@ -470,7 +470,7 @@ fn arm_listening(
                 arm_listening(
                     operation,
                     false,
-                    intentional,
+                    false,
                     voice_state,
                     generation,
                     session_state,
@@ -530,7 +530,8 @@ fn submit_turn(
             }
         };
 
-        let retry_intentional = next_turn_is_intentional(&result.route);
+        let spoke = !result.audio_base64.is_empty();
+        let retry_intentional = next_turn_is_intentional(&result.route, spoke);
         session_state.set(result.session_state.clone());
         detected_domain.set(result.detected_domain.clone());
         route.set(result.route.clone());
@@ -542,7 +543,7 @@ fn submit_turn(
             document_info.set(None);
         }
 
-        if !result.audio_base64.is_empty() {
+        if spoke {
             voice_state.set(VoiceState::Speaking);
             if let Err(message) =
                 cloud::play_response(&result.audio_base64, &result.audio_mime_type).await
@@ -616,8 +617,8 @@ fn human_file_size(bytes: u64) -> String {
     }
 }
 
-fn next_turn_is_intentional(route: &str) -> bool {
-    route == "stt-clarify"
+fn next_turn_is_intentional(route: &str, spoke: bool) -> bool {
+    spoke || route == "stt-clarify"
 }
 
 #[component]
@@ -1059,9 +1060,11 @@ mod tests {
 
     #[test]
     fn recognition_clarification_keeps_the_explicit_turn_open() {
-        assert!(next_turn_is_intentional("stt-clarify"));
-        assert!(!next_turn_is_intentional("stt-silent"));
-        assert!(!next_turn_is_intentional("direct-answer"));
+        assert!(next_turn_is_intentional("stt-clarify", true));
+        assert!(next_turn_is_intentional("stt-clarify", false));
+        assert!(!next_turn_is_intentional("stt-silent", false));
+        assert!(next_turn_is_intentional("direct-answer", true));
+        assert!(!next_turn_is_intentional("direct-answer", false));
     }
 
     #[test]

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 )
 
@@ -16,6 +17,17 @@ type fakeResearchVerifier struct {
 	verification research.Verification
 	err          error
 	calls        []research.Query
+}
+
+func attachResearchVerifier(
+	t *testing.T,
+	agent *vertexAgent,
+	verifier research.Verifier,
+) {
+	t.Helper()
+	if err := agent.setResearchVerifier(verifier); err != nil {
+		t.Fatalf("setResearchVerifier: %v", err)
+	}
 }
 
 type cancelingResearchVerifier struct {
@@ -78,7 +90,7 @@ func TestAgentResearchRecentPapersMapsBoundedDiscoveryMetadata(t *testing.T) {
 		},
 	}
 	agent := newTestAgent(t, generator)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 	now := time.Date(2026, time.July, 29, 15, 30, 0, 0, time.UTC)
 	agent.now = func() time.Time { return now }
 
@@ -139,7 +151,7 @@ func TestAgentResearchUnavailableReturnsNoRecords(t *testing.T) {
 	}}
 	verifier := &fakeResearchVerifier{err: research.ErrSourceUnavailable}
 	agent := newTestAgent(t, generator)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 	agent.now = func() time.Time {
 		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
 	}
@@ -199,7 +211,7 @@ func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
 			}}
 			verifier := &fakeResearchVerifier{}
 			agent := newTestAgent(t, generator)
-			agent.research = verifier
+			attachResearchVerifier(t, agent, verifier)
 			if test.disable {
 				agent.security = nil
 			}
@@ -271,6 +283,85 @@ func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
 	}
 }
 
+func TestAgentResearchLeaseDenyPreservesPreGatePendingState(t *testing.T) {
+	const (
+		uid     = "uid-research-capability-pending"
+		topic   = "量子エラー訂正"
+		subject = "導入目的"
+	)
+	awaiting := respondentAwaitingPlan()
+	researchPlan := recentPapersPlan(topic)
+	generator := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, researchPlan)},
+		{body: encodePlan(t, researchPlan)},
+	}}
+	verifier := &fakeResearchVerifier{}
+	agent := newTestAgent(t, generator)
+	attachResearchVerifier(t, agent, verifier)
+	agent.security = nil
+	agent.now = func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	}
+	initial := conversationState{
+		Turn: 4,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の安全な状態"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       subject,
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention:    ArbiterDecision{Act: "clarify"},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     japaneseRecentRequest(topic),
+		StateToken:    token,
+		RequestID:     "0123456789abcdef01234567",
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "planner-unavailable" || len(verifier.calls) != 0 {
+		t.Fatalf(
+			"capability deny did not fail closed: result=%#v verifier=%#v",
+			result,
+			verifier.calls,
+		)
+	}
+	state, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open fallback state: %v", err)
+	}
+	if state.Turn != initial.Turn+1 ||
+		!state.PendingAnswer.Active ||
+		state.PendingAnswer.Operator != initial.PendingAnswer.Operator ||
+		state.PendingAnswer.Subject != subject ||
+		len(state.PendingAnswer.RequiredSlots) != 1 ||
+		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotPurpose ||
+		len(state.Graph.Claims) != 1 ||
+		state.Graph.Claims[0] != initial.Graph.Claims[0] ||
+		!state.SelfCorrectionGrace {
+		t.Fatalf("capability deny changed pre-gate state: %#v", state)
+	}
+}
+
 func TestAgentResearchRejectsMismatchedVerifierProvenance(t *testing.T) {
 	const topic = "量子エラー訂正"
 	plan := recentPapersPlan(topic)
@@ -294,7 +385,7 @@ func TestAgentResearchRejectsMismatchedVerifierProvenance(t *testing.T) {
 		},
 	}
 	agent := newTestAgent(t, generator)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 	agent.now = func() time.Time { return now }
 
 	result, err := agent.Process(context.Background(), "uid", VoiceTurn{
@@ -519,7 +610,7 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 			}}}
 			verifier := &fakeResearchVerifier{}
 			agent := newTestAgent(t, generator)
-			agent.research = verifier
+			attachResearchVerifier(t, agent, verifier)
 
 			result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 				SchemaVersion: SchemaVersion,
@@ -560,7 +651,7 @@ func TestAgentRejectsRespondentResearchCombinationBeforeVerifier(t *testing.T) {
 	}}}
 	verifier := &fakeResearchVerifier{}
 	agent := newTestAgent(t, generator)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 
 	result, err := agent.Process(context.Background(), "uid", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -599,7 +690,7 @@ func TestAgentDOILookupRequiresExplicitIntentBeforeVerifier(t *testing.T) {
 	}}}
 	verifier := &fakeResearchVerifier{}
 	agent := newTestAgent(t, generator)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 
 	utterance := "参考文献のDOIは" + doi + "です"
 	result, err := agent.Process(context.Background(), "uid", VoiceTurn{
@@ -802,7 +893,7 @@ func TestAgentDOILookupBindsVerifierResultToRequestedDOI(t *testing.T) {
 				},
 			}
 			agent := newTestAgent(t, generator)
-			agent.research = verifier
+			attachResearchVerifier(t, agent, verifier)
 			agent.now = func() time.Time { return now }
 
 			result, err := agent.Process(context.Background(), "uid", VoiceTurn{
@@ -829,7 +920,7 @@ func TestAgentResearchPropagatesParentCancellation(t *testing.T) {
 	}}
 	verifier := &cancelingResearchVerifier{}
 	agent := newTestAgent(t, generator)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 	agent.now = func() time.Time {
 		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
 	}

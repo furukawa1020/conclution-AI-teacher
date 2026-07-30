@@ -5,12 +5,14 @@ package securityflow
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -27,8 +29,9 @@ const (
 )
 
 var (
-	ErrInvalidConfig = errors.New("securityflow: invalid configuration")
-	ErrDenied        = errors.New("securityflow: capability denied")
+	ErrInvalidConfig       = errors.New("securityflow: invalid configuration")
+	ErrDenied              = errors.New("securityflow: capability denied")
+	ErrExecutorUnavailable = errors.New("securityflow: executor unavailable")
 )
 
 type Action uint8
@@ -108,13 +111,20 @@ type Scope struct {
 	RequestID string
 }
 
+func (Scope) String() string   { return "securityflow.Scope{redacted}" }
+func (Scope) GoString() string { return "securityflow.Scope{redacted}" }
+func (Scope) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.Scope{redacted}"`), nil
+}
+
 // Config deliberately has no model or network dependency.
 type Config struct {
-	Key     []byte
-	Policy  PolicyID
-	MaxTTL  time.Duration
-	Now     func() time.Time
-	Random  io.Reader
+	Key         []byte
+	Policy      PolicyID
+	MaxTTL      time.Duration
+	IssuanceTTL time.Duration
+	Now         func() time.Time
+	Random      io.Reader
 }
 
 // ActionProposal is safe to construct from model output. It carries only a
@@ -178,25 +188,53 @@ func (Lease) MarshalJSON() ([]byte, error) {
 }
 
 type Guard struct {
-	key           [keyBytes]byte
-	issuer        [nonceBytes]byte
-	policy        PolicyID
-	policyDigest  [sha256.Size]byte
-	maxTTL        time.Duration
-	now           func() time.Time
-	random        io.Reader
+	key          [keyBytes]byte
+	issuer       [nonceBytes]byte
+	policy       PolicyID
+	policyDigest [sha256.Size]byte
+	maxTTL       time.Duration
+	issuanceTTL  time.Duration
+	now          func() time.Time
+	random       io.Reader
 
 	randomMu sync.Mutex
 	mu       sync.Mutex
+	issued   map[[sha256.Size]byte]int64
 	grants   map[[nonceBytes]byte]int64
 	leases   map[[nonceBytes]byte]int64
+}
+
+func (*Guard) String() string   { return "securityflow.Guard{redacted}" }
+func (*Guard) GoString() string { return "securityflow.Guard{redacted}" }
+func (*Guard) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.Guard{redacted}"`), nil
+}
+
+// CrossrefExecutor is the only application boundary that owns a raw research
+// verifier. A model proposal cannot reach the verifier unless a matching,
+// one-shot Lease is consumed immediately before execution.
+type CrossrefExecutor struct {
+	guard    *Guard
+	verifier research.Verifier
+}
+
+func (*CrossrefExecutor) String() string {
+	return "securityflow.CrossrefExecutor{redacted}"
+}
+func (*CrossrefExecutor) GoString() string {
+	return "securityflow.CrossrefExecutor{redacted}"
+}
+func (*CrossrefExecutor) MarshalJSON() ([]byte, error) {
+	return []byte(`"securityflow.CrossrefExecutor{redacted}"`), nil
 }
 
 func NewGuard(config Config) (*Guard, error) {
 	if len(config.Key) != keyBytes ||
 		config.Policy != PolicyPCCMPhase1 ||
 		config.MaxTTL <= 0 ||
-		config.MaxTTL > time.Minute {
+		config.MaxTTL > time.Minute ||
+		config.IssuanceTTL <= 0 ||
+		config.IssuanceTTL > time.Minute {
 		return nil, ErrInvalidConfig
 	}
 	now := config.Now
@@ -208,12 +246,14 @@ func NewGuard(config Config) (*Guard, error) {
 		randomSource = rand.Reader
 	}
 	guard := &Guard{
-		policy: config.Policy,
-		maxTTL: config.MaxTTL,
-		now:    now,
-		random: randomSource,
-		grants: make(map[[nonceBytes]byte]int64),
-		leases: make(map[[nonceBytes]byte]int64),
+		policy:      config.Policy,
+		maxTTL:      config.MaxTTL,
+		issuanceTTL: config.IssuanceTTL,
+		now:         now,
+		random:      randomSource,
+		issued:      make(map[[sha256.Size]byte]int64),
+		grants:      make(map[[nonceBytes]byte]int64),
+		leases:      make(map[[nonceBytes]byte]int64),
 	}
 	copy(guard.key[:], config.Key)
 	if _, err := io.ReadFull(guard.random, guard.issuer[:]); err != nil {
@@ -224,6 +264,85 @@ func NewGuard(config Config) (*Guard, error) {
 		[]byte{byte(guard.policy)},
 	)
 	return guard, nil
+}
+
+func NewCrossrefExecutor(
+	guard *Guard,
+	verifier research.Verifier,
+) (*CrossrefExecutor, error) {
+	if guard == nil || nilVerifier(verifier) {
+		return nil, ErrInvalidConfig
+	}
+	return &CrossrefExecutor{
+		guard:    guard,
+		verifier: verifier,
+	}, nil
+}
+
+// Verify rebinds the exact normalized query at the final execution boundary,
+// consumes the Lease, and only then calls the wrapped verifier. A mismatched
+// query does not consume the Lease, so argument substitution cannot turn a
+// denial into an accidental external request.
+func (executor *CrossrefExecutor) Verify(
+	ctx context.Context,
+	lease Lease,
+	scope Scope,
+	proposal ActionProposal,
+	query research.Query,
+) (research.Verification, DefenseEvent, error) {
+	event := DefenseEvent{
+		Action:   ActionCrossrefDiscovery,
+		Decision: DecisionDeny,
+		Reason:   ReasonInvalidAuthority,
+		Sources:  proposal.sources,
+	}
+	if executor == nil || executor.guard == nil ||
+		nilVerifier(executor.verifier) {
+		return research.Verification{}, event, ErrDenied
+	}
+	event.Policy = executor.guard.policy
+	if ctx == nil {
+		return research.Verification{}, event, ErrDenied
+	}
+	normalizedQuery, err := research.NormalizeQuery(query)
+	if err != nil {
+		event.Reason = ReasonArgumentMismatch
+		return research.Verification{}, event, ErrDenied
+	}
+	queryArgs, err := executor.guard.queryDigest(normalizedQuery)
+	if err != nil || proposal.action != ActionCrossrefDiscovery ||
+		proposal.args != queryArgs {
+		event.Reason = ReasonArgumentMismatch
+		return research.Verification{}, event, ErrDenied
+	}
+	event, err = executor.guard.ConsumeCrossref(lease, scope, proposal)
+	if err != nil {
+		return research.Verification{}, event, ErrDenied
+	}
+	verification, err := callVerifier(
+		executor.verifier,
+		ctx,
+		normalizedQuery,
+	)
+	return verification, event, err
+}
+
+func callVerifier(
+	verifier research.Verifier,
+	ctx context.Context,
+	query research.Query,
+) (verification research.Verification, err error) {
+	defer func() {
+		if recover() != nil {
+			verification = research.Verification{}
+			err = ErrExecutorUnavailable
+		}
+	}()
+	verification, err = verifier.Verify(ctx, query)
+	if err != nil {
+		return research.Verification{}, ErrExecutorUnavailable
+	}
+	return verification, nil
 }
 
 func (guard *Guard) ProposeCrossref(
@@ -280,9 +399,10 @@ func (guard *Guard) BindCurrentUserSpeechForCrossref(
 		return CurrentUserSpeech{}, event, ErrDenied
 	}
 	now := guard.now().UTC()
+	scopeDigest := guard.scopeDigest(scope)
 	grant := CurrentUserSpeech{
 		issuer:    guard.issuer,
-		scope:     guard.scopeDigest(scope),
+		scope:     scopeDigest,
 		args:      args,
 		policy:    guard.policyDigest,
 		action:    ActionCrossrefDiscovery,
@@ -298,7 +418,15 @@ func (guard *Guard) BindCurrentUserSpeechForCrossref(
 	guard.mu.Lock()
 	defer guard.mu.Unlock()
 	guard.cleanupLocked(now.UnixNano())
-	if len(guard.grants)+len(guard.leases) >= maxOutstandingRecords {
+	issuance := guard.issuanceDigest(
+		scopeDigest,
+		ActionCrossrefDiscovery,
+	)
+	if _, exists := guard.issued[issuance]; exists {
+		event.Reason = ReasonReplay
+		return CurrentUserSpeech{}, event, ErrDenied
+	}
+	if guard.outstandingLocked()+2 > maxOutstandingRecords {
 		event.Reason = ReasonCapacity
 		return CurrentUserSpeech{}, event, ErrDenied
 	}
@@ -310,6 +438,7 @@ func (guard *Guard) BindCurrentUserSpeechForCrossref(
 		event.Reason = ReasonTampered
 		return CurrentUserSpeech{}, event, ErrDenied
 	}
+	guard.issued[issuance] = now.Add(guard.issuanceTTL).UnixNano()
 	guard.grants[grant.nonce] = grant.expiresAt
 	event.Decision = DecisionAllow
 	event.Reason = ReasonAuthorized
@@ -373,7 +502,7 @@ func (guard *Guard) MintCrossref(
 		return Lease{}, event, ErrDenied
 	}
 	delete(guard.grants, grant.nonce)
-	if len(guard.grants)+len(guard.leases) >= maxOutstandingRecords {
+	if guard.outstandingLocked()+1 > maxOutstandingRecords {
 		event.Reason = ReasonCapacity
 		return Lease{}, event, ErrDenied
 	}
@@ -514,6 +643,17 @@ func (guard *Guard) scopeDigest(scope Scope) [sha256.Size]byte {
 	return guard.keyedDigest([]byte("scope\x00"), canonical.Bytes())
 }
 
+func (guard *Guard) issuanceDigest(
+	scope [sha256.Size]byte,
+	action Action,
+) [sha256.Size]byte {
+	return guard.keyedDigest(
+		[]byte("issuance\x00"),
+		scope[:],
+		[]byte{byte(action)},
+	)
+}
+
 func (guard *Guard) keyedDigest(parts ...[]byte) [sha256.Size]byte {
 	mac := hmac.New(sha256.New, guard.key[:])
 	for _, part := range parts {
@@ -556,6 +696,11 @@ func (guard *Guard) signLease(lease Lease) [sha256.Size]byte {
 }
 
 func (guard *Guard) cleanupLocked(now int64) {
+	for issuance, expiresAt := range guard.issued {
+		if now >= expiresAt {
+			delete(guard.issued, issuance)
+		}
+	}
 	for nonce, expiresAt := range guard.grants {
 		if now >= expiresAt {
 			delete(guard.grants, nonce)
@@ -566,6 +711,10 @@ func (guard *Guard) cleanupLocked(now int64) {
 			delete(guard.leases, nonce)
 		}
 	}
+}
+
+func (guard *Guard) outstandingLocked() int {
+	return len(guard.issued) + len(guard.grants) + len(guard.leases)
 }
 
 func (guard *Guard) readRandom(destination []byte) error {
@@ -588,6 +737,20 @@ func validScopeField(value string) bool {
 		len(value) <= maxScopeFieldBytes &&
 		utf8.ValidString(value) &&
 		value == strings.TrimSpace(value)
+}
+
+func nilVerifier(verifier research.Verifier) bool {
+	if verifier == nil {
+		return true
+	}
+	value := reflect.ValueOf(verifier)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func writeBoundedString(buffer *bytes.Buffer, value string) {

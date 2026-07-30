@@ -2,6 +2,7 @@ package securityflow
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,31 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 )
+
+type countingVerifier struct {
+	calls []research.Query
+	err   error
+}
+
+func (verifier *countingVerifier) Verify(
+	_ context.Context,
+	query research.Query,
+) (research.Verification, error) {
+	verifier.calls = append(verifier.calls, query)
+	return research.Verification{QueryKind: query.Kind}, verifier.err
+}
+
+type panicVerifier struct {
+	calls int
+}
+
+func (verifier *panicVerifier) Verify(
+	context.Context,
+	research.Query,
+) (research.Verification, error) {
+	verifier.calls++
+	panic("PRIVATE-QUERY-MUST-NOT-ESCAPE")
+}
 
 func TestCrossrefLeaseRequiresBoundCurrentSpeechAndIsOneShot(t *testing.T) {
 	guard, now := newTestGuard(t)
@@ -54,6 +80,244 @@ func TestCrossrefLeaseRequiresBoundCurrentSpeechAndIsOneShot(t *testing.T) {
 	}
 	if now.IsZero() {
 		t.Fatal("test clock was not initialized")
+	}
+}
+
+func TestCrossrefExecutorEnforcesLeaseAndFinalArgumentBinding(t *testing.T) {
+	guard, _ := newTestGuard(t)
+	scope := testScope()
+	query := testQuery(t, "quantum error correction")
+	otherQuery := testQuery(t, "protein folding")
+	proposal, _, err := guard.ProposeCrossref(
+		query,
+		SourceCurrentUserSpeech|SourceModelOutput|SourcePDF,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+		scope,
+		query,
+		2*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, _, err := guard.MintCrossref(
+		grant,
+		scope,
+		proposal,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawEquivalentQuery := query
+	rawEquivalentQuery.Topic = "  quantum   error correction  "
+	rawEquivalentQuery.From = query.From.Add(17*time.Hour + 30*time.Minute)
+	rawEquivalentQuery.Until = query.Until.Add(23*time.Hour + 59*time.Minute)
+	verifier := &countingVerifier{}
+	executor, err := NewCrossrefExecutor(guard, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, event, err := executor.Verify(
+		context.Background(),
+		lease,
+		scope,
+		proposal,
+		otherQuery,
+	)
+	if !errors.Is(err, ErrDenied) ||
+		event.Reason != ReasonArgumentMismatch ||
+		len(verifier.calls) != 0 {
+		t.Fatalf(
+			"argument substitution reached verifier: event=%#v calls=%d err=%v",
+			event,
+			len(verifier.calls),
+			err,
+		)
+	}
+
+	verification, event, err := executor.Verify(
+		context.Background(),
+		lease,
+		scope,
+		proposal,
+		rawEquivalentQuery,
+	)
+	if err != nil ||
+		event.Decision != DecisionAllow ||
+		event.Reason != ReasonAuthorized ||
+		verification.QueryKind != query.Kind ||
+		len(verifier.calls) != 1 {
+		t.Fatalf(
+			"authorized execution failed: event=%#v verification=%#v calls=%d err=%v",
+			event,
+			verification,
+			len(verifier.calls),
+			err,
+		)
+	}
+	if verifier.calls[0] != query {
+		t.Fatalf(
+			"executor passed non-canonical query to verifier: got=%#v want=%#v",
+			verifier.calls[0],
+			query,
+		)
+	}
+
+	_, event, err = executor.Verify(
+		context.Background(),
+		lease,
+		scope,
+		proposal,
+		query,
+	)
+	if !errors.Is(err, ErrDenied) ||
+		event.Reason != ReasonReplay ||
+		len(verifier.calls) != 1 {
+		t.Fatalf(
+			"replayed execution reached verifier: event=%#v calls=%d err=%v",
+			event,
+			len(verifier.calls),
+			err,
+		)
+	}
+
+	_, event, err = executor.Verify(
+		context.Background(),
+		Lease{},
+		scope,
+		proposal,
+		query,
+	)
+	if !errors.Is(err, ErrDenied) ||
+		event.Decision != DecisionDeny ||
+		len(verifier.calls) != 1 {
+		t.Fatalf(
+			"zero lease reached verifier: event=%#v calls=%d err=%v",
+			event,
+			len(verifier.calls),
+			err,
+		)
+	}
+}
+
+func TestCrossrefExecutorRejectsMissingBoundaryComponents(t *testing.T) {
+	guard, _ := newTestGuard(t)
+	var typedNil *countingVerifier
+	for name, candidate := range map[string]func() (*CrossrefExecutor, error){
+		"nil guard": func() (*CrossrefExecutor, error) {
+			return NewCrossrefExecutor(nil, &countingVerifier{})
+		},
+		"nil verifier": func() (*CrossrefExecutor, error) {
+			return NewCrossrefExecutor(guard, nil)
+		},
+		"typed nil verifier": func() (*CrossrefExecutor, error) {
+			return NewCrossrefExecutor(guard, typedNil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := candidate(); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("invalid executor accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestCrossrefExecutorNormalizesProviderFailureAndPanic(t *testing.T) {
+	failing := &countingVerifier{
+		err: errors.New("PRIVATE-PROVIDER-DETAIL"),
+	}
+	panicking := &panicVerifier{}
+	for _, test := range []struct {
+		name     string
+		verifier research.Verifier
+		calls    func() int
+	}{
+		{
+			name:     "provider error",
+			verifier: failing,
+			calls:    func() int { return len(failing.calls) },
+		},
+		{
+			name:     "provider panic",
+			verifier: panicking,
+			calls:    func() int { return panicking.calls },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			guard, _ := newTestGuard(t)
+			scope := testScope()
+			query := testQuery(t, "quantum error correction")
+			proposal, _, err := guard.ProposeCrossref(
+				query,
+				SourceCurrentUserSpeech|SourceModelOutput,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			grant, _, err := guard.BindCurrentUserSpeechForCrossref(
+				scope,
+				query,
+				2*time.Second,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease, _, err := guard.MintCrossref(
+				grant,
+				scope,
+				proposal,
+				time.Second,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor, err := NewCrossrefExecutor(guard, test.verifier)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, event, err := executor.Verify(
+				context.Background(),
+				lease,
+				scope,
+				proposal,
+				query,
+			)
+			if !errors.Is(err, ErrExecutorUnavailable) ||
+				event.Decision != DecisionAllow ||
+				event.Reason != ReasonAuthorized ||
+				strings.Contains(err.Error(), "PRIVATE") ||
+				test.calls() != 1 {
+				t.Fatalf(
+					"unsafe provider failure: event=%#v calls=%d err=%v",
+					event,
+					test.calls(),
+					err,
+				)
+			}
+			_, event, err = executor.Verify(
+				context.Background(),
+				lease,
+				scope,
+				proposal,
+				query,
+			)
+			if !errors.Is(err, ErrDenied) ||
+				event.Reason != ReasonReplay ||
+				test.calls() != 1 {
+				t.Fatalf(
+					"failed provider reused capability: event=%#v calls=%d err=%v",
+					event,
+					test.calls(),
+					err,
+				)
+			}
+		})
 	}
 }
 
@@ -324,6 +588,10 @@ func TestDefenseArtifactsContainNoContentOrIdentifiers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	executor, err := NewCrossrefExecutor(guard, &countingVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	events, err := json.Marshal(
 		[]DefenseEvent{proposalEvent, grantEvent, leaseEvent},
@@ -331,8 +599,22 @@ func TestDefenseArtifactsContainNoContentOrIdentifiers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts := string(events) +
-		fmt.Sprintf("%#v %#v %#v", proposal, grant, lease)
+	opaqueJSON, err := json.Marshal(
+		[]any{scope, proposal, grant, lease, guard, executor},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := string(events) + string(opaqueJSON) +
+		fmt.Sprintf(
+			"%#v %#v %#v %#v %#v %#v",
+			scope,
+			proposal,
+			grant,
+			lease,
+			guard,
+			executor,
+		)
 	for _, private := range []string{
 		topic,
 		scope.UID,
@@ -368,9 +650,10 @@ func TestGuardRejectsUntrustedOnlyProposalAndInvalidConfiguration(t *testing.T) 
 		}
 	}
 	if _, err := NewGuard(Config{
-		Key:    bytes.Repeat([]byte{1}, 31),
-		Policy: PolicyPCCMPhase1,
-		MaxTTL: time.Second,
+		Key:         bytes.Repeat([]byte{1}, 31),
+		Policy:      PolicyPCCMPhase1,
+		MaxTTL:      time.Second,
+		IssuanceTTL: time.Minute,
 	}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("short key accepted: %v", err)
 	}
@@ -456,11 +739,12 @@ func newTestGuard(t *testing.T) (*Guard, *time.Time) {
 		randomBytes[index] = byte(index % 251)
 	}
 	guard, err := NewGuard(Config{
-		Key:    bytes.Repeat([]byte{0x42}, keyBytes),
-		Policy: PolicyPCCMPhase1,
-		MaxTTL: 5 * time.Second,
-		Now:     func() time.Time { return now },
-		Random:  bytes.NewReader(randomBytes),
+		Key:         bytes.Repeat([]byte{0x42}, keyBytes),
+		Policy:      PolicyPCCMPhase1,
+		MaxTTL:      5 * time.Second,
+		IssuanceTTL: time.Minute,
+		Now:         func() time.Time { return now },
+		Random:      bytes.NewReader(randomBytes),
 	})
 	if err != nil {
 		t.Fatalf("NewGuard: %v", err)

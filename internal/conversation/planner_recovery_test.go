@@ -67,7 +67,7 @@ func TestAgentPrecisionRecoveryCannotEscalateToOutboundResearch(t *testing.T) {
 	}}
 	verifier := &fakeResearchVerifier{}
 	agent := newTestAgent(t, fake)
-	agent.research = verifier
+	attachResearchVerifier(t, agent, verifier)
 
 	result, err := agent.Process(
 		context.Background(),

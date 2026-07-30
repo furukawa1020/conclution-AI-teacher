@@ -45,6 +45,7 @@ const (
 	researchDiscoveryTimeout          = 7 * time.Second
 	researchAuthorityGrantTTL         = 3 * time.Second
 	researchCapabilityLeaseTTL        = 2 * time.Second
+	researchAuthorityIssuanceTTL      = time.Minute
 	fastInferenceSequenceTimeout      = 8 * time.Second
 	plannerPrecisionRecoveryTimeout   = 6 * time.Second
 	precisionInferenceSequenceTimeout = 10 * time.Second
@@ -138,7 +139,7 @@ type vertexAgent struct {
 	codec          *StateCodec
 	fastModel      string
 	precisionModel string
-	research       research.Verifier
+	research       *securityflow.CrossrefExecutor
 	security       *securityflow.Guard
 	now            func() time.Time
 }
@@ -294,23 +295,45 @@ func newAgent(
 	}
 	securityKey := deriveSecurityflowKey(stateKey)
 	securityGuard, err := securityflow.NewGuard(securityflow.Config{
-		Key:    securityKey,
-		Policy: securityflowPolicy,
-		MaxTTL: researchAuthorityGrantTTL,
+		Key:         securityKey,
+		Policy:      securityflowPolicy,
+		MaxTTL:      researchAuthorityGrantTTL,
+		IssuanceTTL: researchAuthorityIssuanceTTL,
 	})
 	wipe(securityKey)
 	if err != nil {
 		return nil, errors.New("conversation: initialize capability guard")
 	}
-	return &vertexAgent{
+	agent := &vertexAgent{
 		generator:      generator,
 		codec:          codec,
 		fastModel:      fastModel,
 		precisionModel: precisionModel,
-		research:       researchVerifier,
 		security:       securityGuard,
 		now:            time.Now,
-	}, nil
+	}
+	if err := agent.setResearchVerifier(researchVerifier); err != nil {
+		return nil, err
+	}
+	return agent, nil
+}
+
+func (agent *vertexAgent) setResearchVerifier(
+	verifier research.Verifier,
+) error {
+	if agent == nil {
+		return errors.New("conversation: initialize research executor")
+	}
+	if verifier == nil {
+		agent.research = nil
+		return nil
+	}
+	executor, err := securityflow.NewCrossrefExecutor(agent.security, verifier)
+	if err != nil {
+		return errors.New("conversation: initialize research executor")
+	}
+	agent.research = executor
+	return nil
 }
 
 func (agent *vertexAgent) Process(
@@ -354,6 +377,7 @@ func (agent *vertexAgent) Process(
 	if state.Turn >= maxStateTurns {
 		return VoiceTurnResult{}, ErrInvalidStateToken
 	}
+	capabilityFallbackState := state
 	if isStandalonePhaticGreeting(normalized, state) {
 		return agent.completePhaticLocal(uid, state)
 	}
@@ -612,7 +636,7 @@ func (agent *vertexAgent) Process(
 			if errors.Is(researchErr, errResearchCapabilityDenied) {
 				return agent.completePlannerUnavailable(
 					uid,
-					state,
+					capabilityFallbackState,
 					normalized.Ambient,
 				)
 			}
@@ -1248,16 +1272,21 @@ func (agent *vertexAgent) performResearch(
 	if err != nil {
 		return agent.denyResearchCapability(ctx, event)
 	}
-	event, err = agent.security.ConsumeCrossref(lease, scope, proposal)
-	if err != nil {
-		return agent.denyResearchCapability(ctx, event)
-	}
-
 	researchCtx, cancel := context.WithTimeout(ctx, researchDiscoveryTimeout)
 	defer cancel()
-	verification, err := agent.research.Verify(researchCtx, query)
+	verification, event, err := agent.research.Verify(
+		researchCtx,
+		lease,
+		scope,
+		proposal,
+		query,
+	)
 	if ctx.Err() != nil {
 		return "", []ResearchRecord{}, "", ctx.Err()
+	}
+	if errors.Is(err, securityflow.ErrDenied) &&
+		event.Decision == securityflow.DecisionDeny {
+		return agent.denyResearchCapability(ctx, event)
 	}
 	if err != nil ||
 		verification.Status != research.StatusNeedsPrimaryEvidence ||

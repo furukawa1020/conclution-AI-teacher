@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile as readFileRaw } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -42,6 +42,13 @@ import {
   VOICE_LIVE_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
+
+async function readFile(path, encoding) {
+  const contents = await readFileRaw(path, encoding);
+  return typeof contents === "string"
+    ? contents.replaceAll("\r\n", "\n")
+    : contents;
+}
 
 const researchRecord = Object.freeze({
   title: "A-first responses under working-memory load",
@@ -623,8 +630,8 @@ test("live capture accepts only exact 20 ms PCM frames and bounds startup", () =
   assert.equal(VOICE_LIVE_LIMITS.maximumQueuedInputFrames, 200);
   assert.equal(VOICE_LIVE_LIMITS.readyTimeoutMs, 4_000);
   assert.equal(VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs, 100);
-  assert.equal(VOICE_LIVE_LIMITS.handoffReadyTimeoutMs, 450);
   assert.equal(VOICE_LIVE_LIMITS.terminalCloseTimeoutMs, 1_500);
+  assert.equal("handoffReadyTimeoutMs" in VOICE_LIVE_LIMITS, false);
   assert.equal(VOICE_LIVE_LIMITS.maximumSocketBufferedBytes, 16 * 1024);
   assert.equal(VOICE_LIVE_LIMITS.outboundChunkBytes, 640);
   const pcm = new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes);
@@ -1120,6 +1127,11 @@ test("live server protocol gates binary on ready and commit", () => {
 });
 
 test("hybrid endpoint requires provider and local silence agreement", () => {
+  assert.equal(VOICE_SESSION_LIMITS.hybridEndpointSilenceMs, 440);
+  assert.equal(
+    VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs,
+    760,
+  );
   const short = {
     firstVoiceAt: 100,
     hasSpeech: true,
@@ -1230,8 +1242,8 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   assert.match(metric, /ws_open_ms/u);
   assert.match(metric, /auth_ready_ms/u);
   assert.match(metric, /commit_to_first_audio_ms/u);
-  assert.match(metric, /commit_to_estimated_audible_ms/u);
-  assert.match(metric, /speech_end_to_estimated_audible_ms/u);
+  assert.match(metric, /commit_to_audible_ms/u);
+  assert.match(metric, /speech_end_to_audible_ms/u);
   assert.match(metric, /turn_total_ms/u);
   assert.match(metric, /barge_halt_ms/u);
   assert.doesNotMatch(
@@ -1258,22 +1270,10 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
     microphoneAt,
     microphoneAt + 500,
   );
-  assert.match(microphoneConstraints, /autoGainControl:\s*true/u);
-  assert.match(microphoneConstraints, /noiseSuppression:\s*true/u);
+  assert.match(microphoneConstraints, /autoGainControl:\s*false/u);
+  assert.match(microphoneConstraints, /noiseSuppression:\s*false/u);
   assert.match(microphoneConstraints, /echoCancellation:\s*true/u);
-  assert.match(bridge, /let pendingLiveSession/u);
-  assert.match(
-    bridge,
-    /expectedPending = pendingLiveSession/u,
-  );
-  assert.match(
-    bridge,
-    /pendingLiveSession === pending/u,
-  );
-  assert.match(
-    bridge,
-    /activeRecording === recording/u,
-  );
+  assert.doesNotMatch(bridge, /pendingLiveSession/u);
 });
 
 function advancePastInterruptGuard(state, startedAt) {

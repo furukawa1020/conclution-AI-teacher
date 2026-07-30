@@ -535,13 +535,23 @@ func TestSpeculativeCandidateRequiresRepeatedStableExactText(t *testing.T) {
 	}
 
 	tracker.reset()
-	tracker.observe("1234567", true, started)
+	tracker.observe("12345", true, started)
 	if _, ready = tracker.observe(
-		"1234567",
+		"12345",
 		true,
 		started.Add(time.Second),
 	); ready {
-		t.Fatal("a candidate shorter than eight runes became eligible")
+		t.Fatal("a candidate shorter than six runes became eligible")
+	}
+
+	tracker.reset()
+	tracker.observe("日本の首都は", true, started)
+	if candidate, ready = tracker.observe(
+		"日本の首都は",
+		true,
+		started.Add(minSpeculativeStableDuration),
+	); !ready || candidate != "日本の首都は" {
+		t.Fatalf("six-rune question candidate=%q ready=%v", candidate, ready)
 	}
 
 	joined := joinTranscript(
@@ -1394,6 +1404,157 @@ func TestPipelineLiveLatePrestartFailureDoesNotDoubleSpeak(t *testing.T) {
 		outcome.result.LiveTimings.SpecMiss != 1 ||
 		outcome.result.LiveTimings.SpecCancel != 1 {
 		t.Fatalf("timings=%+v", outcome.result.LiveTimings)
+	}
+}
+
+func TestPipelineLiveReleaseFailuresAreTerminalWithoutDuplicateSpeech(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, test := range []struct {
+		name           string
+		rejectDelivery bool
+		mimeType       string
+	}{
+		{
+			name:           "first released delivery fails",
+			rejectDelivery: true,
+		},
+		{
+			name:     "wrong MIME after full buffer release",
+			mimeType: "audio/mpeg",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			const utterance = "abcdef"
+			finalGate := make(chan struct{})
+			returnGate := make(chan struct{})
+			returnGateClosed := false
+			defer func() {
+				if !returnGateClosed {
+					close(returnGate)
+				}
+			}()
+			session := newFakeLiveTranscriptionSession(
+				speechio.StreamingTranscriptionEvent{
+					Kind:      speechio.StreamingTranscriptionInterim,
+					Text:      utterance,
+					Stability: 0.9,
+				},
+				speechio.StreamingTranscriptionEvent{
+					Kind:      speechio.StreamingTranscriptionInterim,
+					Text:      utterance,
+					Stability: 0.95,
+				},
+				speechio.StreamingTranscriptionEvent{
+					Kind: speechio.StreamingTranscriptionFinal,
+					Text: utterance,
+				},
+			)
+			session.eventGates = map[int]<-chan struct{}{2: finalGate}
+			full := bytes.Repeat(
+				[]byte{4, 0},
+				maxSpeculativeTTSBufferBytes/2,
+			)
+			speech := &scriptedLiveSpeech{
+				session: session,
+				scripts: []scriptedSynthesis{{
+					chunks:       [][]byte{full},
+					mimeType:     test.mimeType,
+					beforeReturn: returnGate,
+				}},
+				completed: make(chan int, 1),
+			}
+			agent := &speculativeTestAgent{
+				speculativeResult: liveTestDecision(
+					"speculative reply",
+					"private-state",
+				),
+				normalResult: liveTestDecision(
+					"duplicate reply",
+					"duplicate-state",
+				),
+			}
+			pipeline, err := New(speech, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Unix(1150, 0)
+			pipeline.now = sequenceClock(
+				started,
+				started.Add(minSpeculativeStableDuration),
+			)
+			audio := make(chan []byte, 1)
+			audio <- []byte{1, 0}
+			close(audio)
+			type pipelineOutcome struct {
+				result httpapi.VoiceTurnResult
+				err    error
+			}
+			done := make(chan pipelineOutcome, 1)
+			deliveryAttempted := make(chan []byte, 1)
+			go func() {
+				result, processErr := pipeline.ProcessLive(
+					context.Background(),
+					"uid",
+					httpapi.VoiceTurnInput{},
+					audio,
+					func(chunk []byte) error {
+						deliveryAttempted <- append([]byte(nil), chunk...)
+						if test.rejectDelivery {
+							return errors.New("transport rejected first audio")
+						}
+						return nil
+					},
+				)
+				done <- pipelineOutcome{result: result, err: processErr}
+			}()
+
+			select {
+			case call := <-speech.completed:
+				if call != 0 {
+					t.Fatalf("completed call=%d", call)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("full speculative buffer was not produced")
+			}
+			close(finalGate)
+			select {
+			case chunk := <-deliveryAttempted:
+				if !bytes.Equal(chunk, full) {
+					t.Fatalf("released %d bytes", len(chunk))
+				}
+			case <-time.After(time.Second):
+				t.Fatal("release never attempted first delivery")
+			}
+			if !test.rejectDelivery {
+				close(returnGate)
+				returnGateClosed = true
+			}
+
+			var outcome pipelineOutcome
+			select {
+			case outcome = <-done:
+			case <-time.After(time.Second):
+				t.Fatal("release failure did not terminate")
+			}
+			if outcome.err == nil {
+				t.Fatal("release failure returned success")
+			}
+			if outcome.result.StateToken != "" ||
+				outcome.result.Caption != "" {
+				t.Fatalf("failure exposed final state: %+v", outcome.result)
+			}
+			if texts := speech.synthesisTexts(); len(texts) != 1 {
+				t.Fatalf("failure triggered duplicate TTS: %v", texts)
+			}
+			turns := agent.recordedTurns()
+			if len(turns) != 1 || !turns[0].Speculative {
+				t.Fatalf("failure reran the agent: %+v", turns)
+			}
+		})
 	}
 }
 

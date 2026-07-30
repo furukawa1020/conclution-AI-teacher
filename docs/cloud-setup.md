@@ -161,7 +161,7 @@ gcloud run deploy kotae-api `
   --cpu=1 `
   --memory=1Gi `
   --concurrency=4 `
-  --min-instances=0 `
+  --min-instances=1 `
   --max-instances=3 `
   --timeout=120 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL" `
@@ -169,7 +169,7 @@ gcloud run deploy kotae-api `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:latest"
 ```
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い120秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い120秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。音声会話のcold startを避けるため最小1 instanceを維持します。これは待ち時間と引き換えにCloud Runの継続費用が発生する設定です。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 

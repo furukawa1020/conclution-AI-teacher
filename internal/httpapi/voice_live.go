@@ -26,11 +26,9 @@ const (
 	voiceLiveMaxCaptureDuration = 55 * time.Second
 	voiceLiveMaxStartBytes      = 40 * 1024
 	voiceLiveMaxPCMFrameBytes   = 15 * 1024
-	voiceLivePCMFrameBytes      = 640
 	voiceLiveMaxPCMFrames       = 2_800
-	voiceLiveMaxPCMTotalBytes   = voiceLivePCMFrameBytes *
-		voiceLiveMaxPCMFrames
-	voiceLiveMaxTokenBytes = 8 * 1024
+	voiceLiveMaxPCMTotalBytes   = 2 * 1024 * 1024
+	voiceLiveMaxTokenBytes      = 8 * 1024
 )
 
 const (
@@ -447,27 +445,22 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			}
 			switch read.messageType {
 			case websocket.MessageBinary:
-				if len(read.payload) != voiceLivePCMFrameBytes {
+				validationCode := voiceLivePCMValidationCode(
+					len(read.payload),
+					inputFrames,
+					inputBytes,
+				)
+				if validationCode != "" {
 					clear(read.payload)
+					status := websocket.StatusPolicyViolation
+					if validationCode == voiceLiveCodeTurnTooLarge {
+						status = websocket.StatusMessageTooBig
+					}
 					finishVoiceLiveWithError(
 						liveCtx,
 						conn,
-						voiceLiveCodeResponseInvalid,
-						websocket.StatusPolicyViolation,
-					)
-					cancelLive()
-					return
-				}
-				if len(read.payload) > voiceLiveMaxPCMFrameBytes ||
-					inputFrames >= voiceLiveMaxPCMFrames ||
-					len(read.payload) >
-						voiceLiveMaxPCMTotalBytes-inputBytes {
-					clear(read.payload)
-					finishVoiceLiveWithError(
-						liveCtx,
-						conn,
-						voiceLiveCodeTurnTooLarge,
-						websocket.StatusMessageTooBig,
+						validationCode,
+						status,
 					)
 					cancelLive()
 					return
@@ -686,6 +679,24 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 	default:
 		return false
 	}
+}
+
+func voiceLivePCMValidationCode(
+	frameBytes int,
+	inputFrames int,
+	inputBytes int,
+) string {
+	if frameBytes == 0 || frameBytes%2 != 0 {
+		return voiceLiveCodeResponseInvalid
+	}
+	if frameBytes > voiceLiveMaxPCMFrameBytes ||
+		inputFrames >= voiceLiveMaxPCMFrames ||
+		inputBytes < 0 ||
+		inputBytes > voiceLiveMaxPCMTotalBytes ||
+		frameBytes > voiceLiveMaxPCMTotalBytes-inputBytes {
+		return voiceLiveCodeTurnTooLarge
+	}
+	return ""
 }
 
 func decodeStrictVoiceLiveJSON(payload []byte, destination any) error {

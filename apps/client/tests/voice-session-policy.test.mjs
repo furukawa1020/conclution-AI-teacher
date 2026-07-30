@@ -356,12 +356,22 @@ test("VAD refreshes the trailing-silence clock as soon as confirmed speech resum
     startedAt +
     VOICE_SESSION_LIMITS.minimumVoiceMs +
     VOICE_SESSION_LIMITS.endOfTurnSilenceMs;
-  state = advanceVad(state, {
-    now: resumesAt - VOICE_SESSION_LIMITS.vadIntervalMs,
-    peak: 0.003,
-    rms: 0.003,
-  });
+  for (
+    let now =
+      startedAt +
+      VOICE_SESSION_LIMITS.minimumVoiceMs +
+      VOICE_SESSION_LIMITS.vadIntervalMs;
+    now < resumesAt;
+    now += VOICE_SESSION_LIMITS.vadIntervalMs
+  ) {
+    state = advanceVad(state, {
+      now,
+      peak: 0.003,
+      rms: 0.003,
+    });
+  }
   assert.equal(state.action, null);
+  assert.equal(state.voiceRunMs, 0);
 
   state = advanceVad(state, {
     now: resumesAt,

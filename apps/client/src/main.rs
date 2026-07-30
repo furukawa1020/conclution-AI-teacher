@@ -255,7 +255,7 @@ mod cloud {
         async fn get_status_js() -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = beginTurn)]
-        async fn begin_turn_js() -> Result<JsValue, JsValue>;
+        async fn begin_turn_js(session_state: &str, turn_mode: &str) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = waitForTurnEnd)]
         async fn wait_for_turn_end_js() -> Result<JsValue, JsValue>;
@@ -284,8 +284,16 @@ mod cloud {
         }
     }
 
-    pub async fn begin_turn() -> Result<(), &'static str> {
-        begin_turn_js().await.map(|_| ()).map_err(user_message)
+    pub async fn begin_turn(session_state: &str, intentional: bool) -> Result<(), &'static str> {
+        let turn_mode = if intentional {
+            "intentional"
+        } else {
+            "ambient"
+        };
+        begin_turn_js(session_state, turn_mode)
+            .await
+            .map(|_| ())
+            .map_err(user_message)
     }
 
     pub async fn wait_for_turn_end() -> Result<bool, &'static str> {
@@ -431,7 +439,7 @@ mod cloud {
         CloudState::Unavailable
     }
 
-    pub async fn begin_turn() -> Result<(), &'static str> {
+    pub async fn begin_turn(_session_state: &str, _intentional: bool) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -496,7 +504,8 @@ fn arm_listening(
     }
 
     spawn(async move {
-        if let Err(message) = cloud::begin_turn().await {
+        let state_snapshot = session_state.peek().clone();
+        if let Err(message) = cloud::begin_turn(&state_snapshot, intentional).await {
             if *generation.peek() == operation {
                 cloud::stop_session();
                 document_info.set(None);

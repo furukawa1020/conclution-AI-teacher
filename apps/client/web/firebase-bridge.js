@@ -30,8 +30,12 @@ import {
 import {
   advanceInterruptVad,
   createInterruptVadState,
+  createVoiceLiveClientTransport,
+  createVoiceLiveServerProtocol,
   createVoiceStreamParser,
   INTERRUPT_VAD_LIMITS,
+  safeLiveCaptureFrame,
+  VOICE_LIVE_LIMITS,
   shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
 } from "./voice-stream-policy.mjs";
@@ -45,6 +49,9 @@ const EXPECTED_MESSAGING_SENDER_ID = "551920539470";
 const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
 const VOICE_ENDPOINT =
   "https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream";
+const VOICE_LIVE_ENDPOINT =
+  "wss://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/live";
+const PCM_CAPTURE_WORKLET_URL = "/pcm-capture-worklet.js";
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
 const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/healthz`;
 
@@ -71,6 +78,7 @@ let analyserStream;
 let activeRecording;
 let activeRequestController;
 let activePlayback;
+let activeLiveSession;
 let pendingDocument;
 let pendingDocumentTimer;
 let voiceTransportPrimed = false;
@@ -84,6 +92,34 @@ const sessionClock = createSessionClock({
 
 function fail(code) {
   throw new Error(code);
+}
+
+function boundedLatency(value) {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.min(120_000, Math.round(value * 10) / 10);
+}
+
+function dispatchVoiceLatency({
+  authReadyMs = 0,
+  bargeHaltMs = 0,
+  commitToFirstAudioMs = 0,
+  turnTotalMs = 0,
+  wsOpenMs = 0,
+}) {
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-latency", {
+      detail: Object.freeze({
+        auth_ready_ms: boundedLatency(authReadyMs),
+        barge_halt_ms: boundedLatency(bargeHaltMs),
+        commit_to_first_audio_ms: boundedLatency(
+          commitToFirstAudioMs,
+        ),
+        turn_total_ms: boundedLatency(turnTotalMs),
+        version: 1,
+        ws_open_ms: boundedLatency(wsOpenMs),
+      }),
+    }),
+  );
 }
 
 function isPlainRecord(value) {
@@ -376,9 +412,16 @@ function createAudioContext() {
     fail("microphone_unsupported");
   }
   try {
-    return new AudioContextConstructor({ latencyHint: "interactive" });
+    return new AudioContextConstructor({
+      latencyHint: "interactive",
+      sampleRate: 16_000,
+    });
   } catch {
-    return new AudioContextConstructor();
+    try {
+      return new AudioContextConstructor({ latencyHint: "interactive" });
+    } catch {
+      return new AudioContextConstructor();
+    }
   }
 }
 
@@ -765,12 +808,20 @@ function createRecording(stream) {
   return recording;
 }
 
-async function beginTurn() {
+async function beginTurn(serializedSessionState, turnMode) {
   if (document.hidden) {
     stopSession();
     fail("request_cancelled");
   }
-  if (activeRecording || beginGate.isBusy() || finishGate.isBusy()) {
+  if (
+    typeof serializedSessionState !== "string" ||
+    serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
+    !isValidTurnMode(turnMode) ||
+    activeRecording ||
+    activeLiveSession ||
+    beginGate.isBusy() ||
+    finishGate.isBusy()
+  ) {
     fail("voice_turn_invalid");
   }
   const beginToken = beginGate.acquire();
@@ -789,7 +840,7 @@ async function beginTurn() {
     const expectedEpoch = sessionEpoch;
     return await initializeWithCleanup(
       async () => {
-        await secureCredentials();
+        const credentials = await secureCredentials();
         if (expectedEpoch !== sessionEpoch) {
           fail("request_cancelled");
         }
@@ -801,10 +852,19 @@ async function beginTurn() {
 
         setStreamTracksEnabled(stream, true);
         activeRecording = createRecording(stream);
+        activeLiveSession = await startVoiceLiveSession({
+          ...credentials,
+          expectedEpoch,
+          sessionState: serializedSessionState,
+          stream,
+          turnMode,
+        });
         return Object.freeze({ state: "listening" });
       },
       () => {
         if (expectedEpoch === sessionEpoch) {
+          activeLiveSession?.cancel(new Error("request_cancelled"));
+          activeLiveSession = undefined;
           releaseMicrophone();
           sessionClock.reset();
         }
@@ -824,6 +884,10 @@ async function waitForTurnEnd() {
   try {
     capture = await recording.endPromise;
   } catch (error) {
+    activeLiveSession?.cancel(
+      error instanceof Error ? error : new Error("request_cancelled"),
+    );
+    activeLiveSession = undefined;
     stopVad(recording);
     recording.discard = true;
     requestRecordingStop(recording, "cancelled");
@@ -836,6 +900,8 @@ async function waitForTurnEnd() {
     fail("request_cancelled");
   }
   if (!capture.hasSpeech) {
+    activeLiveSession?.cancel(new Error("no_speech"));
+    activeLiveSession = undefined;
     activeRecording = undefined;
   } else {
     sessionClock.markSpeech();
@@ -1002,6 +1068,408 @@ function mapVoiceResponseError(status) {
   return "voice_api_unavailable";
 }
 
+function liveVoiceSupported(stream) {
+  return Boolean(
+    typeof globalThis.WebSocket === "function" &&
+      typeof globalThis.AudioWorkletNode === "function" &&
+      audioContext &&
+      audioContext.state !== "closed" &&
+      audioContext.audioWorklet &&
+      typeof audioContext.audioWorklet.addModule === "function" &&
+      hasVerifiedEchoCancellation(stream),
+  );
+}
+
+function liveCredential(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 8_192 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}
+
+async function startVoiceLiveSession({
+  appCheckToken,
+  expectedEpoch,
+  idToken,
+  sessionState,
+  stream,
+  turnMode,
+}) {
+  if (
+    pendingDocument ||
+    !liveVoiceSupported(stream) ||
+    !liveCredential(appCheckToken) ||
+    !liveCredential(idToken) ||
+    typeof sessionState !== "string" ||
+    sessionState.length > SESSION_STATE_MAX_CHARS ||
+    !isValidTurnMode(turnMode)
+  ) {
+    return undefined;
+  }
+  const liveStartedAt = performance.now();
+
+  try {
+    await audioContext.audioWorklet.addModule(PCM_CAPTURE_WORKLET_URL);
+  } catch {
+    return undefined;
+  }
+  if (
+    expectedEpoch !== sessionEpoch ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    fail("request_cancelled");
+  }
+
+  let captureNode;
+  let captureSource;
+  let socket;
+  try {
+    captureNode = new AudioWorkletNode(
+      audioContext,
+      "kotae-pcm-capture",
+      {
+        channelCount: 1,
+        channelCountMode: "explicit",
+        numberOfInputs: 1,
+        numberOfOutputs: 0,
+      },
+    );
+    captureSource = audioContext.createMediaStreamSource(stream);
+    socket = new WebSocket(VOICE_LIVE_ENDPOINT);
+  } catch {
+    captureNode?.disconnect();
+    captureSource?.disconnect();
+    return undefined;
+  }
+  socket.binaryType = "arraybuffer";
+
+  const clientTransport = createVoiceLiveClientTransport(socket, {
+    type: "start",
+    version: 1,
+    idToken,
+    appCheckToken,
+    sessionState,
+    turnMode,
+    sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
+  });
+  const protocol = createVoiceLiveServerProtocol((result) =>
+    safeVoiceResponse(result),
+  );
+  let captureStopped = false;
+  let authReadyMs = 0;
+  let commitAt;
+  let commitToFirstAudioMs = 0;
+  let commitSent = false;
+  let latencyDispatched = false;
+  let finalResult;
+  let readySettled = false;
+  let rejectReady;
+  let rejectResult;
+  let resolveReady;
+  let resolveResult;
+  let resultSettled = false;
+  let state = "connecting";
+  let wsOpenMs = 0;
+  const readyPromise = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const resultPromise = new Promise((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+  void readyPromise.catch(() => {});
+  void resultPromise.catch(() => {});
+
+  function stopCapture() {
+    if (captureStopped) return;
+    captureStopped = true;
+    captureNode.port.onmessage = null;
+    try {
+      captureNode.port.postMessage(
+        Object.freeze({ type: "stop", version: 1 }),
+      );
+    } catch {
+      // A failed worklet is already being removed from the graph.
+    }
+    captureSource.disconnect();
+    captureNode.disconnect();
+  }
+
+  function emitLatency(bargeHaltMs = 0) {
+    if (latencyDispatched) return;
+    latencyDispatched = true;
+    dispatchVoiceLatency({
+      authReadyMs,
+      bargeHaltMs,
+      commitToFirstAudioMs,
+      turnTotalMs: performance.now() - liveStartedAt,
+      wsOpenMs,
+    });
+  }
+
+  function closeSocket(code, reason) {
+    if (
+      socket.readyState === WebSocket.CONNECTING ||
+      socket.readyState === WebSocket.OPEN
+    ) {
+      try {
+        socket.close(code, reason);
+      } catch {
+        // The close event will settle a socket that raced shutdown.
+      }
+    }
+  }
+
+  function settleReady(error) {
+    if (readySettled) return;
+    readySettled = true;
+    if (error) {
+      rejectReady(error);
+    } else {
+      resolveReady();
+    }
+  }
+
+  function settleResult(error, result) {
+    if (resultSettled) return;
+    resultSettled = true;
+    if (error) {
+      rejectResult(error);
+    } else {
+      resolveResult(result);
+    }
+  }
+
+  function failLive(error) {
+    if (state === "failed" || state === "cancelled") return;
+    state = "failed";
+    clientTransport.close();
+    stopCapture();
+    if (session?.playback) {
+      haltStreamingPlayback(session.playback, error);
+    }
+    settleReady(error);
+    settleResult(error);
+    closeSocket(4002, "voice_live_failed");
+  }
+
+  function acceptWorkletMessage(event) {
+    if (
+      expectedEpoch !== sessionEpoch ||
+      state === "failed" ||
+      state === "cancelled" ||
+      state === "committed" ||
+      state === "final"
+    ) {
+      return;
+    }
+    try {
+      const frame = safeLiveCaptureFrame(event.data);
+      clientTransport.pushFrame(frame);
+    } catch (error) {
+      failLive(
+        error instanceof Error
+          ? error
+          : new Error("voice_api_unavailable"),
+      );
+    }
+  }
+
+  let session;
+  function acceptSocketMessage(event) {
+    if (
+      expectedEpoch !== sessionEpoch ||
+      state === "failed" ||
+      state === "cancelled"
+    ) {
+      return;
+    }
+    try {
+      if (typeof event.data === "string") {
+        const message = protocol.acceptText(event.data);
+        if (message.type === "error") {
+          failLive(new Error(message.code));
+          return;
+        }
+        if (message.type === "ready") {
+          if (state !== "awaiting-ready") {
+            fail("voice_response_invalid");
+          }
+          state = "ready";
+          authReadyMs = performance.now() - liveStartedAt;
+          clientTransport.markReady();
+          settleReady();
+          return;
+        }
+        if (message.type === "final") {
+          if (state !== "committed" || !session.playback) {
+            fail("voice_response_invalid");
+          }
+          state = "final";
+          finalResult = message.result;
+          session.playback.finalReceived = true;
+          session.playback.seal();
+          settleResult(undefined, finalResult);
+          closeSocket(1000, "complete");
+          return;
+        }
+        fail("voice_response_invalid");
+      }
+      if (!(event.data instanceof ArrayBuffer)) {
+        fail("voice_response_invalid");
+      }
+      if (state !== "committed" || !session.playback) {
+        fail("voice_response_invalid");
+      }
+      if (commitToFirstAudioMs === 0 && commitAt !== undefined) {
+        commitToFirstAudioMs = performance.now() - commitAt;
+      }
+      session.playback.schedulePcm(protocol.acceptBinary(event.data));
+    } catch (error) {
+      failLive(
+        error instanceof Error
+          ? error
+          : new Error("voice_response_invalid"),
+      );
+    }
+  }
+
+  session = {
+    playback: undefined,
+    canFallback() {
+      return !commitSent;
+    },
+    matches(expectedSessionState, expectedTurnMode) {
+      return (
+        expectedSessionState === sessionState &&
+        expectedTurnMode === turnMode
+      );
+    },
+    cancel(error = new Error("request_cancelled")) {
+      if (state === "cancelled") return;
+      state = "cancelled";
+      clientTransport.close();
+      stopCapture();
+      settleReady(error);
+      settleResult(error);
+      closeSocket(4001, "cancelled");
+    },
+    async commit(playback) {
+      stopCapture();
+      if (state !== "ready") {
+        let timeout;
+        try {
+          await Promise.race([
+            readyPromise,
+            new Promise((_, reject) => {
+              timeout = setTimeout(
+                () => reject(new Error("voice_api_unavailable")),
+                VOICE_LIVE_LIMITS.readyTimeoutMs,
+              );
+            }),
+          ]);
+        } finally {
+          if (timeout !== undefined) clearTimeout(timeout);
+        }
+      }
+      if (state !== "ready" || expectedEpoch !== sessionEpoch) {
+        throw new Error(
+          expectedEpoch === sessionEpoch
+            ? "voice_api_unavailable"
+            : "request_cancelled",
+        );
+      }
+      session.playback = playback;
+      protocol.markCommitted();
+      clientTransport.commit();
+      state = "committed";
+      commitSent = true;
+      commitAt = performance.now();
+
+      const result = await resultPromise;
+      try {
+        await playback.completion;
+      } catch (error) {
+        if (!playback.interrupted) throw error;
+      }
+      const snapshot = protocol.snapshot();
+      emitLatency();
+      return Object.freeze({
+        ...result,
+        interrupted: playback.interrupted,
+        streamedAudio: snapshot.audioEventCount > 0,
+      });
+    },
+    interrupt(error = new Error("voice_interrupted")) {
+      clientTransport.close();
+      stopCapture();
+      if (state !== "final") {
+        settleReady(error);
+        settleResult(error);
+      }
+      closeSocket(4000, "voice_interrupted");
+    },
+    recordBargeIn(bargeHaltMs) {
+      emitLatency(bargeHaltMs);
+    },
+    state() {
+      return state;
+    },
+  };
+
+  captureNode.port.onmessage = acceptWorkletMessage;
+  captureNode.addEventListener(
+    "processorerror",
+    () => failLive(new Error("voice_api_unavailable")),
+    { once: true },
+  );
+  socket.addEventListener("message", acceptSocketMessage);
+  socket.addEventListener(
+    "open",
+    () => {
+      if (
+        expectedEpoch !== sessionEpoch ||
+        state !== "connecting"
+      ) {
+        closeSocket(4001, "stale");
+        return;
+      }
+      try {
+        clientTransport.open();
+        wsOpenMs = performance.now() - liveStartedAt;
+        state = "awaiting-ready";
+      } catch {
+        failLive(new Error("voice_api_unavailable"));
+      }
+    },
+    { once: true },
+  );
+  socket.addEventListener(
+    "close",
+    () => {
+      if (state === "final") {
+        state = "complete";
+        return;
+      }
+      if (state !== "failed" && state !== "cancelled") {
+        failLive(new Error("voice_api_unavailable"));
+      }
+    },
+    { once: true },
+  );
+  socket.addEventListener(
+    "error",
+    () => failLive(new Error("voice_api_unavailable")),
+    { once: true },
+  );
+  captureSource.connect(captureNode);
+  return session;
+}
+
 function isNdjsonContentType(value) {
   return (
     typeof value === "string" &&
@@ -1011,8 +1479,11 @@ function isNdjsonContentType(value) {
   );
 }
 
-function pcm16AudioBuffer(audioBase64, decodedBytes, sampleRateHz) {
-  const encoded = new Uint8Array(base64ToArrayBuffer(audioBase64));
+function pcm16BytesAudioBuffer(encodedBuffer, decodedBytes, sampleRateHz) {
+  if (!(encodedBuffer instanceof ArrayBuffer)) {
+    fail("voice_response_invalid");
+  }
+  const encoded = new Uint8Array(encodedBuffer);
   if (
     encoded.byteLength !== decodedBytes ||
     encoded.byteLength === 0 ||
@@ -1042,6 +1513,14 @@ function pcm16AudioBuffer(audioBase64, decodedBytes, sampleRateHz) {
   return buffer;
 }
 
+function pcm16AudioBuffer(audioBase64, decodedBytes, sampleRateHz) {
+  return pcm16BytesAudioBuffer(
+    base64ToArrayBuffer(audioBase64),
+    decodedBytes,
+    sampleRateHz,
+  );
+}
+
 function abandonInterruptRecording(recording) {
   if (!recording || recording.settled) return;
   recording.settled = true;
@@ -1059,12 +1538,36 @@ function abandonInterruptRecording(recording) {
 
 function stopBargeInMonitoring(playback) {
   if (!playback || playback.interrupted) return;
+  restorePlaybackGain(playback);
   if (playback.interruptRecording) {
     abandonInterruptRecording(playback.interruptRecording);
     playback.interruptRecording = undefined;
   }
   playback.resetInterruptGuard = undefined;
   setTracksEnabled(false);
+}
+
+function rampPlaybackGain(playback, target, seconds) {
+  if (
+    !playback?.gainNode ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    return;
+  }
+  const gain = playback.gainNode.gain;
+  const now = audioContext.currentTime;
+  gain.cancelScheduledValues(now);
+  gain.setValueAtTime(gain.value, now);
+  gain.linearRampToValueAtTime(target, now + seconds);
+}
+
+function softDuckPlayback(playback) {
+  rampPlaybackGain(playback, 0.1, 0.008);
+}
+
+function restorePlaybackGain(playback) {
+  rampPlaybackGain(playback, 1, 0.02);
 }
 
 function hasVerifiedEchoCancellation(stream) {
@@ -1097,6 +1600,13 @@ function confirmBargeIn(playback, recording, candidate) {
   sessionClock.markSpeech();
 
   const interruption = new Error("voice_interrupted");
+  const interruptionStartedAt = Number.isFinite(
+    recording.interruptOnsetAt,
+  )
+    ? recording.interruptOnsetAt
+    : performance.now();
+  const interruptedLiveSession = activeLiveSession;
+  interruptedLiveSession?.interrupt(interruption);
   // Once a final frame has been parsed, keep reading to a clean EOF so
   // trailing bytes cannot be hidden by the interruption. Before final, there
   // is no state that can be committed, so abort the transport immediately.
@@ -1104,6 +1614,15 @@ function confirmBargeIn(playback, recording, candidate) {
     activeRequestController.abort();
   }
   haltStreamingPlayback(playback, interruption);
+  const bargeHaltMs = performance.now() - interruptionStartedAt;
+  if (interruptedLiveSession) {
+    interruptedLiveSession.recordBargeIn(bargeHaltMs);
+  } else {
+    dispatchVoiceLatency({ bargeHaltMs });
+  }
+  if (activeLiveSession === interruptedLiveSession) {
+    activeLiveSession = undefined;
+  }
   globalThis.dispatchEvent(
     new CustomEvent("kotae:voice-interrupted", {
       detail: Object.freeze({
@@ -1165,8 +1684,12 @@ function startBargeInMonitoring(playback, expectedEpoch) {
     });
 
     if (vadState.action === "start") {
+      recording.interruptOnsetAt = vadState.candidateStartedAt;
       if (!startCandidateRecorder(recording, false)) return;
+      softDuckPlayback(playback);
     } else if (vadState.action === "discard") {
+      recording.interruptOnsetAt = undefined;
+      restorePlaybackGain(playback);
       if (!discardCurrentCandidate(recording, "interrupt-rejected")) {
         abandonInterruptRecording(recording);
       }
@@ -1198,6 +1721,9 @@ function createStreamingPlayback(expectedEpoch) {
   let settled = false;
   let streamedAudio = false;
   const sources = new Set();
+  const gainNode = audioContext.createGain();
+  gainNode.gain.setValueAtTime(1, audioContext.currentTime);
+  gainNode.connect(audioContext.destination);
   const completion = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
@@ -1205,9 +1731,74 @@ function createStreamingPlayback(expectedEpoch) {
   // stopSession can reject playback before finishTurn reaches its await.
   void completion.catch(() => {});
 
-  const playback = {
+  let playback;
+  function scheduleBuffer(buffer, event) {
+    if (
+      settled ||
+      sealed ||
+      expectedEpoch !== sessionEpoch ||
+      !audioContext ||
+      audioContext.state === "closed"
+    ) {
+      fail("request_cancelled");
+    }
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(gainNode);
+
+    const startAt = Math.max(
+      nextStartAt,
+      audioContext.currentTime + 0.015,
+    );
+    pendingSources += 1;
+    sources.add(source);
+    source.addEventListener(
+      "ended",
+      () => {
+        sources.delete(source);
+        source.disconnect();
+        pendingSources -= 1;
+        if (sealed && pendingSources === 0 && !settled) {
+          settled = true;
+          stopBargeInMonitoring(playback);
+          if (activePlayback === playback) {
+            activePlayback = undefined;
+          }
+          gainNode.disconnect();
+          resolveCompletion();
+        }
+      },
+      { once: true },
+    );
+    try {
+      source.start(startAt);
+    } catch {
+      sources.delete(source);
+      pendingSources -= 1;
+      source.disconnect();
+      fail("audio_playback_blocked");
+    }
+    nextStartAt = startAt + buffer.duration;
+
+    if (!streamedAudio) {
+      streamedAudio = true;
+      if (playback.interruptRecording) {
+        playback.resetInterruptGuard?.();
+      } else {
+        startBargeInMonitoring(playback, expectedEpoch);
+      }
+      globalThis.dispatchEvent(
+        new CustomEvent("kotae:first-audio", {
+          detail: Object.freeze({ sequence: event.sequence, version: 1 }),
+        }),
+      );
+    }
+  }
+
+  playback = {
     completion,
     finalReceived: false,
+    gainNode,
     hasStreamedAudio: () => streamedAudio,
     interruptRecording: undefined,
     interrupted: false,
@@ -1218,70 +1809,20 @@ function createStreamingPlayback(expectedEpoch) {
       rejectCompletion(error);
     },
     schedule(event) {
-      if (
-        settled ||
-        sealed ||
-        expectedEpoch !== sessionEpoch ||
-        !audioContext ||
-        audioContext.state === "closed"
-      ) {
-        fail("request_cancelled");
-      }
       const buffer = pcm16AudioBuffer(
         event.audioBase64,
         event.decodedBytes,
         event.sampleRateHz,
       );
-      const source = audioContext.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioContext.destination);
-
-      const startAt = Math.max(
-        nextStartAt,
-        audioContext.currentTime + 0.015,
+      scheduleBuffer(buffer, event);
+    },
+    schedulePcm(event) {
+      const buffer = pcm16BytesAudioBuffer(
+        event.pcm,
+        event.pcm.byteLength,
+        event.sampleRateHz,
       );
-      pendingSources += 1;
-      sources.add(source);
-      source.addEventListener(
-        "ended",
-        () => {
-          sources.delete(source);
-          source.disconnect();
-          pendingSources -= 1;
-          if (sealed && pendingSources === 0 && !settled) {
-            settled = true;
-            stopBargeInMonitoring(playback);
-            if (activePlayback === playback) {
-              activePlayback = undefined;
-            }
-            resolveCompletion();
-          }
-        },
-        { once: true },
-      );
-      try {
-        source.start(startAt);
-      } catch {
-        sources.delete(source);
-        pendingSources -= 1;
-        source.disconnect();
-        fail("audio_playback_blocked");
-      }
-      nextStartAt = startAt + buffer.duration;
-
-      if (!streamedAudio) {
-        streamedAudio = true;
-        if (playback.interruptRecording) {
-          playback.resetInterruptGuard?.();
-        } else {
-          startBargeInMonitoring(playback, expectedEpoch);
-        }
-        globalThis.dispatchEvent(
-          new CustomEvent("kotae:first-audio", {
-            detail: Object.freeze({ sequence: event.sequence, version: 1 }),
-          }),
-        );
-      }
+      scheduleBuffer(buffer, event);
     },
     seal() {
       if (settled || sealed) {
@@ -1294,6 +1835,7 @@ function createStreamingPlayback(expectedEpoch) {
         if (activePlayback === playback) {
           activePlayback = undefined;
         }
+        gainNode.disconnect();
         resolveCompletion();
       }
     },
@@ -1321,6 +1863,7 @@ function haltStreamingPlayback(playback, error) {
     source.disconnect();
   }
   playback.sources.clear();
+  playback.gainNode?.disconnect();
 }
 
 async function consumeVoiceStream(response, playback, expectedEpoch) {
@@ -1433,6 +1976,7 @@ async function finishTurn(serializedSessionState, turnMode) {
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
   let documentForTurn;
+  let liveSession = activeLiveSession;
   let playback;
   let requestController;
   try {
@@ -1450,6 +1994,62 @@ async function finishTurn(serializedSessionState, turnMode) {
     documentForTurn = pendingDocument;
     if (documentForTurn) {
       clearPendingDocument("consumed");
+    }
+    if (
+      liveSession &&
+      !liveSession.matches(serializedSessionState, turnMode)
+    ) {
+      liveSession.cancel(new Error("voice_turn_invalid"));
+      fail("voice_turn_invalid");
+    }
+    if (liveSession && documentForTurn) {
+      liveSession.cancel(new Error("voice_live_pdf_fallback"));
+      if (activeLiveSession === liveSession) {
+        activeLiveSession = undefined;
+      }
+      liveSession = undefined;
+    }
+    if (liveSession) {
+      setTracksEnabled(false);
+      if (!audioContext || audioContext.state === "closed") {
+        fail("audio_playback_blocked");
+      }
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+      if (expectedEpoch !== sessionEpoch) {
+        fail("request_cancelled");
+      }
+      playback = createStreamingPlayback(expectedEpoch);
+      startBargeInMonitoring(playback, expectedEpoch);
+      try {
+        return await liveSession.commit(playback);
+      } catch (error) {
+        if (
+          !liveSession.canFallback() ||
+          playback.interrupted ||
+          (error instanceof Error &&
+            error.message === "request_cancelled")
+        ) {
+          throw error;
+        }
+        liveSession.cancel(
+          error instanceof Error
+            ? error
+            : new Error("voice_api_unavailable"),
+        );
+        haltStreamingPlayback(
+          playback,
+          error instanceof Error
+            ? error
+            : new Error("voice_api_unavailable"),
+        );
+        playback = undefined;
+        if (activeLiveSession === liveSession) {
+          activeLiveSession = undefined;
+        }
+        liveSession = undefined;
+      }
     }
     const [audioBuffer, credentials] = await Promise.all([
       capture.blob.arrayBuffer(),
@@ -1511,6 +2111,9 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     return await consumeVoiceStream(response, playback, expectedEpoch);
   } catch (error) {
+    liveSession?.cancel(
+      error instanceof Error ? error : new Error("voice_api_unavailable"),
+    );
     haltStreamingPlayback(
       playback,
       error instanceof Error ? error : new Error("voice_response_invalid"),
@@ -1527,6 +2130,9 @@ async function finishTurn(serializedSessionState, turnMode) {
     audioBase64 = "";
     if (activeRequestController === requestController) {
       activeRequestController = undefined;
+    }
+    if (activeLiveSession === liveSession) {
+      activeLiveSession = undefined;
     }
     if (activeRecording === recording) {
       activeRecording = undefined;
@@ -1586,6 +2192,10 @@ async function attachDocument(inputId) {
     mimeType: "application/pdf",
     name,
   });
+  if (activeLiveSession?.canFallback()) {
+    activeLiveSession.cancel(new Error("voice_live_pdf_fallback"));
+    activeLiveSession = undefined;
+  }
   armPendingDocumentExpiry(pendingDocument, attachedAt);
   base64 = "";
   return Object.freeze({
@@ -1603,6 +2213,11 @@ function stopSession() {
     activeRequestController.abort();
     activeRequestController = undefined;
   }
+  if (activeLiveSession) {
+    const liveSession = activeLiveSession;
+    activeLiveSession = undefined;
+    liveSession.cancel(new Error("request_cancelled"));
+  }
   if (activePlayback) {
     const playback = activePlayback;
     activePlayback = undefined;
@@ -1617,6 +2232,7 @@ function stopSession() {
       source.disconnect();
     }
     playback.sources.clear();
+    playback.gainNode?.disconnect();
   }
   releaseMicrophone();
   sessionClock.reset();
@@ -1630,6 +2246,7 @@ function hasActiveVoiceSession() {
     activeRecording ||
     beginGate.isBusy() ||
     activeRequestController ||
+    activeLiveSession ||
     activePlayback ||
     finishGate.isBusy() ||
     pendingDocument ||

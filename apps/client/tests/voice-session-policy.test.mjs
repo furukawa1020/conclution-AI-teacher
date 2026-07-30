@@ -23,9 +23,14 @@ import {
 import {
   advanceInterruptVad,
   createInterruptVadState,
+  createLivePcmQueue,
+  createVoiceLiveClientTransport,
+  createVoiceLiveServerProtocol,
   createVoiceStreamParser,
   INTERRUPT_VAD_LIMITS,
   shouldAbortVoiceTransportOnInterrupt,
+  safeLiveCaptureFrame,
+  VOICE_LIVE_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
 
@@ -100,7 +105,7 @@ test("explicit voice start warms only the fixed transport without private data",
     /Authorization|audioBase64|sessionState|X-Firebase-AppCheck/u,
   );
 
-  const beginStart = bridge.indexOf("async function beginTurn()");
+  const beginStart = bridge.indexOf("async function beginTurn(");
   const beginEnd = bridge.indexOf("\n}\n\nasync function waitForTurnEnd", beginStart);
   const begin = bridge.slice(beginStart, beginEnd);
   const sessionAt = begin.indexOf("sessionClock.begin()");
@@ -555,6 +560,227 @@ test("voice stream requires version 1 on every PCM frame", () => {
   }
 });
 
+function liveStartFrame() {
+  return {
+    type: "start",
+    version: 1,
+    idToken: "firebase-id-token",
+    appCheckToken: "app-check-token",
+    sessionState: "opaque-state",
+    turnMode: "ambient",
+    sampleRateHz: 16_000,
+  };
+}
+
+class MockWebSocket {
+  constructor() {
+    this.bufferedAmount = 0;
+    this.readyState = 1;
+    this.sent = [];
+  }
+
+  send(value) {
+    this.sent.push(value);
+  }
+}
+
+test("live capture accepts only exact 20 ms PCM frames and bounds startup", () => {
+  assert.equal(VOICE_LIVE_LIMITS.maximumQueuedInputFrames, 200);
+  assert.equal(VOICE_LIVE_LIMITS.readyTimeoutMs, 4_000);
+  assert.equal(VOICE_LIVE_LIMITS.maximumSocketBufferedBytes, 16 * 1024);
+  assert.equal(VOICE_LIVE_LIMITS.outboundChunkBytes, 3_200);
+  const pcm = new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes);
+  assert.equal(
+    safeLiveCaptureFrame({
+      type: "frame",
+      version: 1,
+      sampleRateHz: 16_000,
+      pcm,
+    }),
+    pcm,
+  );
+  assert.throws(
+    () =>
+      safeLiveCaptureFrame({
+        type: "frame",
+        version: 1,
+        sampleRateHz: 16_000,
+        pcm,
+        ignored: true,
+      }),
+    /voice_live_frame_invalid/,
+  );
+
+  const queue = createLivePcmQueue();
+  for (
+    let index = 0;
+    index < VOICE_LIVE_LIMITS.maximumQueuedInputFrames;
+    index += 1
+  ) {
+    queue.push(new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes));
+  }
+  assert.throws(
+    () => queue.push(new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes)),
+    /voice_live_queue_overflow/,
+  );
+  assert.equal(queue.size(), 0);
+});
+
+test("mock WebSocket sends auth in first text then 100 ms PCM chunks", () => {
+  const socket = new MockWebSocket();
+  const transport = createVoiceLiveClientTransport(
+    socket,
+    liveStartFrame(),
+  );
+  for (let index = 0; index < 7; index += 1) {
+    transport.pushFrame(
+      new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
+    );
+  }
+  transport.open();
+  assert.deepEqual(JSON.parse(socket.sent[0]), liveStartFrame());
+  transport.markReady();
+  assert.equal(socket.sent[1] instanceof ArrayBuffer, true);
+  assert.equal(
+    socket.sent[1].byteLength,
+    VOICE_LIVE_LIMITS.outboundChunkBytes,
+  );
+  assert.equal(transport.snapshot().queuedFrames, 2);
+
+  for (let index = 0; index < 3; index += 1) {
+    transport.pushFrame(
+      new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
+    );
+  }
+  assert.equal(
+    socket.sent[2].byteLength,
+    VOICE_LIVE_LIMITS.outboundChunkBytes,
+  );
+  transport.commit();
+  assert.deepEqual(JSON.parse(socket.sent[3]), {
+    type: "commit",
+    version: 1,
+  });
+});
+
+test("live commit flushes an even partial chunk and fails on backpressure", () => {
+  const partialSocket = new MockWebSocket();
+  const partial = createVoiceLiveClientTransport(
+    partialSocket,
+    liveStartFrame(),
+  );
+  partial.open();
+  partial.markReady();
+  partial.pushFrame(
+    new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
+  );
+  partial.pushFrame(
+    new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
+  );
+  partial.commit();
+  assert.equal(
+    partialSocket.sent[1].byteLength,
+    2 * VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+  assert.equal(partialSocket.sent[1].byteLength % 2, 0);
+
+  const stalledSocket = new MockWebSocket();
+  const stalled = createVoiceLiveClientTransport(
+    stalledSocket,
+    liveStartFrame(),
+  );
+  stalled.open();
+  stalled.markReady();
+  for (let index = 0; index < 5; index += 1) {
+    stalled.pushFrame(
+      new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
+    );
+  }
+  stalledSocket.bufferedAmount =
+    VOICE_LIVE_LIMITS.maximumSocketBufferedBytes;
+  for (let index = 0; index < 5; index += 1) {
+    stalled.pushFrame(
+      new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
+    );
+  }
+  assert.equal(stalled.snapshot().queuedFrames, 5);
+  assert.throws(() => stalled.commit(), /voice_api_unavailable/);
+});
+
+test("live server protocol gates binary on ready and commit", () => {
+  const protocol = createVoiceLiveServerProtocol((result) =>
+    Object.freeze({ ...result }),
+  );
+  assert.throws(
+    () => protocol.acceptBinary(new ArrayBuffer(4)),
+    /voice_response_invalid/,
+  );
+  assert.deepEqual(
+    protocol.acceptText(JSON.stringify({ type: "ready", version: 1 })),
+    { type: "ready", version: 1 },
+  );
+  protocol.markCommitted();
+  const audio = protocol.acceptBinary(new ArrayBuffer(4));
+  assert.equal(audio.sequence, 0);
+  assert.equal(audio.sampleRateHz, 24_000);
+  const final = protocol.acceptText(
+    JSON.stringify({
+      type: "final",
+      version: 1,
+      result: finalVoiceResult(),
+    }),
+  );
+  assert.equal(final.type, "final");
+  assert.equal(protocol.snapshot().totalAudioBytes, 4);
+  assert.throws(
+    () =>
+      protocol.acceptText(
+        JSON.stringify({ type: "ready", version: 1 }),
+      ),
+    /voice_response_invalid/,
+  );
+});
+
+test("live bridge keeps credentials out of URL and latency detail", async () => {
+  const [bridge, worklet] = await Promise.all([
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(
+      new URL("../web/pcm-capture-worklet.js", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.match(
+    bridge,
+    /wss:\/\/kotae-api-r6kgkvtrmq-an\.a\.run\.app\/api\/v1\/voice\/live/u,
+  );
+  assert.doesNotMatch(
+    bridge,
+    /wss:\/\/kotae-api-r6kgkvtrmq-an\.a\.run\.app\/api\/v1\/voice\/live\?/u,
+  );
+  assert.match(bridge, /new WebSocket\(VOICE_LIVE_ENDPOINT\)/u);
+  const metricAt = bridge.indexOf("function dispatchVoiceLatency(");
+  const metric = bridge.slice(metricAt, metricAt + 1_200);
+  assert.match(metric, /ws_open_ms/u);
+  assert.match(metric, /auth_ready_ms/u);
+  assert.match(metric, /commit_to_first_audio_ms/u);
+  assert.match(metric, /turn_total_ms/u);
+  assert.match(metric, /barge_halt_ms/u);
+  assert.doesNotMatch(
+    metric,
+    /idToken|appCheckToken|sessionState|audioBase64|caption/u,
+  );
+
+  assert.match(worklet, /OUTPUT_SAMPLE_RATE_HZ = 16_000/u);
+  assert.match(worklet, /FRAME_BYTES = FRAME_SAMPLES \* 2/u);
+  assert.match(worklet, /setInt16\(this\.frameOffset, pcm, true\)/u);
+  assert.match(worklet, /\[completed\]/u);
+  assert.match(worklet, /weighted \/ this\.ratio/u);
+  assert.match(
+    bridge,
+    /sampleRate:\s*16_000/u,
+  );
+});
+
 function advancePastInterruptGuard(state, startedAt) {
   let next = state;
   for (
@@ -725,11 +951,16 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(confirm, /haltStreamingPlayback\(playback, interruption\)/u);
   assert.match(confirm, /new CustomEvent\("kotae:voice-interrupted"/u);
   assert.match(confirm, /finalReceived: playback\.finalReceived/u);
+  assert.match(confirm, /activeLiveSession = undefined/u);
   assert.match(bridge, /getSettings\(\)\.echoCancellation === true/u);
-  const playbackAt = bridge.indexOf(
+  assert.match(bridge, /softDuckPlayback\(playback\)/u);
+  assert.match(bridge, /rampPlaybackGain\(playback, 0\.1, 0\.008\)/u);
+  assert.match(bridge, /rampPlaybackGain\(playback, 1, 0\.02\)/u);
+  assert.match(bridge, /source\.connect\(gainNode\)/u);
+  const playbackAt = bridge.lastIndexOf(
     "playback = createStreamingPlayback(expectedEpoch)",
   );
-  const requestWindow = bridge.slice(playbackAt, playbackAt + 1_200);
+  const requestWindow = bridge.slice(playbackAt, playbackAt + 2_500);
   assert.match(
     requestWindow,
     /startBargeInMonitoring\(playback, expectedEpoch\)/u,

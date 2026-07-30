@@ -142,6 +142,7 @@ try {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-stream-policy.mjs"
     )) {
@@ -157,6 +158,7 @@ try {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-stream-policy.mjs",
         "assets\main.css",
@@ -229,6 +231,7 @@ try {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-stream-policy.mjs",
                 "assets/main.css",

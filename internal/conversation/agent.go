@@ -1855,7 +1855,6 @@ func requiresFailClosedPrecision(turn VoiceTurn, plan modelPlan) bool {
 		plan.Domain == "health" ||
 		plan.Domain == "legal" ||
 		plan.Domain == "finance" ||
-		plan.InterventionPolicy == "safety" ||
 		plan.AnswerContract.QuestionFrame.Operator == answercontract.OperatorEvidence {
 		return true
 	}

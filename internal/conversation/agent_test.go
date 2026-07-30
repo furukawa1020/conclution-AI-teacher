@@ -23,6 +23,7 @@ type fakeGeneration struct {
 type generatorCall struct {
 	model          string
 	thinkingLevel  genai.ThinkingLevel
+	deadline       time.Duration
 	responseMIME   string
 	hasJSONSchema  bool
 	temperatureSet bool
@@ -43,6 +44,9 @@ func (fake *fakeGenerator) GenerateContent(
 	config *genai.GenerateContentConfig,
 ) (*genai.GenerateContentResponse, error) {
 	call := generatorCall{model: model}
+	if deadline, ok := ctx.Deadline(); ok {
+		call.deadline = time.Until(deadline)
+	}
 	if config != nil {
 		call.responseMIME = config.ResponseMIMEType
 		call.hasJSONSchema = config.ResponseJsonSchema != nil
@@ -1121,6 +1125,8 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 		if len(fake.calls) != 3 ||
 			fake.calls[1].model != DefaultPrecisionModel ||
 			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+			fake.calls[1].deadline <= precisionInferenceSequenceTimeout-time.Second ||
+			fake.calls[1].deadline > precisionInferenceSequenceTimeout ||
 			!strings.Contains(fake.calls[1].prompt, `"preliminary_plan"`) ||
 			fake.calls[2].model != DefaultFastModel ||
 			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
@@ -1205,30 +1211,68 @@ func TestAgentRejectsLowUrgencySafetyIntervention(t *testing.T) {
 	}
 }
 
-func TestAgentAmbiguousPrecisionAsksExactlyOneQuestion(t *testing.T) {
+func TestAgentLowConfidenceClarifiesWithoutPublishingOrPersistingDraft(t *testing.T) {
 	fast := validModelPlan()
 	fast.Confidence = 0.4
-	precision := validModelPlan()
-	precision.Confidence = 0.7
-	precision.SpokenReply = "比較したいのは費用ですか？ それとも安全性ですか？"
-	fake := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, fast)},
-		{body: encodePlan(t, precision)},
-	}}
+	fast.SpokenReply = "未確認の候補Aです。候補Bと比べますか？"
+	fast.ThoughtStateDelta.Claims = []string{"曖昧な新規claim"}
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, fast),
+	}}}
 	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 1,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存claim"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "既存の保留",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		LastIntervention: ArbiterDecision{Act: "silent"},
+	}
+	stateToken, err := agent.codec.seal("uid-q", initial)
+	if err != nil {
+		t.Fatalf("seal state: %v", err)
+	}
 
 	result, err := agent.Process(context.Background(), "uid-q", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     "どっちがいいかな",
+		StateToken:    stateToken,
 	})
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if !result.NeedsClarification || result.Intervention.Act != "clarify" {
+	if result.Route != "interpretation-clarify-fast" ||
+		result.SpokenReply != interpretationClarificationSpokenReply ||
+		!result.NeedsClarification ||
+		result.Intervention.Act != "clarify" ||
+		len(fake.calls) != 1 {
 		t.Fatalf("expected clarification: %#v", result)
 	}
-	if countQuestions(result.SpokenReply) != 1 {
-		t.Fatalf("not exactly one question: %q", result.SpokenReply)
+	if strings.Contains(result.SpokenReply, "候補") ||
+		countQuestions(result.SpokenReply) != 1 {
+		t.Fatalf("unverified draft escaped clarification: %q", result.SpokenReply)
+	}
+	nextState, err := agent.codec.open("uid-q", result.StateToken)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	if len(nextState.Graph.Claims) != 1 ||
+		nextState.Graph.Claims[0] != "既存claim" ||
+		!nextState.PendingAnswer.Active ||
+		nextState.PendingAnswer.Subject != "既存の保留" {
+		t.Fatalf("ambiguous interpretation changed semantic state: %#v", nextState)
 	}
 }
 
@@ -1395,6 +1439,7 @@ func TestAgentLACRejectsMeaningChangingRepair(t *testing.T) {
 
 func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	plan := respondentAwaitingPlan()
+	plan.Confidence = 0.4
 	fake := &fakeGenerator{generations: []fakeGeneration{{
 		body: encodePlan(t, plan),
 	}}}
@@ -1438,6 +1483,42 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	if bytes.Contains(stateJSON, []byte(utterance)) ||
 		bytes.Contains(stateJSON, []byte(plan.SpokenReply)) {
 		t.Fatalf("awaiting state retained turn prose: %s", stateJSON)
+	}
+}
+
+func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
+	fast := respondentAwaitingPlan()
+	fast.Domain = "health"
+	fast.Confidence = 0.4
+	precision := fast
+	precision.Confidence = 0.95
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, fast)},
+		{body: encodePlan(t, precision)},
+	}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-respondent-await-high-risk",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "家族から薬をどう考えているか聞かれたけど、答えられない",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "respondent-awaiting-precision" ||
+		result.SpokenReply != respondentAwaitingSpokenReply ||
+		len(fake.calls) != 2 ||
+		fake.calls[1].model != DefaultPrecisionModel ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
+		t.Fatalf(
+			"high-risk awaiting bypassed precision: result=%#v calls=%#v",
+			result,
+			fake.calls,
+		)
 	}
 }
 
@@ -1859,7 +1940,6 @@ func TestAgentUrgentSafetyOutranksLowConfidenceAndAmbiguousLAC(t *testing.T) {
 	}
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, plan)},
-		{body: encodePlan(t, plan)},
 		{body: encodeContract(t, critic)},
 	}}
 	agent := newTestAgent(t, fake)
@@ -1876,7 +1956,9 @@ func TestAgentUrgentSafetyOutranksLowConfidenceAndAmbiguousLAC(t *testing.T) {
 		result.SpokenReply == plan.SpokenReply ||
 		result.Intervention.Act == "silent" ||
 		result.Intervention.Act == "clarify" ||
-		result.InterventionPolicy != "safety" {
+		result.InterventionPolicy != "safety" ||
+		len(fake.calls) != 2 ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
 		t.Fatalf("urgent safety was rewritten by ambiguity: %#v", result)
 	}
 }

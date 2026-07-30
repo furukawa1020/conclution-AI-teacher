@@ -1,4 +1,7 @@
-// Package shadowcut synthesizes and verifies content-free causal cuts.
+// Package shadowcut synthesizes and verifies content-free causal cuts over a
+// one-sink chain-forest proof IR. A general agent DAG must be decomposed into
+// one trusted root-to-outcome chain bundle per sink before it enters this
+// package; that compiler and its attestation are intentionally out of scope.
 //
 // It is deliberately disconnected from the production securityflow monitor:
 // this package has no executor, persistence, network, signing, or apply API.
@@ -9,7 +12,7 @@ import "errors"
 const (
 	// SchemaVersion identifies the fixed-width canonical encoding used by this
 	// package.
-	SchemaVersion uint16 = 2
+	SchemaVersion uint16 = 3
 
 	MaxControls        = 16
 	MaxTraces          = 1_024
@@ -17,6 +20,7 @@ const (
 	MaxEdgesPerTrace   = 128
 	MaxSourcesPerTrace = 16
 	MaxSinksPerTrace   = 1
+	MaxTraceWeight     = 1_000_000
 	maxSearchWork      = 50_000_000
 )
 
@@ -28,8 +32,9 @@ var (
 	ErrVerification     = errors.New("shadowcut: verification failed")
 )
 
-// NodeID is local to one trace. It is not a request, session, user, content,
-// URL, or provider identifier.
+// NodeID is a dense, one-based causal event ordinal local to one trace. Edges
+// must move from a lower ordinal to a higher ordinal. It is not a request,
+// session, user, content, URL, or provider identifier.
 type NodeID uint16
 
 type NodeKind uint8
@@ -52,13 +57,13 @@ type EdgeKind uint8
 
 const (
 	EdgeUnknown EdgeKind = iota
-	EdgeDerive
 	EdgeQuote
 	EdgeRecall
 	EdgePropose
 	EdgeIssueGrant
 	EdgeConsume
 	EdgeToolCall
+	EdgeToolResult
 	EdgeExecute
 	EdgeRespond
 	edgeKindLimit
@@ -122,6 +127,13 @@ const (
 	controlLimit
 )
 
+const controlCostCount = 8
+
+var (
+	_ [int(controlLimit-1) - controlCostCount]struct{}
+	_ [controlCostCount - int(controlLimit-1)]struct{}
+)
+
 type ControlMask uint16
 
 const knownControlMask ControlMask = (1 << (controlLimit - 1)) - 1
@@ -134,6 +146,8 @@ const (
 	TraceBenign
 	traceClassLimit
 )
+
+type behaviorFingerprint [1 + ((1 << (controlLimit - 1)) / 8)]byte
 
 // Node contains finite security labels only.
 type Node struct {
@@ -155,9 +169,11 @@ type Edge struct {
 	Controls ControlMask
 }
 
-// Trace is a content-free causal DAG. Sources identify attack origins for an
-// attack trace and required normal inputs for a benign trace. Sinks identify
-// the dangerous or intended outcomes respectively.
+// Trace is a normalized one-sink chain forest supplied by trusted offline
+// instrumentation. Independent chains may meet only at the terminal Sink.
+// Class and Weight are trusted aggregate labels; they must never be authored
+// by a model, retrieved content, or a live user. Sources identify attack
+// origins for an attack trace and required normal inputs for a benign trace.
 type Trace struct {
 	Class   TraceClass
 	Weight  uint32
@@ -207,7 +223,7 @@ func validControlMask(mask ControlMask) bool {
 func controlCost(mask ControlMask) uint32 {
 	// Costs are fixed integers to keep synthesis deterministic. They are only
 	// a final tie-break after normal-path retention and control count.
-	costs := [...]uint16{
+	costs := [controlCostCount]uint16{
 		1, // evidence ingress
 		3, // planner boundary
 		2, // memory boundary

@@ -1,7 +1,5 @@
 package shadowcut
 
-import "crypto/sha256"
-
 type preparedTrace struct {
 	trace    Trace
 	index    map[NodeID]int
@@ -18,27 +16,33 @@ type preparedCorpus struct {
 }
 
 func prepareCorpus(traces []Trace) (preparedCorpus, error) {
-	if len(traces) == 0 || len(traces) > MaxTraces {
+	if int(controlLimit-1) > MaxControls ||
+		len(traces) == 0 ||
+		len(traces) > MaxTraces {
 		return preparedCorpus{}, ErrInvalidCorpus
 	}
 
 	prepared := preparedCorpus{
 		traces: make([]preparedTrace, 0, len(traces)),
 	}
-	seenTraces := make(map[[32]byte]struct{}, len(traces))
+	seenBehaviors := make(map[behaviorFingerprint]struct{}, len(traces))
 	var estimatedSearchWork uint64
+	candidateCount := uint64(knownControlMask) + 1
 	for _, trace := range traces {
 		item, err := prepareTrace(cloneTrace(trace))
 		if err != nil {
 			return preparedCorpus{}, err
 		}
-		traceFingerprint := sha256.Sum256(canonicalTraceBytes(item.trace))
-		if _, duplicate := seenTraces[traceFingerprint]; duplicate {
-			return preparedCorpus{}, ErrInvalidCorpus
-		}
-		seenTraces[traceFingerprint] = struct{}{}
 		estimatedSearchWork += uint64(len(item.trace.Sources)) *
 			uint64(len(item.trace.Nodes)+len(item.trace.Edges))
+		if estimatedSearchWork > maxSearchWork/candidateCount {
+			return preparedCorpus{}, ErrInvalidCorpus
+		}
+		behavior := traceBehaviorFingerprint(&item)
+		if _, duplicate := seenBehaviors[behavior]; duplicate {
+			return preparedCorpus{}, ErrInvalidCorpus
+		}
+		seenBehaviors[behavior] = struct{}{}
 		prepared.traces = append(prepared.traces, item)
 		switch trace.Class {
 		case TraceAttack:
@@ -48,10 +52,6 @@ func prepareCorpus(traces []Trace) (preparedCorpus, error) {
 		default:
 			return preparedCorpus{}, ErrInvalidCorpus
 		}
-	}
-	candidateCount := uint64(knownControlMask) + 1
-	if estimatedSearchWork > maxSearchWork/candidateCount {
-		return preparedCorpus{}, ErrInvalidCorpus
 	}
 	if prepared.attacks == 0 || prepared.benignWeight == 0 {
 		return preparedCorpus{}, ErrInvalidCorpus
@@ -63,6 +63,76 @@ func prepareCorpus(traces []Trace) (preparedCorpus, error) {
 	}
 	prepared.traceSetHash = hash
 	return prepared, nil
+}
+
+func traceBehaviorFingerprint(trace *preparedTrace) behaviorFingerprint {
+	var fingerprint behaviorFingerprint
+	fingerprint[0] = byte(trace.trace.Class)
+	for raw := uint32(0); raw <= uint32(knownControlMask); raw++ {
+		cut := ControlMask(raw)
+		reachable := trace.trace.Class == TraceBenign
+		if trace.trace.Class == TraceAttack {
+			for _, source := range trace.trace.Sources {
+				if behaviorSourceReachesSink(
+					trace,
+					trace.index[source],
+					cut,
+				) {
+					reachable = true
+					break
+				}
+			}
+		} else {
+			for _, source := range trace.trace.Sources {
+				if !behaviorSourceReachesSink(
+					trace,
+					trace.index[source],
+					cut,
+				) {
+					reachable = false
+					break
+				}
+			}
+		}
+		if reachable {
+			fingerprint[1+raw/8] |= byte(1 << (raw % 8))
+		}
+	}
+	return fingerprint
+}
+
+func behaviorSourceReachesSink(
+	trace *preparedTrace,
+	source int,
+	cut ControlMask,
+) bool {
+	current := source
+	for !trace.sink[current] {
+		edgeIndex := trace.outgoing[current][0]
+		edge := trace.trace.Edges[edgeIndex]
+		if edge.Controls&cut != 0 {
+			return false
+		}
+		current = trace.index[edge.To]
+	}
+	node := trace.trace.Nodes[current]
+	if node.Requires == 0 {
+		return true
+	}
+	for _, edgeIndex := range trace.incoming[current] {
+		consume := trace.trace.Edges[edgeIndex]
+		if consume.Kind != EdgeConsume {
+			continue
+		}
+		if consume.Controls&cut != 0 {
+			return false
+		}
+		grant := trace.index[consume.From]
+		issue := trace.trace.Edges[trace.incoming[grant][0]]
+		return issue.Kind == EdgeIssueGrant &&
+			issue.Controls&cut == 0
+	}
+	return false
 }
 
 func cloneTrace(trace Trace) Trace {
@@ -77,6 +147,7 @@ func cloneTrace(trace Trace) Trace {
 func prepareTrace(trace Trace) (preparedTrace, error) {
 	if trace.Class <= TraceUnknown || trace.Class >= traceClassLimit ||
 		trace.Weight == 0 ||
+		trace.Weight > MaxTraceWeight ||
 		len(trace.Nodes) == 0 ||
 		len(trace.Nodes) > MaxNodesPerTrace ||
 		len(trace.Edges) == 0 ||
@@ -101,6 +172,11 @@ func prepareTrace(trace Trace) (preparedTrace, error) {
 		}
 		prepared.index[node.ID] = index
 	}
+	for ordinal := 1; ordinal <= len(trace.Nodes); ordinal++ {
+		if _, exists := prepared.index[NodeID(ordinal)]; !exists {
+			return preparedTrace{}, ErrInvalidTrace
+		}
+	}
 
 	type edgeKey struct {
 		from NodeID
@@ -115,6 +191,7 @@ func prepareTrace(trace Trace) (preparedTrace, error) {
 		_, duplicate := edges[key]
 		if !fromExists || !toExists ||
 			edge.From == edge.To ||
+			edge.From > edge.To ||
 			edge.Kind <= EdgeUnknown || edge.Kind >= edgeKindLimit ||
 			!validEdgeControls(edge) ||
 			duplicate ||
@@ -137,6 +214,7 @@ func prepareTrace(trace Trace) (preparedTrace, error) {
 	}
 
 	if !validEndpoints(&prepared) ||
+		!validCausalShape(&prepared) ||
 		!acyclic(&prepared) ||
 		!allNodesReachSink(&prepared) ||
 		!allSourcesReachSink(&prepared, 0) ||
@@ -196,7 +274,7 @@ func validEdgeKinds(from NodeKind, to NodeKind, kind EdgeKind) bool {
 			from == NodePDF ||
 			from == NodeWeb) &&
 			(to == NodeMemory || to == NodeModel)
-	case EdgeDerive:
+	case EdgeToolResult:
 		return from == NodeTool && to == NodeModel
 	case EdgeRecall:
 		return from == NodeMemory && to == NodeModel
@@ -239,13 +317,30 @@ func validEdgeControls(edge Edge) bool {
 		expected = ControlExternalEgress
 	case EdgeRespond:
 		expected = ControlSpeechBoundary
-	case EdgeDerive:
-		return edge.Controls == 0
+	case EdgeToolResult:
+		expected = ControlToolBoundary
 	default:
 		return false
 	}
 	expectedMask := ControlMask(1 << (expected - 1))
 	return edge.Controls == 0 || edge.Controls == expectedMask
+}
+
+func validCausalShape(trace *preparedTrace) bool {
+	for index := range trace.trace.Nodes {
+		if trace.sink[index] {
+			if len(trace.incoming[index]) == 0 ||
+				len(trace.outgoing[index]) != 0 {
+				return false
+			}
+			continue
+		}
+		if len(trace.incoming[index]) > 1 ||
+			len(trace.outgoing[index]) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func validEndpoints(trace *preparedTrace) bool {

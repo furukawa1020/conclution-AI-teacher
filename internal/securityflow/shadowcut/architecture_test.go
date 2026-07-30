@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -75,32 +76,53 @@ func TestShadowPackageHasNoProductionDependencyOrApplyAPI(t *testing.T) {
 		})
 	}
 
-	productionDirectory := filepath.Dir(directory)
-	productionFiles, err := filepath.Glob(
-		filepath.Join(productionDirectory, "*.go"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	const shadowImport = "github.com/furukawa1020/conclution-ai-teacher/internal/securityflow/shadowcut"
-	for _, path := range productionFiles {
-		parsed, err := parser.ParseFile(
-			fileSet,
-			path,
-			nil,
-			parser.ImportsOnly,
+	moduleRoot := filepath.Clean(filepath.Join(directory, "..", "..", ".."))
+	for _, productionRoot := range []string{
+		filepath.Join(moduleRoot, "cmd"),
+		filepath.Join(moduleRoot, "internal"),
+	} {
+		err := filepath.WalkDir(
+			productionRoot,
+			func(path string, entry fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if entry.IsDir() {
+					if filepath.Clean(path) == filepath.Clean(directory) {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if filepath.Ext(path) != ".go" {
+					return nil
+				}
+				parsed, err := parser.ParseFile(
+					fileSet,
+					path,
+					nil,
+					parser.ImportsOnly,
+				)
+				if err != nil {
+					return err
+				}
+				for _, imported := range parsed.Imports {
+					value, err := strconv.Unquote(imported.Path.Value)
+					if err != nil {
+						return err
+					}
+					if value == shadowImport {
+						t.Errorf(
+							"production imports shadow package: %s",
+							path,
+						)
+					}
+				}
+				return nil
+			},
 		)
 		if err != nil {
 			t.Fatal(err)
-		}
-		for _, imported := range parsed.Imports {
-			value, err := strconv.Unquote(imported.Path.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if value == shadowImport {
-				t.Fatalf("production imports shadow package: %s", path)
-			}
 		}
 	}
 }

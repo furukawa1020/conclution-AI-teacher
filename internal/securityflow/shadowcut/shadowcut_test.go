@@ -76,6 +76,25 @@ func TestSynthesizeObjectiveOrder(t *testing.T) {
 	}
 }
 
+func TestControlSpaceTablesAreComplete(t *testing.T) {
+	if int(controlLimit-1) > MaxControls {
+		t.Fatalf(
+			"control space exceeds bound: got=%d max=%d",
+			controlLimit-1,
+			MaxControls,
+		)
+	}
+	for control := ControlUnknown + 1; control < controlLimit; control++ {
+		mask, err := ControlMaskOf(control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if controlCost(mask) == 0 {
+			t.Fatalf("control has no enforcement cost: %d", control)
+		}
+	}
+}
+
 func TestCanonicalHashAndSynthesisIgnoreInputOrder(t *testing.T) {
 	evidence := mustMask(t, ControlEvidenceIngress)
 	planner := mustMask(t, ControlPlannerBoundary)
@@ -190,7 +209,7 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 		{
 			name: "boundary kind substitution",
 			mutate: func(trace *Trace) {
-				trace.Edges[0].Kind = EdgeDerive
+				trace.Edges[0].Kind = EdgeToolResult
 				trace.Edges[0].Controls = 0
 			},
 		},
@@ -204,7 +223,7 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 			name: "cycle",
 			mutate: func(trace *Trace) {
 				trace.Edges = append(trace.Edges, Edge{
-					From: 6,
+					From: 3,
 					To:   2,
 					Kind: EdgePropose,
 				})
@@ -276,29 +295,36 @@ func TestTraceValidationRejectsUnsafeGraphs(t *testing.T) {
 		{
 			name: "multiple grants consumed by one action",
 			mutate: func(trace *Trace) {
+				trace.Nodes[6].ID = 9
+				for index := range trace.Edges {
+					if trace.Edges[index].To == 7 {
+						trace.Edges[index].To = 9
+					}
+				}
+				trace.Sinks[0] = 9
 				trace.Nodes = append(
 					trace.Nodes,
 					Node{
-						ID:         8,
+						ID:         7,
 						Kind:       NodeAuthenticatedIntent,
 						Integrity:  IntegrityAuthenticated,
 						Authority:  AuthorityResearchRead,
 						Binding:    BindingExactScopeActionArgs,
-						BindingRef: 2,
+						BindingRef: 1,
 					},
 					Node{
-						ID:         9,
+						ID:         8,
 						Kind:       NodeGrant,
 						Integrity:  IntegritySystem,
 						Authority:  AuthorityResearchRead,
 						Binding:    BindingExactScopeActionArgs,
-						BindingRef: 2,
+						BindingRef: 1,
 					},
 				)
 				trace.Edges = append(
 					trace.Edges,
-					Edge{From: 8, To: 9, Kind: EdgeIssueGrant},
-					Edge{From: 9, To: 5, Kind: EdgeConsume},
+					Edge{From: 7, To: 8, Kind: EdgeIssueGrant},
+					Edge{From: 8, To: 9, Kind: EdgeConsume},
 				)
 			},
 		},
@@ -334,7 +360,7 @@ func TestPrivilegedBenignTraceRequiresEveryRootAndExactBinding(t *testing.T) {
 	benign := privilegedAttack(evidence, planner)
 	benign.Class = TraceBenign
 	benign.Weight = 5
-	benign.Sources = []NodeID{1, 3}
+	benign.Sources = []NodeID{1, 5}
 
 	corpus := []Trace{
 		privilegedAttack(evidence, planner),
@@ -371,6 +397,118 @@ func TestPrivilegedBenignTraceRequiresEveryRootAndExactBinding(t *testing.T) {
 	}
 }
 
+func TestPrivilegedSinkRequiresUncutGrantAndConsume(t *testing.T) {
+	grant := mustMask(t, ControlGrantBoundary)
+	execution := mustMask(t, ControlExecutionBoundary)
+	attack := privilegedAttack(0, 0)
+	for index := range attack.Edges {
+		switch attack.Edges[index].Kind {
+		case EdgeIssueGrant:
+			attack.Edges[index].Controls = grant
+		case EdgeConsume:
+			attack.Edges[index].Controls = execution
+		}
+	}
+	traces := []Trace{attack, benignTrace(1, 0)}
+	candidate, certificate, err := Synthesize(traces)
+	if err != nil {
+		t.Fatalf("privileged conjunction was treated as uncuttable: %v", err)
+	}
+	if candidate.Controls != grant {
+		t.Fatalf(
+			"grant/consume conjunction objective mismatch: got=%d want=%d",
+			candidate.Controls,
+			grant,
+		)
+	}
+	if err := Verify(traces, candidate, certificate); err != nil {
+		t.Fatalf("privileged conjunction did not verify: %v", err)
+	}
+}
+
+func TestBoundaryKindsCannotBeSubstituted(t *testing.T) {
+	allDataControls :=
+		mustMask(t, ControlEvidenceIngress) |
+			mustMask(t, ControlMemoryBoundary) |
+			mustMask(t, ControlPlannerBoundary) |
+			mustMask(t, ControlToolBoundary) |
+			mustMask(t, ControlSpeechBoundary)
+	speechTrace := attackTrace(allDataControls)
+	externalTrace := attackTrace(
+		mustMask(t, ControlExternalEgress),
+	)
+
+	tests := []struct {
+		name     string
+		base     Trace
+		edge     int
+		replaced EdgeKind
+	}{
+		{"evidence as tool result", speechTrace, 0, EdgeToolResult},
+		{"memory as tool result", speechTrace, 1, EdgeToolResult},
+		{"planner as tool result", speechTrace, 2, EdgeToolResult},
+		{"tool call as propose", speechTrace, 3, EdgePropose},
+		{"speech as propose", speechTrace, 5, EdgePropose},
+		{"external execute as respond", externalTrace, 4, EdgeRespond},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := cloneTrace(test.base)
+			invalid.Edges[test.edge].Kind = test.replaced
+			invalid.Edges[test.edge].Controls = 0
+			if _, _, err := Synthesize([]Trace{
+				invalid,
+				benignTrace(1, 0),
+			}); !errors.Is(err, ErrInvalidTrace) {
+				t.Fatalf("boundary kind substitution accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestToolResultCanBeCutAtBidirectionalToolBoundary(t *testing.T) {
+	tool := mustMask(t, ControlToolBoundary)
+	planner := mustMask(t, ControlPlannerBoundary)
+	toolOutputAttack := Trace{
+		Class:  TraceAttack,
+		Weight: 1,
+		Nodes: []Node{
+			{ID: 1, Kind: NodeTool, Integrity: IntegrityUntrusted},
+			{ID: 2, Kind: NodeModel, Integrity: IntegrityUntrusted},
+			{ID: 3, Kind: NodeModel, Integrity: IntegrityUntrusted},
+			{ID: 4, Kind: NodeSink, Integrity: IntegrityUntrusted},
+		},
+		Edges: []Edge{
+			{
+				From:     1,
+				To:       2,
+				Kind:     EdgeToolResult,
+				Controls: tool,
+			},
+			{
+				From:     2,
+				To:       3,
+				Kind:     EdgePropose,
+				Controls: planner,
+			},
+			{From: 3, To: 4, Kind: EdgeRespond},
+		},
+		Sources: []NodeID{1},
+		Sinks:   []NodeID{4},
+	}
+	traces := []Trace{toolOutputAttack, benignTrace(1, 0)}
+	candidate, certificate, err := Synthesize(traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Controls != tool {
+		t.Fatalf("tool output boundary not selected: %#v", candidate)
+	}
+	if err := Verify(traces, candidate, certificate); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUncuttableAttackIsInfeasible(t *testing.T) {
 	traces := []Trace{
 		privilegedAttack(0, 0),
@@ -385,6 +523,18 @@ func TestUncuttableAttackIsInfeasible(t *testing.T) {
 		Certificate{},
 	); !errors.Is(err, ErrInfeasible) {
 		t.Fatalf("uncuttable verify result: %v", err)
+	}
+}
+
+func TestTraceWeightIsBounded(t *testing.T) {
+	evidence := mustMask(t, ControlEvidenceIngress)
+	attack := attackTrace(evidence)
+	attack.Weight = MaxTraceWeight + 1
+	if _, _, err := Synthesize([]Trace{
+		attack,
+		benignTrace(1, 0),
+	}); !errors.Is(err, ErrInvalidTrace) {
+		t.Fatalf("oversized trusted aggregate weight accepted: %v", err)
 	}
 }
 
@@ -467,6 +617,127 @@ func TestCanonicalDuplicateTraceIsRejected(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidCorpus) {
 		t.Fatalf("canonical duplicate trace accepted: %v", err)
 	}
+
+	differentWeight := cloneTrace(benign)
+	differentWeight.Weight++
+	if _, _, err := Synthesize([]Trace{
+		attackTrace(evidence),
+		benign,
+		differentWeight,
+	}); !errors.Is(err, ErrInvalidCorpus) {
+		t.Fatalf("weight-only duplicate trace accepted: %v", err)
+	}
+
+	renamed := cloneTrace(benign)
+	for index := range renamed.Nodes {
+		renamed.Nodes[index].ID += 100
+	}
+	for index := range renamed.Edges {
+		renamed.Edges[index].From += 100
+		renamed.Edges[index].To += 100
+	}
+	for index := range renamed.Sources {
+		renamed.Sources[index] += 100
+	}
+	for index := range renamed.Sinks {
+		renamed.Sinks[index] += 100
+	}
+	if _, _, err := Synthesize([]Trace{
+		attackTrace(evidence),
+		benign,
+		renamed,
+	}); !errors.Is(err, ErrInvalidTrace) {
+		t.Fatalf("noncanonical trace-local IDs accepted: %v", err)
+	}
+}
+
+func TestCanonicalNormalFormIgnoresTopologicalAndBindingAlphaRename(
+	t *testing.T,
+) {
+	evidence := mustMask(t, ControlEvidenceIngress)
+	planner := mustMask(t, ControlPlannerBoundary)
+	original := privilegedAttack(evidence, planner)
+	renamed := cloneTrace(original)
+	idMap := map[NodeID]NodeID{
+		1: 3,
+		2: 4,
+		3: 5,
+		4: 6,
+		5: 1,
+		6: 2,
+		7: 7,
+	}
+	for index := range renamed.Nodes {
+		renamed.Nodes[index].ID = idMap[renamed.Nodes[index].ID]
+		if renamed.Nodes[index].BindingRef != 0 {
+			renamed.Nodes[index].BindingRef = 42
+		}
+	}
+	for index := range renamed.Edges {
+		renamed.Edges[index].From = idMap[renamed.Edges[index].From]
+		renamed.Edges[index].To = idMap[renamed.Edges[index].To]
+	}
+	for index := range renamed.Sources {
+		renamed.Sources[index] = idMap[renamed.Sources[index]]
+	}
+	for index := range renamed.Sinks {
+		renamed.Sinks[index] = idMap[renamed.Sinks[index]]
+	}
+
+	benign := benignTrace(1, 0)
+	firstCandidate, firstCertificate, err := Synthesize(
+		[]Trace{original, benign},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCandidate, secondCertificate, err := Synthesize(
+		[]Trace{renamed, benign},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstCandidate != secondCandidate ||
+		firstCertificate != secondCertificate {
+		t.Fatalf(
+			"alpha rename changed canonical result: first=%#v/%#v second=%#v/%#v",
+			firstCandidate,
+			firstCertificate,
+			secondCandidate,
+			secondCertificate,
+		)
+	}
+	if _, _, err := Synthesize([]Trace{
+		original,
+		renamed,
+		benign,
+	}); !errors.Is(err, ErrInvalidCorpus) {
+		t.Fatalf("alpha-renamed duplicate behavior accepted: %v", err)
+	}
+}
+
+func TestTrustedClassLabelsMayExpressAttackBenignTradeoff(t *testing.T) {
+	evidence := mustMask(t, ControlEvidenceIngress)
+	attack := attackTrace(evidence)
+	benign := cloneTrace(attack)
+	benign.Class = TraceBenign
+	benign.Weight = 10
+
+	candidate, certificate, err := Synthesize([]Trace{attack, benign})
+	if err != nil {
+		t.Fatalf("trusted attack/benign tradeoff rejected: %v", err)
+	}
+	if candidate.Controls != evidence ||
+		certificate.BenignWeightRetained != 0 {
+		t.Fatalf("unexpected tradeoff objective: %#v %#v", candidate, certificate)
+	}
+	if err := Verify(
+		[]Trace{attack, benign},
+		candidate,
+		certificate,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func privilegedAttack(
@@ -488,17 +759,17 @@ func privilegedAttack(
 				Integrity: IntegrityUntrusted,
 			},
 			{
-				ID:        6,
+				ID:        3,
 				Kind:      NodeModel,
 				Integrity: IntegrityUntrusted,
 			},
 			{
-				ID:        7,
+				ID:        4,
 				Kind:      NodeTool,
 				Integrity: IntegrityUntrusted,
 			},
 			{
-				ID:         3,
+				ID:         5,
 				Kind:       NodeAuthenticatedIntent,
 				Integrity:  IntegrityAuthenticated,
 				Authority:  AuthorityResearchRead,
@@ -506,7 +777,7 @@ func privilegedAttack(
 				BindingRef: 1,
 			},
 			{
-				ID:         4,
+				ID:         6,
 				Kind:       NodeGrant,
 				Integrity:  IntegritySystem,
 				Authority:  AuthorityResearchRead,
@@ -514,7 +785,7 @@ func privilegedAttack(
 				BindingRef: 1,
 			},
 			{
-				ID:         5,
+				ID:         7,
 				Kind:       NodeSink,
 				Integrity:  IntegrityUntrusted,
 				Authority:  AuthorityResearchRead,
@@ -532,17 +803,17 @@ func privilegedAttack(
 			},
 			{
 				From:     2,
-				To:       6,
+				To:       3,
 				Kind:     EdgePropose,
 				Controls: secondControl,
 			},
-			{From: 6, To: 7, Kind: EdgeToolCall},
-			{From: 7, To: 5, Kind: EdgeExecute},
-			{From: 3, To: 4, Kind: EdgeIssueGrant},
-			{From: 4, To: 5, Kind: EdgeConsume},
+			{From: 3, To: 4, Kind: EdgeToolCall},
+			{From: 4, To: 7, Kind: EdgeExecute},
+			{From: 5, To: 6, Kind: EdgeIssueGrant},
+			{From: 6, To: 7, Kind: EdgeConsume},
 		},
 		Sources: []NodeID{1},
-		Sinks:   []NodeID{5},
+		Sinks:   []NodeID{7},
 	}
 }
 
@@ -614,7 +885,12 @@ func attackTrace(controls ControlMask) Trace {
 		)
 		edges = append(
 			edges,
-			Edge{From: 5, To: 6, Kind: EdgeDerive},
+			Edge{
+				From:     5,
+				To:       6,
+				Kind:     EdgeToolResult,
+				Controls: controls & tool,
+			},
 			Edge{
 				From:     6,
 				To:       7,

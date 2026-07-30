@@ -34,32 +34,51 @@ func canonicalTraceSetHash(traces []preparedTrace) ([32]byte, error) {
 }
 
 func canonicalTraceBytes(trace Trace) []byte {
-	nodes := append([]Node(nil), trace.Nodes...)
-	edges := append([]Edge(nil), trace.Edges...)
-	sources := append([]NodeID(nil), trace.Sources...)
-	sinks := append([]NodeID(nil), trace.Sinks...)
+	nodes := make(map[NodeID]Node, len(trace.Nodes))
+	incoming := make(map[NodeID]uint16, len(trace.Nodes))
+	outgoing := make(map[NodeID]Edge, len(trace.Edges))
+	sources := make(map[NodeID]struct{}, len(trace.Sources))
+	for _, node := range trace.Nodes {
+		nodes[node.ID] = node
+	}
+	for _, edge := range trace.Edges {
+		incoming[edge.To]++
+		outgoing[edge.From] = edge
+	}
+	for _, source := range trace.Sources {
+		sources[source] = struct{}{}
+	}
 
-	sort.Slice(nodes, func(left, right int) bool {
-		return nodes[left].ID < nodes[right].ID
-	})
-	sort.Slice(edges, func(left, right int) bool {
-		a, b := edges[left], edges[right]
-		switch {
-		case a.From != b.From:
-			return a.From < b.From
-		case a.To != b.To:
-			return a.To < b.To
-		case a.Kind != b.Kind:
-			return a.Kind < b.Kind
-		default:
-			return a.Controls < b.Controls
+	// Validation restricts a trace to disjoint causal chains that meet only at
+	// one terminal sink. Encoding each root-to-sink chain and sorting the
+	// resulting bytes therefore gives an exact structural normal form without
+	// raw NodeID or BindingRef values.
+	paths := make([][]byte, 0, len(trace.Sources)+1)
+	for _, node := range trace.Nodes {
+		if incoming[node.ID] != 0 {
+			continue
 		}
-	})
-	sort.Slice(sources, func(left, right int) bool {
-		return sources[left] < sources[right]
-	})
-	sort.Slice(sinks, func(left, right int) bool {
-		return sinks[left] < sinks[right]
+		path := []byte{0x50, 0x41, 0x54, 0x48}
+		if _, declared := sources[node.ID]; declared {
+			path = append(path, 1)
+		} else {
+			path = append(path, 0)
+		}
+		current := node.ID
+		for {
+			currentNode := nodes[current]
+			path = appendCanonicalNode(path, currentNode)
+			edge, exists := outgoing[current]
+			if !exists {
+				break
+			}
+			path = appendCanonicalEdge(path, edge)
+			current = edge.To
+		}
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(left, right int) bool {
+		return bytes.Compare(paths[left], paths[right]) < 0
 	})
 
 	canonical := []byte{0x54, 0x52, 0x43, 0x45}
@@ -67,74 +86,58 @@ func canonicalTraceBytes(trace Trace) []byte {
 	canonical = binary.BigEndian.AppendUint32(canonical, trace.Weight)
 	canonical = binary.BigEndian.AppendUint16(
 		canonical,
-		uint16(len(nodes)),
+		uint16(len(trace.Nodes)),
 	)
-	for _, node := range nodes {
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(node.ID),
-		)
-		canonical = append(
-			canonical,
-			byte(node.Kind),
-			byte(node.Integrity),
-		)
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(node.Authority),
-		)
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(node.Requires),
-		)
-		canonical = append(canonical, byte(node.Binding))
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(node.BindingRef),
-		)
-	}
-
 	canonical = binary.BigEndian.AppendUint16(
 		canonical,
-		uint16(len(edges)),
+		uint16(len(trace.Edges)),
 	)
-	for _, edge := range edges {
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(edge.From),
-		)
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(edge.To),
-		)
-		canonical = append(canonical, byte(edge.Kind))
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(edge.Controls),
-		)
-	}
-
 	canonical = binary.BigEndian.AppendUint16(
 		canonical,
-		uint16(len(sources)),
+		uint16(len(trace.Sources)),
 	)
-	for _, source := range sources {
-		canonical = binary.BigEndian.AppendUint16(
-			canonical,
-			uint16(source),
-		)
-	}
 	canonical = binary.BigEndian.AppendUint16(
 		canonical,
-		uint16(len(sinks)),
+		uint16(len(paths)),
 	)
-	for _, sink := range sinks {
-		canonical = binary.BigEndian.AppendUint16(
+	for _, path := range paths {
+		canonical = binary.BigEndian.AppendUint32(
 			canonical,
-			uint16(sink),
+			uint32(len(path)),
 		)
+		canonical = append(canonical, path...)
 	}
 	return canonical
+}
+
+func appendCanonicalNode(encoded []byte, node Node) []byte {
+	encoded = append(
+		encoded,
+		0x4e,
+		byte(node.Kind),
+		byte(node.Integrity),
+	)
+	encoded = binary.BigEndian.AppendUint16(
+		encoded,
+		uint16(node.Authority),
+	)
+	encoded = binary.BigEndian.AppendUint16(
+		encoded,
+		uint16(node.Requires),
+	)
+	encoded = append(encoded, byte(node.Binding))
+	if node.BindingRef == 0 {
+		return append(encoded, 0)
+	}
+	return append(encoded, 1)
+}
+
+func appendCanonicalEdge(encoded []byte, edge Edge) []byte {
+	encoded = append(encoded, 0x45, byte(edge.Kind))
+	return binary.BigEndian.AppendUint16(
+		encoded,
+		uint16(edge.Controls),
+	)
 }
 
 func canonicalCandidateHash(candidate Candidate) [32]byte {

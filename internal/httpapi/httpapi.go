@@ -252,11 +252,18 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusUnprocessableEntity, "voice_turn_invalid", "The voice turn could not be understood safely.")
 			return
 		}
-		s.logger.ErrorContext(ctx, "voice turn failed",
+		logAttributes := []any{
 			"request_id", requestIDFromContext(ctx),
 			"duration_ms", time.Since(started).Milliseconds(),
 			"error_class", "voice_pipeline_failure",
-		)
+		}
+		if pipelineStage, classified := VoicePipelineStageOf(err); classified {
+			logAttributes = append(
+				logAttributes,
+				"pipeline_stage", string(pipelineStage),
+			)
+		}
+		s.logger.ErrorContext(ctx, "voice turn failed", logAttributes...)
 		writeProblem(w, http.StatusBadGateway, "voice_turn_unavailable", "The voice turn could not be completed.")
 		return
 	}

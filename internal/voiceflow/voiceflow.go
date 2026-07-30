@@ -3,7 +3,6 @@ package voiceflow
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
@@ -41,7 +40,9 @@ func (p *Pipeline) Process(
 		if errors.Is(err, speechio.ErrNoSpeech) {
 			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNotRecognized
 		}
-		return httpapi.VoiceTurnResult{}, fmt.Errorf("voiceflow: transcribe: %w", err)
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageTranscribe,
+		)
 	}
 	if transcriptConfidenceTooLow(confidence) {
 		result := httpapi.VoiceTurnResult{
@@ -61,9 +62,8 @@ func (p *Pipeline) Process(
 			lowConfidencePrompt,
 		)
 		if synthesizeErr != nil {
-			return httpapi.VoiceTurnResult{}, fmt.Errorf(
-				"voiceflow: synthesize recognition clarification: %w",
-				synthesizeErr,
+			return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+				httpapi.VoicePipelineStageSynthesize,
 			)
 		}
 		result.Audio = audio
@@ -91,7 +91,9 @@ func (p *Pipeline) Process(
 			errors.Is(err, conversation.ErrInvalidTurn) {
 			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceStateInvalid
 		}
-		return httpapi.VoiceTurnResult{}, fmt.Errorf("voiceflow: reason: %w", err)
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageConversation,
+		)
 	}
 
 	result := httpapi.VoiceTurnResult{
@@ -111,7 +113,9 @@ func (p *Pipeline) Process(
 
 	audio, audioMIME, err := p.speech.Synthesize(ctx, decision.SpokenReply)
 	if err != nil {
-		return httpapi.VoiceTurnResult{}, fmt.Errorf("voiceflow: synthesize: %w", err)
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
 	}
 	result.Audio = audio
 	result.AudioMIMEType = audioMIME

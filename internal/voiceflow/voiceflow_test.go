@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
@@ -14,6 +15,7 @@ type fakeSpeech struct {
 	transcript      string
 	confidence      float32
 	transcribeErr   error
+	synthesizeErr   error
 	synthesizeCalls int
 	synthesizedText string
 }
@@ -25,6 +27,9 @@ func (s *fakeSpeech) Transcribe(_ context.Context, _ []byte) (string, float32, e
 func (s *fakeSpeech) Synthesize(_ context.Context, text string) ([]byte, string, error) {
 	s.synthesizeCalls++
 	s.synthesizedText = text
+	if s.synthesizeErr != nil {
+		return nil, "", s.synthesizeErr
+	}
 	return []byte("speech"), "audio/mpeg", nil
 }
 
@@ -355,5 +360,114 @@ func TestPipelineRejectsInvalidEncryptedState(t *testing.T) {
 	})
 	if !errors.Is(err, httpapi.ErrVoiceStateInvalid) {
 		t.Fatalf("error = %v; want invalid state", err)
+	}
+}
+
+func TestPipelineUnexpectedErrorsExposeOnlyFiniteStage(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secretProviderText = "provider-response-SECRET"
+		secretTranscript   = "田中さんの診療記録"
+		secretUID          = "uid-private-123"
+	)
+
+	tests := []struct {
+		name      string
+		speech    *fakeSpeech
+		agent     *fakeAgent
+		wantStage httpapi.VoicePipelineStage
+	}{
+		{
+			name: "transcribe",
+			speech: &fakeSpeech{
+				transcribeErr: errors.New(
+					secretProviderText + " AUDIO-SECRET",
+				),
+			},
+			agent:     &fakeAgent{},
+			wantStage: httpapi.VoicePipelineStageTranscribe,
+		},
+		{
+			name: "conversation",
+			speech: &fakeSpeech{
+				transcript: secretTranscript,
+				confidence: 0.95,
+			},
+			agent: &fakeAgent{
+				err: errors.New(secretProviderText + " " + secretTranscript),
+			},
+			wantStage: httpapi.VoicePipelineStageConversation,
+		},
+		{
+			name: "synthesize",
+			speech: &fakeSpeech{
+				transcript:    "回答をまとめて",
+				confidence:    0.95,
+				synthesizeErr: errors.New(secretProviderText),
+			},
+			agent: &fakeAgent{
+				result: conversation.VoiceTurnResult{
+					Domain:           "general",
+					AssistanceTarget: "assistant",
+					RespondentStage:  "none",
+					ResearchStatus:   "none",
+					ResearchRecords:  []conversation.ResearchRecord{},
+					Route:            "fast",
+					StateToken:       "encrypted-state",
+					SpokenReply:      secretTranscript,
+				},
+			},
+			wantStage: httpapi.VoicePipelineStageSynthesize,
+		},
+		{
+			name: "synthesize recognition clarification",
+			speech: &fakeSpeech{
+				transcript:    secretTranscript,
+				confidence:    0.40,
+				synthesizeErr: errors.New(secretProviderText),
+			},
+			agent:     &fakeAgent{},
+			wantStage: httpapi.VoicePipelineStageSynthesize,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			pipeline, err := New(test.speech, test.agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = pipeline.Process(
+				context.Background(),
+				secretUID,
+				httpapi.VoiceTurnInput{Audio: []byte("AUDIO-SECRET")},
+			)
+			if err == nil {
+				t.Fatal("pipeline succeeded; want classified failure")
+			}
+			stage, classified := httpapi.VoicePipelineStageOf(err)
+			if !classified || stage != test.wantStage {
+				t.Fatalf(
+					"stage = %q, classified = %v; want %q",
+					stage,
+					classified,
+					test.wantStage,
+				)
+			}
+			for _, forbidden := range []string{
+				secretProviderText,
+				secretTranscript,
+				secretUID,
+				"AUDIO-SECRET",
+			} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("pipeline error exposed private content %q", forbidden)
+				}
+			}
+		})
 	}
 }

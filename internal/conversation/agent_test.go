@@ -231,6 +231,95 @@ func TestAgentCanonicalizesCriticDerivedFields(t *testing.T) {
 	}
 }
 
+func TestCanonicalizeAnswerContractAddsAuthoritativeTarget(t *testing.T) {
+	plan := validModelPlan()
+	contract := &plan.AnswerContract
+	contract.QuestionFrame.RequiredSlots = []answercontract.RequiredSlot{
+		answercontract.SlotState,
+	}
+	contract.CommitmentFront.FilledSlots = []answercontract.RequiredSlot{
+		answercontract.SlotState,
+	}
+	contract.CommitmentFront.FillsTarget = true
+	contract.CommitmentFront.TargetCoverage = 1
+	contract.CommitmentFront.Issue = answercontract.IssueNone
+
+	canonicalizeAnswerContractDerivedFields(contract)
+
+	if len(contract.QuestionFrame.RequiredSlots) != 2 ||
+		contract.QuestionFrame.RequiredSlots[0] != answercontract.SlotState ||
+		contract.QuestionFrame.RequiredSlots[1] != answercontract.SlotPosition ||
+		contract.CommitmentFront.FillsTarget ||
+		contract.CommitmentFront.TargetCoverage != 0.5 ||
+		contract.CommitmentFront.Issue != answercontract.IssueTargetMissing {
+		t.Fatalf("unexpected canonical contract: %#v", contract)
+	}
+	if err := answercontract.Validate(*contract); err != nil {
+		t.Fatalf("canonical contract should validate: %v", err)
+	}
+}
+
+func TestCanonicalizeAnswerContractFailsClosedAtRequiredSlotLimit(t *testing.T) {
+	plan := validModelPlan()
+	contract := &plan.AnswerContract
+	contract.QuestionFrame.RequiredSlots = []answercontract.RequiredSlot{
+		answercontract.SlotState,
+		answercontract.SlotCause,
+		answercontract.SlotProcedure,
+		answercontract.SlotEvidence,
+		answercontract.SlotPurpose,
+	}
+	contract.CommitmentFront.FilledSlots = append(
+		[]answercontract.RequiredSlot(nil),
+		contract.QuestionFrame.RequiredSlots...,
+	)
+	contract.CommitmentFront.FillsTarget = false
+	contract.CommitmentFront.TargetCoverage = 1
+	contract.CommitmentFront.Issue = answercontract.IssueNone
+
+	canonicalizeAnswerContractDerivedFields(contract)
+
+	if len(contract.QuestionFrame.RequiredSlots) != answercontract.MaxRequiredSlots {
+		t.Fatalf("required slots were replaced: %#v", contract.QuestionFrame.RequiredSlots)
+	}
+	if err := answercontract.Validate(*contract); !errors.Is(
+		err,
+		answercontract.ErrInvalidContract,
+	) {
+		t.Fatalf("missing target must remain invalid at the limit: %v", err)
+	}
+}
+
+func TestNormalizeAndValidatePlanAcceptsGreetingContractAfterCanonicalization(
+	t *testing.T,
+) {
+	plan := validModelPlan()
+	plan.Domain = "daily"
+	plan.Intent = "other"
+	plan.AnswerContract.QuestionFrame.RequiredSlots = []answercontract.RequiredSlot{
+		answercontract.SlotState,
+	}
+	plan.AnswerContract.CommitmentFront.FilledSlots = []answercontract.RequiredSlot{
+		answercontract.SlotState,
+	}
+	plan.AnswerContract.CommitmentFront.FillsTarget = true
+	plan.AnswerContract.CommitmentFront.TargetCoverage = 1
+	plan.AnswerContract.CommitmentFront.Issue = answercontract.IssueNone
+
+	if err := normalizeAndValidatePlan(&plan, false, "こんにちは", false); err != nil {
+		t.Fatalf("greeting-like plan should validate after canonicalization: %v", err)
+	}
+	if got := plan.AnswerContract; len(got.QuestionFrame.RequiredSlots) != 2 ||
+		got.QuestionFrame.RequiredSlots[1] != answercontract.SlotPosition ||
+		len(got.CommitmentFront.FilledSlots) != 1 ||
+		got.CommitmentFront.FilledSlots[0] != answercontract.SlotState ||
+		got.CommitmentFront.FillsTarget ||
+		got.CommitmentFront.TargetCoverage != 0.5 ||
+		got.CommitmentFront.Issue != answercontract.IssueTargetMissing {
+		t.Fatalf("unexpected normalized greeting contract: %#v", got)
+	}
+}
+
 func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 	t.Run("precision model recovers two primary provider failures", func(t *testing.T) {
 		plan := validModelPlan()

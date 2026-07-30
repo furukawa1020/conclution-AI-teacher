@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -540,6 +541,79 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"researchStatus":"none"`) ||
 		!strings.Contains(response.Body.String(), `"researchRecords":[]`) {
 		t.Fatalf("response research metadata = %s", response.Body.String())
+	}
+}
+
+func TestVoiceTurnFailureLogsOnlyFinitePipelineStage(t *testing.T) {
+	t.Parallel()
+
+	const (
+		privateProviderText = "provider-response-SECRET"
+		privateTranscript   = "田中さんの診療記録"
+		privateState        = "STATE-SECRET"
+	)
+	service := &fakeVoiceService{
+		err: fmt.Errorf(
+			"%s %s: %w",
+			privateProviderText,
+			privateTranscript,
+			NewVoicePipelineFailure(VoicePipelineStageConversation),
+		),
+	}
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	handler := NewWithVoice(
+		logger,
+		fakeVerifier{principal: identity.Principal{
+			UID:   "user-123",
+			AppID: "app-123",
+			Roles: map[string]bool{"user": true},
+		}},
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		2*time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:         service,
+			RateLimiter:     &fakeLimiter{},
+			AppRateLimiter:  &fakeLimiter{wantKey: "app:app-123"},
+			RequestTimeout:  2 * time.Second,
+			MaxRequestBytes: 13 * 1024 * 1024,
+		},
+	)
+	body := fmt.Sprintf(
+		`{"audioBase64":%q,"mimeType":"audio/wav","sessionState":%q,"turnMode":"intentional"}`,
+		base64.StdEncoding.EncodeToString([]byte("AUDIO-SECRET")),
+		privateState,
+	)
+	request := authenticatedRequest(http.MethodPost, "/api/v1/voice/turns", body)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d; body = %s", response.Code, response.Body.String())
+	}
+	logged := logOutput.String()
+	if !strings.Contains(logged, `"pipeline_stage":"conversation"`) {
+		t.Fatalf("finite pipeline stage missing from log: %s", logged)
+	}
+	for _, forbidden := range []string{
+		privateProviderText,
+		privateTranscript,
+		privateState,
+		"AUDIO-SECRET",
+		"user-123",
+		"app-123",
+	} {
+		if strings.Contains(logged, forbidden) {
+			t.Fatalf("voice failure log exposed private content %q: %s", forbidden, logged)
+		}
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("voice failure response exposed private content %q", forbidden)
+		}
 	}
 }
 

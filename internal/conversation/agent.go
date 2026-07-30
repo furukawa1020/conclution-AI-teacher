@@ -1110,7 +1110,7 @@ func (agent *vertexAgent) auditAnswer(
 			errCriticJSON,
 		)
 	}
-	canonicalizeCriticDerivedFields(&contract)
+	canonicalizeAnswerContractDerivedFields(&contract)
 	assessment, err := answercontract.Evaluate(contract, candidatePlan.SpokenReply)
 	if err != nil {
 		return answercontract.Assessment{}, errors.Join(
@@ -1149,7 +1149,11 @@ func criticFinishFailure(response *genai.GenerateContentResponse) error {
 	}
 }
 
-func canonicalizeCriticDerivedFields(contract *answercontract.Contract) {
+// canonicalizeAnswerContractDerivedFields enforces the operator-to-target
+// relationship that the provider JSON schema cannot express. It only adds the
+// authoritative target slot and recomputes derived claims; it never marks a
+// slot as filled or invents answer text.
+func canonicalizeAnswerContractDerivedFields(contract *answercontract.Contract) {
 	if contract == nil || len(contract.QuestionFrame.RequiredSlots) == 0 {
 		return
 	}
@@ -1157,6 +1161,21 @@ func canonicalizeCriticDerivedFields(contract *answercontract.Contract) {
 	if !ok {
 		return
 	}
+	targetRequired := false
+	for _, slot := range contract.QuestionFrame.RequiredSlots {
+		if slot == targetSlot {
+			targetRequired = true
+			break
+		}
+	}
+	if !targetRequired &&
+		len(contract.QuestionFrame.RequiredSlots) < answercontract.MaxRequiredSlots {
+		contract.QuestionFrame.RequiredSlots = append(
+			contract.QuestionFrame.RequiredSlots,
+			targetSlot,
+		)
+	}
+
 	commitment := &contract.CommitmentFront
 	commitment.TargetCoverage = float64(len(commitment.FilledSlots)) /
 		float64(len(contract.QuestionFrame.RequiredSlots))
@@ -1166,6 +1185,19 @@ func canonicalizeCriticDerivedFields(contract *answercontract.Contract) {
 			commitment.FillsTarget = true
 			break
 		}
+	}
+	switch {
+	case commitment.TargetCoverage < 1 &&
+		commitment.Issue == answercontract.IssueNone:
+		if commitment.FillsTarget {
+			commitment.Issue = answercontract.IssueMissingRequiredSlot
+		} else {
+			commitment.Issue = answercontract.IssueTargetMissing
+		}
+	case commitment.TargetCoverage == 1 &&
+		(commitment.Issue == answercontract.IssueTargetMissing ||
+			commitment.Issue == answercontract.IssueMissingRequiredSlot):
+		commitment.Issue = answercontract.IssueNone
 	}
 }
 
@@ -1260,6 +1292,7 @@ func normalizeAndValidatePlan(
 	plan.ConversationSummary = collapseSpace(plan.ConversationSummary)
 	plan.DocumentSummary = collapseSpace(plan.DocumentSummary)
 	plan.Intervention.Act = strings.TrimSpace(plan.Intervention.Act)
+	canonicalizeAnswerContractDerivedFields(&plan.AnswerContract)
 
 	if !allowedDomain(plan.Domain) ||
 		!allowedIntent(plan.Intent) ||

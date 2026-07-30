@@ -25,7 +25,8 @@ const (
 	voiceLiveMaxCaptureDuration = 55 * time.Second
 	voiceLiveMaxStartBytes      = 40 * 1024
 	voiceLiveMaxPCMFrameBytes   = 15 * 1024
-	voiceLiveMaxPCMTotalBytes   = maxAudioBytes
+	voiceLiveMaxPCMFrames       = 2_800
+	voiceLiveMaxPCMTotalBytes   = 2 * 1024 * 1024
 	voiceLiveMaxTokenBytes      = 8 * 1024
 )
 
@@ -88,9 +89,16 @@ type voiceLiveRead struct {
 
 type voiceLiveOutputMetrics struct {
 	mu            sync.Mutex
+	committed     bool
 	firstOutputAt time.Time
 	frames        int
 	bytes         int
+}
+
+func (metrics *voiceLiveOutputMetrics) markCommitted() {
+	metrics.mu.Lock()
+	metrics.committed = true
+	metrics.mu.Unlock()
 }
 
 func (metrics *voiceLiveOutputMetrics) deliver(
@@ -100,7 +108,8 @@ func (metrics *voiceLiveOutputMetrics) deliver(
 ) error {
 	metrics.mu.Lock()
 	defer metrics.mu.Unlock()
-	if len(audio) == 0 ||
+	if !metrics.committed ||
+		len(audio) == 0 ||
 		len(audio)%2 != 0 ||
 		len(audio) > voiceStreamMaxChunkBytes ||
 		metrics.frames >= voiceStreamMaxChunks ||
@@ -170,8 +179,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var start voiceLiveStartFrame
+	decodeErr := decodeStrictVoiceLiveJSON(payload, &start)
+	clear(payload)
 	if messageType != websocket.MessageText ||
-		decodeStrictVoiceLiveJSON(payload, &start) != nil ||
+		decodeErr != nil ||
 		!validVoiceLiveStart(start) {
 		finishVoiceLiveWithError(
 			r.Context(),
@@ -260,6 +271,13 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	outputMetrics := &voiceLiveOutputMetrics{}
 	outcomeChannel := make(chan voiceLiveOutcome, 1)
 	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				outcomeChannel <- voiceLiveOutcome{
+					err: errors.New("live voice pipeline panicked"),
+				}
+			}
+		}()
 		result, processErr := liveService.ProcessLive(
 			liveCtx,
 			principal.UID,
@@ -348,6 +366,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if len(read.payload) > voiceLiveMaxPCMFrameBytes ||
+					inputFrames >= voiceLiveMaxPCMFrames ||
 					len(read.payload) >
 						voiceLiveMaxPCMTotalBytes-inputBytes {
 					clear(read.payload)
@@ -410,6 +429,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				commitAt = time.Now()
+				outputMetrics.markCommitted()
 				close(audioInput)
 				audioInputClosed = true
 			default:

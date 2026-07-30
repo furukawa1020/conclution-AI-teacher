@@ -21,7 +21,15 @@ import (
 const (
 	liveTestIDToken       = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEyMyJ9.signature"
 	liveTestAppCheckToken = "eyJhbGciOiJub25lIn0.eyJhcHBfaWQiOiJhcHAtMTIzIn0.signature"
+	liveTestPCMFrameBytes = 640
 )
+
+func liveTestPCMFrame() []byte {
+	frame := make([]byte, liveTestPCMFrameBytes)
+	frame[0] = 1
+	frame[2] = 2
+	return frame
+}
 
 type liveTestVerifier struct {
 	mu            sync.Mutex
@@ -258,10 +266,11 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 		len(ready) != 2 {
 		t.Fatalf("ready=%#v", ready)
 	}
+	inputFrame := liveTestPCMFrame()
 	if err := conn.Write(
 		ctx,
 		websocket.MessageBinary,
-		[]byte{1, 0, 2, 0},
+		inputFrame,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +319,7 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 	service.mu.Lock()
 	defer service.mu.Unlock()
 	if len(service.audio) != 1 ||
-		string(service.audio[0]) != string([]byte{1, 0, 2, 0}) ||
+		string(service.audio[0]) != string(inputFrame) ||
 		service.input.RequestID == "" {
 		t.Fatalf("live service audio=%v input=%+v", service.audio, service.input)
 	}
@@ -476,7 +485,7 @@ func TestVoiceLiveDisconnectCancelsPipeline(t *testing.T) {
 	if err := conn.Write(
 		ctx,
 		websocket.MessageBinary,
-		[]byte{1, 0},
+		liveTestPCMFrame(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -524,5 +533,283 @@ func TestVoiceLiveStartRequiresJWTAlphabetAndCanonicalState(t *testing.T) {
 		if validVoiceLiveStart(frame) {
 			t.Fatalf("invalid start frame was accepted: %+v", frame)
 		}
+	}
+}
+
+func TestVoiceLiveAcceptsBoundedEvenPCMFrameSizes(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		size int
+	}{
+		{name: "twenty milliseconds", size: 640},
+		{name: "current client batch", size: liveTestPCMFrameBytes},
+		{name: "arbitrary even frame", size: 638},
+		{name: "two small frames batched", size: 1_280},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			service := &liveTestVoiceService{
+				result: VoiceTurnResult{
+					StateToken:       "sealed-state",
+					DetectedDomain:   "daily",
+					AssistanceTarget: "assistant",
+					RespondentStage:  "none",
+					ResearchStatus:   "none",
+					ResearchRecords:  []ResearchRecord{},
+					Route:            "silent-fast",
+				},
+			}
+			server := newVoiceLiveTestServer(
+				t,
+				service,
+				&liveTestVerifier{},
+				&fakeLimiter{},
+				&fakeLimiter{wantKey: "app:app-123"},
+			)
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				3*time.Second,
+			)
+			defer cancel()
+			conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.CloseNow()
+			writeVoiceLiveStart(t, ctx, conn)
+			_ = readVoiceLiveJSON(t, ctx, conn)
+			if err := conn.Write(
+				ctx,
+				websocket.MessageBinary,
+				make([]byte, test.size),
+			); err != nil {
+				t.Fatal(err)
+			}
+			commit, err := json.Marshal(voiceLiveCommitFrame{
+				Type:    "commit",
+				Version: voiceLiveVersion,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.Write(
+				ctx,
+				websocket.MessageText,
+				commit,
+			); err != nil {
+				t.Fatal(err)
+			}
+			frame := readVoiceLiveJSON(t, ctx, conn)
+			if frame["type"] != "final" {
+				t.Fatalf("%d-byte PCM response=%#v", test.size, frame)
+			}
+			service.mu.Lock()
+			defer service.mu.Unlock()
+			if len(service.audio) != 1 ||
+				len(service.audio[0]) != test.size {
+				t.Fatalf(
+					"%d-byte PCM was not delivered: %v",
+					test.size,
+					service.audio,
+				)
+			}
+		})
+	}
+}
+
+func TestVoiceLiveSilentFinalContainsNoBinaryAudio(t *testing.T) {
+	t.Parallel()
+	service := &liveTestVoiceService{
+		result: VoiceTurnResult{
+			StateToken:       "sealed-silent-state",
+			DetectedDomain:   "daily",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "ambient-silent-fast",
+		},
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		liveTestPCMFrame(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+
+	messageType, payload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("silent result emitted binary frame type=%v", messageType)
+	}
+	var final map[string]any
+	if err := json.Unmarshal(payload, &final); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := final["result"].(map[string]any)
+	if final["type"] != "final" ||
+		!ok ||
+		result["audioBase64"] != "" ||
+		result["audioMimeType"] != "" ||
+		result["caption"] != nil ||
+		result["sessionState"] != "sealed-silent-state" {
+		t.Fatalf("silent final=%#v", final)
+	}
+}
+
+type precommitOutputLiveTestVoiceService struct {
+	attempted chan error
+}
+
+func (*precommitOutputLiveTestVoiceService) Process(
+	context.Context,
+	string,
+	VoiceTurnInput,
+) (VoiceTurnResult, error) {
+	return VoiceTurnResult{}, errors.New("buffered voice method called")
+}
+
+func (service *precommitOutputLiveTestVoiceService) ProcessLive(
+	_ context.Context,
+	_ string,
+	_ VoiceTurnInput,
+	_ <-chan []byte,
+	onAudio func([]byte) error,
+) (VoiceTurnResult, error) {
+	err := onAudio([]byte{1, 0})
+	service.attempted <- err
+	return VoiceTurnResult{}, err
+}
+
+func TestVoiceLiveRejectsPipelineOutputBeforeCommit(t *testing.T) {
+	t.Parallel()
+	service := &precommitOutputLiveTestVoiceService{
+		attempted: make(chan error, 1),
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("precommit output response=%#v", frame)
+	}
+	select {
+	case attemptErr := <-service.attempted:
+		if attemptErr == nil {
+			t.Fatal("precommit output callback was accepted")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("precommit output callback did not return")
+	}
+}
+
+type panickingLiveTestVoiceService struct{}
+
+func (panickingLiveTestVoiceService) Process(
+	context.Context,
+	string,
+	VoiceTurnInput,
+) (VoiceTurnResult, error) {
+	return VoiceTurnResult{}, errors.New("buffered voice method called")
+}
+
+func (panickingLiveTestVoiceService) ProcessLive(
+	_ context.Context,
+	_ string,
+	_ VoiceTurnInput,
+	audio <-chan []byte,
+	_ func([]byte) error,
+) (VoiceTurnResult, error) {
+	for range audio {
+	}
+	panic("test live pipeline panic")
+}
+
+func TestVoiceLivePipelinePanicFailsClosedWithoutBinaryAudio(t *testing.T) {
+	t.Parallel()
+	server := newVoiceLiveTestServer(
+		t,
+		panickingLiveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		liveTestPCMFrame(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("pipeline panic response=%#v", frame)
 	}
 }

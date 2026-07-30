@@ -89,9 +89,10 @@ type fakeLiveSpeech struct {
 }
 
 type scriptedSynthesis struct {
-	chunks   [][]byte
-	mimeType string
-	err      error
+	chunks       [][]byte
+	mimeType     string
+	err          error
+	beforeReturn <-chan struct{}
 }
 
 type synthesisChunkEvent struct {
@@ -109,6 +110,7 @@ type scriptedLiveSpeech struct {
 	chunkStarted  chan synthesisChunkEvent
 	chunkFinished chan synthesisChunkEvent
 	completed     chan int
+	returned      chan int
 }
 
 func (speech *scriptedLiveSpeech) OpenStreamingTranscription(
@@ -132,6 +134,11 @@ func (speech *scriptedLiveSpeech) StreamSynthesize(
 	}
 	script := speech.scripts[call]
 	speech.mu.Unlock()
+	if speech.returned != nil {
+		defer func() {
+			speech.returned <- call
+		}()
+	}
 
 	for index, chunk := range script.chunks {
 		event := synthesisChunkEvent{call: call, chunk: index}
@@ -150,6 +157,13 @@ func (speech *scriptedLiveSpeech) StreamSynthesize(
 	}
 	if speech.completed != nil {
 		speech.completed <- call
+	}
+	if script.beforeReturn != nil {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-script.beforeReturn:
+		}
 	}
 	if script.err != nil {
 		return "", script.err
@@ -859,6 +873,612 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 	}
 }
 
+func TestPipelineLiveReleasesFullPrestartedTTSInOrder(t *testing.T) {
+	t.Parallel()
+	const utterance = "長い先読み音声の順序を確認する"
+	finalGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.91,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	first := bytes.Repeat([]byte{5, 0}, maxSpeculativeTTSBufferBytes/2)
+	second := []byte{6, 0}
+	speech := &scriptedLiveSpeech{
+		session: session,
+		scripts: []scriptedSynthesis{{
+			chunks: [][]byte{first, second},
+		}},
+		chunkStarted:  make(chan synthesisChunkEvent, 2),
+		chunkFinished: make(chan synthesisChunkEvent, 2),
+		completed:     make(chan int, 1),
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("長い先読み回答", "spec-state"),
+		normalResult:      liveTestDecision("通常回答", "normal-state"),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(800, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	type pipelineOutcome struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}
+	done := make(chan pipelineOutcome, 1)
+	var outputMu sync.Mutex
+	var outputFrames [][]byte
+	go func() {
+		result, processErr := pipeline.ProcessLive(
+			context.Background(),
+			"uid",
+			httpapi.VoiceTurnInput{},
+			audio,
+			func(chunk []byte) error {
+				outputMu.Lock()
+				outputFrames = append(
+					outputFrames,
+					append([]byte(nil), chunk...),
+				)
+				outputMu.Unlock()
+				return nil
+			},
+		)
+		done <- pipelineOutcome{result: result, err: processErr}
+	}()
+
+	for _, want := range []synthesisChunkEvent{
+		{call: 0, chunk: 0},
+		{call: 0, chunk: 1},
+	} {
+		select {
+		case got := <-speech.chunkStarted:
+			if got != want {
+				t.Fatalf("started=%+v want %+v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("chunk %+v never started", want)
+		}
+		if want.chunk == 0 {
+			select {
+			case got := <-speech.chunkFinished:
+				if got != want {
+					t.Fatalf("finished=%+v want %+v", got, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("first bounded chunk did not finish")
+			}
+		}
+	}
+	select {
+	case event := <-speech.chunkFinished:
+		t.Fatalf("full-buffer callback was not blocked: %+v", event)
+	case <-time.After(20 * time.Millisecond):
+	}
+	outputMu.Lock()
+	preFinalFrames := len(outputFrames)
+	outputMu.Unlock()
+	if preFinalFrames != 0 {
+		t.Fatalf("pre-final frames=%d", preFinalFrames)
+	}
+
+	close(finalGate)
+	var outcome pipelineOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("full-buffer release did not complete")
+	}
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	outputMu.Lock()
+	frames := append([][]byte(nil), outputFrames...)
+	outputMu.Unlock()
+	if len(frames) != 2 ||
+		!bytes.Equal(frames[0], first) ||
+		!bytes.Equal(frames[1], second) {
+		sizes := make([]int, 0, len(frames))
+		for _, frame := range frames {
+			sizes = append(sizes, len(frame))
+		}
+		t.Fatalf("output frame sizes=%v", sizes)
+	}
+	if texts := speech.synthesisTexts(); len(texts) != 1 ||
+		texts[0] != "長い先読み回答" {
+		t.Fatalf("synthesis texts=%v", texts)
+	}
+	if outcome.result.LiveTimings.TTSPrestarted != 1 ||
+		outcome.result.LiveTimings.TTSBufferedBytes !=
+			maxSpeculativeTTSBufferBytes ||
+		outcome.result.LiveTimings.TTSReleaseMS < 0 ||
+		outcome.result.LiveTimings.SpecHit != 1 {
+		t.Fatalf("timings=%+v", outcome.result.LiveTimings)
+	}
+}
+
+func TestPipelineLiveDiscardsPrestartedTTSOnFinalMismatch(t *testing.T) {
+	t.Parallel()
+	const interim = "先読み時点の質問内容です"
+	finalGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      interim,
+			Stability: 0.9,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      interim,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "確定時点では異なる質問です",
+		},
+	)
+	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	speech := &scriptedLiveSpeech{
+		session: session,
+		scripts: []scriptedSynthesis{
+			{chunks: [][]byte{{9, 0}}},
+			{chunks: [][]byte{{7, 0}}},
+		},
+		completed: make(chan int, 2),
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision(
+			"破棄される先読み回答",
+			"provisional-state",
+		),
+		normalResult: liveTestDecision("確定回答", "final-state"),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(900, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	type pipelineOutcome struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}
+	done := make(chan pipelineOutcome, 1)
+	var outputMu sync.Mutex
+	var output []byte
+	go func() {
+		result, processErr := pipeline.ProcessLive(
+			context.Background(),
+			"uid",
+			httpapi.VoiceTurnInput{},
+			audio,
+			func(chunk []byte) error {
+				outputMu.Lock()
+				output = append(output, chunk...)
+				outputMu.Unlock()
+				return nil
+			},
+		)
+		done <- pipelineOutcome{result: result, err: processErr}
+	}()
+	select {
+	case call := <-speech.completed:
+		if call != 0 {
+			t.Fatalf("completed call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("speculative TTS did not complete before final")
+	}
+	outputMu.Lock()
+	preFinalBytes := len(output)
+	outputMu.Unlock()
+	if preFinalBytes != 0 {
+		t.Fatalf("pre-final output bytes=%d", preFinalBytes)
+	}
+	close(finalGate)
+	var outcome pipelineOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("mismatch fallback did not complete")
+	}
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	outputMu.Lock()
+	finalOutput := append([]byte(nil), output...)
+	outputMu.Unlock()
+	if !bytes.Equal(finalOutput, []byte{7, 0}) ||
+		outcome.result.StateToken != "final-state" ||
+		outcome.result.Caption != "確定回答" {
+		t.Fatalf("output=%v result=%+v", finalOutput, outcome.result)
+	}
+	if texts := speech.synthesisTexts(); len(texts) != 2 ||
+		texts[0] != "破棄される先読み回答" ||
+		texts[1] != "確定回答" {
+		t.Fatalf("synthesis texts=%v", texts)
+	}
+	if outcome.result.LiveTimings.TTSPrestarted != 1 ||
+		outcome.result.LiveTimings.TTSBufferedBytes != 2 ||
+		outcome.result.LiveTimings.TTSReleaseMS != -1 ||
+		outcome.result.LiveTimings.SpecMiss != 1 ||
+		outcome.result.LiveTimings.SpecCancel != 1 {
+		t.Fatalf("timings=%+v", outcome.result.LiveTimings)
+	}
+}
+
+func TestPipelineLivePrestartFailureFallsBackBeforeRelease(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		script scriptedSynthesis
+	}{
+		{
+			name: "provider error",
+			script: scriptedSynthesis{
+				chunks: [][]byte{{8, 0}},
+				err:    errors.New("prestart failed"),
+			},
+		},
+		{
+			name: "wrong MIME",
+			script: scriptedSynthesis{
+				chunks:   [][]byte{{8, 0}},
+				mimeType: "audio/mpeg",
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			const utterance = "先読み失敗時の安全性を確認する"
+			finalGate := make(chan struct{})
+			session := newFakeLiveTranscriptionSession(
+				speechio.StreamingTranscriptionEvent{
+					Kind:      speechio.StreamingTranscriptionInterim,
+					Text:      utterance,
+					Stability: 0.9,
+				},
+				speechio.StreamingTranscriptionEvent{
+					Kind:      speechio.StreamingTranscriptionInterim,
+					Text:      utterance,
+					Stability: 0.95,
+				},
+				speechio.StreamingTranscriptionEvent{
+					Kind: speechio.StreamingTranscriptionFinal,
+					Text: utterance,
+				},
+			)
+			session.eventGates = map[int]<-chan struct{}{2: finalGate}
+			speech := &scriptedLiveSpeech{
+				session: session,
+				scripts: []scriptedSynthesis{
+					test.script,
+					{chunks: [][]byte{{3, 0}}},
+				},
+				completed: make(chan int, 2),
+			}
+			agent := &speculativeTestAgent{
+				speculativeResult: liveTestDecision(
+					"破棄される先読み回答",
+					"provisional-state",
+				),
+				normalResult: liveTestDecision("通常再実行", "final-state"),
+			}
+			pipeline, err := New(speech, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Unix(1000, 0)
+			pipeline.now = sequenceClock(
+				started,
+				started.Add(minSpeculativeStableDuration),
+			)
+			audio := make(chan []byte, 1)
+			audio <- []byte{1, 0}
+			close(audio)
+			type pipelineOutcome struct {
+				result httpapi.VoiceTurnResult
+				err    error
+			}
+			done := make(chan pipelineOutcome, 1)
+			var outputMu sync.Mutex
+			var output []byte
+			go func() {
+				result, processErr := pipeline.ProcessLive(
+					context.Background(),
+					"uid",
+					httpapi.VoiceTurnInput{},
+					audio,
+					func(chunk []byte) error {
+						outputMu.Lock()
+						output = append(output, chunk...)
+						outputMu.Unlock()
+						return nil
+					},
+				)
+				done <- pipelineOutcome{result: result, err: processErr}
+			}()
+			select {
+			case call := <-speech.completed:
+				if call != 0 {
+					t.Fatalf("completed call=%d", call)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("prestart did not finish before final")
+			}
+			outputMu.Lock()
+			preFinalBytes := len(output)
+			outputMu.Unlock()
+			if preFinalBytes != 0 {
+				t.Fatalf("invalid prestart output bytes=%d", preFinalBytes)
+			}
+			close(finalGate)
+			var outcome pipelineOutcome
+			select {
+			case outcome = <-done:
+			case <-time.After(time.Second):
+				t.Fatal("prestart fallback did not finish")
+			}
+			if outcome.err != nil {
+				t.Fatal(outcome.err)
+			}
+			outputMu.Lock()
+			finalOutput := append([]byte(nil), output...)
+			outputMu.Unlock()
+			if !bytes.Equal(finalOutput, []byte{3, 0}) ||
+				outcome.result.StateToken != "final-state" ||
+				outcome.result.Caption != "通常再実行" {
+				t.Fatalf("output=%v result=%+v", finalOutput, outcome.result)
+			}
+			if texts := speech.synthesisTexts(); len(texts) != 2 {
+				t.Fatalf("synthesis texts=%v", texts)
+			}
+			if outcome.result.LiveTimings.TTSPrestarted != 1 ||
+				outcome.result.LiveTimings.TTSBufferedBytes != 2 ||
+				outcome.result.LiveTimings.TTSReleaseMS != -1 ||
+				outcome.result.LiveTimings.SpecMiss != 1 ||
+				outcome.result.LiveTimings.SpecCancel != 1 {
+				t.Fatalf("timings=%+v", outcome.result.LiveTimings)
+			}
+		})
+	}
+}
+
+func TestPipelineLiveLatePrestartFailureDoesNotDoubleSpeak(t *testing.T) {
+	t.Parallel()
+	const utterance = "後段失敗でも二重発話を防止する"
+	finalGate := make(chan struct{})
+	returnGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.9,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	first := bytes.Repeat([]byte{4, 0}, maxSpeculativeTTSBufferBytes/2)
+	speech := &scriptedLiveSpeech{
+		session: session,
+		scripts: []scriptedSynthesis{{
+			chunks:       [][]byte{first},
+			err:          errors.New("late synthesis failure"),
+			beforeReturn: returnGate,
+		}},
+		completed: make(chan int, 1),
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("先読み回答", "spec-state"),
+		normalResult:      liveTestDecision("再送してはいけない", "normal-state"),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(1100, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	type pipelineOutcome struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}
+	done := make(chan pipelineOutcome, 1)
+	delivered := make(chan []byte, 1)
+	go func() {
+		result, processErr := pipeline.ProcessLive(
+			context.Background(),
+			"uid",
+			httpapi.VoiceTurnInput{},
+			audio,
+			func(chunk []byte) error {
+				delivered <- append([]byte(nil), chunk...)
+				return nil
+			},
+		)
+		done <- pipelineOutcome{result: result, err: processErr}
+	}()
+	select {
+	case call := <-speech.completed:
+		if call != 0 {
+			t.Fatalf("completed call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("full speculative buffer was not produced")
+	}
+	close(finalGate)
+	select {
+	case chunk := <-delivered:
+		if !bytes.Equal(chunk, first) {
+			t.Fatalf("delivered %d bytes", len(chunk))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("committed prefix was not released")
+	}
+	close(returnGate)
+	var outcome pipelineOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("late synthesis error did not terminate")
+	}
+	if outcome.err == nil {
+		t.Fatal("late synthesis error returned success")
+	}
+	if outcome.result.StateToken != "" ||
+		outcome.result.Caption != "" {
+		t.Fatalf("late failure exposed final state: %+v", outcome.result)
+	}
+	if texts := speech.synthesisTexts(); len(texts) != 1 {
+		t.Fatalf("late failure triggered duplicate TTS: %v", texts)
+	}
+	turns := agent.recordedTurns()
+	if len(turns) != 1 || !turns[0].Speculative {
+		t.Fatalf("late failure reran the agent: %+v", turns)
+	}
+	if outcome.result.LiveTimings.TTSPrestarted != 1 ||
+		outcome.result.LiveTimings.TTSBufferedBytes !=
+			maxSpeculativeTTSBufferBytes ||
+		outcome.result.LiveTimings.TTSReleaseMS < 0 ||
+		outcome.result.LiveTimings.SpecHit != 0 ||
+		outcome.result.LiveTimings.SpecMiss != 1 ||
+		outcome.result.LiveTimings.SpecCancel != 1 {
+		t.Fatalf("timings=%+v", outcome.result.LiveTimings)
+	}
+}
+
+func TestPipelineLiveCancellationWakesFullPrestartedTTS(t *testing.T) {
+	t.Parallel()
+	const utterance = "接続中断時の先読みを停止する"
+	finalGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.9,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	full := bytes.Repeat([]byte{2, 0}, maxSpeculativeTTSBufferBytes/2)
+	speech := &scriptedLiveSpeech{
+		session: session,
+		scripts: []scriptedSynthesis{{
+			chunks: [][]byte{full, {3, 0}},
+		}},
+		chunkStarted: make(chan synthesisChunkEvent, 2),
+		returned:     make(chan int, 1),
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("先読み回答", "spec-state"),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(1200, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	delivered := make(chan struct{}, 1)
+	go func() {
+		_, processErr := pipeline.ProcessLive(
+			ctx,
+			"uid",
+			httpapi.VoiceTurnInput{},
+			audio,
+			func([]byte) error {
+				delivered <- struct{}{}
+				return nil
+			},
+		)
+		done <- processErr
+	}()
+	for index := 0; index < 2; index++ {
+		select {
+		case event := <-speech.chunkStarted:
+			if event != (synthesisChunkEvent{call: 0, chunk: index}) {
+				t.Fatalf("chunk event=%+v", event)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("chunk %d did not start", index)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline cancellation did not return")
+	}
+	select {
+	case call := <-speech.returned:
+		if call != 0 {
+			t.Fatalf("returned call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("full speculative TTS goroutine did not return")
+	}
+	select {
+	case <-delivered:
+		t.Fatal("cancelled speculative PCM escaped")
+	default:
+	}
+}
+
 func TestPipelineLiveSpeculationUsesFinalsPlusLatestInterim(t *testing.T) {
 	t.Parallel()
 	const (
@@ -1271,5 +1891,172 @@ func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T
 				t.Fatalf("timings=%+v", result.LiveTimings)
 			}
 		})
+	}
+}
+
+type earlyEOFTranscriptionSession struct {
+	events       []speechio.StreamingTranscriptionEvent
+	eventIndex   int
+	sendObserved chan struct{}
+	sendOnce     sync.Once
+}
+
+func (session *earlyEOFTranscriptionSession) SendPCM([]byte) error {
+	session.sendOnce.Do(func() {
+		close(session.sendObserved)
+	})
+	return nil
+}
+
+func (*earlyEOFTranscriptionSession) CloseSend() error {
+	return nil
+}
+
+func (session *earlyEOFTranscriptionSession) RecvEvent() (
+	speechio.StreamingTranscriptionEvent,
+	error,
+) {
+	if session.eventIndex >= len(session.events) {
+		return speechio.StreamingTranscriptionEvent{}, io.EOF
+	}
+	event := session.events[session.eventIndex]
+	session.eventIndex++
+	return event, nil
+}
+
+type earlyEOFStreamingSpeech struct {
+	fakeSpeech
+	session   *earlyEOFTranscriptionSession
+	ttsCalled chan struct{}
+	ttsOnce   sync.Once
+}
+
+func (speech *earlyEOFStreamingSpeech) OpenStreamingTranscription(
+	context.Context,
+) (speechio.StreamingTranscriptionSession, error) {
+	return speech.session, nil
+}
+
+func (speech *earlyEOFStreamingSpeech) StreamSynthesize(
+	context.Context,
+	string,
+	speechio.StreamChunkHandler,
+) (string, error) {
+	speech.ttsOnce.Do(func() {
+		close(speech.ttsCalled)
+	})
+	return speechio.StreamingAudioContentType, nil
+}
+
+type commitBoundaryAgent struct {
+	called chan struct{}
+	once   sync.Once
+}
+
+func (agent *commitBoundaryAgent) Process(
+	context.Context,
+	string,
+	conversation.VoiceTurn,
+) (conversation.VoiceTurnResult, error) {
+	agent.once.Do(func() {
+		close(agent.called)
+	})
+	return liveTestDecision("must not be spoken", "must-not-commit"), nil
+}
+
+func TestPipelineLiveProviderEOFFailsClosedBeforeCommit(t *testing.T) {
+	t.Parallel()
+	session := &earlyEOFTranscriptionSession{
+		events: []speechio.StreamingTranscriptionEvent{{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "確定前にプロバイダーが終了した",
+		}},
+		sendObserved: make(chan struct{}),
+	}
+	speech := &earlyEOFStreamingSpeech{
+		session:   session,
+		ttsCalled: make(chan struct{}),
+	}
+	agent := &commitBoundaryAgent{called: make(chan struct{})}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	audio := make(chan []byte)
+	defer close(audio)
+	outputCalled := make(chan struct{}, 1)
+	type pipelineOutcome struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}
+	done := make(chan pipelineOutcome, 1)
+	go func() {
+		result, processErr := pipeline.ProcessLive(
+			ctx,
+			"uid",
+			httpapi.VoiceTurnInput{
+				TurnMode: httpapi.VoiceTurnIntentional,
+			},
+			audio,
+			func([]byte) error {
+				outputCalled <- struct{}{}
+				return nil
+			},
+		)
+		done <- pipelineOutcome{result: result, err: processErr}
+	}()
+
+	select {
+	case audio <- []byte{1, 0}:
+	case <-time.After(time.Second):
+		t.Fatal("live sender did not accept PCM")
+	}
+	select {
+	case <-session.sendObserved:
+	case <-time.After(time.Second):
+		t.Fatal("streaming recognizer did not receive PCM")
+	}
+	select {
+	case <-agent.called:
+		t.Fatal("agent ran after provider EOF but before commit")
+	case <-speech.ttsCalled:
+		t.Fatal("TTS ran after provider EOF but before commit")
+	case <-outputCalled:
+		t.Fatal("audio escaped after provider EOF but before commit")
+	case outcome := <-done:
+		t.Fatalf("pipeline returned before commit: result=%+v err=%v",
+			outcome.result, outcome.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case outcome := <-done:
+		stage, classified := httpapi.VoicePipelineStageOf(outcome.err)
+		if !classified || stage != httpapi.VoicePipelineStageTranscribe {
+			t.Fatalf(
+				"provider EOF cancellation stage=%q classified=%v err=%v",
+				stage,
+				classified,
+				outcome.err,
+			)
+		}
+		if outcome.result.StateToken != "" ||
+			outcome.result.Caption != "" {
+			t.Fatalf("uncommitted result escaped: %+v", outcome.result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider EOF cancellation left pipeline goroutine running")
+	}
+	select {
+	case <-agent.called:
+		t.Fatal("agent ran while canceling uncommitted provider EOF")
+	case <-speech.ttsCalled:
+		t.Fatal("TTS ran while canceling uncommitted provider EOF")
+	case <-outputCalled:
+		t.Fatal("audio escaped while canceling uncommitted provider EOF")
+	default:
 	}
 }

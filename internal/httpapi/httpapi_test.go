@@ -395,7 +395,7 @@ func TestWriteOriginMustExactlyMatchFirebaseHosting(t *testing.T) {
 	healthResponse := httptest.NewRecorder()
 	handler.ServeHTTP(
 		healthResponse,
-		httptest.NewRequest(http.MethodGet, "/healthz", nil),
+		httptest.NewRequest(http.MethodGet, "/health", nil),
 	)
 	if healthResponse.Code != http.StatusOK {
 		t.Fatalf("GET health without Origin = %d", healthResponse.Code)
@@ -1410,7 +1410,7 @@ func TestSecurityHeadersAreApplied(t *testing.T) {
 
 	handler := testHandler(&fakeEvaluator{}, &fakeStore{})
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	for name, want := range map[string]string{
 		"Cache-Control":                "no-store",

@@ -210,7 +210,7 @@ func NewWithVoice(
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", server.health)
+	mux.HandleFunc("GET /health", server.health)
 	mux.Handle("GET /api/v1/me", server.requireIdentity(http.HandlerFunc(server.me)))
 	mux.Handle("POST /api/v1/evaluations", server.requireIdentity(http.HandlerFunc(server.evaluate)))
 	mux.Handle("POST /api/v1/voice/turns", server.requireIdentity(http.HandlerFunc(server.voiceTurn)))

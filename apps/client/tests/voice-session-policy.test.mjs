@@ -106,6 +106,8 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.notEqual(warmEnd, -1);
   const warm = bridge.slice(warmStart, warmEnd);
 
+  assert.match(bridge, /VOICE_WARMUP_ENDPOINT = `\$\{VOICE_ORIGIN\}\/health`/u);
+  assert.doesNotMatch(bridge, /\/healthz/u);
   assert.match(warm, /fetch\(VOICE_WARMUP_ENDPOINT/u);
   assert.match(warm, /credentials:\s*"omit"/u);
   assert.match(warm, /mode:\s*"no-cors"/u);

@@ -61,7 +61,7 @@ const VOICE_LIVE_ENDPOINT =
   "wss://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/live";
 const PCM_CAPTURE_WORKLET_URL = "/pcm-capture-worklet.js";
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
-const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/healthz`;
+const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/health`;
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;

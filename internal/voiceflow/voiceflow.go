@@ -105,7 +105,8 @@ func (p *Pipeline) Process(
 		Route:            decision.Route,
 		NeedsPaper: (decision.Intervention.Act == "paper_check" &&
 			input.Document == nil) ||
-			(decision.Route == "planner-unavailable" &&
+			((decision.Route == "planner-unavailable" ||
+				decision.Route == "planner-unavailable-silent") &&
 				input.Document != nil),
 	}
 	if decision.SpokenReply == "" {

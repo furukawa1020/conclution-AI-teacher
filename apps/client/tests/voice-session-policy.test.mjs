@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile as readFileRaw } from "node:fs/promises";
 import test from "node:test";
+
+async function readFile(...arguments_) {
+  const value = await readFileRaw(...arguments_);
+  return typeof value === "string"
+    ? value.replaceAll("\r\n", "\n")
+    : value;
+}
 
 import {
   advanceCandidateCapture,

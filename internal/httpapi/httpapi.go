@@ -36,6 +36,7 @@ const (
 	maxCaptionRunes  = 480
 	allowedWebOrigin = "https://kotae-ai.web.app"
 	voiceStreamPath  = "/api/v1/voice/turns:stream"
+	voiceLivePath    = "/api/v1/voice/live"
 
 	voiceStreamVersion       = 1
 	voiceStreamSampleRateHz  = 24_000
@@ -85,6 +86,14 @@ type VoiceTurnResult struct {
 	Route            string
 	NeedsPaper       bool
 	Caption          string
+	LiveTimings      VoiceLiveTimings
+}
+
+type VoiceLiveTimings struct {
+	STTFirstInterimMS int64
+	STTFinalMS        int64
+	ConversationMS    int64
+	TTSFirstChunkMS   int64
 }
 
 type ResearchRecord struct {
@@ -104,6 +113,16 @@ type VoiceTurnStreamService interface {
 		ctx context.Context,
 		uid string,
 		input VoiceTurnInput,
+		onAudio func([]byte) error,
+	) (VoiceTurnResult, error)
+}
+
+type VoiceTurnLiveService interface {
+	ProcessLive(
+		ctx context.Context,
+		uid string,
+		input VoiceTurnInput,
+		audio <-chan []byte,
 		onAudio func([]byte) error,
 	) (VoiceTurnResult, error)
 }
@@ -179,6 +198,7 @@ func NewWithVoice(
 		server.requireIdentity(http.HandlerFunc(server.voiceTurnStream)),
 	)
 	mux.HandleFunc("OPTIONS "+voiceStreamPath, server.voiceStreamPreflight)
+	mux.HandleFunc("GET "+voiceLivePath, server.voiceLive)
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(
@@ -754,7 +774,8 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		resourcePolicy := "same-origin"
-		if r.URL.Path == voiceStreamPath &&
+		if (r.URL.Path == voiceStreamPath ||
+			r.URL.Path == voiceLivePath) &&
 			r.Header.Get("Origin") == allowedWebOrigin {
 			resourcePolicy = "cross-origin"
 		}

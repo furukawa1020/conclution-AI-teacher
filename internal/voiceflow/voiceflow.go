@@ -3,9 +3,12 @@ package voiceflow
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
@@ -27,6 +30,13 @@ const (
 type Pipeline struct {
 	speech speechio.Service
 	agent  conversation.Agent
+}
+
+type liveStreamingSpeech interface {
+	speechio.StreamingService
+	OpenStreamingTranscription(
+		context.Context,
+	) (speechio.StreamingTranscriptionSession, error)
 }
 
 func New(speech speechio.Service, agent conversation.Agent) (*Pipeline, error) {
@@ -122,6 +132,199 @@ func (p *Pipeline) ProcessStream(
 	return result, nil
 }
 
+// ProcessLive consumes bounded PCM chunks as they arrive, receives streaming
+// recognition events concurrently, and sends only the final audited reply to
+// streaming synthesis. Ownership of each audio slice transfers to this method.
+func (p *Pipeline) ProcessLive(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+) (httpapi.VoiceTurnResult, error) {
+	if audio == nil || onAudio == nil {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageTranscribe,
+		)
+	}
+	streamingSpeech, ok := p.speech.(liveStreamingSpeech)
+	if !ok {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageTranscribe,
+		)
+	}
+
+	transcriptionStarted := time.Now()
+	transcriptionCtx, cancelTranscription := context.WithCancel(ctx)
+	defer cancelTranscription()
+	session, err := streamingSpeech.OpenStreamingTranscription(transcriptionCtx)
+	if err != nil {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageTranscribe,
+		)
+	}
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sentAudio := false
+		for {
+			select {
+			case <-transcriptionCtx.Done():
+				sendDone <- transcriptionCtx.Err()
+				return
+			case chunk, open := <-audio:
+				if !open {
+					if !sentAudio {
+						if err := session.CloseSend(); err != nil {
+							sendDone <- err
+							return
+						}
+						sendDone <- speechio.ErrNoSpeech
+						return
+					}
+					sendDone <- session.CloseSend()
+					return
+				}
+				err := session.SendPCM(chunk)
+				clear(chunk)
+				if err != nil {
+					sendDone <- err
+					return
+				}
+				sentAudio = true
+			}
+		}
+	}()
+
+	var transcript strings.Builder
+	receiveErr := error(nil)
+	firstInterimMS := int64(-1)
+	firstFinalMS := int64(-1)
+	for {
+		event, eventErr := session.RecvEvent()
+		if errors.Is(eventErr, io.EOF) {
+			break
+		}
+		if eventErr != nil {
+			receiveErr = eventErr
+			break
+		}
+		if event.Kind == speechio.StreamingTranscriptionInterim &&
+			firstInterimMS < 0 {
+			firstInterimMS = time.Since(transcriptionStarted).Milliseconds()
+		}
+		if event.Kind != speechio.StreamingTranscriptionFinal {
+			continue
+		}
+		if firstFinalMS < 0 {
+			firstFinalMS = time.Since(transcriptionStarted).Milliseconds()
+		}
+		fragment := strings.TrimSpace(event.Text)
+		if fragment == "" {
+			continue
+		}
+		if transcript.Len() > 0 {
+			transcript.WriteByte(' ')
+		}
+		transcript.WriteString(fragment)
+		if utf8.RuneCountInString(transcript.String()) >
+			conversation.MaxUtteranceRunes {
+			receiveErr = speechio.ErrTranscriptLong
+			break
+		}
+	}
+	cancelTranscription()
+	sendErr := <-sendDone
+	if receiveErr != nil ||
+		(sendErr != nil &&
+			!errors.Is(sendErr, context.Canceled) &&
+			!errors.Is(sendErr, speechio.ErrNoSpeech)) {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageTranscribe,
+		)
+	}
+
+	finalTranscript := strings.TrimSpace(transcript.String())
+	slog.InfoContext(ctx, "voice pipeline stage completed",
+		"request_id", input.RequestID,
+		"stage", "transcribe_stream",
+		"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
+		"recognized", finalTranscript != "",
+		"stt_first_interim_ms", firstInterimMS,
+		"stt_final_ms", firstFinalMS,
+	)
+	conversationMS := int64(-1)
+	var (
+		result      httpapi.VoiceTurnResult
+		spokenReply string
+	)
+	if finalTranscript == "" {
+		route := routeClarifyNoSpeech
+		if input.Ambient {
+			route = routeSilentNoSpeech
+		}
+		result = silentRecognitionResult(input.StateToken, route)
+		if !input.Ambient {
+			spokenReply = lowConfidencePrompt
+		}
+	} else {
+		// Chirp 3's confidence field is not a calibrated utterance score.
+		// Preserve the recognized text bounds and let the audited conversation
+		// agent handle semantic ambiguity instead of applying the buffered
+		// recognizer's fixed confidence gate.
+		conversationStarted := time.Now()
+		result, spokenReply, err = p.prepareRecognizedTurn(
+			ctx,
+			uid,
+			input,
+			finalTranscript,
+			0,
+		)
+		conversationMS = time.Since(conversationStarted).Milliseconds()
+	}
+	if err != nil || spokenReply == "" {
+		result.LiveTimings = httpapi.VoiceLiveTimings{
+			STTFirstInterimMS: firstInterimMS,
+			STTFinalMS:        firstFinalMS,
+			ConversationMS:    conversationMS,
+			TTSFirstChunkMS:   -1,
+		}
+		return result, err
+	}
+
+	synthesisStarted := time.Now()
+	firstTTSChunkMS := int64(-1)
+	audioMIME, err := streamingSpeech.StreamSynthesize(
+		ctx,
+		spokenReply,
+		func(chunk []byte) error {
+			if firstTTSChunkMS < 0 {
+				firstTTSChunkMS = time.Since(synthesisStarted).Milliseconds()
+			}
+			return onAudio(chunk)
+		},
+	)
+	if err != nil || audioMIME != speechio.StreamingAudioContentType {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
+	}
+	slog.InfoContext(ctx, "voice pipeline stage completed",
+		"request_id", input.RequestID,
+		"stage", "synthesize_live",
+		"duration_ms", time.Since(synthesisStarted).Milliseconds(),
+		"tts_first_chunk_ms", firstTTSChunkMS,
+	)
+	result.Caption = spokenReply
+	result.LiveTimings = httpapi.VoiceLiveTimings{
+		STTFirstInterimMS: firstInterimMS,
+		STTFinalMS:        firstFinalMS,
+		ConversationMS:    conversationMS,
+		TTSFirstChunkMS:   firstTTSChunkMS,
+	}
+	return result, nil
+}
+
 func (p *Pipeline) prepareTurn(
 	ctx context.Context,
 	uid string,
@@ -158,6 +361,16 @@ func (p *Pipeline) prepareTurn(
 		"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
 		"recognized", true,
 	)
+	return p.prepareRecognizedTurn(ctx, uid, input, transcript, confidence)
+}
+
+func (p *Pipeline) prepareRecognizedTurn(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	transcript string,
+	confidence float32,
+) (httpapi.VoiceTurnResult, string, error) {
 	if transcriptConfidenceTooLow(confidence) {
 		if input.Ambient {
 			return silentRecognitionResult(

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile as readRawFile } from "node:fs/promises";
 import test from "node:test";
+
+async function readFile(path, encoding) {
+  const source = await readRawFile(path, encoding);
+  return source.replaceAll("\r\n", "\n");
+}
 
 import {
   advanceCandidateCapture,
@@ -561,6 +566,38 @@ test("voice stream fails closed on missing ready, sequence gaps, and truncation"
   truncated.push(streamLine({ type: "ready", version: 1 }));
   truncated.push(audio);
   assert.throws(() => truncated.finish(), /voice_response_invalid/);
+});
+
+test("voice stream preserves reviewed server failures after ready", () => {
+  for (const code of ["voice_turn_timeout", "voice_turn_unavailable"]) {
+    const parser = createVoiceStreamParser((result) => result);
+    parser.push(streamLine({ type: "ready", version: 1 }));
+    assert.throws(
+      () =>
+        parser.push(
+          streamLine({
+            type: "error",
+            version: 1,
+            code,
+          }),
+        ),
+      new RegExp(code),
+    );
+  }
+
+  const unreviewed = createVoiceStreamParser((result) => result);
+  unreviewed.push(streamLine({ type: "ready", version: 1 }));
+  assert.throws(
+    () =>
+      unreviewed.push(
+        streamLine({
+          type: "error",
+          version: 1,
+          code: "provider private detail",
+        }),
+      ),
+    /voice_response_invalid/,
+  );
 });
 
 test("voice stream rejects odd PCM, extra fields, and anything after final", () => {

@@ -395,6 +395,12 @@ mod cloud {
 
     fn user_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
+            Some("voice_turn_timeout") => {
+                "考えている途中で時間を使い切った　内容を変えずもう一度だけ話してみて"
+            }
+            Some("voice_turn_unavailable") => {
+                "音声の処理で止まった　接続はできている　もう一度だけ試してみて"
+            }
             Some("microphone_unsupported") => {
                 "このブラウザでは音声会話を使えない　最新版でためしてみて"
             }

@@ -45,8 +45,8 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.MaxVoiceBytes != 13*1024*1024 {
 		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)
 	}
-	if cfg.SpeechModel != "chirp_3" {
-		t.Fatalf("speech model = %q; want chirp_3", cfg.SpeechModel)
+	if cfg.SpeechModel != "long" {
+		t.Fatalf("speech model = %q; want long", cfg.SpeechModel)
 	}
 	if cfg.SpeechVoice != "ja-JP-Chirp3-HD-Kore" {
 		t.Fatalf(

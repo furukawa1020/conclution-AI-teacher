@@ -553,6 +553,8 @@ const LIVE_SERVER_ERROR_CODES = Object.freeze([
   "voice_response_invalid",
   "voice_turn_invalid",
   "voice_turn_too_large",
+  "voice_turn_timeout",
+  "voice_turn_unavailable",
 ]);
 
 export function createVoiceLiveServerProtocol(validateFinalResult) {
@@ -807,6 +809,16 @@ export function createVoiceStreamParser(validateFinalResult) {
       const event = safeReadyEvent(value);
       ready = true;
       return event;
+    }
+    if (value.type === "error") {
+      if (
+        !hasExactKeys(value, ["code", "type", "version"]) ||
+        value.version !== 1 ||
+        !LIVE_SERVER_ERROR_CODES.includes(value.code)
+      ) {
+        invalid();
+      }
+      throw new Error(value.code);
     }
     if (value.type === "audio") {
       const event = safeAudioEvent(

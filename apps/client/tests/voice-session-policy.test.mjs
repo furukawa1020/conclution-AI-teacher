@@ -324,64 +324,35 @@ test("an in-flight initialization gate remains held until cleanup finishes", asy
   assert.notEqual(gate.acquire(), null);
 });
 
-test("pre-roll retains at most four recent chunks and never sends silence alone", () => {
-  const capture = createCaptureBuffer({
-    maximumBytes: 1_000,
-    preRollByteLimit: 100,
-    preRollChunkLimit: 4,
-  });
-  for (let id = 1; id <= 6; id += 1) {
-    capture.append({ id, size: 10 }, false);
-  }
+test("capture buffer retains complete recorder chunks in order", () => {
+  const capture = createCaptureBuffer({ maximumBytes: 1_000 });
+  capture.append({ id: 1, size: 10 });
+  capture.append({ id: 2, size: 20 });
+  capture.append({ id: 3, size: 30 });
+
   assert.deepEqual(capture.snapshot(), {
-    preRollBytes: 40,
-    preRollChunks: 4,
-    promoted: false,
-    retainedBytes: 0,
-    retainedChunks: 0,
+    retainedBytes: 60,
+    retainedChunks: 3,
     tooLarge: false,
-    totalBytes: 40,
+    totalBytes: 60,
   });
-  assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
-});
-
-test("speech promotes only bounded pre-roll plus subsequent voice chunks", () => {
-  const capture = createCaptureBuffer({
-    maximumBytes: 1_000,
-    preRollByteLimit: 100,
-    preRollChunkLimit: 4,
-  });
-  for (let id = 1; id <= 6; id += 1) {
-    capture.append({ id, size: 10 }, false);
-  }
-  capture.append({ id: 7, size: 20 }, true);
-  capture.append({ id: 8, size: 30 }, true);
-
-  const payload = capture.take();
   assert.deepEqual(
-    payload.chunks.map(({ id }) => id),
-    [3, 4, 5, 6, 7, 8],
+    capture.take().chunks.map(({ id }) => id),
+    [1, 2, 3],
   );
-  assert.equal(payload.totalBytes, 90);
   assert.equal(capture.snapshot().totalBytes, 0);
 });
 
-test("pre-roll and promoted payload enforce independent byte ceilings", () => {
-  const capture = createCaptureBuffer({
-    maximumBytes: 100,
-    preRollByteLimit: 60,
-    preRollChunkLimit: 4,
-  });
-  capture.append({ id: 1, size: 40 }, false);
-  capture.append({ id: 2, size: 40 }, false);
-  assert.equal(capture.snapshot().preRollBytes, 40);
+test("capture buffer clears the complete payload at its byte ceiling", () => {
+  const capture = createCaptureBuffer({ maximumBytes: 100 });
+  capture.append({ id: 1, size: 40 });
+  capture.append({ id: 2, size: 40 });
+  const overflow = capture.append({ id: 3, size: 21 });
 
-  capture.append({ id: 3, size: 40 }, true);
-  assert.equal(capture.snapshot().retainedBytes, 80);
-  const overflow = capture.append({ id: 4, size: 21 }, true);
   assert.equal(overflow.tooLarge, true);
   assert.equal(overflow.totalBytes, 0);
   assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
+  assert.equal(capture.snapshot().totalBytes, 0);
 });
 
 test("retryable initializer shares an attempt, retries a failure, and caches success", async () => {

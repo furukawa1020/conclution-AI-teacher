@@ -536,7 +536,7 @@ function createRecording(stream) {
     if (recording.discard || !event.data || event.data.size === 0) {
       return;
     }
-    const captureState = recording.captureBuffer.append(event.data, true);
+    const captureState = recording.captureBuffer.append(event.data);
     recording.totalBytes = captureState.totalBytes;
     if (captureState.tooLarge) {
       recording.discard = true;

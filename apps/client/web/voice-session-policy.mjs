@@ -7,8 +7,6 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   idleSessionLimitMs: 3 * 60_000,
   maximumSessionMs: 30 * 60_000,
   pendingDocumentLimitMs: 5 * 60_000,
-  preRollByteLimit: 64 * 1024,
-  preRollChunkLimit: 4,
 });
 
 const RESEARCH_STATUSES = Object.freeze([
@@ -302,28 +300,13 @@ export function createRetryableInitializer(initialize) {
   };
 }
 
-export function createCaptureBuffer({
-  maximumBytes,
-  preRollByteLimit = VOICE_SESSION_LIMITS.preRollByteLimit,
-  preRollChunkLimit = VOICE_SESSION_LIMITS.preRollChunkLimit,
-} = {}) {
-  if (
-    !Number.isSafeInteger(maximumBytes) ||
-    maximumBytes <= 0 ||
-    !Number.isSafeInteger(preRollByteLimit) ||
-    preRollByteLimit <= 0 ||
-    preRollByteLimit > maximumBytes ||
-    !Number.isSafeInteger(preRollChunkLimit) ||
-    preRollChunkLimit <= 0
-  ) {
+export function createCaptureBuffer({ maximumBytes } = {}) {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
     throw new TypeError("capture_limits_invalid");
   }
 
-  let preRoll = [];
-  let preRollBytes = 0;
   let retained = [];
   let retainedBytes = 0;
-  let promoted = false;
   let tooLarge = false;
 
   function chunkSize(chunk) {
@@ -339,52 +322,23 @@ export function createCaptureBuffer({
   }
 
   function clearArrays() {
-    preRoll.length = 0;
     retained.length = 0;
-    preRollBytes = 0;
     retainedBytes = 0;
   }
 
   function snapshot() {
     return Object.freeze({
-      preRollBytes,
-      preRollChunks: preRoll.length,
-      promoted,
       retainedBytes,
       retainedChunks: retained.length,
       tooLarge,
-      totalBytes: promoted ? retainedBytes : preRollBytes,
+      totalBytes: retainedBytes,
     });
   }
 
   return Object.freeze({
-    append(chunk, hasSpeech) {
-      if (typeof hasSpeech !== "boolean") {
-        throw new TypeError("capture_speech_flag_invalid");
-      }
+    append(chunk) {
       if (tooLarge) return snapshot();
       const size = chunkSize(chunk);
-
-      if (!promoted && !hasSpeech) {
-        preRoll.push(chunk);
-        preRollBytes += size;
-        while (
-          preRoll.length > preRollChunkLimit ||
-          preRollBytes > preRollByteLimit
-        ) {
-          const evicted = preRoll.shift();
-          preRollBytes -= evicted.size;
-        }
-        return snapshot();
-      }
-
-      if (!promoted) {
-        retained = preRoll;
-        retainedBytes = preRollBytes;
-        preRoll = [];
-        preRollBytes = 0;
-        promoted = true;
-      }
       if (retainedBytes + size > maximumBytes) {
         clearArrays();
         tooLarge = true;
@@ -396,16 +350,15 @@ export function createCaptureBuffer({
     },
     clear() {
       clearArrays();
-      promoted = false;
       tooLarge = false;
       return snapshot();
     },
     snapshot,
     take() {
-      const chunks = promoted ? retained.slice() : [];
-      const totalBytes = promoted ? retainedBytes : 0;
+      const chunks = retained.slice();
+      const totalBytes = retainedBytes;
       clearArrays();
-      promoted = false;
+      tooLarge = false;
       return Object.freeze({ chunks, totalBytes });
     },
   });

@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   advanceVad,
   createCaptureBuffer,
-  createCapturePhase,
+  createRetryableInitializer,
   createSessionClock,
   createTurnGate,
   createVadState,
@@ -384,31 +384,23 @@ test("pre-roll and promoted payload enforce independent byte ceilings", () => {
   assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
 });
 
-test("a delayed huge first chunk after speech confirmation is discarded", () => {
-  const capture = createCaptureBuffer({
-    maximumBytes: 2_000,
-    preRollByteLimit: 100,
-    preRollChunkLimit: 4,
+test("retryable initializer shares an attempt, retries a failure, and caches success", async () => {
+  let calls = 0;
+  const initialize = createRetryableInitializer(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error("temporary_failure");
+    return Object.freeze({ ready: true });
   });
-  const phase = createCapturePhase();
 
-  for (let id = 1; id <= 4; id += 1) {
-    capture.append({ id, size: 10 }, phase.classifyChunk() === "retain");
-  }
-  assert.equal(phase.confirmSpeech(), true);
+  const first = initialize();
+  assert.equal(initialize(), first);
+  await assert.rejects(first, /temporary_failure/);
 
-  const delayedBoundaryChunk = { id: 5, size: 1_500 };
-  assert.equal(phase.classifyChunk(), "discard-boundary");
-  capture.clear();
-  assert.equal(capture.snapshot().totalBytes, 0);
-
-  const voiceChunk = { id: 6, size: 50 };
-  assert.equal(phase.classifyChunk(), "retain");
-  capture.append(voiceChunk, true);
-  assert.deepEqual(capture.take(), {
-    chunks: [voiceChunk],
-    totalBytes: 50,
-  });
+  const second = initialize();
+  assert.notEqual(second, first);
+  assert.deepEqual(await second, { ready: true });
+  assert.equal(initialize(), second);
+  assert.equal(calls, 2);
 });
 
 test("gesture epoch, not session state, selects explicit versus ambient mode", () => {

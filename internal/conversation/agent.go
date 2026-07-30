@@ -25,20 +25,23 @@ const (
 	DefaultFastModel      = "gemini-3.6-flash"
 	DefaultPrecisionModel = "gemini-3.1-pro-preview"
 
-	phaticLocalSpokenReply = "こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。"
+	phaticLocalSpokenReply                 = "こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。"
+	interpretationClarificationSpokenReply = "何をいちばん知りたいか、もう少し具体的に教えてもらえますか？"
+	respondentAwaitingSpokenReply          = "まとまっていなくていいので、今の答えをそのまま話してもらえますか？"
 
-	PrecisionConfidenceThreshold  = 0.78
-	AmbientEVIThreshold           = 0.35
-	maxModelResponseBytes         = 64 * 1024
-	maxRespondentEvidence         = 8
-	maxRespondentProtected        = 16
-	maxRespondentProtectedRunes   = 160
-	maxResearchQueryRunes         = research.MaxTopicRunes
-	researchDiscoveryTimeout      = 7 * time.Second
-	criticTimeout                 = 12 * time.Second
-	criticRecoveryTimeout         = 18 * time.Second
-	ordinaryCriticSequenceTimeout = 8 * time.Second
-	highRiskCriticSequenceTimeout = 24 * time.Second
+	PrecisionConfidenceThreshold      = 0.78
+	AmbientEVIThreshold               = 0.35
+	maxModelResponseBytes             = 64 * 1024
+	maxRespondentEvidence             = 8
+	maxRespondentProtected            = 16
+	maxRespondentProtectedRunes       = 160
+	maxResearchQueryRunes             = research.MaxTopicRunes
+	researchDiscoveryTimeout          = 7 * time.Second
+	precisionInferenceSequenceTimeout = 10 * time.Second
+	criticTimeout                     = 12 * time.Second
+	criticRecoveryTimeout             = 18 * time.Second
+	ordinaryCriticSequenceTimeout     = 8 * time.Second
+	highRiskCriticSequenceTimeout     = 24 * time.Second
 )
 
 var (
@@ -326,13 +329,25 @@ func (agent *vertexAgent) Process(
 	if canCompleteAmbientSilentFast(normalized, fastPlan) {
 		return agent.completeAmbientSilentFast(uid, state, fastPlan)
 	}
+	if canCompleteInterpretationClarification(normalized, fastPlan) {
+		return agent.completeInterpretationClarification(uid, state, fastPlan)
+	}
 	finalPlan := fastPlan
 	route := "fast"
 	failClosedPrecision := requiresFailClosedPrecision(normalized, fastPlan)
 	precisionUnavailable := false
-	if needsPrecision(fastPlan) || failClosedPrecision {
-		precisionPlan, precisionErr := agent.inferWithRetry(
+	awaitingAnswerWithoutPublishableDraft :=
+		fastPlan.AssistanceTarget == "respondent" &&
+			fastPlan.RespondentStage == "awaiting_answer" &&
+			!failClosedPrecision
+	if (needsPrecision(fastPlan) || failClosedPrecision) &&
+		!awaitingAnswerWithoutPublishableDraft {
+		precisionCtx, cancelPrecision := context.WithTimeout(
 			ctx,
+			precisionInferenceSequenceTimeout,
+		)
+		precisionPlan, precisionErr := agent.inferWithRetry(
+			precisionCtx,
 			agent.precisionModel,
 			"precision",
 			genai.ThinkingLevelHigh,
@@ -340,6 +355,7 @@ func (agent *vertexAgent) Process(
 			state,
 			&fastPlan,
 		)
+		cancelPrecision()
 		if precisionErr != nil {
 			if failClosedPrecision {
 				route = "precision-unavailable"
@@ -371,6 +387,7 @@ func (agent *vertexAgent) Process(
 	respondentAwaitingAnswer := finalPlan.AssistanceTarget == "respondent" &&
 		finalPlan.RespondentStage == "awaiting_answer"
 	if respondentAwaitingAnswer {
+		finalPlan.SpokenReply = respondentAwaitingSpokenReply
 		finalPlan.answerAssessment = answercontract.Assessment{
 			Outcome: answercontract.OutcomeKeep,
 		}
@@ -709,6 +726,67 @@ func (agent *vertexAgent) completeAmbientSilentFast(
 		Intervention:        decision,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
 		Route:               "ambient-silent-fast",
+		StateToken:          stateToken,
+	}, nil
+}
+
+func canCompleteInterpretationClarification(
+	turn VoiceTurn,
+	plan modelPlan,
+) bool {
+	return !turn.Ambient &&
+		turn.PDF == nil &&
+		plan.AssistanceTarget == "assistant" &&
+		plan.RespondentStage == "none" &&
+		plan.ResearchAction == "none" &&
+		plan.InterventionPolicy != "safety" &&
+		plan.InterventionPolicy != "paper_check" &&
+		plan.Confidence < PrecisionConfidenceThreshold &&
+		!requiresFailClosedPrecision(turn, plan)
+}
+
+func (agent *vertexAgent) completeInterpretationClarification(
+	uid string,
+	state conversationState,
+	plan modelPlan,
+) (VoiceTurnResult, error) {
+	decision := ArbiterDecision{
+		Benefit:          0.6,
+		InterruptionCost: 0.1,
+		Urgency:          0.1,
+		Confidence:       1,
+		Act:              "clarify",
+		Score:            0.6,
+	}
+	nextState := conversationState{
+		Turn:                state.Turn + 1,
+		Graph:               state.Graph,
+		ConversationSummary: "",
+		DocumentSummary:     "",
+		PendingAnswer:       state.PendingAnswer,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		LastIntervention:    decision,
+	}
+	stateToken, err := agent.codec.seal(uid, nextState)
+	if err != nil {
+		return VoiceTurnResult{}, err
+	}
+	return VoiceTurnResult{
+		SchemaVersion:       SchemaVersion,
+		Domain:              plan.Domain,
+		Intent:              plan.Intent,
+		AssistanceTarget:    "assistant",
+		RespondentStage:     "none",
+		ResearchStatus:      "none",
+		ResearchRecords:     []ResearchRecord{},
+		ArgumentStructure:   "clarifying_question",
+		InterventionPolicy:  "clarify",
+		SpokenReply:         interpretationClarificationSpokenReply,
+		Confidence:          plan.Confidence,
+		Intervention:        decision,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		Route:               "interpretation-clarify-fast",
+		NeedsClarification:  true,
 		StateToken:          stateToken,
 	}, nil
 }
@@ -1767,8 +1845,7 @@ func needsPrecision(plan modelPlan) bool {
 		plan.Domain == "technical" ||
 		plan.Domain == "health" ||
 		plan.Domain == "legal" ||
-		plan.Domain == "finance" ||
-		plan.Confidence < PrecisionConfidenceThreshold
+		plan.Domain == "finance"
 }
 
 func requiresFailClosedPrecision(turn VoiceTurn, plan modelPlan) bool {
@@ -1778,6 +1855,7 @@ func requiresFailClosedPrecision(turn VoiceTurn, plan modelPlan) bool {
 		plan.Domain == "health" ||
 		plan.Domain == "legal" ||
 		plan.Domain == "finance" ||
+		plan.InterventionPolicy == "safety" ||
 		plan.AnswerContract.QuestionFrame.Operator == answercontract.OperatorEvidence {
 		return true
 	}
@@ -2181,6 +2259,8 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - 通常の質問へKOTAE自身が答える時はassistance_target=assistant、respondent_stage=none、answer_attempt=""にする。
 - 「こう聞かれたが答えられない」「質問に対して自分はこう言いたい」「結局何をやりたいのと聞かれた」のように、他者の質問へ本人の答えを組み立てる支援ならassistance_target=respondentにする。
 - previous_state.pending_answer.active=trueなら、今の発話をその保留質問への回答試行としてまず検討する。ただし明確に話題を変えた時はassistantへ戻す。
+- confidenceは知識の確実性ではなく、今回の問い・意図・assistance_targetを一意に解釈できる確信度にする。曖昧なら低くする。
+- pending_answerがactiveでも、KOTAE自身への直接質問、単独の挨拶、明示的な話題変更はassistance_target=assistant、respondent_stage=noneへ戻す。
 - 他者の質問は分かるが本人の回答内容がまだない時はrespondent_stage=awaiting_answerにし、answer_attempt=""、clarifyを選ぶ。「まとまっていなくていいから、今の答えをそのまま話して」のような非難のない一問だけを返す。
 - 本人の回答内容が今の発話にある時だけrespondent_stage=restructureにする。answer_attemptは今のutteranceに実際に連続して含まれる本人の回答部分を一字も創作せず抜き出す。
 - restructureのspoken_replyはanswer_attempt内の意味節を一字も書き換えず、句読点で区切られた既存節の順序だけを変える。質問が要求するtarget節を最初へ移し、新しい答え、一般知識、助言、診断、励ましを足さず、既存節も落とさない。

@@ -803,9 +803,10 @@ func (agent *vertexAgent) Process(
 	pendingAnswer := state.PendingAnswer
 	nextSelfCorrectionGrace := finalPlan.SelfCorrectionGrace
 	// Ambient audio may be a television, nearby speaker, replay, or another
-	// person. It can trigger a bounded safety response, but it cannot author
-	// semantic cross-turn memory until speaker/liveness provenance exists.
-	if verificationUnavailable || normalized.Ambient {
+	// person. A raw PDF is also untrusted active content. Both can affect the
+	// bounded current response, but neither can author semantic cross-turn
+	// memory until speaker and document-span provenance exists.
+	if verificationUnavailable || normalized.Ambient || normalized.PDF != nil {
 		nextSelfCorrectionGrace = state.SelfCorrectionGrace
 	} else {
 		graph = mergeGraph(state.Graph, finalPlan.ThoughtStateDelta, normalized.Utterance)

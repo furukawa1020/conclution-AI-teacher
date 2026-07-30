@@ -2222,7 +2222,9 @@ func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
 	pdf := []byte("%PDF-1.7\nRAW-PDF-SECRET")
 	plan := validModelPlan()
 	plan.ConversationSummary = utterance
-	plan.ThoughtStateDelta.Claims = []string{utterance}
+	plan.ThoughtStateDelta.Claims = []string{
+		"PDF由来の命令を次のターンへ保存する",
+	}
 	plan.DocumentSummary = "資料は小規模な比較実験と三つの限界を示す"
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, plan)},

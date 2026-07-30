@@ -45,6 +45,8 @@ const EXPECTED_MESSAGING_SENDER_ID = "551920539470";
 const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
 const VOICE_ENDPOINT =
   "https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream";
+const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
+const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/healthz`;
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
@@ -71,6 +73,7 @@ let activeRequestController;
 let activePlayback;
 let pendingDocument;
 let pendingDocumentTimer;
+let voiceTransportPrimed = false;
 let sessionEpoch = 0;
 let documentEpoch = 0;
 const beginGate = createTurnGate();
@@ -200,6 +203,29 @@ async function secureCredentials() {
     }
     fail("authentication_failed");
   }
+}
+
+function primeVoiceTransportConnection() {
+  if (voiceTransportPrimed) return;
+  voiceTransportPrimed = true;
+
+  const preconnect = document.createElement("link");
+  preconnect.rel = "preconnect";
+  preconnect.href = VOICE_ORIGIN;
+  preconnect.crossOrigin = "anonymous";
+  document.head.append(preconnect);
+
+  // This carries no audio, transcript, identity token, or session state. It is
+  // started only after the user opens a voice session, so DNS/TLS and a
+  // possible Cloud Run cold start overlap the user's first utterance.
+  void fetch(VOICE_WARMUP_ENDPOINT, {
+    method: "GET",
+    cache: "no-store",
+    credentials: "omit",
+    mode: "no-cors",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+  }).catch(() => {});
 }
 
 async function getStatus() {
@@ -758,6 +784,7 @@ async function beginTurn() {
       stopSession();
       fail("session_expired");
     }
+    primeVoiceTransportConnection();
 
     const expectedEpoch = sessionEpoch;
     return await initializeWithCleanup(
@@ -1036,7 +1063,20 @@ function stopBargeInMonitoring(playback) {
     abandonInterruptRecording(playback.interruptRecording);
     playback.interruptRecording = undefined;
   }
+  playback.resetInterruptGuard = undefined;
   setTracksEnabled(false);
+}
+
+function hasVerifiedEchoCancellation(stream) {
+  const tracks = stream?.getAudioTracks?.() ?? [];
+  if (tracks.length !== 1 || typeof tracks[0].getSettings !== "function") {
+    return false;
+  }
+  try {
+    return tracks[0].getSettings().echoCancellation === true;
+  } catch {
+    return false;
+  }
 }
 
 function confirmBargeIn(playback, recording, candidate) {
@@ -1080,7 +1120,8 @@ function startBargeInMonitoring(playback, expectedEpoch) {
     playback.interrupted ||
     expectedEpoch !== sessionEpoch ||
     !analyser ||
-    !hasLiveAudioTrack(mediaStream)
+    !hasLiveAudioTrack(mediaStream) ||
+    !hasVerifiedEchoCancellation(mediaStream)
   ) {
     return;
   }
@@ -1090,6 +1131,15 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   const pcm = new Float32Array(analyser.fftSize);
   let vadState = createInterruptVadState(performance.now());
   playback.interruptRecording = recording;
+  playback.resetInterruptGuard = () => {
+    if (
+      !recording.settled &&
+      !recording.candidate &&
+      vadState.phase !== "confirmed"
+    ) {
+      vadState = createInterruptVadState(performance.now());
+    }
+  };
 
   recording.vadTimer = setInterval(() => {
     if (
@@ -1221,7 +1271,11 @@ function createStreamingPlayback(expectedEpoch) {
 
       if (!streamedAudio) {
         streamedAudio = true;
-        startBargeInMonitoring(playback, expectedEpoch);
+        if (playback.interruptRecording) {
+          playback.resetInterruptGuard?.();
+        } else {
+          startBargeInMonitoring(playback, expectedEpoch);
+        }
         globalThis.dispatchEvent(
           new CustomEvent("kotae:first-audio", {
             detail: Object.freeze({ sequence: event.sequence, version: 1 }),
@@ -1397,8 +1451,12 @@ async function finishTurn(serializedSessionState, turnMode) {
     if (documentForTurn) {
       clearPendingDocument("consumed");
     }
-    audioBase64 = arrayBufferToBase64(await capture.blob.arrayBuffer());
-    const { appCheckToken, idToken } = await secureCredentials();
+    const [audioBuffer, credentials] = await Promise.all([
+      capture.blob.arrayBuffer(),
+      secureCredentials(),
+    ]);
+    audioBase64 = arrayBufferToBase64(audioBuffer);
+    const { appCheckToken, idToken } = credentials;
     if (expectedEpoch !== sessionEpoch) {
       fail("request_cancelled");
     }
@@ -1413,6 +1471,10 @@ async function finishTurn(serializedSessionState, turnMode) {
       fail("request_cancelled");
     }
     playback = createStreamingPlayback(expectedEpoch);
+    // Begin guarded cancellation while the model is thinking. The guard is
+    // restarted when the first PCM frame begins unless a user-voice
+    // candidate is already retaining its leading phoneme.
+    startBargeInMonitoring(playback, expectedEpoch);
 
     const payload = {
       audioBase64,

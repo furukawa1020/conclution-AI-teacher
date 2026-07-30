@@ -10,7 +10,10 @@ export const VOICE_STREAM_LIMITS = Object.freeze({
 });
 
 export const INTERRUPT_VAD_LIMITS = Object.freeze({
-  confirmationMs: 240,
+  candidateGapMs: 120,
+  // Four 40 ms voiced frames confirm after 120 ms wall-clock from the first
+  // detected frame while still requiring 160 ms of sampled speech.
+  confirmationMs: 160,
   guardMs: 320,
   intervalMs: 40,
   maximumCaptureMs: 55_000,
@@ -78,8 +81,10 @@ function safeAudioEvent(value, expectedSequence, totalAudioBytes) {
       "sampleRateHz",
       "sequence",
       "type",
+      "version",
     ]) ||
     value.type !== "audio" ||
+    value.version !== 1 ||
     !Number.isSafeInteger(value.sequence) ||
     value.sequence !== expectedSequence ||
     expectedSequence >= VOICE_STREAM_LIMITS.maximumAudioEventCount ||
@@ -103,6 +108,7 @@ function safeAudioEvent(value, expectedSequence, totalAudioBytes) {
     sampleRateHz: 24_000,
     sequence: value.sequence,
     type: "audio",
+    version: 1,
   });
 }
 
@@ -249,6 +255,7 @@ export function createInterruptVadState(startedAt) {
   }
   return Object.freeze({
     action: null,
+    candidateSilenceMs: 0,
     candidateStartedAt: null,
     firstVoiceAt: null,
     lastVoiceAt: null,
@@ -270,6 +277,8 @@ export function advanceInterruptVad(
     !Number.isFinite(state.startedAt) ||
     state.startedAt < 0 ||
     !boundedLevel(state.noiseFloor) ||
+    !Number.isFinite(state.candidateSilenceMs) ||
+    state.candidateSilenceMs < 0 ||
     !Number.isFinite(state.voiceRunMs) ||
     state.voiceRunMs < 0 ||
     !finiteOrNull(state.candidateStartedAt) ||
@@ -289,6 +298,7 @@ export function advanceInterruptVad(
   }
 
   let {
+    candidateSilenceMs,
     candidateStartedAt,
     firstVoiceAt,
     lastVoiceAt,
@@ -299,16 +309,45 @@ export function advanceInterruptVad(
   let action = null;
 
   if (now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs) {
-    noiseFloor = clampNoiseFloor(noiseFloor * 0.72 + rms * 0.28);
+    const guardVoiced =
+      rms >=
+        Math.max(outputActive ? 0.05 : 0.03, noiseFloor * 4.5) &&
+      peak >=
+        Math.max(outputActive ? 0.12 : 0.08, noiseFloor * 9);
+    if (guardVoiced) {
+      if (phase !== "candidate") {
+        phase = "candidate";
+        candidateStartedAt = now;
+        candidateSilenceMs = 0;
+        voiceRunMs = 0;
+        action = "start";
+      }
+      candidateSilenceMs = 0;
+      voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
+    } else if (phase === "candidate") {
+      candidateSilenceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      if (
+        candidateSilenceMs >= INTERRUPT_VAD_LIMITS.candidateGapMs
+      ) {
+        action = "discard";
+        phase = "guard";
+        candidateStartedAt = null;
+        candidateSilenceMs = 0;
+        voiceRunMs = 0;
+      }
+    } else {
+      noiseFloor = clampNoiseFloor(noiseFloor * 0.72 + rms * 0.28);
+    }
     return Object.freeze({
       action,
-      candidateStartedAt: null,
+      candidateSilenceMs,
+      candidateStartedAt,
       firstVoiceAt: null,
       lastVoiceAt: null,
       noiseFloor,
-      phase: "guard",
+      phase,
       startedAt: state.startedAt,
-      voiceRunMs: 0,
+      voiceRunMs,
     });
   }
   if (phase === "guard") phase = "armed";
@@ -343,9 +382,11 @@ export function advanceInterruptVad(
     if (phase !== "candidate") {
       phase = "candidate";
       candidateStartedAt = now;
+      candidateSilenceMs = 0;
       voiceRunMs = 0;
       action = "start";
     }
+    candidateSilenceMs = 0;
     voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
     if (voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs) {
       phase = "confirmed";
@@ -356,15 +397,33 @@ export function advanceInterruptVad(
   } else {
     noiseFloor = clampNoiseFloor(noiseFloor * 0.92 + rms * 0.08);
     if (phase === "candidate") {
+      candidateSilenceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      if (
+        candidateSilenceMs < INTERRUPT_VAD_LIMITS.candidateGapMs
+      ) {
+        return Object.freeze({
+          action,
+          candidateSilenceMs,
+          candidateStartedAt,
+          firstVoiceAt,
+          lastVoiceAt,
+          noiseFloor,
+          phase,
+          startedAt: state.startedAt,
+          voiceRunMs,
+        });
+      }
       action = "discard";
     }
     phase = "armed";
+    candidateSilenceMs = 0;
     candidateStartedAt = null;
     voiceRunMs = 0;
   }
 
   return Object.freeze({
     action,
+    candidateSilenceMs,
     candidateStartedAt,
     firstVoiceAt,
     lastVoiceAt,

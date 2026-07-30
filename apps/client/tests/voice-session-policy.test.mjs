@@ -21,7 +21,10 @@ import {
   VOICE_SESSION_LIMITS,
 } from "../web/voice-session-policy.mjs";
 import {
+  advanceInterruptVad,
+  createInterruptVadState,
   createVoiceStreamParser,
+  INTERRUPT_VAD_LIMITS,
   shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
@@ -76,6 +79,57 @@ test("bridge primes App Check before a fresh anonymous sign-in", async () => {
   assert.ok(appCheckAt >= 0);
   assert.ok(initializeAuthAt > appCheckAt);
   assert.ok(anonymousSignInAt > initializeAuthAt);
+});
+
+test("explicit voice start warms only the fixed transport without private data", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const warmStart = bridge.indexOf("function primeVoiceTransportConnection()");
+  const warmEnd = bridge.indexOf("\n}\n\nasync function getStatus", warmStart);
+  assert.notEqual(warmStart, -1);
+  assert.notEqual(warmEnd, -1);
+  const warm = bridge.slice(warmStart, warmEnd);
+
+  assert.match(warm, /fetch\(VOICE_WARMUP_ENDPOINT/u);
+  assert.match(warm, /credentials:\s*"omit"/u);
+  assert.match(warm, /mode:\s*"no-cors"/u);
+  assert.doesNotMatch(
+    warm,
+    /Authorization|audioBase64|sessionState|X-Firebase-AppCheck/u,
+  );
+
+  const beginStart = bridge.indexOf("async function beginTurn()");
+  const beginEnd = bridge.indexOf("\n}\n\nasync function waitForTurnEnd", beginStart);
+  const begin = bridge.slice(beginStart, beginEnd);
+  const sessionAt = begin.indexOf("sessionClock.begin()");
+  const warmAt = begin.indexOf("primeVoiceTransportConnection()");
+  const microphoneAt = begin.indexOf("ensureMediaStream(expectedEpoch)");
+  assert.ok(sessionAt >= 0);
+  assert.ok(warmAt > sessionAt);
+  assert.ok(microphoneAt > warmAt);
+});
+
+test("voice upload conversion overlaps refreshed credentials", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function finishTurn(");
+  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const finish = bridge.slice(start, end);
+
+  assert.match(
+    finish,
+    /Promise\.all\(\[\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
+  );
+  const joinedAt = finish.indexOf("await Promise.all([");
+  const encodeAt = finish.indexOf("arrayBufferToBase64(audioBuffer)");
+  assert.ok(joinedAt >= 0);
+  assert.ok(encodeAt > joinedAt);
 });
 
 test("empty capture rollover ends the explicit gesture epoch", async () => {
@@ -228,6 +282,7 @@ test("voice stream accepts split UTF-8 input with strict ordered PCM events", ()
   const ready = streamLine({ type: "ready", version: 1 });
   const audio = streamLine({
     type: "audio",
+    version: 1,
     sequence: 0,
     audioBase64: "AQIDBA==",
     sampleRateHz: 24_000,
@@ -245,6 +300,7 @@ test("voice stream accepts split UTF-8 input with strict ordered PCM events", ()
   assert.deepEqual(parser.push(audio), [
     {
       type: "audio",
+      version: 1,
       sequence: 0,
       audioBase64: "AQIDBA==",
       decodedBytes: 4,
@@ -292,6 +348,7 @@ test("voice stream audio-event ceiling matches the server chunk ceiling", () => 
     parser.push(
       streamLine({
         type: "audio",
+        version: 1,
         sequence,
         audioBase64: "AAA=",
         sampleRateHz: 24_000,
@@ -324,6 +381,7 @@ test("voice stream audio-event ceiling matches the server chunk ceiling", () => 
     overflow.push(
       streamLine({
         type: "audio",
+        version: 1,
         sequence,
         audioBase64: "AAA=",
         sampleRateHz: 24_000,
@@ -335,6 +393,7 @@ test("voice stream audio-event ceiling matches the server chunk ceiling", () => 
       overflow.push(
         streamLine({
           type: "audio",
+          version: 1,
           sequence: VOICE_STREAM_LIMITS.maximumAudioEventCount,
           audioBase64: "AAA=",
           sampleRateHz: 24_000,
@@ -353,12 +412,14 @@ test("one transport read may contain multiple maximum-size NDJSON frames", () =>
   const combined =
     streamLine({
       type: "audio",
+      version: 1,
       sequence: 0,
       audioBase64: maximumPCM,
       sampleRateHz: 24_000,
     }) +
     streamLine({
       type: "audio",
+      version: 1,
       sequence: 1,
       audioBase64: maximumPCM,
       sampleRateHz: 24_000,
@@ -405,6 +466,7 @@ test("a parsed final can latch barge-in but trailing junk prevents terminal succ
 test("voice stream fails closed on missing ready, sequence gaps, and truncation", () => {
   const audio = streamLine({
     type: "audio",
+    version: 1,
     sequence: 0,
     audioBase64: "AQIDBA==",
     sampleRateHz: 24_000,
@@ -419,6 +481,7 @@ test("voice stream fails closed on missing ready, sequence gaps, and truncation"
       sequenceGap.push(
         streamLine({
           type: "audio",
+          version: 1,
           sequence: 1,
           audioBase64: "AQIDBA==",
           sampleRateHz: 24_000,
@@ -441,6 +504,7 @@ test("voice stream rejects odd PCM, extra fields, and anything after final", () 
       oddPcm.push(
         streamLine({
           type: "audio",
+          version: 1,
           sequence: 0,
           audioBase64: "AQID",
           sampleRateHz: 24_000,
@@ -470,6 +534,223 @@ test("voice stream rejects odd PCM, extra fields, and anything after final", () 
   assert.throws(
     () => afterFinal.push(streamLine({ type: "ready", version: 1 })),
     /voice_response_invalid/,
+  );
+});
+
+test("voice stream requires version 1 on every PCM frame", () => {
+  for (const version of [undefined, 0, 2, "1"]) {
+    const parser = createVoiceStreamParser((result) => result);
+    parser.push(streamLine({ type: "ready", version: 1 }));
+    const frame = {
+      type: "audio",
+      sequence: 0,
+      audioBase64: "AAA=",
+      sampleRateHz: 24_000,
+    };
+    if (version !== undefined) frame.version = version;
+    assert.throws(
+      () => parser.push(streamLine(frame)),
+      /voice_response_invalid/,
+    );
+  }
+});
+
+function advancePastInterruptGuard(state, startedAt) {
+  let next = state;
+  for (
+    let now = startedAt + INTERRUPT_VAD_LIMITS.intervalMs;
+    now <= startedAt + INTERRUPT_VAD_LIMITS.guardMs;
+    now += INTERRUPT_VAD_LIMITS.intervalMs
+  ) {
+    next = advanceInterruptVad(next, {
+      now,
+      outputActive: true,
+      peak: 0.02,
+      rms: 0.006,
+    });
+  }
+  return next;
+}
+
+test("interrupt VAD ignores guarded playback and rejects short echo bursts", () => {
+  const startedAt = 10_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  assert.equal(state.phase, "armed");
+
+  for (let sample = 1; sample <= 8; sample += 1) {
+    state = advanceInterruptVad(state, {
+      now:
+        startedAt +
+        INTERRUPT_VAD_LIMITS.guardMs +
+        sample * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.04,
+      rms: 0.015,
+    });
+    assert.equal(state.action, null);
+    assert.notEqual(state.phase, "confirmed");
+  }
+
+  const candidateAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    9 * INTERRUPT_VAD_LIMITS.intervalMs;
+  state = advanceInterruptVad(state, {
+    now: candidateAt,
+    outputActive: true,
+    peak: 0.14,
+    rms: 0.05,
+  });
+  assert.equal(state.action, "start");
+  state = advanceInterruptVad(state, {
+    now: candidateAt + INTERRUPT_VAD_LIMITS.intervalMs,
+    outputActive: true,
+    peak: 0.04,
+    rms: 0.015,
+  });
+  assert.equal(state.action, null);
+  assert.equal(state.phase, "candidate");
+  state = advanceInterruptVad(state, {
+    now: candidateAt + 2 * INTERRUPT_VAD_LIMITS.intervalMs,
+    outputActive: true,
+    peak: 0.04,
+    rms: 0.015,
+  });
+  assert.equal(state.action, null);
+  state = advanceInterruptVad(state, {
+    now: candidateAt + 3 * INTERRUPT_VAD_LIMITS.intervalMs,
+    outputActive: true,
+    peak: 0.04,
+    rms: 0.015,
+  });
+  assert.equal(state.action, "discard");
+  assert.equal(state.phase, "armed");
+});
+
+test("interrupt capture starts inside the guard and retains its first frame", () => {
+  const startedAt = 15_000;
+  let state = createInterruptVadState(startedAt);
+  state = advanceInterruptVad(state, {
+    now: startedAt + 40,
+    outputActive: false,
+    peak: 0.01,
+    rms: 0.004,
+  });
+  const firstVoiceAt = startedAt + 80;
+  for (
+    let now = firstVoiceAt;
+    now <= startedAt + INTERRUPT_VAD_LIMITS.guardMs;
+    now += INTERRUPT_VAD_LIMITS.intervalMs
+  ) {
+    state = advanceInterruptVad(state, {
+      now,
+      outputActive: false,
+      peak: 0.15,
+      rms: 0.05,
+    });
+    if (now === firstVoiceAt) assert.equal(state.action, "start");
+  }
+  assert.equal(state.action, "confirm");
+  assert.equal(state.firstVoiceAt, firstVoiceAt);
+  assert.equal(state.candidateStartedAt, firstVoiceAt);
+});
+
+test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
+  const startedAt = 20_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  const firstVoiceAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  const confirmationFrames =
+    INTERRUPT_VAD_LIMITS.confirmationMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  assert.equal(confirmationFrames, 4);
+
+  for (let frame = 0; frame < confirmationFrames; frame += 1) {
+    state = advanceInterruptVad(state, {
+      now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.15,
+      rms: 0.05,
+    });
+    if (frame === 0) assert.equal(state.action, "start");
+  }
+  assert.equal(state.action, "confirm");
+  assert.equal(state.phase, "confirmed");
+  assert.equal(state.firstVoiceAt, firstVoiceAt);
+  assert.equal(
+    state.lastVoiceAt - state.firstVoiceAt,
+    120,
+  );
+
+  state = advanceInterruptVad(state, {
+    now:
+      state.lastVoiceAt +
+      INTERRUPT_VAD_LIMITS.trailingSilenceMs -
+      1,
+    outputActive: false,
+    peak: 0.003,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceInterruptVad(state, {
+    now:
+      state.lastVoiceAt + INTERRUPT_VAD_LIMITS.trailingSilenceMs,
+    outputActive: false,
+    peak: 0.003,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("barge-in aborts pre-final audio and preserves ambient authority", async () => {
+  const [bridge, client] = await Promise.all([
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+  ]);
+  const confirmAt = bridge.indexOf("function confirmBargeIn(");
+  const confirm = bridge.slice(confirmAt, confirmAt + 1_600);
+  assert.match(
+    confirm,
+    /if \(!playback\.finalReceived && activeRequestController\)/u,
+  );
+  assert.match(confirm, /activeRequestController\.abort\(\)/u);
+  assert.match(confirm, /haltStreamingPlayback\(playback, interruption\)/u);
+  assert.match(confirm, /new CustomEvent\("kotae:voice-interrupted"/u);
+  assert.match(confirm, /finalReceived: playback\.finalReceived/u);
+  assert.match(bridge, /getSettings\(\)\.echoCancellation === true/u);
+  const playbackAt = bridge.indexOf(
+    "playback = createStreamingPlayback(expectedEpoch)",
+  );
+  const requestWindow = bridge.slice(playbackAt, playbackAt + 1_200);
+  assert.match(
+    requestWindow,
+    /startBargeInMonitoring\(playback, expectedEpoch\)/u,
+  );
+  assert.ok(
+    requestWindow.indexOf("startBargeInMonitoring") <
+      requestWindow.indexOf("fetch(VOICE_ENDPOINT"),
+  );
+
+  const interruptionAt = client.indexOf(
+    "fn resume_ambient_interruption(",
+  );
+  const continuation = client.slice(interruptionAt, interruptionAt + 2_500);
+  assert.match(continuation, /cloud::wait_for_turn_end\(\)\.await/u);
+  assert.match(
+    continuation,
+    /submit_turn\(\s*operation,\s*false,/u,
+  );
+  assert.doesNotMatch(
+    continuation,
+    /session_state\.set\(result\.session_state/u,
   );
 });
 

@@ -189,6 +189,7 @@ function Assert-HostingArtifact {
         "bootstrap.js",
         "firebase-bridge.js",
         "voice-session-policy.mjs",
+        "voice-stream-policy.mjs",
         "assets\main.css",
         "wasm\kotae_client.js",
         "wasm\kotae_client_bg.wasm"
@@ -219,6 +220,7 @@ function Assert-HostingArtifact {
                 "bootstrap.js",
                 "firebase-bridge.js",
                 "voice-session-policy.mjs",
+                "voice-stream-policy.mjs",
                 "assets/main.css",
                 "wasm/kotae_client.js",
                 "wasm/kotae_client_bg.wasm"
@@ -255,6 +257,9 @@ function Assert-HostingArtifact {
     }
     if ($bridge -notmatch [regex]::Escape('from "./voice-session-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice session policy module."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited voice stream policy module."
     }
     if (
         $bridge -notmatch [regex]::Escape("const EXPECTED_PROJECT_ID = `"$expectedProjectId`";") -or

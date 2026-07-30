@@ -142,7 +142,8 @@ try {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
-        "voice-session-policy.mjs"
+        "voice-session-policy.mjs",
+        "voice-stream-policy.mjs"
     )) {
         $source = Join-Path $webSource $name
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
@@ -157,6 +158,7 @@ try {
         "bootstrap.js",
         "firebase-bridge.js",
         "voice-session-policy.mjs",
+        "voice-stream-policy.mjs",
         "assets\main.css",
         "wasm\kotae_client.js",
         "wasm\kotae_client_bg.wasm"
@@ -184,6 +186,9 @@ try {
     }
     if ($bridge -notmatch [regex]::Escape('from "./voice-session-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice session policy module."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited voice stream policy module."
     }
 
     $bootstrap = [System.IO.File]::ReadAllText(
@@ -225,6 +230,7 @@ try {
                 "bootstrap.js",
                 "firebase-bridge.js",
                 "voice-session-policy.mjs",
+                "voice-stream-policy.mjs",
                 "assets/main.css",
                 "wasm/kotae_client.js",
                 "wasm/kotae_client_bg.wasm"

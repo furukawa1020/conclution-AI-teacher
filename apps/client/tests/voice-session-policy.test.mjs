@@ -22,6 +22,7 @@ import {
 } from "../web/voice-session-policy.mjs";
 import {
   createVoiceStreamParser,
+  shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
 
@@ -77,23 +78,95 @@ test("bridge primes App Check before a fresh anonymous sign-in", async () => {
   assert.ok(anonymousSignInAt > initializeAuthAt);
 });
 
-test("empty capture rollover preserves the current conversation intent", async () => {
+test("empty capture rollover ends the explicit gesture epoch", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
   const marker = client.indexOf(
-    "A finite recorder window with no speech is not a new user",
+    "The explicit gesture authorizes only this finite recording",
   );
   assert.notEqual(marker, -1);
   const rollover = client.slice(marker, marker + 600);
 
   assert.match(
     rollover,
-    /arm_listening\(\s*operation,\s*false,\s*intentional,/u,
+    /arm_listening\(\s*operation,\s*false,\s*intentional_for_gesture_epoch\(false\),/u,
   );
   assert.doesNotMatch(
     rollover,
+    /arm_listening\(\s*operation,\s*false,\s*intentional,/u,
+  );
+});
+
+test("terminal barge-in commits final state before ambient continuation", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const start = client.indexOf("fn submit_turn(");
+  const end = client.indexOf("\n}\n\n#[allow(clippy::too_many_arguments)]", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const submit = client.slice(start, end);
+  const stateCommitAt = submit.indexOf(
+    "session_state.set(result.session_state.clone())",
+  );
+  const interruptedAt = submit.indexOf("if result.interrupted");
+  const ambientResumeAt = submit.indexOf(
+    "resume_ambient_interruption(",
+    interruptedAt,
+  );
+  assert.ok(stateCommitAt >= 0);
+  assert.ok(interruptedAt > stateCommitAt);
+  assert.ok(ambientResumeAt > interruptedAt);
+});
+
+test("barge-in racing terminal playback preserves the validated final", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function consumeVoiceStream(");
+  const end = bridge.indexOf("\n}\n\nasync function finishTurn", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const consume = bridge.slice(start, end);
+  const terminalAt = consume.indexOf("const completed = parser.finish()");
+  const playbackAt = consume.indexOf("await playback.completion");
+  const returnAt = consume.indexOf("...completed.finalResult");
+  assert.ok(terminalAt >= 0);
+  assert.ok(playbackAt > terminalAt);
+  assert.ok(returnAt > playbackAt);
+  assert.match(
+    consume,
+    /catch \(error\) \{[\s\S]*if \(!playback\.interrupted\) \{[\s\S]*throw error;/u,
+  );
+});
+
+test("automatic rearm is ambient and only a fresh gesture is intentional", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const automatic = client.indexOf(
+    "intentional_for_gesture_epoch(false)",
+  );
+  const explicit = client.indexOf("intentional_for_gesture_epoch(true)");
+  assert.ok(automatic >= 0);
+  assert.ok(explicit >= 0);
+  const resumeStart = client.indexOf("fn resume_ambient_interruption(");
+  const resumeEnd = client.indexOf(
+    "\n}\n\n#[allow(clippy::too_many_arguments)]\nfn submit_turn",
+    resumeStart,
+  );
+  const resume = client.slice(resumeStart, resumeEnd);
+  assert.match(
+    resume,
+    /submit_turn\(\s*operation,\s*false,/u,
+  );
+  assert.match(
+    resume,
     /arm_listening\(\s*operation,\s*false,\s*false,/u,
   );
 });
@@ -186,6 +259,149 @@ test("voice stream accepts split UTF-8 input with strict ordered PCM events", ()
   assert.equal(completed.events[0].type, "final");
 });
 
+test("voice stream accepts a valid silent final with empty audio MIME", () => {
+  const parser = createVoiceStreamParser((result) =>
+    Object.freeze({ ...result }),
+  );
+  parser.push(streamLine({ type: "ready", version: 1 }));
+  parser.push(
+    streamLine({
+      type: "final",
+      version: 1,
+      result: {
+        audioBase64: "",
+        audioMimeType: "",
+        sessionState: "opaque",
+      },
+    }),
+  );
+
+  const completed = parser.finish();
+  assert.equal(completed.audioEventCount, 0);
+  assert.equal(completed.finalResult.audioMimeType, "");
+});
+
+test("voice stream audio-event ceiling matches the server chunk ceiling", () => {
+  const parser = createVoiceStreamParser((result) => result);
+  parser.push(streamLine({ type: "ready", version: 1 }));
+  for (
+    let sequence = 0;
+    sequence < VOICE_STREAM_LIMITS.maximumAudioEventCount;
+    sequence += 1
+  ) {
+    parser.push(
+      streamLine({
+        type: "audio",
+        sequence,
+        audioBase64: "AAA=",
+        sampleRateHz: 24_000,
+      }),
+    );
+  }
+  parser.push(
+    streamLine({
+      type: "final",
+      version: 1,
+      result: finalVoiceResult(),
+    }),
+  );
+  assert.equal(
+    parser.finish().audioEventCount,
+    VOICE_STREAM_LIMITS.maximumAudioEventCount,
+  );
+  assert.equal(
+    VOICE_STREAM_LIMITS.maximumEventCount,
+    VOICE_STREAM_LIMITS.maximumAudioEventCount + 2,
+  );
+
+  const overflow = createVoiceStreamParser((result) => result);
+  overflow.push(streamLine({ type: "ready", version: 1 }));
+  for (
+    let sequence = 0;
+    sequence < VOICE_STREAM_LIMITS.maximumAudioEventCount;
+    sequence += 1
+  ) {
+    overflow.push(
+      streamLine({
+        type: "audio",
+        sequence,
+        audioBase64: "AAA=",
+        sampleRateHz: 24_000,
+      }),
+    );
+  }
+  assert.throws(
+    () =>
+      overflow.push(
+        streamLine({
+          type: "audio",
+          sequence: VOICE_STREAM_LIMITS.maximumAudioEventCount,
+          audioBase64: "AAA=",
+          sampleRateHz: 24_000,
+        }),
+      ),
+    /voice_response_invalid/,
+  );
+});
+
+test("one transport read may contain multiple maximum-size NDJSON frames", () => {
+  const parser = createVoiceStreamParser((result) => result);
+  parser.push(streamLine({ type: "ready", version: 1 }));
+  const maximumPCM = Buffer.alloc(
+    VOICE_STREAM_LIMITS.maximumAudioChunkBytes,
+  ).toString("base64");
+  const combined =
+    streamLine({
+      type: "audio",
+      sequence: 0,
+      audioBase64: maximumPCM,
+      sampleRateHz: 24_000,
+    }) +
+    streamLine({
+      type: "audio",
+      sequence: 1,
+      audioBase64: maximumPCM,
+      sampleRateHz: 24_000,
+    });
+
+  assert.ok(
+    combined.length > VOICE_STREAM_LIMITS.maximumLineCharacters,
+  );
+  const events = parser.push(combined);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].decodedBytes, 1024 * 1024);
+  assert.equal(events[1].decodedBytes, 1024 * 1024);
+});
+
+test("barge-in aborts transport only before a final frame is parsed", () => {
+  assert.equal(shouldAbortVoiceTransportOnInterrupt(false), true);
+  assert.equal(shouldAbortVoiceTransportOnInterrupt(true), false);
+  assert.throws(
+    () => shouldAbortVoiceTransportOnInterrupt("yes"),
+    /voice_stream_final_latch_invalid/,
+  );
+});
+
+test("a parsed final can latch barge-in but trailing junk prevents terminal success", () => {
+  const parser = createVoiceStreamParser((result) => result);
+  const events = parser.push(
+    streamLine({ type: "ready", version: 1 }) +
+      streamLine({
+        type: "final",
+        version: 1,
+        result: { ...finalVoiceResult(), audioMimeType: "" },
+      }),
+  );
+  assert.equal(events.at(-1).type, "final");
+  assert.equal(
+    shouldAbortVoiceTransportOnInterrupt(
+      events.some((event) => event.type === "final"),
+    ),
+    false,
+  );
+  assert.throws(() => parser.push("junk"), /voice_response_invalid/);
+});
+
 test("voice stream fails closed on missing ready, sequence gaps, and truncation", () => {
   const audio = streamLine({
     type: "audio",
@@ -248,7 +464,7 @@ test("voice stream rejects odd PCM, extra fields, and anything after final", () 
     streamLine({
       type: "final",
       version: 1,
-      result: finalVoiceResult(),
+      result: { ...finalVoiceResult(), audioMimeType: "" },
     }),
   );
   assert.throws(
@@ -276,7 +492,6 @@ test("stream bridge uses direct authenticated CORS with bounded PCM playback", a
   assert.match(fetchBlock, /mode: "cors"/u);
   assert.match(fetchBlock, /Authorization: `Bearer \$\{idToken\}`/u);
   assert.match(fetchBlock, /"X-Firebase-AppCheck": appCheckToken/u);
-  assert.match(bridge, /maximumTransportChunkBytes/u);
   assert.match(bridge, /maximumResponseBytes/u);
   assert.match(bridge, /new CustomEvent\("kotae:first-audio"/u);
   assert.equal(VOICE_STREAM_LIMITS.maximumAudioChunkBytes, 1024 * 1024);

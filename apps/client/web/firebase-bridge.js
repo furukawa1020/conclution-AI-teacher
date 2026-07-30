@@ -28,7 +28,11 @@ import {
   VOICE_SESSION_LIMITS,
 } from "./voice-session-policy.mjs";
 import {
+  advanceInterruptVad,
+  createInterruptVadState,
   createVoiceStreamParser,
+  INTERRUPT_VAD_LIMITS,
+  shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
 } from "./voice-stream-policy.mjs";
 
@@ -702,7 +706,7 @@ function armVad(recording) {
   }, VAD_INTERVAL_MS);
 }
 
-function createRecording(stream) {
+function createRecordingState(stream) {
   let resolveEnd;
   let rejectEnd;
   const endPromise = new Promise((resolve, reject) => {
@@ -726,7 +730,11 @@ function createRecording(stream) {
     totalBytes: 0,
     vadTimer: undefined,
   };
+  return recording;
+}
 
+function createRecording(stream) {
+  const recording = createRecordingState(stream);
   armVad(recording);
   return recording;
 }
@@ -1007,6 +1015,122 @@ function pcm16AudioBuffer(audioBase64, decodedBytes, sampleRateHz) {
   return buffer;
 }
 
+function abandonInterruptRecording(recording) {
+  if (!recording || recording.settled) return;
+  recording.settled = true;
+  stopVad(recording);
+  discardCurrentCandidate(recording, "interrupt-abandoned");
+  recording.resolveEnd(
+    Object.freeze({
+      blob: new Blob([], { type: "audio/webm" }),
+      hasSpeech: false,
+      mimeType: "audio/webm",
+      reason: "interrupt-abandoned",
+    }),
+  );
+}
+
+function stopBargeInMonitoring(playback) {
+  if (!playback || playback.interrupted) return;
+  if (playback.interruptRecording) {
+    abandonInterruptRecording(playback.interruptRecording);
+    playback.interruptRecording = undefined;
+  }
+  setTracksEnabled(false);
+}
+
+function confirmBargeIn(playback, recording, candidate) {
+  if (
+    playback.interrupted ||
+    playback !== activePlayback ||
+    recording.settled ||
+    !candidate ||
+    !candidateEventIsCurrent(recording, candidate)
+  ) {
+    return;
+  }
+  candidate.confirmed = true;
+  playback.interruptedBeforeFinal =
+    shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+  playback.interrupted = true;
+  activeRecording = recording;
+  sessionClock.markSpeech();
+
+  const interruption = new Error("voice_interrupted");
+  // Once a final frame has been parsed, keep reading to a clean EOF so
+  // trailing bytes cannot be hidden by the interruption. Before final, there
+  // is no state that can be committed, so abort the transport immediately.
+  if (!playback.finalReceived && activeRequestController) {
+    activeRequestController.abort();
+  }
+  haltStreamingPlayback(playback, interruption);
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-interrupted", {
+      detail: Object.freeze({
+        finalReceived: playback.finalReceived,
+        version: 1,
+      }),
+    }),
+  );
+}
+
+function startBargeInMonitoring(playback, expectedEpoch) {
+  if (
+    playback.interruptRecording ||
+    playback.interrupted ||
+    expectedEpoch !== sessionEpoch ||
+    !analyser ||
+    !hasLiveAudioTrack(mediaStream)
+  ) {
+    return;
+  }
+
+  setTracksEnabled(true);
+  const recording = createRecordingState(mediaStream);
+  const pcm = new Float32Array(analyser.fftSize);
+  let vadState = createInterruptVadState(performance.now());
+  playback.interruptRecording = recording;
+
+  recording.vadTimer = setInterval(() => {
+    if (
+      recording.settled ||
+      expectedEpoch !== sessionEpoch ||
+      !analyser
+    ) {
+      return;
+    }
+    analyser.getFloatTimeDomainData(pcm);
+    let sumSquares = 0;
+    let peak = 0;
+    for (let index = 0; index < pcm.length; index += 1) {
+      const magnitude = Math.abs(pcm[index]);
+      sumSquares += magnitude * magnitude;
+      if (magnitude > peak) peak = magnitude;
+    }
+    vadState = advanceInterruptVad(vadState, {
+      now: performance.now(),
+      outputActive: playback.sources.size > 0,
+      peak,
+      rms: Math.sqrt(sumSquares / pcm.length),
+    });
+
+    if (vadState.action === "start") {
+      if (!startCandidateRecorder(recording, false)) return;
+    } else if (vadState.action === "discard") {
+      if (!discardCurrentCandidate(recording, "interrupt-rejected")) {
+        abandonInterruptRecording(recording);
+      }
+    } else if (vadState.action === "confirm") {
+      confirmBargeIn(playback, recording, recording.candidate);
+    } else if (
+      vadState.action === "end-of-turn" ||
+      vadState.action === "duration-limit"
+    ) {
+      requestRecordingStop(recording, vadState.action);
+    }
+  }, INTERRUPT_VAD_LIMITS.intervalMs);
+}
+
 function createStreamingPlayback(expectedEpoch) {
   if (
     activePlayback ||
@@ -1033,7 +1157,11 @@ function createStreamingPlayback(expectedEpoch) {
 
   const playback = {
     completion,
+    finalReceived: false,
     hasStreamedAudio: () => streamedAudio,
+    interruptRecording: undefined,
+    interrupted: false,
+    interruptedBeforeFinal: false,
     reject(error) {
       if (settled) return;
       settled = true;
@@ -1072,6 +1200,7 @@ function createStreamingPlayback(expectedEpoch) {
           pendingSources -= 1;
           if (sealed && pendingSources === 0 && !settled) {
             settled = true;
+            stopBargeInMonitoring(playback);
             if (activePlayback === playback) {
               activePlayback = undefined;
             }
@@ -1092,6 +1221,7 @@ function createStreamingPlayback(expectedEpoch) {
 
       if (!streamedAudio) {
         streamedAudio = true;
+        startBargeInMonitoring(playback, expectedEpoch);
         globalThis.dispatchEvent(
           new CustomEvent("kotae:first-audio", {
             detail: Object.freeze({ sequence: event.sequence, version: 1 }),
@@ -1106,6 +1236,7 @@ function createStreamingPlayback(expectedEpoch) {
       sealed = true;
       if (pendingSources === 0) {
         settled = true;
+        stopBargeInMonitoring(playback);
         if (activePlayback === playback) {
           activePlayback = undefined;
         }
@@ -1126,6 +1257,7 @@ function haltStreamingPlayback(playback, error) {
   // Settle the owner before stopping sources: stopping dispatches "ended"
   // synchronously in some browser engines.
   playback.reject(error);
+  stopBargeInMonitoring(playback);
   for (const source of playback.sources) {
     try {
       source.stop();
@@ -1168,6 +1300,10 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
     for (const event of events) {
       if (event.type === "audio") {
         playback.schedule(event);
+      } else if (event.type === "final") {
+        // Latch at parse time rather than EOF. Barge-in after this point must
+        // preserve the transport until parser.finish validates termination.
+        playback.finalReceived = true;
       }
     }
   }
@@ -1178,9 +1314,7 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
       if (done) break;
       if (
         !(value instanceof Uint8Array) ||
-        value.byteLength === 0 ||
-        value.byteLength >
-          VOICE_STREAM_LIMITS.maximumTransportChunkBytes
+        value.byteLength === 0
       ) {
         fail("voice_response_invalid");
       }
@@ -1199,10 +1333,22 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
     if (expectedEpoch !== sessionEpoch) {
       fail("request_cancelled");
     }
-    playback.seal();
-    await playback.completion;
+    if (!playback.interrupted) {
+      playback.seal();
+      try {
+        await playback.completion;
+      } catch (error) {
+        // A barge-in can race this await after terminal EOF. The stream is
+        // already fully validated, so preserve its final state and report the
+        // interruption with that result. Other cancellation still fails.
+        if (!playback.interrupted) {
+          throw error;
+        }
+      }
+    }
     return Object.freeze({
       ...completed.finalResult,
+      interrupted: playback.interrupted,
       streamedAudio: completed.audioEventCount > 0,
     });
   } catch (error) {
@@ -1307,6 +1453,9 @@ async function finishTurn(serializedSessionState, turnMode) {
       playback,
       error instanceof Error ? error : new Error("voice_response_invalid"),
     );
+    if (playback?.interruptedBeforeFinal) {
+      fail("voice_interrupted");
+    }
     if (error && typeof error === "object" && error.name === "AbortError") {
       fail("request_cancelled");
     }
@@ -1396,6 +1545,7 @@ function stopSession() {
     const playback = activePlayback;
     activePlayback = undefined;
     playback.reject(new Error("request_cancelled"));
+    stopBargeInMonitoring(playback);
     for (const source of playback.sources) {
       try {
         source.stop();

@@ -2,12 +2,29 @@ const MEBIBYTE = 1024 * 1024;
 
 export const VOICE_STREAM_LIMITS = Object.freeze({
   maximumAudioChunkBytes: MEBIBYTE,
+  maximumAudioEventCount: 512,
   maximumAudioTotalBytes: 16 * MEBIBYTE,
-  maximumEventCount: 512,
+  maximumEventCount: 514,
   maximumLineCharacters: 1_400_256,
   maximumResponseBytes: 24 * MEBIBYTE,
-  maximumTransportChunkBytes: 2 * MEBIBYTE,
 });
+
+export const INTERRUPT_VAD_LIMITS = Object.freeze({
+  confirmationMs: 240,
+  guardMs: 320,
+  intervalMs: 40,
+  maximumCaptureMs: 55_000,
+  reflectiveSilenceMs: 1_700,
+  reflectiveSpeechMs: 2_400,
+  trailingSilenceMs: 1_100,
+});
+
+export function shouldAbortVoiceTransportOnInterrupt(finalReceived) {
+  if (typeof finalReceived !== "boolean") {
+    throw new TypeError("voice_stream_final_latch_invalid");
+  }
+  return !finalReceived;
+}
 
 function invalid() {
   throw new Error("voice_response_invalid");
@@ -65,6 +82,7 @@ function safeAudioEvent(value, expectedSequence, totalAudioBytes) {
     value.type !== "audio" ||
     !Number.isSafeInteger(value.sequence) ||
     value.sequence !== expectedSequence ||
+    expectedSequence >= VOICE_STREAM_LIMITS.maximumAudioEventCount ||
     value.sampleRateHz !== 24_000
   ) {
     invalid();
@@ -138,13 +156,15 @@ export function createVoiceStreamParser(validateFinalResult) {
       totalAudioBytes += event.decodedBytes;
       return event;
     }
+    const expectedAudioMIME =
+      expectedSequence === 0 ? "" : "audio/L16";
     if (
       value.type !== "final" ||
       !hasExactKeys(value, ["result", "type", "version"]) ||
       value.version !== 1 ||
       !isPlainRecord(value.result) ||
       value.result.audioBase64 !== "" ||
-      value.result.audioMimeType !== "audio/L16"
+      value.result.audioMimeType !== expectedAudioMIME
     ) {
       invalid();
     }
@@ -163,18 +183,28 @@ export function createVoiceStreamParser(validateFinalResult) {
     if (finalResult !== undefined && text.length > 0) {
       invalid();
     }
-    buffered += text;
-    if (buffered.length > VOICE_STREAM_LIMITS.maximumLineCharacters) {
-      invalid();
-    }
-
     const events = [];
+    let offset = 0;
     for (;;) {
-      const newline = buffered.indexOf("\n");
-      if (newline < 0) break;
-      const line = buffered.slice(0, newline);
-      buffered = buffered.slice(newline + 1);
+      const newline = text.indexOf("\n", offset);
+      if (newline < 0) {
+        buffered += text.slice(offset);
+        if (buffered.length > VOICE_STREAM_LIMITS.maximumLineCharacters) {
+          invalid();
+        }
+        break;
+      }
+      const segment = text.slice(offset, newline);
+      if (
+        buffered.length + segment.length >
+        VOICE_STREAM_LIMITS.maximumLineCharacters
+      ) {
+        invalid();
+      }
+      const line = buffered + segment;
+      buffered = "";
       events.push(parseLine(line));
+      offset = newline + 1;
     }
     return events;
   }
@@ -198,4 +228,149 @@ export function createVoiceStreamParser(validateFinalResult) {
   }
 
   return Object.freeze({ finish, push });
+}
+
+function boundedLevel(value) {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 1
+  );
+}
+
+function clampNoiseFloor(value) {
+  return Math.min(0.08, Math.max(0.002, value));
+}
+
+export function createInterruptVadState(startedAt) {
+  if (!Number.isFinite(startedAt) || startedAt < 0) {
+    throw new TypeError("interrupt_vad_time_invalid");
+  }
+  return Object.freeze({
+    action: null,
+    candidateStartedAt: null,
+    firstVoiceAt: null,
+    lastVoiceAt: null,
+    noiseFloor: 0.004,
+    phase: "guard",
+    startedAt,
+    voiceRunMs: 0,
+  });
+}
+
+export function advanceInterruptVad(
+  state,
+  { now, outputActive, peak, rms },
+) {
+  const finiteOrNull = (value) =>
+    value === null || (Number.isFinite(value) && value >= state.startedAt);
+  if (
+    !isPlainRecord(state) ||
+    !Number.isFinite(state.startedAt) ||
+    state.startedAt < 0 ||
+    !boundedLevel(state.noiseFloor) ||
+    !Number.isFinite(state.voiceRunMs) ||
+    state.voiceRunMs < 0 ||
+    !finiteOrNull(state.candidateStartedAt) ||
+    !finiteOrNull(state.firstVoiceAt) ||
+    !finiteOrNull(state.lastVoiceAt) ||
+    (state.phase === "confirmed" &&
+      (state.firstVoiceAt === null || state.lastVoiceAt === null)) ||
+    (state.phase === "candidate" && state.candidateStartedAt === null) ||
+    !Number.isFinite(now) ||
+    now < state.startedAt ||
+    typeof outputActive !== "boolean" ||
+    !boundedLevel(peak) ||
+    !boundedLevel(rms) ||
+    !["guard", "armed", "candidate", "confirmed"].includes(state.phase)
+  ) {
+    throw new TypeError("interrupt_vad_state_invalid");
+  }
+
+  let {
+    candidateStartedAt,
+    firstVoiceAt,
+    lastVoiceAt,
+    noiseFloor,
+    phase,
+    voiceRunMs,
+  } = state;
+  let action = null;
+
+  if (now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs) {
+    noiseFloor = clampNoiseFloor(noiseFloor * 0.72 + rms * 0.28);
+    return Object.freeze({
+      action,
+      candidateStartedAt: null,
+      firstVoiceAt: null,
+      lastVoiceAt: null,
+      noiseFloor,
+      phase: "guard",
+      startedAt: state.startedAt,
+      voiceRunMs: 0,
+    });
+  }
+  if (phase === "guard") phase = "armed";
+
+  const rmsThreshold = Math.max(
+    outputActive ? 0.026 : 0.014,
+    noiseFloor * (outputActive ? 3.2 : 2.35),
+  );
+  const peakThreshold = Math.max(
+    outputActive ? 0.065 : 0.035,
+    noiseFloor * (outputActive ? 7 : 5),
+  );
+  const voiced = rms >= rmsThreshold && peak >= peakThreshold;
+
+  if (phase === "confirmed") {
+    if (voiced) {
+      lastVoiceAt = now;
+    } else {
+      noiseFloor = clampNoiseFloor(noiseFloor * 0.96 + rms * 0.04);
+    }
+    const spokenFor = now - firstVoiceAt;
+    const silenceLimit =
+      spokenFor >= INTERRUPT_VAD_LIMITS.reflectiveSpeechMs
+        ? INTERRUPT_VAD_LIMITS.reflectiveSilenceMs
+        : INTERRUPT_VAD_LIMITS.trailingSilenceMs;
+    if (spokenFor >= INTERRUPT_VAD_LIMITS.maximumCaptureMs) {
+      action = "duration-limit";
+    } else if (now - lastVoiceAt >= silenceLimit) {
+      action = "end-of-turn";
+    }
+  } else if (voiced) {
+    if (phase !== "candidate") {
+      phase = "candidate";
+      candidateStartedAt = now;
+      voiceRunMs = 0;
+      action = "start";
+    }
+    voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
+    if (voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs) {
+      phase = "confirmed";
+      firstVoiceAt = candidateStartedAt;
+      lastVoiceAt = now;
+      action = "confirm";
+    }
+  } else {
+    noiseFloor = clampNoiseFloor(noiseFloor * 0.92 + rms * 0.08);
+    if (phase === "candidate") {
+      action = "discard";
+    }
+    phase = "armed";
+    candidateStartedAt = null;
+    voiceRunMs = 0;
+  }
+
+  return Object.freeze({
+    action,
+    candidateStartedAt,
+    firstVoiceAt,
+    lastVoiceAt,
+    noiseFloor,
+    phase,
+    startedAt: state.startedAt,
+    voiceRunMs,
+  });
 }

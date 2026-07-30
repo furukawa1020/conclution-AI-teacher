@@ -35,6 +35,13 @@ const (
 	maxStateBytes    = conversation.MaxStateTokenBytes
 	maxCaptionRunes  = 480
 	allowedWebOrigin = "https://kotae-ai.web.app"
+	voiceStreamPath  = "/api/v1/voice/turns:stream"
+
+	voiceStreamVersion       = 1
+	voiceStreamSampleRateHz  = 24_000
+	voiceStreamMaxChunkBytes = 1 << 20
+	voiceStreamMaxAudioBytes = 16 << 20
+	voiceStreamMaxChunks     = 512
 )
 
 var (
@@ -90,6 +97,15 @@ type ResearchRecord struct {
 
 type VoiceTurnService interface {
 	Process(ctx context.Context, uid string, input VoiceTurnInput) (VoiceTurnResult, error)
+}
+
+type VoiceTurnStreamService interface {
+	ProcessStream(
+		ctx context.Context,
+		uid string,
+		input VoiceTurnInput,
+		onAudio func([]byte) error,
+	) (VoiceTurnResult, error)
 }
 
 type VoiceOptions struct {
@@ -158,11 +174,18 @@ func NewWithVoice(
 	mux.Handle("GET /api/v1/me", server.requireIdentity(http.HandlerFunc(server.me)))
 	mux.Handle("POST /api/v1/evaluations", server.requireIdentity(http.HandlerFunc(server.evaluate)))
 	mux.Handle("POST /api/v1/voice/turns", server.requireIdentity(http.HandlerFunc(server.voiceTurn)))
+	mux.Handle(
+		"POST "+voiceStreamPath,
+		server.requireIdentity(http.HandlerFunc(server.voiceTurnStream)),
+	)
+	mux.HandleFunc("OPTIONS "+voiceStreamPath, server.voiceStreamPreflight)
 
-	return server.recoverPanic(
-		server.securityHeaders(
-			server.requestContext(
-				server.rejectCrossSiteWrites(mux),
+	return server.voiceStreamCORS(
+		server.recoverPanic(
+			server.securityHeaders(
+				server.requestContext(
+					server.rejectCrossSiteWrites(mux),
+				),
 			),
 		),
 	)
@@ -730,7 +753,12 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		resourcePolicy := "same-origin"
+		if r.URL.Path == voiceStreamPath &&
+			r.Header.Get("Origin") == allowedWebOrigin {
+			resourcePolicy = "cross-origin"
+		}
+		w.Header().Set("Cross-Origin-Resource-Policy", resourcePolicy)
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -742,9 +770,13 @@ func (s *Server) rejectCrossSiteWrites(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 			origins := r.Header.Values("Origin")
+			directVoiceStream := r.URL.Path == voiceStreamPath &&
+				len(origins) == 1 &&
+				origins[0] == allowedWebOrigin
 			if len(origins) != 1 ||
 				origins[0] != allowedWebOrigin ||
-				strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+				(strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") &&
+					!directVoiceStream) {
 				writeProblem(w, http.StatusForbidden, "cross_site_request", "Cross-site writes are not allowed.")
 				return
 			}

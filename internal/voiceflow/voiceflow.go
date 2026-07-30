@@ -3,7 +3,9 @@ package voiceflow
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
+	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
@@ -39,37 +41,134 @@ func (p *Pipeline) Process(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, error) {
+	result, spokenReply, err := p.prepareTurn(ctx, uid, input)
+	if err != nil || spokenReply == "" {
+		return result, err
+	}
+	synthesisStarted := time.Now()
+	audio, audioMIME, err := p.speech.Synthesize(ctx, spokenReply)
+	if err != nil {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
+	}
+	slog.InfoContext(ctx, "voice pipeline stage completed",
+		"request_id", input.RequestID,
+		"stage", "synthesize_buffered",
+		"duration_ms", time.Since(synthesisStarted).Milliseconds(),
+	)
+	result.Audio = audio
+	result.AudioMIMEType = audioMIME
+	result.Caption = spokenReply
+	return result, nil
+}
+
+func (p *Pipeline) ProcessStream(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	onAudio func([]byte) error,
+) (httpapi.VoiceTurnResult, error) {
+	if onAudio == nil {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
+	}
+	streamingSpeech, ok := p.speech.(speechio.StreamingService)
+	if !ok {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
+	}
+	result, spokenReply, err := p.prepareTurn(ctx, uid, input)
+	if err != nil || spokenReply == "" {
+		return result, err
+	}
+
+	synthesisStarted := time.Now()
+	firstChunkAt := time.Time{}
+	chunkCount := 0
+	audioMIME, err := streamingSpeech.StreamSynthesize(
+		ctx,
+		spokenReply,
+		func(audio []byte) error {
+			if firstChunkAt.IsZero() {
+				firstChunkAt = time.Now()
+			}
+			if err := onAudio(audio); err != nil {
+				return err
+			}
+			chunkCount++
+			return nil
+		},
+	)
+	if err != nil || audioMIME != speechio.StreamingAudioContentType {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageSynthesize,
+		)
+	}
+	firstChunkMS := int64(-1)
+	if !firstChunkAt.IsZero() {
+		firstChunkMS = firstChunkAt.Sub(synthesisStarted).Milliseconds()
+	}
+	slog.InfoContext(ctx, "voice pipeline stage completed",
+		"request_id", input.RequestID,
+		"stage", "synthesize_stream",
+		"duration_ms", time.Since(synthesisStarted).Milliseconds(),
+		"first_chunk_ms", firstChunkMS,
+		"chunk_count", chunkCount,
+	)
+	result.Caption = spokenReply
+	return result, nil
+}
+
+func (p *Pipeline) prepareTurn(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+) (httpapi.VoiceTurnResult, string, error) {
+	transcriptionStarted := time.Now()
 	transcript, confidence, err := p.speech.Transcribe(ctx, input.Audio)
 	if err != nil {
+		slog.InfoContext(ctx, "voice pipeline stage completed",
+			"request_id", input.RequestID,
+			"stage", "transcribe",
+			"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
+			"recognized", false,
+		)
 		if errors.Is(err, speechio.ErrNoSpeech) {
 			if input.Ambient {
 				return silentRecognitionResult(
 					input.StateToken,
 					routeSilentNoSpeech,
-				), nil
+				), "", nil
 			}
-			return p.recognitionClarification(
-				ctx,
+			return silentRecognitionResult(
 				input.StateToken,
 				routeClarifyNoSpeech,
-			)
+			), lowConfidencePrompt, nil
 		}
-		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+		return httpapi.VoiceTurnResult{}, "", httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
+	slog.InfoContext(ctx, "voice pipeline stage completed",
+		"request_id", input.RequestID,
+		"stage", "transcribe",
+		"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
+		"recognized", true,
+	)
 	if transcriptConfidenceTooLow(confidence) {
 		if input.Ambient {
 			return silentRecognitionResult(
 				input.StateToken,
 				routeSilentLowConfidence,
-			), nil
+			), "", nil
 		}
-		return p.recognitionClarification(
-			ctx,
+		return silentRecognitionResult(
 			input.StateToken,
 			routeClarifyLowConfidence,
-		)
+		), lowConfidencePrompt, nil
 	}
 
 	turn := conversation.VoiceTurn{
@@ -85,16 +184,23 @@ func (p *Pipeline) Process(
 			Data:     input.Document.Data,
 		}
 	}
+	conversationStarted := time.Now()
 	decision, err := p.agent.Process(ctx, uid, turn)
 	if err != nil {
 		if errors.Is(err, conversation.ErrInvalidStateToken) ||
 			errors.Is(err, conversation.ErrInvalidTurn) {
-			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceStateInvalid
+			return httpapi.VoiceTurnResult{}, "", httpapi.ErrVoiceStateInvalid
 		}
-		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+		return httpapi.VoiceTurnResult{}, "", httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageConversation,
 		)
 	}
+	slog.InfoContext(ctx, "voice pipeline stage completed",
+		"request_id", input.RequestID,
+		"stage", "conversation",
+		"duration_ms", time.Since(conversationStarted).Milliseconds(),
+		"route", decision.Route,
+	)
 
 	result := httpapi.VoiceTurnResult{
 		StateToken:       decision.StateToken,
@@ -111,37 +217,9 @@ func (p *Pipeline) Process(
 				input.Document != nil),
 	}
 	if decision.SpokenReply == "" {
-		return result, nil
+		return result, "", nil
 	}
-
-	audio, audioMIME, err := p.speech.Synthesize(ctx, decision.SpokenReply)
-	if err != nil {
-		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
-			httpapi.VoicePipelineStageSynthesize,
-		)
-	}
-	result.Audio = audio
-	result.AudioMIMEType = audioMIME
-	result.Caption = decision.SpokenReply
-	return result, nil
-}
-
-func (p *Pipeline) recognitionClarification(
-	ctx context.Context,
-	stateToken string,
-	route string,
-) (httpapi.VoiceTurnResult, error) {
-	audio, audioMIME, err := p.speech.Synthesize(ctx, lowConfidencePrompt)
-	if err != nil {
-		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
-			httpapi.VoicePipelineStageSynthesize,
-		)
-	}
-	result := silentRecognitionResult(stateToken, route)
-	result.Audio = audio
-	result.AudioMIMEType = audioMIME
-	result.Caption = lowConfidencePrompt
-	return result, nil
+	return result, decision.SpokenReply, nil
 }
 
 func silentRecognitionResult(

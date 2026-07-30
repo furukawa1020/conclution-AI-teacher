@@ -129,6 +129,8 @@ struct VoiceTurnResult {
     audio_base64: String,
     audio_mime_type: String,
     streamed_audio: bool,
+    #[serde(default)]
+    interrupted: bool,
     session_state: String,
     detected_domain: String,
     assistance_target: String,
@@ -188,10 +190,17 @@ struct TurnEnd {
     has_speech: bool,
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+enum FinishTurnError {
+    Interrupted,
+    Message(&'static str),
+}
+
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        BridgeStatus, CloudState, DocumentInfo, TurnEnd, VoiceState, VoiceTurnResult,
+        BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
+        VoiceTurnResult,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -221,6 +230,20 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:first-audio",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    pub(super) struct VoiceInterruptedListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Drop for VoiceInterruptedListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-interrupted",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -275,17 +298,21 @@ mod cloud {
     pub async fn finish_turn(
         session_state: &str,
         intentional: bool,
-    ) -> Result<VoiceTurnResult, &'static str> {
+    ) -> Result<VoiceTurnResult, FinishTurnError> {
         let turn_mode = if intentional {
             "intentional"
         } else {
             "ambient"
         };
-        let value = finish_turn_js(session_state, turn_mode)
-            .await
-            .map_err(user_message)?;
+        let value = match finish_turn_js(session_state, turn_mode).await {
+            Ok(value) => value,
+            Err(error) if error_code(error.clone()).as_deref() == Some("voice_interrupted") => {
+                return Err(FinishTurnError::Interrupted);
+            }
+            Err(error) => return Err(FinishTurnError::Message(user_message(error))),
+        };
         serde_wasm_bindgen::from_value(value)
-            .map_err(|_| "音声応答を確認できない　もう一度ためしてみて")
+            .map_err(|_| FinishTurnError::Message("音声応答を確認できない　もう一度ためしてみて"))
     }
 
     pub async fn attach_document(input_id: &str) -> Result<DocumentInfo, &'static str> {
@@ -327,6 +354,27 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(FirstAudioListener { window, callback }))
+    }
+
+    pub fn install_voice_interrupted_listener(
+        mut voice_state: Signal<VoiceState>,
+    ) -> Option<Rc<VoiceInterruptedListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if matches!(
+                *voice_state.peek(),
+                VoiceState::Thinking | VoiceState::Speaking
+            ) {
+                voice_state.set(VoiceState::Listening);
+            }
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:voice-interrupted",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(VoiceInterruptedListener { window, callback }))
     }
 
     pub fn stop_session() {
@@ -373,7 +421,7 @@ mod cloud {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
-    use super::{CloudState, DocumentInfo, VoiceState, VoiceTurnResult};
+    use super::{CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnResult};
     use dioxus::prelude::Signal;
 
     #[derive(Clone)]
@@ -394,8 +442,8 @@ mod cloud {
     pub async fn finish_turn(
         _session_state: &str,
         _intentional: bool,
-    ) -> Result<VoiceTurnResult, &'static str> {
-        Err("WebAssembly版で使ってみて")
+    ) -> Result<VoiceTurnResult, FinishTurnError> {
+        Err(FinishTurnError::Message("WebAssembly版で使ってみて"))
     }
 
     pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
@@ -409,6 +457,12 @@ mod cloud {
     }
 
     pub fn install_first_audio_listener(
+        _voice_state: Signal<VoiceState>,
+    ) -> Option<DocumentClearListener> {
+        None
+    }
+
+    pub fn install_voice_interrupted_listener(
         _voice_state: Signal<VoiceState>,
     ) -> Option<DocumentClearListener> {
         None
@@ -485,13 +539,12 @@ fn arm_listening(
                     caption,
                 );
             } else {
-                // A finite recorder window with no speech is not a new user
-                // turn. Preserve the current explicit/follow-up intent while
-                // transparently re-arming the microphone.
+                // The explicit gesture authorizes only this finite recording
+                // window. Any automatically opened replacement is ambient.
                 arm_listening(
                     operation,
                     false,
-                    intentional,
+                    intentional_for_gesture_epoch(false),
                     voice_state,
                     generation,
                     session_state,
@@ -504,6 +557,72 @@ fn arm_listening(
                     caption,
                 );
             }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_ambient_interruption(
+    operation: u64,
+    mut voice_state: Signal<VoiceState>,
+    generation: Signal<u64>,
+    session_state: Signal<String>,
+    detected_domain: Signal<String>,
+    route: Signal<String>,
+    needs_paper: Signal<bool>,
+    research_status: Signal<ResearchStatus>,
+    research_records: Signal<Vec<ResearchRecord>>,
+    document_info: Signal<Option<DocumentInfo>>,
+    caption: Signal<Option<String>>,
+) {
+    voice_state.set(VoiceState::Listening);
+    spawn(async move {
+        let has_speech = match cloud::wait_for_turn_end().await {
+            Ok(has_speech) => has_speech,
+            Err(message) => {
+                if *generation.peek() == operation {
+                    cloud::stop_session();
+                    voice_state.set(VoiceState::Error(message));
+                }
+                return;
+            }
+        };
+        if *generation.peek() != operation || *voice_state.peek() != VoiceState::Listening {
+            return;
+        }
+        if has_speech {
+            // Acoustic interruption is never a fresh user gesture. This also
+            // keeps replayed output outside intentional-turn authority.
+            submit_turn(
+                operation,
+                false,
+                voice_state,
+                generation,
+                session_state,
+                detected_domain,
+                route,
+                needs_paper,
+                research_status,
+                research_records,
+                document_info,
+                caption,
+            );
+        } else {
+            arm_listening(
+                operation,
+                false,
+                false,
+                voice_state,
+                generation,
+                session_state,
+                detected_domain,
+                route,
+                needs_paper,
+                research_status,
+                research_records,
+                document_info,
+                caption,
+            );
         }
     });
 }
@@ -541,7 +660,26 @@ fn submit_turn(
 
         let result = match result {
             Ok(result) => result,
-            Err(message) => {
+            Err(FinishTurnError::Interrupted) => {
+                if consumed_document {
+                    document_info.set(None);
+                }
+                resume_ambient_interruption(
+                    operation,
+                    voice_state,
+                    generation,
+                    session_state,
+                    detected_domain,
+                    route,
+                    needs_paper,
+                    research_status,
+                    research_records,
+                    document_info,
+                    caption,
+                );
+                return;
+            }
+            Err(FinishTurnError::Message(message)) => {
                 if consumed_document {
                     document_info.set(None);
                 }
@@ -551,7 +689,11 @@ fn submit_turn(
             }
         };
 
-        if !result.audio_base64.is_empty() || result.audio_mime_type != "audio/L16" {
+        if !valid_streamed_audio_metadata(
+            &result.audio_base64,
+            &result.audio_mime_type,
+            result.streamed_audio,
+        ) {
             cloud::stop_session();
             voice_state.set(VoiceState::Error(
                 "音声応答を確認できない　もう一度ためしてみて",
@@ -559,7 +701,6 @@ fn submit_turn(
             return;
         }
         let spoke = result.streamed_audio;
-        let retry_intentional = next_turn_is_intentional(&result.route, spoke);
         session_state.set(result.session_state.clone());
         detected_domain.set(result.detected_domain.clone());
         route.set(result.route.clone());
@@ -569,6 +710,24 @@ fn submit_turn(
         caption.set(result.caption.clone());
         if consumed_document {
             document_info.set(None);
+        }
+        if result.interrupted {
+            // The final frame reached a clean terminal EOF, so commit its
+            // state before submitting the already-captured interruption.
+            resume_ambient_interruption(
+                operation,
+                voice_state,
+                generation,
+                session_state,
+                detected_domain,
+                route,
+                needs_paper,
+                research_status,
+                research_records,
+                document_info,
+                caption,
+            );
+            return;
         }
 
         if spoke && *voice_state.peek() == VoiceState::Thinking {
@@ -581,7 +740,7 @@ fn submit_turn(
         arm_listening(
             operation,
             false,
-            retry_intentional,
+            intentional_for_gesture_epoch(false),
             voice_state,
             generation,
             session_state,
@@ -614,7 +773,7 @@ fn start_or_resume(
     arm_listening(
         operation,
         true,
-        true,
+        intentional_for_gesture_epoch(true),
         voice_state,
         generation,
         session_state,
@@ -636,15 +795,16 @@ fn human_file_size(bytes: u64) -> String {
     }
 }
 
-fn next_turn_is_intentional(route: &str, spoke: bool) -> bool {
-    spoke
-        || matches!(
-            route,
-            "stt-clarify"
-                | "stt-clarify-no-speech"
-                | "stt-clarify-low-confidence"
-                | "planner-unavailable"
-        )
+const fn intentional_for_gesture_epoch(fresh_gesture: bool) -> bool {
+    fresh_gesture
+}
+
+fn valid_streamed_audio_metadata(
+    audio_base64: &str,
+    audio_mime_type: &str,
+    streamed_audio: bool,
+) -> bool {
+    audio_base64.is_empty() && audio_mime_type == if streamed_audio { "audio/L16" } else { "" }
 }
 
 #[component]
@@ -663,8 +823,9 @@ fn App() -> Element {
     let mut captions_visible = use_signal(|| false);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
-    let _first_audio_listener =
-        use_hook(|| cloud::install_first_audio_listener(voice_state));
+    let _first_audio_listener = use_hook(|| cloud::install_first_audio_listener(voice_state));
+    let _voice_interrupted_listener =
+        use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
     let cloud_status = use_resource(|| async { cloud::status().await });
 
     let state_snapshot = *voice_state.read();
@@ -1084,30 +1245,21 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{VoiceState, next_turn_is_intentional};
+    use super::{VoiceState, intentional_for_gesture_epoch, valid_streamed_audio_metadata};
 
     #[test]
-    fn recognition_clarification_keeps_the_explicit_turn_open() {
-        assert!(next_turn_is_intentional("stt-clarify", true));
-        assert!(next_turn_is_intentional("stt-clarify", false));
-        assert!(next_turn_is_intentional("stt-clarify-no-speech", false));
-        assert!(next_turn_is_intentional(
-            "stt-clarify-low-confidence",
-            false
-        ));
-        assert!(next_turn_is_intentional("planner-unavailable", false));
-        assert!(!next_turn_is_intentional("stt-silent", false));
-        assert!(!next_turn_is_intentional("stt-silent-no-speech", false));
-        assert!(!next_turn_is_intentional(
-            "stt-silent-low-confidence",
-            false
-        ));
-        assert!(!next_turn_is_intentional(
-            "planner-unavailable-silent",
-            false
-        ));
-        assert!(next_turn_is_intentional("direct-answer", true));
-        assert!(!next_turn_is_intentional("direct-answer", false));
+    fn only_a_fresh_gesture_can_create_intentional_authority() {
+        assert!(intentional_for_gesture_epoch(true));
+        assert!(!intentional_for_gesture_epoch(false));
+    }
+
+    #[test]
+    fn streamed_audio_metadata_accepts_spoken_and_silent_final_shapes() {
+        assert!(valid_streamed_audio_metadata("", "audio/L16", true));
+        assert!(valid_streamed_audio_metadata("", "", false));
+        assert!(!valid_streamed_audio_metadata("", "audio/L16", false));
+        assert!(!valid_streamed_audio_metadata("", "", true));
+        assert!(!valid_streamed_audio_metadata("YQ==", "audio/L16", true));
     }
 
     #[test]

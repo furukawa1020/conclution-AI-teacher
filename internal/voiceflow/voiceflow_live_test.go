@@ -3,6 +3,7 @@ package voiceflow
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -85,6 +86,85 @@ type fakeLiveSpeech struct {
 	fakeStreamingSpeech
 	session *fakeLiveTranscriptionSession
 	opened  chan struct{}
+}
+
+type scriptedSynthesis struct {
+	chunks   [][]byte
+	mimeType string
+	err      error
+}
+
+type synthesisChunkEvent struct {
+	call  int
+	chunk int
+}
+
+type scriptedLiveSpeech struct {
+	fakeSpeech
+	session *fakeLiveTranscriptionSession
+	scripts []scriptedSynthesis
+
+	mu            sync.Mutex
+	texts         []string
+	chunkStarted  chan synthesisChunkEvent
+	chunkFinished chan synthesisChunkEvent
+	completed     chan int
+}
+
+func (speech *scriptedLiveSpeech) OpenStreamingTranscription(
+	ctx context.Context,
+) (speechio.StreamingTranscriptionSession, error) {
+	speech.session.ctx = ctx
+	return speech.session, nil
+}
+
+func (speech *scriptedLiveSpeech) StreamSynthesize(
+	ctx context.Context,
+	text string,
+	onChunk speechio.StreamChunkHandler,
+) (string, error) {
+	speech.mu.Lock()
+	call := len(speech.texts)
+	speech.texts = append(speech.texts, text)
+	if call >= len(speech.scripts) {
+		speech.mu.Unlock()
+		return "", errors.New("unexpected synthesis call")
+	}
+	script := speech.scripts[call]
+	speech.mu.Unlock()
+
+	for index, chunk := range script.chunks {
+		event := synthesisChunkEvent{call: call, chunk: index}
+		if speech.chunkStarted != nil {
+			speech.chunkStarted <- event
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := onChunk(chunk); err != nil {
+			return "", err
+		}
+		if speech.chunkFinished != nil {
+			speech.chunkFinished <- event
+		}
+	}
+	if speech.completed != nil {
+		speech.completed <- call
+	}
+	if script.err != nil {
+		return "", script.err
+	}
+	mimeType := script.mimeType
+	if mimeType == "" {
+		mimeType = speechio.StreamingAudioContentType
+	}
+	return mimeType, nil
+}
+
+func (speech *scriptedLiveSpeech) synthesisTexts() []string {
+	speech.mu.Lock()
+	defer speech.mu.Unlock()
+	return append([]string(nil), speech.texts...)
 }
 
 type speculativeTestAgent struct {

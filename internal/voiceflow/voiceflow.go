@@ -78,6 +78,9 @@ var (
 	errSpeculativeAudioMIME = errors.New(
 		"voiceflow: speculative synthesis returned an invalid content type",
 	)
+	errSpeculativeAudioChunk = errors.New(
+		"voiceflow: speculative synthesis returned invalid PCM",
+	)
 )
 
 type speculativeAudioCommitBuffer struct {
@@ -90,6 +93,9 @@ type speculativeAudioCommitBuffer struct {
 	peakBytes     int
 	discardErr    error
 	deliver       func([]byte) error
+	releaseChunks [][]byte
+	releaseIndex  int
+	delivering    bool
 
 	stopWatcher     chan struct{}
 	stopWatcherOnce sync.Once
@@ -672,12 +678,15 @@ func (p *Pipeline) startLiveSpeculation(
 
 func (speculation *liveSpeculation) cancel() *speculativeSynthesis {
 	speculation.mu.Lock()
-	speculation.cancelContext()
 	synthesis := speculation.synthesis
-	speculation.mu.Unlock()
 	if synthesis != nil {
-		synthesis.abort(context.Canceled)
+		synthesis.buffer.discard(context.Canceled)
 	}
+	speculation.cancelContext()
+	if synthesis != nil {
+		synthesis.cancel()
+	}
+	speculation.mu.Unlock()
 	return synthesis
 }
 
@@ -747,6 +756,10 @@ func (buffer *speculativeAudioCommitBuffer) write(
 	ctx context.Context,
 	chunk []byte,
 ) error {
+	if len(chunk) == 0 || len(chunk)%2 != 0 {
+		buffer.discard(errSpeculativeAudioChunk)
+		return errSpeculativeAudioChunk
+	}
 	offset := 0
 	for offset < len(chunk) {
 		buffer.mu.Lock()
@@ -811,28 +824,67 @@ func (buffer *speculativeAudioCommitBuffer) release(
 		return -1, errSpeculativeAudioDiscarded
 	}
 	buffer.state = speculativeAudioReleasing
-	for index, chunk := range buffer.chunks {
-		if err := ctx.Err(); err != nil {
-			buffer.clearFromLocked(index, err)
-			buffer.mu.Unlock()
-			buffer.stopWatching()
-			return -1, err
-		}
-		if err := buffer.deliver(chunk); err != nil {
-			buffer.clearFromLocked(index, err)
-			buffer.mu.Unlock()
-			buffer.stopWatching()
-			return -1, err
-		}
-		clear(chunk)
-	}
+	buffer.releaseChunks = buffer.chunks
 	buffer.chunks = nil
 	buffer.bufferedBytes = 0
-	buffer.state = speculativeAudioLive
-	buffer.changed.Broadcast()
 	buffer.mu.Unlock()
-	buffer.stopWatching()
-	return time.Since(started).Milliseconds(), nil
+
+	for {
+		buffer.mu.Lock()
+		if buffer.state == speculativeAudioDiscarded {
+			err := buffer.discardErr
+			buffer.clearReleaseLocked()
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			if err == nil {
+				err = errSpeculativeAudioDiscarded
+			}
+			return -1, err
+		}
+		if err := ctx.Err(); err != nil {
+			buffer.discardLocked(err)
+			buffer.clearReleaseLocked()
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			return -1, err
+		}
+		if buffer.releaseIndex >= len(buffer.releaseChunks) {
+			buffer.clearReleaseLocked()
+			buffer.state = speculativeAudioLive
+			buffer.changed.Broadcast()
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			return time.Since(started).Milliseconds(), nil
+		}
+		chunk := buffer.releaseChunks[buffer.releaseIndex]
+		buffer.delivering = true
+		buffer.mu.Unlock()
+
+		deliverErr := buffer.deliver(chunk)
+
+		buffer.mu.Lock()
+		buffer.delivering = false
+		clear(chunk)
+		buffer.releaseIndex++
+		if deliverErr != nil {
+			buffer.discardLocked(deliverErr)
+			buffer.clearReleaseLocked()
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			return -1, deliverErr
+		}
+		if buffer.state == speculativeAudioDiscarded {
+			err := buffer.discardErr
+			buffer.clearReleaseLocked()
+			buffer.mu.Unlock()
+			buffer.stopWatching()
+			if err == nil {
+				err = errSpeculativeAudioDiscarded
+			}
+			return -1, err
+		}
+		buffer.mu.Unlock()
+	}
 }
 
 func (buffer *speculativeAudioCommitBuffer) discard(reason error) {
@@ -841,26 +893,36 @@ func (buffer *speculativeAudioCommitBuffer) discard(reason error) {
 	}
 	buffer.mu.Lock()
 	if buffer.state != speculativeAudioDiscarded {
-		buffer.clearFromLocked(0, reason)
+		buffer.discardLocked(reason)
 	}
 	buffer.mu.Unlock()
 	buffer.stopWatching()
 }
 
-func (buffer *speculativeAudioCommitBuffer) clearFromLocked(
-	startIndex int,
-	reason error,
-) {
-	for index, chunk := range buffer.chunks {
-		if index >= startIndex {
-			clear(chunk)
+func (buffer *speculativeAudioCommitBuffer) discardLocked(reason error) {
+	for _, chunk := range buffer.chunks {
+		clear(chunk)
+	}
+	for index := buffer.releaseIndex; index < len(buffer.releaseChunks); index++ {
+		if index == buffer.releaseIndex && buffer.delivering {
+			continue
 		}
+		clear(buffer.releaseChunks[index])
 	}
 	buffer.chunks = nil
 	buffer.bufferedBytes = 0
 	buffer.state = speculativeAudioDiscarded
 	buffer.discardErr = reason
 	buffer.changed.Broadcast()
+}
+
+func (buffer *speculativeAudioCommitBuffer) clearReleaseLocked() {
+	for index := buffer.releaseIndex; index < len(buffer.releaseChunks); index++ {
+		clear(buffer.releaseChunks[index])
+	}
+	buffer.releaseChunks = nil
+	buffer.releaseIndex = 0
+	buffer.delivering = false
 }
 
 func (buffer *speculativeAudioCommitBuffer) stopWatching() {
@@ -907,8 +969,8 @@ func (synthesis *speculativeSynthesis) await(
 }
 
 func (synthesis *speculativeSynthesis) abort(reason error) {
-	synthesis.cancel()
 	synthesis.buffer.discard(reason)
+	synthesis.cancel()
 }
 
 func (tracker *speculativeCandidateTracker) observe(

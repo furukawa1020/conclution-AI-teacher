@@ -28,33 +28,48 @@ const (
 	phaticLocalSpokenReply                 = "こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。"
 	interpretationClarificationSpokenReply = "何をいちばん知りたいか、もう少し具体的に教えてもらえますか？"
 	respondentAwaitingSpokenReply          = "まとまっていなくていいので、今の答えをそのまま話してもらえますか？"
+	plannerUnavailableSpokenReply          = "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。"
 
-	PrecisionConfidenceThreshold      = 0.78
-	AmbientEVIThreshold               = 0.35
-	maxModelResponseBytes             = 64 * 1024
-	maxRespondentEvidence             = 8
-	maxRespondentProtected            = 16
-	maxRespondentProtectedRunes       = 160
-	maxResearchQueryRunes             = research.MaxTopicRunes
-	researchDiscoveryTimeout          = 7 * time.Second
-	precisionInferenceSequenceTimeout = 10 * time.Second
-	criticTimeout                     = 12 * time.Second
-	criticRecoveryTimeout             = 18 * time.Second
-	ordinaryCriticSequenceTimeout     = 8 * time.Second
-	highRiskCriticSequenceTimeout     = 24 * time.Second
+	PrecisionConfidenceThreshold        = 0.78
+	AmbientEVIThreshold                 = 0.35
+	maxModelResponseBytes               = 64 * 1024
+	maxRespondentEvidence               = 8
+	maxRespondentProtected              = 16
+	maxRespondentProtectedRunes         = 160
+	maxResearchQueryRunes               = research.MaxTopicRunes
+	researchDiscoveryTimeout            = 7 * time.Second
+	fastInferenceSequenceTimeout        = 12 * time.Second
+	plannerPrecisionRecoveryTimeout     = 10 * time.Second
+	precisionInferenceSequenceTimeout   = 10 * time.Second
+	criticTimeout                       = 12 * time.Second
+	criticRecoveryTimeout               = 18 * time.Second
+	ordinaryCriticSequenceTimeout       = 8 * time.Second
+	highRiskCriticSequenceTimeout       = 24 * time.Second
 )
 
 var (
-	errCriticDeadline        = errors.New("conversation: critic deadline")
-	errCriticCanceled        = errors.New("conversation: critic canceled")
-	errCriticFinishSafety    = errors.New("conversation: critic safety finish")
-	errCriticFinishLimit     = errors.New("conversation: critic output limit")
-	errCriticResponseShape   = errors.New("conversation: critic response shape")
-	errCriticJSON            = errors.New("conversation: critic JSON")
-	errCriticContract        = errors.New("conversation: critic contract")
-	errCriticRepairBounds    = errors.New("conversation: critic repair bounds")
-	errInferenceFinishSafety = errors.New("conversation: inference safety finish")
-	errInferenceFinishLimit  = errors.New("conversation: inference output limit")
+	errCriticDeadline             = errors.New("conversation: critic deadline")
+	errCriticCanceled             = errors.New("conversation: critic canceled")
+	errCriticFinishSafety         = errors.New("conversation: critic safety finish")
+	errCriticFinishLimit          = errors.New("conversation: critic output limit")
+	errCriticResponseShape        = errors.New("conversation: critic response shape")
+	errCriticJSON                 = errors.New("conversation: critic JSON")
+	errCriticContract             = errors.New("conversation: critic contract")
+	errCriticRepairBounds         = errors.New("conversation: critic repair bounds")
+	errInferencePromptBlocked     = errors.New("conversation: inference prompt blocked")
+	errInferenceFinishSafety      = errors.New("conversation: inference safety finish")
+	errInferenceFinishLimit       = errors.New("conversation: inference output limit")
+	errInferenceFinishPolicy      = errors.New("conversation: inference policy finish")
+	errInferenceResponseShape     = errors.New("conversation: inference response shape")
+	errInferenceJSON              = errors.New("conversation: inference JSON")
+	errInferenceTrailingJSON      = errors.New("conversation: inference trailing JSON")
+	errInferencePlanEnvelope      = errors.New("conversation: inference plan envelope")
+	errInferenceRespondentGuard   = errors.New("conversation: inference respondent guard")
+	errInferenceResearchGuard     = errors.New("conversation: inference research guard")
+	errInferenceDocumentGuard     = errors.New("conversation: inference document guard")
+	errInferenceArbiterGuard      = errors.New("conversation: inference arbiter guard")
+	errInferenceAnswerContract    = errors.New("conversation: inference answer contract")
+	errInferenceStateDelta        = errors.New("conversation: inference state delta")
 
 	explicitJapaneseRecentResearchPattern = regexp.MustCompile(
 		`^(?:(?i:crossref)|クロスレフ|外部検索)で\s*` +
@@ -315,8 +330,13 @@ func (agent *vertexAgent) Process(
 		return agent.completePhaticLocal(uid, state)
 	}
 
-	fastPlan, err := agent.inferWithRetry(
+	plannerStarted := time.Now()
+	fastCtx, cancelFast := context.WithTimeout(
 		ctx,
+		fastInferenceSequenceTimeout,
+	)
+	fastPlan, err := agent.inferWithRetry(
+		fastCtx,
 		agent.fastModel,
 		"fast",
 		genai.ThinkingLevelLow,
@@ -324,8 +344,92 @@ func (agent *vertexAgent) Process(
 		state,
 		nil,
 	)
+	fastContextErr := fastCtx.Err()
+	cancelFast()
+	plannerRecoveredWithPrecision := false
 	if err != nil {
-		return VoiceTurnResult{}, err
+		if ctx.Err() != nil {
+			return VoiceTurnResult{}, err
+		}
+		if fastContextErr != nil || !precisionPlannerRecoveryAllowed(err) {
+			slog.WarnContext(
+				ctx,
+				"planner recovery failed closed",
+				"failure_class", inferenceFailureClass(err),
+				"failure_stage", inferenceFailureStage(err),
+				"recovery_outcome", "failed_closed",
+				"turn_mode", plannerTurnMode(normalized.Ambient),
+				"duration_ms", time.Since(plannerStarted).Milliseconds(),
+			)
+			return agent.completePlannerUnavailable(
+				uid,
+				state,
+				normalized.Ambient,
+			)
+		}
+
+		slog.WarnContext(
+			ctx,
+			"planner precision recovery started",
+			"failure_class", inferenceFailureClass(err),
+			"failure_stage", inferenceFailureStage(err),
+			"primary_model_role", "fast",
+			"recovery_model_role", "precision",
+			"recovery_outcome", "started",
+			"turn_mode", plannerTurnMode(normalized.Ambient),
+		)
+		recoveryCtx, cancelRecovery := context.WithTimeout(
+			ctx,
+			plannerPrecisionRecoveryTimeout,
+		)
+		recoveredPlan, recoveryErr := agent.infer(
+			recoveryCtx,
+			agent.precisionModel,
+			genai.ThinkingLevelHigh,
+			normalized,
+			state,
+			nil,
+		)
+		recoveryContextErr := recoveryCtx.Err()
+		cancelRecovery()
+		if recoveryErr != nil || recoveryContextErr != nil {
+			if ctx.Err() != nil {
+				if recoveryErr != nil {
+					return VoiceTurnResult{}, recoveryErr
+				}
+				return VoiceTurnResult{}, ctx.Err()
+			}
+			if recoveryErr == nil {
+				recoveryErr = ErrModelUnavailable
+			}
+			slog.WarnContext(
+				ctx,
+				"planner precision recovery failed closed",
+				"failure_class", inferenceFailureClass(recoveryErr),
+				"failure_stage", inferenceFailureStage(recoveryErr),
+				"primary_model_role", "fast",
+				"recovery_model_role", "precision",
+				"recovery_outcome", "failed_closed",
+				"turn_mode", plannerTurnMode(normalized.Ambient),
+				"duration_ms", time.Since(plannerStarted).Milliseconds(),
+			)
+			return agent.completePlannerUnavailable(
+				uid,
+				state,
+				normalized.Ambient,
+			)
+		}
+		fastPlan = recoveredPlan
+		plannerRecoveredWithPrecision = true
+		slog.InfoContext(
+			ctx,
+			"planner precision recovery completed",
+			"primary_model_role", "fast",
+			"recovery_model_role", "precision",
+			"recovery_outcome", "recovered",
+			"turn_mode", plannerTurnMode(normalized.Ambient),
+			"duration_ms", time.Since(plannerStarted).Milliseconds(),
+		)
 	}
 	if state.PendingAnswer.Active &&
 		fastPlan.AssistanceTarget == "respondent" &&
@@ -363,6 +467,7 @@ func (agent *vertexAgent) Process(
 		}
 		state = recoveryState
 		fastPlan = recoveredPlan
+		plannerRecoveredWithPrecision = false
 	}
 	if canCompleteAmbientSilentFast(normalized, fastPlan) {
 		return agent.completeAmbientSilentFast(uid, state, fastPlan)
@@ -372,13 +477,17 @@ func (agent *vertexAgent) Process(
 	}
 	finalPlan := fastPlan
 	route := "fast"
+	if plannerRecoveredWithPrecision {
+		route = "precision-recovery"
+	}
 	failClosedPrecision := requiresFailClosedPrecision(normalized, fastPlan)
 	precisionUnavailable := false
 	awaitingAnswerWithoutPublishableDraft :=
 		fastPlan.AssistanceTarget == "respondent" &&
 			fastPlan.RespondentStage == "awaiting_answer" &&
 			!failClosedPrecision
-	if (needsPrecision(fastPlan) || failClosedPrecision) &&
+	if !plannerRecoveredWithPrecision &&
+		(needsPrecision(fastPlan) || failClosedPrecision) &&
 		!awaitingAnswerWithoutPublishableDraft {
 		precisionCtx, cancelPrecision := context.WithTimeout(
 			ctx,
@@ -712,6 +821,70 @@ func (agent *vertexAgent) completePhaticLocal(
 		NeedsClarification: false,
 		StateToken:         stateToken,
 	}, nil
+}
+
+func (agent *vertexAgent) completePlannerUnavailable(
+	uid string,
+	state conversationState,
+	ambient bool,
+) (VoiceTurnResult, error) {
+	decision := ArbiterDecision{
+		Benefit:          0.5,
+		InterruptionCost: 0.1,
+		Urgency:          0,
+		Confidence:       1,
+		Act:              "clarify",
+		Score:            0.4,
+	}
+	route := "planner-unavailable"
+	spokenReply := plannerUnavailableSpokenReply
+	interventionPolicy := "clarify"
+	argumentStructure := "clarifying_question"
+	if ambient {
+		decision = ArbiterDecision{Act: "silent"}
+		route = "planner-unavailable-silent"
+		spokenReply = ""
+		interventionPolicy = "wait"
+		argumentStructure = "direct_answer"
+	}
+	nextState := conversationState{
+		Turn:                state.Turn + 1,
+		Graph:               state.Graph,
+		ConversationSummary: "",
+		DocumentSummary:     "",
+		PendingAnswer:       state.PendingAnswer,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		LastIntervention:    decision,
+	}
+	stateToken, err := agent.codec.seal(uid, nextState)
+	if err != nil {
+		return VoiceTurnResult{}, err
+	}
+	return VoiceTurnResult{
+		SchemaVersion:       SchemaVersion,
+		Domain:              "other",
+		Intent:              "other",
+		AssistanceTarget:    "assistant",
+		RespondentStage:     "none",
+		ResearchStatus:      "none",
+		ResearchRecords:     []ResearchRecord{},
+		ArgumentStructure:   argumentStructure,
+		InterventionPolicy:  interventionPolicy,
+		SpokenReply:         spokenReply,
+		Confidence:          0,
+		Intervention:        decision,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		Route:               route,
+		NeedsClarification:  !ambient,
+		StateToken:          stateToken,
+	}, nil
+}
+
+func plannerTurnMode(ambient bool) string {
+	if ambient {
+		return "ambient"
+	}
+	return "intentional"
 }
 
 func canCompleteAmbientSilentFast(turn VoiceTurn, plan modelPlan) bool {
@@ -1202,7 +1375,10 @@ func (agent *vertexAgent) infer(
 	}
 	raw, err := responseText(response)
 	if err != nil {
-		return modelPlan{}, err
+		return modelPlan{}, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceResponseShape,
+		)
 	}
 	defer wipe(raw)
 
@@ -1210,10 +1386,16 @@ func (agent *vertexAgent) infer(
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&plan); err != nil {
-		return modelPlan{}, ErrModelOutputInvalid
+		return modelPlan{}, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceJSON,
+		)
 	}
 	if err := requireJSONEOF(decoder); err != nil {
-		return modelPlan{}, ErrModelOutputInvalid
+		return modelPlan{}, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceTrailingJSON,
+		)
 	}
 	if err := normalizeAndValidatePlan(
 		&plan,
@@ -1226,7 +1408,10 @@ func (agent *vertexAgent) infer(
 	if !respondentAllowed &&
 		(plan.AssistanceTarget != "assistant" ||
 			plan.RespondentStage != "none") {
-		return modelPlan{}, ErrModelOutputInvalid
+		return modelPlan{}, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceRespondentGuard,
+		)
 	}
 	return plan, nil
 }
@@ -1276,6 +1461,12 @@ func (agent *vertexAgent) inferWithRetry(
 }
 
 func inferenceFinishFailure(response *genai.GenerateContentResponse) error {
+	if response != nil && response.PromptFeedback != nil {
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferencePromptBlocked,
+		)
+	}
 	if response == nil || len(response.Candidates) != 1 ||
 		response.Candidates[0] == nil {
 		return nil
@@ -1291,23 +1482,46 @@ func inferenceFinishFailure(response *genai.GenerateContentResponse) error {
 	case genai.FinishReasonMaxTokens:
 		return errors.Join(ErrModelOutputInvalid, errInferenceFinishLimit)
 	default:
-		return ErrModelOutputInvalid
+		return errors.Join(ErrModelOutputInvalid, errInferenceFinishPolicy)
 	}
 }
 
 func retryableInferenceFailure(err error) bool {
-	if errors.Is(err, errInferenceFinishSafety) ||
-		errors.Is(err, errInferenceFinishLimit) {
+	return errors.Is(err, ErrModelUnavailable) ||
+		precisionPlannerRecoveryAllowed(err)
+}
+
+func precisionPlannerRecoveryAllowed(err error) bool {
+	if err == nil ||
+		errors.Is(err, ErrModelUnavailable) ||
+		errors.Is(err, errInferencePromptBlocked) ||
+		errors.Is(err, errInferenceFinishSafety) ||
+		errors.Is(err, errInferenceFinishLimit) ||
+		errors.Is(err, errInferenceFinishPolicy) ||
+		errors.Is(err, errInferenceRespondentGuard) ||
+		errors.Is(err, errInferenceResearchGuard) ||
+		errors.Is(err, errInferenceDocumentGuard) ||
+		errors.Is(err, errInferenceArbiterGuard) ||
+		errors.Is(err, errInferenceStateDelta) {
 		return false
 	}
-	return errors.Is(err, ErrModelUnavailable) ||
-		errors.Is(err, ErrModelOutputInvalid)
+	return errors.Is(err, errInferenceResponseShape) ||
+		errors.Is(err, errInferenceJSON) ||
+		errors.Is(err, errInferenceTrailingJSON) ||
+		errors.Is(err, errInferencePlanEnvelope) ||
+		errors.Is(err, errInferenceAnswerContract)
 }
 
 func inferenceFailureClass(err error) string {
 	switch {
+	case errors.Is(err, errInferencePromptBlocked):
+		return "prompt_blocked"
 	case errors.Is(err, errInferenceFinishSafety):
 		return "safety"
+	case errors.Is(err, errInferenceFinishLimit):
+		return "output_limit"
+	case errors.Is(err, errInferenceFinishPolicy):
+		return "finish_policy"
 	case errors.Is(err, ErrModelUnavailable):
 		return "provider_unavailable"
 	case errors.Is(err, ErrModelOutputInvalid):
@@ -1319,13 +1533,36 @@ func inferenceFailureClass(err error) string {
 
 func inferenceFailureStage(err error) string {
 	switch {
+	case errors.Is(err, errInferencePromptBlocked):
+		return "prompt_blocked"
 	case errors.Is(err, errInferenceFinishSafety),
-		errors.Is(err, errInferenceFinishLimit):
+		errors.Is(err, errInferenceFinishLimit),
+		errors.Is(err, errInferenceFinishPolicy):
 		return "finish"
 	case errors.Is(err, ErrModelUnavailable):
 		return "generate"
+	case errors.Is(err, errInferenceResponseShape):
+		return "response_shape"
+	case errors.Is(err, errInferenceJSON):
+		return "json"
+	case errors.Is(err, errInferenceTrailingJSON):
+		return "trailing_json"
+	case errors.Is(err, errInferencePlanEnvelope):
+		return "plan_envelope"
+	case errors.Is(err, errInferenceRespondentGuard):
+		return "respondent_guard"
+	case errors.Is(err, errInferenceResearchGuard):
+		return "research_guard"
+	case errors.Is(err, errInferenceDocumentGuard):
+		return "document_guard"
+	case errors.Is(err, errInferenceArbiterGuard):
+		return "arbiter_guard"
+	case errors.Is(err, errInferenceAnswerContract):
+		return "answer_contract"
+	case errors.Is(err, errInferenceStateDelta):
+		return "state_delta"
 	case errors.Is(err, ErrModelOutputInvalid):
-		return "response"
+		return "response_unclassified"
 	default:
 		return "internal"
 	}
@@ -1635,7 +1872,10 @@ func normalizeAndValidatePlan(
 		utf8.RuneCountInString(plan.ConversationSummary) > maxConversationSummaryRunes ||
 		!utf8.ValidString(plan.DocumentSummary) ||
 		utf8.RuneCountInString(plan.DocumentSummary) > maxDocumentSummaryRunes {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferencePlanEnvelope,
+		)
 	}
 	switch plan.AssistanceTarget {
 	case "assistant":
@@ -1643,7 +1883,10 @@ func normalizeAndValidatePlan(
 			plan.AnswerAttempt != "" ||
 			len(plan.RespondentEvidence) != 0 ||
 			len(plan.RespondentProtected) != 0 {
-			return ErrModelOutputInvalid
+			return errors.Join(
+				ErrModelOutputInvalid,
+				errInferenceRespondentGuard,
+			)
 		}
 	case "respondent":
 		switch plan.RespondentStage {
@@ -1653,26 +1896,44 @@ func normalizeAndValidatePlan(
 				len(plan.RespondentProtected) != 0 ||
 				plan.InterventionPolicy != "clarify" ||
 				plan.Intervention.Act != "clarify" {
-				return ErrModelOutputInvalid
+				return errors.Join(
+					ErrModelOutputInvalid,
+					errInferenceRespondentGuard,
+				)
 			}
 		case "restructure":
 			if plan.AnswerAttempt == "" ||
 				!strings.Contains(collapseSpace(utterance), plan.AnswerAttempt) ||
 				!validRespondentEvidence(plan) {
-				return ErrModelOutputInvalid
+				return errors.Join(
+					ErrModelOutputInvalid,
+					errInferenceRespondentGuard,
+				)
 			}
 		default:
-			return ErrModelOutputInvalid
+			return errors.Join(
+				ErrModelOutputInvalid,
+				errInferenceRespondentGuard,
+			)
 		}
 	}
 	if !validResearchPlan(plan, utterance, ambient) {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceResearchGuard,
+		)
 	}
 	if !hasPDF && plan.DocumentSummary != "" {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceDocumentGuard,
+		)
 	}
 	if containsUnspeakableMarkup(plan.SpokenReply) {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferencePlanEnvelope,
+		)
 	}
 	decision := ArbiterDecision{
 		Benefit:          plan.Intervention.Benefit,
@@ -1682,24 +1943,39 @@ func normalizeAndValidatePlan(
 		Act:              plan.Intervention.Act,
 	}
 	if err := validateArbiter(decision); err != nil {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceArbiterGuard,
+		)
 	}
 	if plan.InterventionPolicy == "safety" &&
 		(decision.Urgency < 0.8 || decision.Act == "silent") {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceArbiterGuard,
+		)
 	}
 	if decision.Act != "silent" && plan.SpokenReply == "" {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceArbiterGuard,
+		)
 	}
 	if decision.Act == "silent" {
 		plan.SpokenReply = ""
 	}
 	if err := answercontract.Validate(plan.AnswerContract); err != nil {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceAnswerContract,
+		)
 	}
 	delta, err := normalizeDelta(plan.ThoughtStateDelta)
 	if err != nil {
-		return ErrModelOutputInvalid
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceStateDelta,
+		)
 	}
 	plan.ThoughtStateDelta = delta
 	return nil

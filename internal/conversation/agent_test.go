@@ -1090,12 +1090,20 @@ func TestAgentRetriesStructuredInferenceButNotSafetyFinish(t *testing.T) {
 			{finishReason: genai.FinishReasonSafety},
 		}}
 		agent := newTestAgent(t, fake)
-		_, err := agent.Process(context.Background(), "uid-infer-safety", VoiceTurn{
+		result, err := agent.Process(context.Background(), "uid-infer-safety", VoiceTurn{
 			SchemaVersion: SchemaVersion,
 			Utterance:     "答えて",
 		})
-		if !errors.Is(err, ErrModelOutputInvalid) || len(fake.calls) != 1 {
-			t.Fatalf("safety finish was retried: calls=%d err=%v", len(fake.calls), err)
+		if err != nil ||
+			result.Route != "planner-unavailable" ||
+			result.SpokenReply != plannerUnavailableSpokenReply ||
+			len(fake.calls) != 1 {
+			t.Fatalf(
+				"safety finish was retried or its draft escaped: result=%#v calls=%d err=%v",
+				result,
+				len(fake.calls),
+				err,
+			)
 		}
 	})
 }

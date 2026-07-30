@@ -103,8 +103,10 @@ func (p *Pipeline) Process(
 		ResearchStatus:   decision.ResearchStatus,
 		ResearchRecords:  researchRecords(decision.ResearchRecords),
 		Route:            decision.Route,
-		NeedsPaper: decision.Intervention.Act == "paper_check" &&
-			input.Document == nil,
+		NeedsPaper: (decision.Intervention.Act == "paper_check" &&
+			input.Document == nil) ||
+			(decision.Route == "planner-unavailable" &&
+				input.Document != nil),
 	}
 	if decision.SpokenReply == "" {
 		return result, nil

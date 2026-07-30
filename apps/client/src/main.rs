@@ -624,7 +624,10 @@ fn next_turn_is_intentional(route: &str, spoke: bool) -> bool {
     spoke
         || matches!(
             route,
-            "stt-clarify" | "stt-clarify-no-speech" | "stt-clarify-low-confidence"
+            "stt-clarify"
+                | "stt-clarify-no-speech"
+                | "stt-clarify-low-confidence"
+                | "planner-unavailable"
         )
 }
 
@@ -1074,10 +1077,15 @@ mod tests {
             "stt-clarify-low-confidence",
             false
         ));
+        assert!(next_turn_is_intentional("planner-unavailable", false));
         assert!(!next_turn_is_intentional("stt-silent", false));
         assert!(!next_turn_is_intentional("stt-silent-no-speech", false));
         assert!(!next_turn_is_intentional(
             "stt-silent-low-confidence",
+            false
+        ));
+        assert!(!next_turn_is_intentional(
+            "planner-unavailable-silent",
             false
         ));
         assert!(next_turn_is_intentional("direct-answer", true));

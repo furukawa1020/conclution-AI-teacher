@@ -2873,7 +2873,6 @@ async function finishTurn(serializedSessionState, turnMode) {
         fail("request_cancelled");
       }
       playback = createStreamingPlayback(expectedEpoch);
-      startBargeInMonitoring(playback, expectedEpoch);
       try {
         return await liveSession.commit(
           playback,
@@ -2926,10 +2925,9 @@ async function finishTurn(serializedSessionState, turnMode) {
       fail("request_cancelled");
     }
     playback = createStreamingPlayback(expectedEpoch);
-    // Retain corrections spoken while the model is thinking. The guard is
-    // restarted at the first response frame so playback echo cannot confirm
-    // an interruption.
-    startBargeInMonitoring(playback, expectedEpoch);
+    // Barge-in starts only when the first response audio frame is scheduled.
+    // Until then, a resumed phrase belongs to the foreground conversation
+    // rather than interrupting an answer that has not begun.
 
     const payload = {
       audioBase64,

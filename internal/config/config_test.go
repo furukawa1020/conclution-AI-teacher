@@ -131,6 +131,7 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "voice app minute too high", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", value: "21"},
 		{name: "voice app day disabled", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", value: "0"},
 		{name: "request timeout collides with write deadline", key: "KOTAE_REQUEST_TIMEOUT", value: "51s"},
+		{name: "voice timeout leaves no speech reserve", key: "KOTAE_VOICE_TIMEOUT", value: "14s"},
 		{name: "voice timeout collides with write deadline", key: "KOTAE_VOICE_TIMEOUT", value: "51s"},
 		{name: "unreviewed speech primary", key: "KOTAE_SPEECH_MODEL", value: "short"},
 		{name: "unreviewed speech voice", key: "KOTAE_SPEECH_VOICE", value: "ja-JP-Neural2-B"},

@@ -183,7 +183,7 @@ func TestAgentPlannerRecoveryFailsClosedWithoutPublishingDraft(t *testing.T) {
 	})
 }
 
-func TestAgentPlannerUnavailablePreservesStateAndAmbientSilence(t *testing.T) {
+func TestAgentPlannerUnavailablePreservesStateAndGivesAmbientNotice(t *testing.T) {
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: "{"},
 		{body: "{"},
@@ -229,12 +229,12 @@ func TestAgentPlannerUnavailablePreservesStateAndAmbientSilence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "planner-unavailable-silent" ||
-		result.SpokenReply != "" ||
-		result.NeedsClarification ||
+	if result.Route != "planner-unavailable" ||
+		result.SpokenReply != plannerUnavailableSpokenReply ||
+		!result.NeedsClarification ||
 		result.StateToken == "" ||
 		result.StateToken == token {
-		t.Fatalf("ambient fallback was not silent and fresh: %#v", result)
+		t.Fatalf("ambient fallback notice was not bounded and fresh: %#v", result)
 	}
 	next, err := agent.codec.open("uid-planner-state", result.StateToken)
 	if err != nil {
@@ -244,7 +244,7 @@ func TestAgentPlannerUnavailablePreservesStateAndAmbientSilence(t *testing.T) {
 		!reflect.DeepEqual(next.Graph, initial.Graph) ||
 		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
 		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
-		next.LastIntervention.Act != "silent" {
+		next.LastIntervention.Act != initial.LastIntervention.Act {
 		t.Fatalf("fallback changed semantic state: got=%#v want=%#v", next, initial)
 	}
 }
@@ -361,7 +361,7 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 		}
 		if result.Route != "planner-unavailable" ||
 			result.SpokenReply != plannerUnavailableSpokenReply ||
-			len(fake.calls) != 2 {
+			len(fake.calls) != 0 {
 			t.Fatalf(
 				"planner consumed response reserve: result=%#v calls=%#v",
 				result,
@@ -376,7 +376,10 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 			body: encodePlan(t, plan),
 		}}}
 		agent := newTestAgent(t, fake)
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			voiceResponseReserve+500*time.Millisecond,
+		)
 		defer cancel()
 
 		result, err := agent.Process(
@@ -402,6 +405,102 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 			)
 		}
 	})
+
+	t.Run("pending recovery is skipped without speech reserve", func(t *testing.T) {
+		fake := &fakeGenerator{generations: []fakeGeneration{{
+			body:               encodePlan(t, respondentAwaitingPlan()),
+			waitForContext:     true,
+			returnAfterContext: true,
+		}}}
+		agent := newTestAgent(t, fake)
+		initial := plannerRecoveryState()
+		token, err := agent.codec.seal("uid-pending-budget", initial)
+		if err != nil {
+			t.Fatalf("seal initial state: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			voiceResponseReserve+75*time.Millisecond,
+		)
+		defer cancel()
+
+		result, err := agent.Process(
+			ctx,
+			"uid-pending-budget",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "my answer",
+				StateToken:    token,
+			},
+		)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "interpretation-clarify-fast" ||
+			result.SpokenReply == "" ||
+			len(fake.calls) != 1 {
+			t.Fatalf(
+				"pending recovery consumed speech reserve: result=%#v calls=%#v",
+				result,
+				fake.calls,
+			)
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		domain    string
+		wantRoute string
+	}{
+		{
+			name:      "normal precision is skipped",
+			domain:    "technical",
+			wantRoute: "verification-unavailable",
+		},
+		{
+			name:      "fail closed precision is skipped",
+			domain:    "health",
+			wantRoute: "precision-unavailable",
+		},
+	} {
+		test := test
+		t.Run(test.name+" without speech reserve", func(t *testing.T) {
+			plan := validModelPlan()
+			plan.Domain = test.domain
+			fake := &fakeGenerator{generations: []fakeGeneration{{
+				body:               encodePlan(t, plan),
+				waitForContext:     true,
+				returnAfterContext: true,
+			}}}
+			agent := newTestAgent(t, fake)
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				voiceResponseReserve+75*time.Millisecond,
+			)
+			defer cancel()
+
+			result, err := agent.Process(
+				ctx,
+				"uid-precision-budget-"+test.domain,
+				VoiceTurn{
+					SchemaVersion: SchemaVersion,
+					Utterance:     "explain the mechanism",
+				},
+			)
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if result.Route != test.wantRoute ||
+				result.SpokenReply == "" ||
+				len(fake.calls) != 1 {
+				t.Fatalf(
+					"precision consumed speech reserve: result=%#v calls=%#v",
+					result,
+					fake.calls,
+				)
+			}
+		})
+	}
 }
 
 func plannerRecoveryState() conversationState {

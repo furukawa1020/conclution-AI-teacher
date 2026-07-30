@@ -15,10 +15,11 @@ import (
 )
 
 type fakeGeneration struct {
-	body           string
-	err            error
-	finishReason   genai.FinishReason
-	waitForContext bool
+	body               string
+	err                error
+	finishReason       genai.FinishReason
+	waitForContext     bool
+	returnAfterContext bool
 }
 
 func TestVertexHTTPOptionsKeepPriorityExplicitAndExact(t *testing.T) {
@@ -94,7 +95,8 @@ func (fake *fakeGenerator) GenerateContent(
 			}
 			return &genai.GenerateContentResponse{
 				Candidates: []*genai.Candidate{{
-					Content: genai.NewContentFromText(body, genai.RoleModel),
+					Content:      genai.NewContentFromText(body, genai.RoleModel),
+					FinishReason: genai.FinishReasonStop,
 				}},
 			}, nil
 		}
@@ -103,15 +105,21 @@ func (fake *fakeGenerator) GenerateContent(
 	generation := fake.generations[index]
 	if generation.waitForContext {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		if !generation.returnAfterContext {
+			return nil, ctx.Err()
+		}
 	}
 	if generation.err != nil {
 		return nil, generation.err
 	}
+	finishReason := generation.finishReason
+	if finishReason == "" {
+		finishReason = genai.FinishReasonStop
+	}
 	return &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{
 			Content:      genai.NewContentFromText(generation.body, genai.RoleModel),
-			FinishReason: generation.finishReason,
+			FinishReason: finishReason,
 		}},
 	}, nil
 }

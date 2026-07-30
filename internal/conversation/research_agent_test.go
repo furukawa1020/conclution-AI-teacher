@@ -215,6 +215,48 @@ func TestAgentResearchUnavailableReturnsNoRecords(t *testing.T) {
 	}
 }
 
+func TestAgentResearchSkipsOutboundWorkWithoutSpeechReserve(t *testing.T) {
+	const topic = "response reserve"
+	verifier := &fakeResearchVerifier{}
+	agent := newTestAgent(t, &fakeGenerator{})
+	attachResearchVerifier(t, agent, verifier)
+	agent.now = func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		voiceResponseReserve-time.Second,
+	)
+	defer cancel()
+
+	status, records, reply, err := agent.performResearch(
+		ctx,
+		"uid-research-budget",
+		"session-research-budget",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     japaneseRecentRequest(topic),
+			RequestID:     "0123456789abcdef01234567",
+		},
+		recentPapersPlan(topic),
+	)
+	if err != nil {
+		t.Fatalf("performResearch: %v", err)
+	}
+	if status != "unavailable" ||
+		len(records) != 0 ||
+		reply == "" ||
+		len(verifier.calls) != 0 {
+		t.Fatalf(
+			"research consumed speech reserve: status=%q records=%#v reply=%q calls=%#v",
+			status,
+			records,
+			reply,
+			verifier.calls,
+		)
+	}
+}
+
 func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
 	const (
 		topic       = "量子エラー訂正"
@@ -985,11 +1027,6 @@ func assertResearchGuardPlannerFallback(
 	wantRoute := "planner-unavailable"
 	wantSpokenReply := plannerUnavailableSpokenReply
 	wantClarification := true
-	if ambient {
-		wantRoute = "planner-unavailable-silent"
-		wantSpokenReply = ""
-		wantClarification = false
-	}
 	if result.Route != wantRoute ||
 		result.SpokenReply != wantSpokenReply ||
 		result.NeedsClarification != wantClarification ||

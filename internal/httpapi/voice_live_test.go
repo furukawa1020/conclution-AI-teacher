@@ -360,9 +360,23 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	publishedDeadline, hasDeadline :=
+		<-service.input.ProcessingDeadline
+	_, deadlineStillOpen := <-service.input.ProcessingDeadline
+	commitPublished := false
+	select {
+	case <-service.input.ProcessingCommitted:
+		commitPublished = true
+	default:
+	}
 	if len(service.audio) != 1 ||
 		string(service.audio[0]) != string(inputFrame) ||
-		service.input.RequestID == "" {
+		service.input.RequestID == "" ||
+		service.input.ProcessingTimeout != 2*time.Second ||
+		!hasDeadline ||
+		publishedDeadline.IsZero() ||
+		deadlineStillOpen ||
+		!commitPublished {
 		t.Fatalf("live service audio=%v input=%+v", service.audio, service.input)
 	}
 }

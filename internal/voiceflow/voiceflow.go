@@ -79,6 +79,12 @@ var (
 	errSpeculativeAudioChunk = errors.New(
 		"voiceflow: speculative synthesis returned invalid PCM",
 	)
+	errTranscriptionResponseReserve = errors.New(
+		"voiceflow: transcription exhausted the response reserve",
+	)
+	errProcessingDeadlineInvalid = errors.New(
+		"voiceflow: live processing deadline is invalid",
+	)
 )
 
 type speculativeAudioCommitBuffer struct {
@@ -118,8 +124,16 @@ type speculativeSynthesis struct {
 }
 
 type liveTranscriptionSendResult struct {
-	err       error
-	committed bool
+	err          error
+	committed    bool
+	committedAt  time.Time
+	reserveTimer *time.Timer
+}
+
+type liveProcessingBudget struct {
+	deadline     time.Time
+	reserveTimer *time.Timer
+	err          error
 }
 
 type liveStreamingSpeech interface {
@@ -283,13 +297,89 @@ func (p *Pipeline) processLive(
 	}
 
 	transcriptionStarted := time.Now()
-	transcriptionCtx, cancelTranscription := context.WithCancel(ctx)
-	defer cancelTranscription()
+	transcriptionCtx, cancelTranscription := context.WithCancelCause(ctx)
+	defer cancelTranscription(nil)
 	session, err := streamingSpeech.OpenStreamingTranscription(transcriptionCtx)
 	if err != nil {
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
+	}
+	armTranscriptionReserve := func(deadline time.Time) *time.Timer {
+		reserveDelay := time.Until(
+			deadline.Add(-conversation.VoiceResponseReserve),
+		)
+		if reserveDelay <= 0 {
+			cancelTranscription(errTranscriptionResponseReserve)
+			return nil
+		}
+		return time.AfterFunc(reserveDelay, func() {
+			cancelTranscription(errTranscriptionResponseReserve)
+		})
+	}
+	processingBudgetReady := make(chan liveProcessingBudget, 1)
+	stopProcessingDeadlineWatcher := make(chan struct{})
+	defer close(stopProcessingDeadlineWatcher)
+	if input.ProcessingDeadline != nil {
+		go func() {
+			budget := liveProcessingBudget{}
+			select {
+			case deadline, open := <-input.ProcessingDeadline:
+				now := time.Now()
+				if !open ||
+					deadline.IsZero() ||
+					input.ProcessingTimeout <= 0 ||
+					deadline.After(now.Add(input.ProcessingTimeout)) {
+					budget.err = errProcessingDeadlineInvalid
+					cancelTranscription(errProcessingDeadlineInvalid)
+				} else {
+					if parentDeadline, hasParentDeadline :=
+						ctx.Deadline(); hasParentDeadline &&
+						parentDeadline.Before(deadline) {
+						deadline = parentDeadline
+					}
+					budget.deadline = deadline
+					budget.reserveTimer =
+						armTranscriptionReserve(deadline)
+				}
+			case <-stopProcessingDeadlineWatcher:
+				return
+			}
+			select {
+			case processingBudgetReady <- budget:
+			case <-stopProcessingDeadlineWatcher:
+				if budget.reserveTimer != nil {
+					budget.reserveTimer.Stop()
+				}
+				return
+			}
+			<-stopProcessingDeadlineWatcher
+			if budget.reserveTimer != nil {
+				budget.reserveTimer.Stop()
+			}
+		}()
+	}
+	beginCommittedSend := func() (time.Time, *time.Timer) {
+		committedAt := time.Now()
+		if input.ProcessingDeadline != nil ||
+			input.ProcessingTimeout <= 0 {
+			return committedAt, nil
+		}
+		return committedAt, armTranscriptionReserve(
+			committedAt.Add(input.ProcessingTimeout),
+		)
+	}
+	committedSendResult := func(
+		sendErr error,
+		committedAt time.Time,
+		reserveTimer *time.Timer,
+	) liveTranscriptionSendResult {
+		return liveTranscriptionSendResult{
+			err:          sendErr,
+			committed:    true,
+			committedAt:  committedAt,
+			reserveTimer: reserveTimer,
+		}
 	}
 
 	sendDone := make(chan liveTranscriptionSendResult, 1)
@@ -304,24 +394,29 @@ func (p *Pipeline) processLive(
 				return
 			case chunk, open := <-audio:
 				if !open {
+					committedAt, reserveTimer := beginCommittedSend()
 					if !sentAudio {
 						if err := session.CloseSend(); err != nil {
-							sendDone <- liveTranscriptionSendResult{
-								err:       err,
-								committed: true,
-							}
+							sendDone <- committedSendResult(
+								err,
+								committedAt,
+								reserveTimer,
+							)
 							return
 						}
-						sendDone <- liveTranscriptionSendResult{
-							err:       speechio.ErrNoSpeech,
-							committed: true,
-						}
+						sendDone <- committedSendResult(
+							speechio.ErrNoSpeech,
+							committedAt,
+							reserveTimer,
+						)
 						return
 					}
-					sendDone <- liveTranscriptionSendResult{
-						err:       session.CloseSend(),
-						committed: true,
-					}
+					closeErr := session.CloseSend()
+					sendDone <- committedSendResult(
+						closeErr,
+						committedAt,
+						reserveTimer,
+					)
 					return
 				}
 				err := session.SendPCM(chunk)
@@ -458,15 +553,73 @@ func (p *Pipeline) processLive(
 		}
 	}
 	sendResult := <-sendDone
-	cancelTranscription()
-	if receiveErr != nil ||
+	processingBudget := liveProcessingBudget{
+		reserveTimer: sendResult.reserveTimer,
+	}
+	if sendResult.committed && input.ProcessingTimeout > 0 {
+		if input.ProcessingDeadline != nil {
+			select {
+			case processingBudget = <-processingBudgetReady:
+			case <-ctx.Done():
+				processingBudget.err = ctx.Err()
+			}
+		} else {
+			processingBudget.deadline =
+				sendResult.committedAt.Add(input.ProcessingTimeout)
+		}
+	}
+	if processingBudget.reserveTimer != nil {
+		processingBudget.reserveTimer.Stop()
+	}
+	transcriptionCause := context.Cause(transcriptionCtx)
+	cancelTranscription(nil)
+	if processingBudget.err != nil ||
+		receiveErr != nil ||
 		!sendResult.committed ||
 		(sendResult.err != nil &&
 			!errors.Is(sendResult.err, speechio.ErrNoSpeech)) {
+		if errors.Is(
+			transcriptionCause,
+			errTranscriptionResponseReserve,
+		) {
+			slog.WarnContext(
+				ctx,
+				"transcription stopped for response budget",
+				"request_id",
+				input.RequestID,
+				"failure_class",
+				"deadline",
+				"failure_stage",
+				"transcribe_budget",
+			)
+		}
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
+	processingCtx := ctx
+	cancelProcessing := func() {}
+	if input.ProcessingTimeout > 0 {
+		if processingBudget.deadline.IsZero() {
+			return httpapi.VoiceTurnResult{},
+				httpapi.NewVoicePipelineFailure(
+					httpapi.VoicePipelineStageTranscribe,
+				)
+		}
+		processingCtx, cancelProcessing = context.WithDeadline(
+			ctx,
+			processingBudget.deadline,
+		)
+	}
+	defer cancelProcessing()
+	if processingCtx.Err() != nil {
+		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageTranscribe,
+		)
+	}
+	// Every post-commit model and synthesis call must see the same deadline as
+	// the live transport's processing timer.
+	ctx = processingCtx
 
 	finalTranscript := strings.TrimSpace(strings.Join(finalFragments, " "))
 	slog.InfoContext(ctx, "voice pipeline stage completed",
@@ -732,10 +885,21 @@ func (p *Pipeline) startLiveSpeculation(
 	streamingSpeech speechio.StreamingService,
 	deliverAudio func([]byte) error,
 ) *liveSpeculation {
-	if input.Document != nil {
+	if input.Document != nil || liveProcessingCommitted(input) {
 		return nil
 	}
 	speculationCtx, cancel := context.WithCancel(ctx)
+	if input.ProcessingTimeout > 0 {
+		cancel()
+		speculationCtx, cancel = context.WithTimeout(
+			ctx,
+			input.ProcessingTimeout,
+		)
+	}
+	if liveProcessingCommitted(input) {
+		cancel()
+		return nil
+	}
 	outcome := make(chan speculativeTurnOutcome, 1)
 	speculation := &liveSpeculation{
 		candidate:     candidate,
@@ -771,6 +935,18 @@ func (p *Pipeline) startLiveSpeculation(
 		}
 	}()
 	return speculation
+}
+
+func liveProcessingCommitted(input httpapi.VoiceTurnInput) bool {
+	if input.ProcessingCommitted == nil {
+		return false
+	}
+	select {
+	case <-input.ProcessingCommitted:
+		return true
+	default:
+		return false
+	}
 }
 
 func (speculation *liveSpeculation) cancel() *speculativeSynthesis {
@@ -1166,8 +1342,43 @@ func (p *Pipeline) prepareTurn(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, string, error) {
+	transcriptionCtx, cancelTranscription, hasTranscriptionBudget :=
+		transcriptionContextWithResponseReserve(ctx)
+	if !hasTranscriptionBudget {
+		return httpapi.VoiceTurnResult{}, "",
+			httpapi.NewVoicePipelineFailure(
+				httpapi.VoicePipelineStageTranscribe,
+			)
+	}
 	transcriptionStarted := time.Now()
-	transcript, confidence, err := p.speech.Transcribe(ctx, input.Audio)
+	transcript, confidence, err := p.speech.Transcribe(
+		transcriptionCtx,
+		input.Audio,
+	)
+	transcriptionContextErr := transcriptionCtx.Err()
+	cancelTranscription()
+	if transcriptionContextErr != nil && ctx.Err() == nil {
+		slog.WarnContext(
+			ctx,
+			"transcription stopped for response budget",
+			"request_id",
+			input.RequestID,
+			"failure_class",
+			"deadline",
+			"failure_stage",
+			"transcribe_budget",
+		)
+		if input.Ambient {
+			return silentRecognitionResult(
+				input.StateToken,
+				routeSilentNoSpeech,
+			), "", nil
+		}
+		return silentRecognitionResult(
+			input.StateToken,
+			routeClarifyNoSpeech,
+		), lowConfidencePrompt, nil
+	}
 	if err != nil {
 		slog.InfoContext(ctx, "voice pipeline stage completed",
 			"request_id", input.RequestID,
@@ -1198,6 +1409,25 @@ func (p *Pipeline) prepareTurn(
 		"recognized", true,
 	)
 	return p.prepareRecognizedTurn(ctx, uid, input, transcript, confidence)
+}
+
+func transcriptionContextWithResponseReserve(
+	ctx context.Context,
+) (context.Context, context.CancelFunc, bool) {
+	if ctx == nil {
+		return nil, func() {}, false
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		transcriptionCtx, cancel := context.WithCancel(ctx)
+		return transcriptionCtx, cancel, true
+	}
+	budget := time.Until(deadline) - conversation.VoiceResponseReserve
+	if budget <= 0 {
+		return nil, func() {}, false
+	}
+	transcriptionCtx, cancel := context.WithTimeout(ctx, budget)
+	return transcriptionCtx, cancel, true
 }
 
 func (p *Pipeline) prepareRecognizedTurn(

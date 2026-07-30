@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
@@ -19,6 +20,22 @@ type fakeSpeech struct {
 	synthesizeErr   error
 	synthesizeCalls int
 	synthesizedText string
+}
+
+type deadlineBlockingSpeech struct {
+	fakeSpeech
+	transcriptionBudget time.Duration
+}
+
+func (s *deadlineBlockingSpeech) Transcribe(
+	ctx context.Context,
+	_ []byte,
+) (string, float32, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		s.transcriptionBudget = time.Until(deadline)
+	}
+	<-ctx.Done()
+	return "", 0, ctx.Err()
 }
 
 func (s *fakeSpeech) Transcribe(_ context.Context, _ []byte) (string, float32, error) {
@@ -35,19 +52,23 @@ func (s *fakeSpeech) Synthesize(_ context.Context, text string) ([]byte, string,
 }
 
 type fakeAgent struct {
-	calls  int
-	turn   conversation.VoiceTurn
-	result conversation.VoiceTurnResult
-	err    error
+	calls            int
+	turn             conversation.VoiceTurn
+	result           conversation.VoiceTurnResult
+	err              error
+	processingBudget time.Duration
 }
 
 func (a *fakeAgent) Process(
-	_ context.Context,
+	ctx context.Context,
 	_ string,
 	turn conversation.VoiceTurn,
 ) (conversation.VoiceTurnResult, error) {
 	a.calls++
 	a.turn = turn
+	if deadline, ok := ctx.Deadline(); ok {
+		a.processingBudget = time.Until(deadline)
+	}
 	return a.result, a.err
 }
 
@@ -188,6 +209,48 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 	}
 }
 
+func TestPipelineStopsBufferedSTTBeforeSpeechResponseReserve(t *testing.T) {
+	speech := &deadlineBlockingSpeech{}
+	agent := &fakeAgent{}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		conversation.VoiceResponseReserve+75*time.Millisecond,
+	)
+	defer cancel()
+
+	result, err := pipeline.Process(
+		ctx,
+		"uid-stt-budget",
+		httpapi.VoiceTurnInput{
+			Audio:      []byte("audio"),
+			StateToken: "existing-state",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if ctx.Err() != nil ||
+		speech.transcriptionBudget <= 0 ||
+		speech.transcriptionBudget > 150*time.Millisecond ||
+		agent.calls != 0 ||
+		speech.synthesizeCalls != 1 ||
+		result.Route != routeClarifyNoSpeech ||
+		result.Caption != lowConfidencePrompt {
+		t.Fatalf(
+			"buffered STT consumed response reserve: result=%+v budget=%v agent_calls=%d synth_calls=%d parent_err=%v",
+			result,
+			speech.transcriptionBudget,
+			agent.calls,
+			speech.synthesizeCalls,
+			ctx.Err(),
+		)
+	}
+}
+
 func TestPipelineTreatsZeroSTTConfidenceAsUnavailableNotLow(t *testing.T) {
 	t.Parallel()
 
@@ -315,10 +378,12 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 		},
 		{
 			name:             "ambient",
-			route:            "planner-unavailable-silent",
+			route:            "planner-unavailable",
+			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
+			needsClarify:     true,
 			ambient:          true,
-			wantSynthesized:  0,
-			wantIntervention: "silent",
+			wantSynthesized:  1,
+			wantIntervention: "clarify",
 		},
 	} {
 		test := test

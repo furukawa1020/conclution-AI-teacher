@@ -56,8 +56,11 @@ const (
 	criticRecoveryTimeout             = 18 * time.Second
 	ordinaryCriticSequenceTimeout     = 8 * time.Second
 	highRiskCriticSequenceTimeout     = 24 * time.Second
-	voiceResponseReserve              = 5 * time.Second
-	securityflowPolicy                = securityflow.PolicyPCCMPhase1
+	// VoiceResponseReserve is the minimum time every upstream voice stage must
+	// leave for the final regional synthesis and transport commit.
+	VoiceResponseReserve = 5 * time.Second
+	voiceResponseReserve = VoiceResponseReserve
+	securityflowPolicy   = securityflow.PolicyPCCMPhase1
 )
 
 var (
@@ -444,9 +447,36 @@ func (agent *vertexAgent) Process(
 			candidate,
 		)
 	}
-	fastCtx, cancelFast := context.WithTimeout(
+	fastBudget, hasFastBudget := timeoutBudgetWithReserve(
 		ctx,
 		fastInferenceSequenceTimeout,
+		voiceResponseReserve,
+	)
+	if !hasFastBudget {
+		if ctx.Err() != nil {
+			return VoiceTurnResult{}, ctx.Err()
+		}
+		slog.WarnContext(
+			ctx,
+			"planner skipped for response budget",
+			"failure_class",
+			"deadline",
+			"failure_stage",
+			"budget",
+			"recovery_outcome",
+			"fixed_notice",
+			"turn_mode",
+			plannerTurnMode(normalized.Ambient),
+		)
+		return agent.completePlannerUnavailable(
+			uid,
+			state,
+			normalized.Ambient,
+		)
+	}
+	fastCtx, cancelFast := context.WithTimeout(
+		ctx,
+		fastBudget,
 	)
 	fastPlan, err := agent.infer(
 		fastCtx,
@@ -642,9 +672,32 @@ func (agent *vertexAgent) Process(
 		recoveryState.PendingAnswer = PendingAnswerFrame{
 			RequiredSlots: []answercontract.RequiredSlot{},
 		}
+		pendingRecoveryBudget, hasPendingRecoveryBudget :=
+			timeoutBudgetWithReserve(
+				ctx,
+				fastInferenceSequenceTimeout,
+				voiceResponseReserve,
+			)
+		if !hasPendingRecoveryBudget {
+			if ctx.Err() != nil {
+				return VoiceTurnResult{}, ctx.Err()
+			}
+			if normalized.Ambient {
+				return agent.completeAmbientSilentFast(
+					uid,
+					state,
+					fastPlan,
+				)
+			}
+			return agent.completeInterpretationClarification(
+				uid,
+				state,
+				fastPlan,
+			)
+		}
 		pendingRecoveryCtx, cancelPendingRecovery := context.WithTimeout(
 			ctx,
-			fastInferenceSequenceTimeout,
+			pendingRecoveryBudget,
 		)
 		recoveredPlan, recoveryErr := agent.inferWithRetry(
 			pendingRecoveryCtx,
@@ -697,21 +750,23 @@ func (agent *vertexAgent) Process(
 	if !plannerRecoveredWithPrecision &&
 		(needsPrecision(fastPlan) || failClosedPrecision) &&
 		!awaitingAnswerWithoutPublishableDraft {
-		precisionCtx, cancelPrecision := context.WithTimeout(
+		precisionBudget, hasPrecisionBudget := timeoutBudgetWithReserve(
 			ctx,
 			precisionInferenceSequenceTimeout,
+			voiceResponseReserve,
 		)
-		precisionPlan, precisionErr := agent.inferWithRetry(
-			precisionCtx,
-			agent.precisionModel,
-			"precision",
-			genai.ThinkingLevelHigh,
-			normalized,
-			state,
-			&fastPlan,
-		)
-		cancelPrecision()
-		if precisionErr != nil {
+		if !hasPrecisionBudget {
+			if ctx.Err() != nil {
+				return VoiceTurnResult{}, ctx.Err()
+			}
+			slog.WarnContext(
+				ctx,
+				"precision planner skipped for response budget",
+				"failure_class",
+				"deadline",
+				"failure_stage",
+				"budget",
+			)
 			if failClosedPrecision {
 				route = "precision-unavailable"
 				precisionUnavailable = true
@@ -719,8 +774,31 @@ func (agent *vertexAgent) Process(
 				route = "fast-fallback"
 			}
 		} else {
-			finalPlan = precisionPlan
-			route = "precision"
+			precisionCtx, cancelPrecision := context.WithTimeout(
+				ctx,
+				precisionBudget,
+			)
+			precisionPlan, precisionErr := agent.inferWithRetry(
+				precisionCtx,
+				agent.precisionModel,
+				"precision",
+				genai.ThinkingLevelHigh,
+				normalized,
+				state,
+				&fastPlan,
+			)
+			cancelPrecision()
+			if precisionErr != nil {
+				if failClosedPrecision {
+					route = "precision-unavailable"
+					precisionUnavailable = true
+				} else {
+					route = "fast-fallback"
+				}
+			} else {
+				finalPlan = precisionPlan
+				route = "precision"
+			}
 		}
 	}
 
@@ -1130,16 +1208,16 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		Act:              "clarify",
 		Score:            0.4,
 	}
-	route := "planner-unavailable"
-	spokenReply := plannerUnavailableSpokenReply
-	interventionPolicy := "clarify"
-	argumentStructure := "clarifying_question"
+	lastIntervention := decision
 	if ambient {
-		decision = ArbiterDecision{Act: "silent"}
-		route = "planner-unavailable-silent"
-		spokenReply = ""
-		interventionPolicy = "wait"
-		argumentStructure = "direct_answer"
+		// An ambient turn cannot author cross-turn semantic state. A planner
+		// failure still gets a fixed, content-independent spoken notice so the
+		// live session never presents infrastructure failure as intentional
+		// silence.
+		lastIntervention = isolatedStateIntervention(
+			state.LastIntervention,
+			true,
+		)
 	}
 	nextState := conversationState{
 		SessionID:           state.SessionID,
@@ -1149,7 +1227,7 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		DocumentSummary:     "",
 		PendingAnswer:       state.PendingAnswer,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
-		LastIntervention:    decision,
+		LastIntervention:    lastIntervention,
 	}
 	stateToken, err := agent.codec.seal(uid, nextState)
 	if err != nil {
@@ -1163,14 +1241,14 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		RespondentStage:     "none",
 		ResearchStatus:      "none",
 		ResearchRecords:     []ResearchRecord{},
-		ArgumentStructure:   argumentStructure,
-		InterventionPolicy:  interventionPolicy,
-		SpokenReply:         spokenReply,
+		ArgumentStructure:   "clarifying_question",
+		InterventionPolicy:  "clarify",
+		SpokenReply:         plannerUnavailableSpokenReply,
 		Confidence:          0,
 		Intervention:        decision,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
-		Route:               route,
-		NeedsClarification:  !ambient,
+		Route:               "planner-unavailable",
+		NeedsClarification:  true,
 		StateToken:          stateToken,
 	}, nil
 }
@@ -1191,6 +1269,28 @@ func contextHasTimeBudget(ctx context.Context, required time.Duration) bool {
 		return true
 	}
 	return time.Until(deadline) >= required
+}
+
+func timeoutBudgetWithReserve(
+	ctx context.Context,
+	maximum time.Duration,
+	reserve time.Duration,
+) (time.Duration, bool) {
+	if ctx == nil || maximum <= 0 || reserve < 0 {
+		return 0, false
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return maximum, true
+	}
+	available := time.Until(deadline) - reserve
+	if available <= 0 {
+		return 0, false
+	}
+	if available < maximum {
+		return available, true
+	}
+	return maximum, true
 }
 
 func canCompleteAmbientSilentFast(turn VoiceTurn, plan modelPlan) bool {
@@ -1400,6 +1500,19 @@ func (agent *vertexAgent) performResearch(
 	if agent == nil || agent.research == nil || agent.now == nil {
 		return unavailable()
 	}
+	researchBudget, hasResearchBudget := timeoutBudgetWithReserve(
+		ctx,
+		researchDiscoveryTimeout,
+		voiceResponseReserve,
+	)
+	if !hasResearchBudget {
+		if ctx.Err() != nil {
+			return "", []ResearchRecord{}, "", ctx.Err()
+		}
+		return unavailable()
+	}
+	researchCtx, cancelResearch := context.WithTimeout(ctx, researchBudget)
+	defer cancelResearch()
 
 	now := agent.now().UTC()
 	query, err := authorizedResearchQuery(plan, turn, now)
@@ -1409,7 +1522,7 @@ func (agent *vertexAgent) performResearch(
 	requestID, err := capabilityRequestID(turn.RequestID)
 	if err != nil {
 		return agent.denyResearchCapability(
-			ctx,
+			researchCtx,
 			securityflow.DefenseEvent{
 				Policy:   securityflowPolicy,
 				Action:   securityflow.ActionCrossrefDiscovery,
@@ -1427,7 +1540,7 @@ func (agent *vertexAgent) performResearch(
 	sources := researchInfluenceSources(turn)
 	proposal, event, err := agent.security.ProposeCrossref(query, sources)
 	if err != nil {
-		return agent.denyResearchCapability(ctx, event)
+		return agent.denyResearchCapability(researchCtx, event)
 	}
 	authority, event, err := agent.security.BindDeclaredIntentionalAudioForCrossref(
 		scope,
@@ -1435,7 +1548,7 @@ func (agent *vertexAgent) performResearch(
 		researchAuthorityGrantTTL,
 	)
 	if err != nil {
-		return agent.denyResearchCapability(ctx, event)
+		return agent.denyResearchCapability(researchCtx, event)
 	}
 	lease, event, err := agent.security.MintCrossref(
 		authority,
@@ -1444,10 +1557,8 @@ func (agent *vertexAgent) performResearch(
 		researchCapabilityLeaseTTL,
 	)
 	if err != nil {
-		return agent.denyResearchCapability(ctx, event)
+		return agent.denyResearchCapability(researchCtx, event)
 	}
-	researchCtx, cancel := context.WithTimeout(ctx, researchDiscoveryTimeout)
-	defer cancel()
 	verification, event, err := agent.research.Verify(
 		researchCtx,
 		lease,
@@ -1458,9 +1569,12 @@ func (agent *vertexAgent) performResearch(
 	if ctx.Err() != nil {
 		return "", []ResearchRecord{}, "", ctx.Err()
 	}
+	if researchCtx.Err() != nil {
+		return unavailable()
+	}
 	if errors.Is(err, securityflow.ErrDenied) &&
 		event.Decision == securityflow.DecisionDeny {
-		return agent.denyResearchCapability(ctx, event)
+		return agent.denyResearchCapability(researchCtx, event)
 	}
 	if err != nil ||
 		verification.Status != research.StatusNeedsPrimaryEvidence ||
@@ -1905,7 +2019,7 @@ func (agent *vertexAgent) infer(
 			config,
 		)
 		if err == nil {
-			if finishErr := inferenceFinishFailure(response); finishErr != nil {
+			if finishErr := inferenceUnaryFinishFailure(response); finishErr != nil {
 				return modelPlan{}, finishErr
 			}
 			raw, err = responseText(response)
@@ -1969,6 +2083,7 @@ func streamedInferenceText(
 ) ([]byte, error) {
 	var raw []byte
 	candidatePublished := false
+	cleanStop := false
 	for response, streamErr := range streamer.GenerateContentStream(
 		ctx,
 		model,
@@ -1980,6 +2095,15 @@ func streamedInferenceText(
 		}
 		if finishErr := inferenceFinishFailure(response); finishErr != nil {
 			return nil, finishErr
+		}
+		if cleanStop {
+			if response == nil || len(response.Candidates) != 0 {
+				return nil, errors.Join(
+					ErrModelOutputInvalid,
+					errInferenceResponseShape,
+				)
+			}
+			continue
 		}
 		chunk, err := streamedResponseChunkText(response)
 		if err != nil {
@@ -2001,6 +2125,21 @@ func streamedInferenceText(
 				onCandidate(candidate)
 			}
 		}
+		if response != nil &&
+			len(response.Candidates) == 1 &&
+			response.Candidates[0] != nil &&
+			response.Candidates[0].FinishReason == genai.FinishReasonStop {
+			cleanStop = true
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if !cleanStop {
+		return nil, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceResponseShape,
+		)
 	}
 	if len(raw) == 0 {
 		return nil, errors.Join(
@@ -2029,23 +2168,54 @@ func streamedResponseChunkText(
 	if content == nil {
 		return nil, nil
 	}
+	finishReason := response.Candidates[0].FinishReason
 	var output []byte
-	for _, part := range content.Parts {
-		if part == nil {
-			return nil, ErrModelOutputInvalid
+	for index, part := range content.Parts {
+		text, err := safeResponsePartText(
+			part,
+			finishReason,
+			index == len(content.Parts)-1,
+		)
+		if err != nil {
+			return nil, err
 		}
-		if part.Thought {
-			continue
-		}
-		if part.Text == "" || part.InlineData != nil || part.FileData != nil ||
-			part.FunctionCall != nil || part.FunctionResponse != nil ||
-			part.ExecutableCode != nil || part.CodeExecutionResult != nil ||
-			part.ToolCall != nil || part.ToolResponse != nil {
-			return nil, ErrModelOutputInvalid
-		}
-		output = append(output, part.Text...)
+		output = append(output, text...)
 	}
 	return output, nil
+}
+
+func safeResponsePartText(
+	part *genai.Part,
+	finishReason genai.FinishReason,
+	lastPart bool,
+) ([]byte, error) {
+	if part == nil ||
+		part.InlineData != nil ||
+		part.FileData != nil ||
+		part.FunctionCall != nil ||
+		part.FunctionResponse != nil ||
+		part.ExecutableCode != nil ||
+		part.CodeExecutionResult != nil ||
+		part.ToolCall != nil ||
+		part.ToolResponse != nil {
+		return nil, ErrModelOutputInvalid
+	}
+	if part.Thought {
+		return nil, nil
+	}
+	if part.Text != "" {
+		return []byte(part.Text), nil
+	}
+	// Gemini 3 emits an authenticated thought signature as a textless final
+	// part after the complete structured payload. Treat only that terminal
+	// metadata shape as a no-op. Empty non-terminal parts and every
+	// actuator-bearing part still fail closed.
+	if finishReason == genai.FinishReasonStop &&
+		lastPart &&
+		len(part.ThoughtSignature) > 0 {
+		return nil, nil
+	}
+	return nil, ErrModelOutputInvalid
 }
 
 func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
@@ -2194,6 +2364,21 @@ func inferenceFinishFailure(response *genai.GenerateContentResponse) error {
 	default:
 		return errors.Join(ErrModelOutputInvalid, errInferenceFinishPolicy)
 	}
+}
+
+func inferenceUnaryFinishFailure(
+	response *genai.GenerateContentResponse,
+) error {
+	if err := inferenceFinishFailure(response); err != nil {
+		return err
+	}
+	if !unaryResponseHasCleanStop(response) {
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceResponseShape,
+		)
+	}
+	return nil
 }
 
 func retryableInferenceFailure(err error) bool {
@@ -2354,7 +2539,7 @@ func (agent *vertexAgent) auditAnswer(
 		}
 		return answercontract.Assessment{}, ErrModelUnavailable
 	}
-	if finishErr := criticFinishFailure(response); finishErr != nil {
+	if finishErr := criticUnaryFinishFailure(response); finishErr != nil {
 		return answercontract.Assessment{}, finishErr
 	}
 	raw, err := responseText(response)
@@ -2424,6 +2609,30 @@ func criticFinishFailure(response *genai.GenerateContentResponse) error {
 	default:
 		return errors.Join(ErrModelOutputInvalid, errCriticFinishPolicy)
 	}
+}
+
+func criticUnaryFinishFailure(
+	response *genai.GenerateContentResponse,
+) error {
+	if err := criticFinishFailure(response); err != nil {
+		return err
+	}
+	if !unaryResponseHasCleanStop(response) {
+		return errors.Join(
+			ErrModelOutputInvalid,
+			errCriticResponseShape,
+		)
+	}
+	return nil
+}
+
+func unaryResponseHasCleanStop(
+	response *genai.GenerateContentResponse,
+) bool {
+	return response != nil &&
+		len(response.Candidates) == 1 &&
+		response.Candidates[0] != nil &&
+		response.Candidates[0].FinishReason == genai.FinishReasonStop
 }
 
 // canonicalizeAnswerContractDerivedFields enforces the operator-to-target
@@ -2981,21 +3190,21 @@ func responseText(response *genai.GenerateContentResponse) ([]byte, error) {
 		response.Candidates[0].Content == nil {
 		return nil, ErrModelOutputInvalid
 	}
+	candidate := response.Candidates[0]
 	var output []byte
-	for _, part := range response.Candidates[0].Content.Parts {
-		if part == nil || part.Thought {
-			continue
+	for index, part := range candidate.Content.Parts {
+		text, err := safeResponsePartText(
+			part,
+			candidate.FinishReason,
+			index == len(candidate.Content.Parts)-1,
+		)
+		if err != nil {
+			return nil, err
 		}
-		if part.Text == "" || part.InlineData != nil || part.FileData != nil ||
-			part.FunctionCall != nil || part.FunctionResponse != nil ||
-			part.ExecutableCode != nil || part.CodeExecutionResult != nil ||
-			part.ToolCall != nil || part.ToolResponse != nil {
+		if len(output)+len(text) > maxModelResponseBytes {
 			return nil, ErrModelOutputInvalid
 		}
-		if len(output)+len(part.Text) > maxModelResponseBytes {
-			return nil, ErrModelOutputInvalid
-		}
-		output = append(output, part.Text...)
+		output = append(output, text...)
 	}
 	if len(output) == 0 {
 		return nil, ErrModelOutputInvalid

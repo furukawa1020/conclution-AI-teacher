@@ -72,6 +72,16 @@ type VoiceTurnInput struct {
 	Document      *VoiceDocument
 	STTLocale     string
 	SchemaVersion int
+	// ProcessingTimeout is server-authored. Live pipelines start this budget
+	// at the audio commit boundary so downstream agents can observe the same
+	// deadline that the transport enforces.
+	ProcessingTimeout time.Duration
+	// ProcessingDeadline carries the single server-authored absolute deadline
+	// published at live audio commit. It is never decoded from client input.
+	ProcessingDeadline <-chan time.Time
+	// ProcessingCommitted is a broadcast-only server signal. A closed channel
+	// means no new speculative model work may start.
+	ProcessingCommitted <-chan struct{}
 }
 
 type VoiceTurnResult struct {

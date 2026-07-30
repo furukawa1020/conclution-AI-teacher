@@ -27,7 +27,9 @@ $expectedDefaultUrl = "https://kotae-ai.web.app"
 $expectedRunService = "kotae-api"
 $expectedRunRegion = "asia-northeast1"
 $expectedRunUrl = "https://kotae-api-r6kgkvtrmq-an.a.run.app"
+$expectedRunWebSocketUrl = "wss://kotae-api-r6kgkvtrmq-an.a.run.app"
 $expectedVoiceStreamUrl = "$expectedRunUrl/api/v1/voice/turns:stream"
+$expectedVoiceLiveUrl = "$expectedRunWebSocketUrl/api/v1/voice/live"
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace $PublicDirectory))
@@ -273,6 +275,9 @@ function Assert-HostingArtifact {
     if ($bridge -notmatch [regex]::Escape("`"$expectedVoiceStreamUrl`"")) {
         throw "firebase-bridge.js is not bound to the expected Cloud Run voice stream endpoint."
     }
+    if ($bridge -notmatch [regex]::Escape("`"$expectedVoiceLiveUrl`"")) {
+        throw "firebase-bridge.js is not bound to the expected Cloud Run live voice endpoint."
+    }
 
     $bootstrap = [System.IO.File]::ReadAllText(
         (Join-Path $Root "bootstrap.js"),
@@ -394,7 +399,7 @@ try {
             -Bytes $gzipByHash[$hash]
     }
 
-    $csp = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com/firebasejs/12.16.0/ https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-hashes' 'sha256-biLFinpqYMtWHmXfkA1BPeCY0/fNt46SAZ+BBk5YUog=' 'sha256-aqNNdDLnnrDOnTNdkJpYlAxKVJtLt9CtFLklmInuUAE=' 'sha256-ZdHxw9eWtnxUb3mk6tBS+gIiVUPE3pGM470keHPDFlE='; img-src 'self' data:; font-src 'self'; connect-src 'self' $expectedRunUrl https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://content-firebaseappcheck.googleapis.com https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; frame-src https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
+    $csp = "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'wasm-unsafe-eval' https://www.gstatic.com/firebasejs/12.16.0/ https://www.gstatic.com/recaptcha/ https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; script-src-attr 'none'; style-src 'self'; style-src-attr 'unsafe-hashes' 'sha256-biLFinpqYMtWHmXfkA1BPeCY0/fNt46SAZ+BBk5YUog=' 'sha256-aqNNdDLnnrDOnTNdkJpYlAxKVJtLt9CtFLklmInuUAE=' 'sha256-ZdHxw9eWtnxUb3mk6tBS+gIiVUPE3pGM470keHPDFlE='; img-src 'self' data:; font-src 'self'; connect-src 'self' $expectedRunUrl $expectedRunWebSocketUrl https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://content-firebaseappcheck.googleapis.com https://www.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; frame-src https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/ https://www.recaptcha.net/recaptcha/; worker-src 'self'; manifest-src 'self'; upgrade-insecure-requests"
     $hostingConfig = @{
         cleanUrls = $true
         trailingSlashBehavior = "REMOVE"

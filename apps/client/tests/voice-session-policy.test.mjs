@@ -21,7 +21,11 @@ import {
   VOICE_SESSION_LIMITS,
 } from "../web/voice-session-policy.mjs";
 import {
+  ambientHandoffAssignmentAllowed,
   advanceInterruptVad,
+  BARGE_PCM_LIMITS,
+  claimAmbientLiveHandoff,
+  createBargePcmRing,
   createInterruptVadState,
   createLivePcmQueue,
   createVoiceLiveClientTransport,
@@ -29,6 +33,7 @@ import {
   createVoiceStreamParser,
   INTERRUPT_VAD_LIMITS,
   shouldAbortVoiceTransportOnInterrupt,
+  shouldStartAmbientLiveHandoff,
   safeLiveCaptureFrame,
   VOICE_LIVE_LIMITS,
   VOICE_STREAM_LIMITS,
@@ -619,11 +624,182 @@ test("live capture accepts only exact 20 ms PCM frames and bounds startup", () =
   ) {
     queue.push(new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes));
   }
+  const overflowFrame = new ArrayBuffer(
+    VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+  new Uint8Array(overflowFrame).fill(255);
   assert.throws(
-    () => queue.push(new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes)),
+    () => queue.push(overflowFrame),
     /voice_live_queue_overflow/,
   );
   assert.equal(queue.size(), 0);
+  assert.equal(
+    new Uint8Array(overflowFrame).every((value) => value === 0),
+    true,
+  );
+});
+
+function filledPcmFrame(value) {
+  const frame = new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes);
+  new Uint8Array(frame).fill(value);
+  return frame;
+}
+
+test("barge PCM ring retains only timestamped 400 ms and drains 40 ms pre-roll", () => {
+  assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
+  assert.equal(BARGE_PCM_LIMITS.historyMs, 400);
+  assert.equal(BARGE_PCM_LIMITS.leadInMs, 40);
+  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 20);
+  assert.equal(
+    BARGE_PCM_LIMITS.maximumBytes,
+    20 * VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+
+  const ring = createBargePcmRing();
+  const evicted = filledPcmFrame(255);
+  ring.push(evicted, 0);
+  for (let index = 1; index <= 20; index += 1) {
+    ring.push(filledPcmFrame(index), index * 20);
+  }
+  assert.deepEqual(ring.snapshot(), {
+    frameCount: 20,
+    newestAt: 400,
+    oldestAt: 20,
+    totalBytes: BARGE_PCM_LIMITS.maximumBytes,
+  });
+  assert.equal(
+    new Uint8Array(evicted).every((value) => value === 0),
+    true,
+    "an evicted microphone frame must be zeroized",
+  );
+
+  const candidateStartedAt = 360;
+  const drained = ring.drainSince(
+    candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
+  );
+  assert.equal(drained[0].capturedAt, 320);
+  assert.equal(drained.at(-1).capturedAt, 400);
+  assert.equal(drained.length, 5);
+  assert.deepEqual(ring.snapshot(), {
+    frameCount: 0,
+    newestAt: null,
+    oldestAt: null,
+    totalBytes: 0,
+  });
+
+  const expired = filledPcmFrame(91);
+  const cleared = filledPcmFrame(92);
+  ring.push(expired, 500);
+  ring.push(cleared, 920);
+  assert.equal(
+    new Uint8Array(expired).every((value) => value === 0),
+    true,
+    "timestamp eviction must zero audio older than 400 ms",
+  );
+  ring.clear();
+  assert.equal(
+    new Uint8Array(cleared).every((value) => value === 0),
+    true,
+    "monitor teardown must zero the retained frame",
+  );
+});
+
+test("mock ambient handoff sends old state first then bounded PCM pre-roll", () => {
+  const ring = createBargePcmRing();
+  for (let timestamp = 300; timestamp <= 420; timestamp += 20) {
+    ring.push(filledPcmFrame(timestamp / 20), timestamp);
+  }
+  const preRoll = ring
+    .drainSince(400 - BARGE_PCM_LIMITS.leadInMs)
+    .map((entry) => entry.pcm);
+  const socket = new MockWebSocket();
+  const start = {
+    ...liveStartFrame(),
+    sessionState: "old-committed-state",
+    turnMode: "ambient",
+  };
+  const transport = createVoiceLiveClientTransport(socket, start);
+  for (const frame of preRoll) transport.pushFrame(frame);
+  transport.open();
+  assert.deepEqual(JSON.parse(socket.sent[0]), start);
+  assert.equal(JSON.parse(socket.sent[0]).turnMode, "ambient");
+  assert.equal(
+    JSON.parse(socket.sent[0]).sessionState,
+    "old-committed-state",
+  );
+  transport.markReady();
+  transport.commit();
+  assert.equal(socket.sent[1] instanceof ArrayBuffer, true);
+  assert.equal(
+    socket.sent[1].byteLength,
+    preRoll.length * VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+  const sentPcm = new Uint8Array(socket.sent[1]);
+  assert.deepEqual(
+    [0, 1, 2, 3].map(
+      (index) =>
+        sentPcm[index * VOICE_LIVE_LIMITS.inputFrameBytes],
+    ),
+    [18, 19, 20, 21],
+  );
+  assert.deepEqual(JSON.parse(socket.sent[2]), {
+    type: "commit",
+    version: 1,
+  });
+});
+
+test("post-final and stale ambient handoffs fail closed to HTTP ownership", () => {
+  assert.equal(
+    shouldStartAmbientLiveHandoff({
+      captureAvailable: true,
+      finalReceived: false,
+      liveState: "committed",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldStartAmbientLiveHandoff({
+      captureAvailable: true,
+      finalReceived: true,
+      liveState: "committed",
+    }),
+    false,
+  );
+  assert.equal(
+    ambientHandoffAssignmentAllowed({
+      activeRecordingMatches: true,
+      activeSlotEmpty: true,
+      currentEpoch: 9,
+      expectedEpoch: 9,
+      recordingSettled: false,
+    }),
+    true,
+  );
+  for (const stale of [
+    { currentEpoch: 10 },
+    { activeRecordingMatches: false },
+    { activeSlotEmpty: false },
+    { recordingSettled: true },
+  ]) {
+    const cancelled = [];
+    const nextLiveSession = {
+      cancel(error) {
+        cancelled.push(error.message);
+      },
+    };
+    assert.equal(
+      claimAmbientLiveHandoff(nextLiveSession, {
+        activeRecordingMatches: true,
+        activeSlotEmpty: true,
+        currentEpoch: 9,
+        expectedEpoch: 9,
+        recordingSettled: false,
+        ...stale,
+      }),
+      undefined,
+    );
+    assert.deepEqual(cancelled, ["request_cancelled"]);
+  }
 });
 
 test("mock WebSocket sends auth in first text then 100 ms PCM chunks", () => {
@@ -759,7 +935,7 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   );
   assert.match(bridge, /new WebSocket\(VOICE_LIVE_ENDPOINT\)/u);
   const liveAt = bridge.indexOf("async function startVoiceLiveSession(");
-  const liveSession = bridge.slice(liveAt, liveAt + 15_000);
+  const liveSession = bridge.slice(liveAt, liveAt + 30_000);
   assert.ok(
     liveSession.indexOf("new WebSocket(VOICE_LIVE_ENDPOINT)") <
       liveSession.indexOf("loadPcmCaptureWorklet(audioContext)"),
@@ -957,7 +1133,7 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
   ]);
   const confirmAt = bridge.indexOf("function confirmBargeIn(");
-  const confirm = bridge.slice(confirmAt, confirmAt + 1_600);
+  const confirm = bridge.slice(confirmAt, confirmAt + 4_500);
   assert.match(
     confirm,
     /if \(!playback\.finalReceived && activeRequestController\)/u,
@@ -967,6 +1143,14 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(confirm, /new CustomEvent\("kotae:voice-interrupted"/u);
   assert.match(confirm, /finalReceived: playback\.finalReceived/u);
   assert.match(confirm, /activeLiveSession = undefined/u);
+  assert.match(
+    confirm,
+    /interruptedLiveSession\.handoffAmbient\(/u,
+  );
+  assert.match(
+    confirm,
+    /claimAmbientLiveHandoff\(/u,
+  );
   assert.match(bridge, /getSettings\(\)\.echoCancellation === true/u);
   assert.match(bridge, /softDuckPlayback\(playback\)/u);
   assert.match(bridge, /rampPlaybackGain\(playback, 0\.1, 0\.008\)/u);
@@ -984,6 +1168,47 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
     requestWindow.indexOf("startBargeInMonitoring") <
       requestWindow.indexOf("fetch(VOICE_ENDPOINT"),
   );
+  const handoffAt = bridge.indexOf("handoffAmbient({");
+  const handoff = bridge.slice(handoffAt, handoffAt + 2_000);
+  assert.match(handoff, /liveState: state/u);
+  assert.match(handoff, /session\.playback\.finalReceived/u);
+  assert.match(handoff, /appCheckToken,/u);
+  assert.match(handoff, /idToken,/u);
+  assert.match(handoff, /sessionState,/u);
+  assert.match(handoff, /turnMode: "ambient"/u);
+  assert.match(
+    handoff,
+    /candidateStartedAt - BARGE_PCM_LIMITS\.leadInMs/u,
+  );
+  const liveSessionAt = bridge.indexOf(
+    "async function startVoiceLiveSession(",
+  );
+  const liveSession = bridge.slice(liveSessionAt, liveSessionAt + 30_000);
+  assert.match(
+    liveSession,
+    /if \(captureHandoff === undefined\) \{[\s\S]*new AudioWorkletNode/u,
+  );
+  assert.match(liveSession, /captureHandoff\.adopt\(\{/u);
+  assert.match(liveSession, /adoptedCapture = captureHandoff/u);
+  assert.match(liveSession, /ownedCapture\.stop\(\)/u);
+  const interruptAt = liveSession.indexOf(
+    'interrupt(error = new Error("voice_interrupted"))',
+  );
+  const interrupt = liveSession.slice(interruptAt, interruptAt + 700);
+  assert.ok(
+    interrupt.indexOf('state = "cancelled"') <
+      interrupt.indexOf("closeSocket(4000"),
+    "the old live turn must reject queued final frames before close",
+  );
+  const monitorAt = bridge.indexOf(
+    "async function startBargePcmMonitoring(",
+  );
+  const monitor = bridge.slice(monitorAt, monitorAt + 6_500);
+  assert.match(monitor, /const ring = createBargePcmRing\(\)/u);
+  assert.match(monitor, /ring\.push\(frame, performance\.now\(\)\)/u);
+  assert.match(monitor, /const preRoll = ring\.drainSince\(cutoffAt\)/u);
+  assert.match(monitor, /frameSink = onFrame/u);
+  assert.match(monitor, /ring\.clear\(\)/u);
 
   const interruptionAt = client.indexOf(
     "fn resume_ambient_interruption(",

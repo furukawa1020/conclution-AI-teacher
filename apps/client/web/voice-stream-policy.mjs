@@ -32,6 +32,163 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
   readyTimeoutMs: 4_000,
 });
 
+export const BARGE_PCM_LIMITS = Object.freeze({
+  frameDurationMs: 20,
+  historyMs: 400,
+  leadInMs: 40,
+  maximumBytes: 12_800,
+  maximumFrames: 20,
+});
+
+function erasePcmFrame(frame) {
+  if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
+    new Uint8Array(frame).fill(0);
+  }
+}
+
+export function createBargePcmRing() {
+  let entries = [];
+  let lastCapturedAt = null;
+  let totalBytes = 0;
+
+  function removeOldest(erase) {
+    const removed = entries.shift();
+    if (!removed) return;
+    totalBytes -= removed.pcm.byteLength;
+    if (erase) erasePcmFrame(removed.pcm);
+  }
+
+  function clear() {
+    while (entries.length > 0) removeOldest(true);
+    lastCapturedAt = null;
+  }
+
+  return Object.freeze({
+    clear,
+    drainSince(cutoffAt) {
+      if (!Number.isFinite(cutoffAt) || cutoffAt < 0) {
+        throw new TypeError("barge_pcm_cutoff_invalid");
+      }
+      const retained = [];
+      for (const entry of entries) {
+        if (entry.capturedAt >= cutoffAt) {
+          retained.push(entry);
+        } else {
+          erasePcmFrame(entry.pcm);
+        }
+      }
+      entries = [];
+      totalBytes = 0;
+      lastCapturedAt = null;
+      return Object.freeze(retained);
+    },
+    push(pcm, capturedAt) {
+      if (
+        !(pcm instanceof ArrayBuffer) ||
+        pcm.byteLength !== VOICE_LIVE_LIMITS.inputFrameBytes ||
+        !Number.isFinite(capturedAt) ||
+        capturedAt < 0 ||
+        (lastCapturedAt !== null && capturedAt < lastCapturedAt)
+      ) {
+        erasePcmFrame(pcm);
+        throw new TypeError("barge_pcm_frame_invalid");
+      }
+      while (
+        entries.length > 0 &&
+        (entries.length >= BARGE_PCM_LIMITS.maximumFrames ||
+          totalBytes + pcm.byteLength > BARGE_PCM_LIMITS.maximumBytes ||
+          entries[0].capturedAt <
+            capturedAt - BARGE_PCM_LIMITS.historyMs)
+      ) {
+        removeOldest(true);
+      }
+      const entry = Object.freeze({ capturedAt, pcm });
+      entries.push(entry);
+      totalBytes += pcm.byteLength;
+      lastCapturedAt = capturedAt;
+      return Object.freeze({
+        frameCount: entries.length,
+        totalBytes,
+      });
+    },
+    snapshot() {
+      return Object.freeze({
+        frameCount: entries.length,
+        newestAt:
+          entries.length === 0
+            ? null
+            : entries[entries.length - 1].capturedAt,
+        oldestAt: entries.length === 0 ? null : entries[0].capturedAt,
+        totalBytes,
+      });
+    },
+  });
+}
+
+export function ambientHandoffAssignmentAllowed({
+  activeRecordingMatches,
+  activeSlotEmpty,
+  currentEpoch,
+  expectedEpoch,
+  recordingSettled,
+}) {
+  if (
+    typeof activeRecordingMatches !== "boolean" ||
+    typeof activeSlotEmpty !== "boolean" ||
+    !Number.isSafeInteger(currentEpoch) ||
+    currentEpoch < 0 ||
+    !Number.isSafeInteger(expectedEpoch) ||
+    expectedEpoch < 0 ||
+    typeof recordingSettled !== "boolean"
+  ) {
+    throw new TypeError("barge_handoff_assignment_invalid");
+  }
+  return (
+    activeRecordingMatches &&
+    activeSlotEmpty &&
+    currentEpoch === expectedEpoch &&
+    !recordingSettled
+  );
+}
+
+export function claimAmbientLiveHandoff(nextLiveSession, assignment) {
+  if (
+    nextLiveSession === null ||
+    typeof nextLiveSession !== "object" ||
+    typeof nextLiveSession.cancel !== "function"
+  ) {
+    throw new TypeError("barge_handoff_session_invalid");
+  }
+  if (ambientHandoffAssignmentAllowed(assignment)) {
+    return nextLiveSession;
+  }
+  try {
+    nextLiveSession.cancel(new Error("request_cancelled"));
+  } catch {
+    // A stale candidate remains rejected even if its close races the socket.
+  }
+  return undefined;
+}
+
+export function shouldStartAmbientLiveHandoff({
+  captureAvailable,
+  finalReceived,
+  liveState,
+}) {
+  if (
+    typeof captureAvailable !== "boolean" ||
+    typeof finalReceived !== "boolean" ||
+    typeof liveState !== "string"
+  ) {
+    throw new TypeError("barge_handoff_state_invalid");
+  }
+  return (
+    captureAvailable &&
+    !finalReceived &&
+    liveState === "committed"
+  );
+}
+
 export function shouldAbortVoiceTransportOnInterrupt(finalReceived) {
   if (typeof finalReceived !== "boolean") {
     throw new TypeError("voice_stream_final_latch_invalid");
@@ -64,6 +221,7 @@ export function createLivePcmQueue() {
 
   return Object.freeze({
     clear() {
+      for (const frame of frames) erasePcmFrame(frame);
       frames = [];
     },
     push(frame) {
@@ -74,7 +232,9 @@ export function createLivePcmQueue() {
         throw new Error("voice_live_frame_invalid");
       }
       if (frames.length >= VOICE_LIVE_LIMITS.maximumQueuedInputFrames) {
+        for (const queued of frames) erasePcmFrame(queued);
         frames = [];
+        erasePcmFrame(frame);
         throw new Error("voice_live_queue_overflow");
       }
       frames.push(frame);
@@ -170,14 +330,13 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
         break;
       }
       const chunk = new Uint8Array(chunkBytes);
-      queue
-        .take(frameCount)
-        .forEach((frame, index) =>
-          chunk.set(
-            new Uint8Array(frame),
-            index * VOICE_LIVE_LIMITS.inputFrameBytes,
-          ),
+      queue.take(frameCount).forEach((frame, index) => {
+        chunk.set(
+          new Uint8Array(frame),
+          index * VOICE_LIVE_LIMITS.inputFrameBytes,
         );
+        erasePcmFrame(frame);
+      });
       socket.send(chunk.buffer);
     }
   }

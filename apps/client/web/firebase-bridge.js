@@ -29,12 +29,16 @@ import {
 } from "./voice-session-policy.mjs";
 import {
   advanceInterruptVad,
+  BARGE_PCM_LIMITS,
+  claimAmbientLiveHandoff,
+  createBargePcmRing,
   createInterruptVadState,
   createVoiceLiveClientTransport,
   createVoiceLiveServerProtocol,
   createVoiceStreamParser,
   INTERRUPT_VAD_LIMITS,
   safeLiveCaptureFrame,
+  shouldStartAmbientLiveHandoff,
   VOICE_LIVE_LIMITS,
   shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
@@ -1106,8 +1110,10 @@ function liveCredential(value) {
 
 async function startVoiceLiveSession({
   appCheckToken,
+  captureHandoff,
   expectedEpoch,
   idToken,
+  preRollCutoffAt,
   sessionState,
   stream,
   turnMode,
@@ -1119,7 +1125,14 @@ async function startVoiceLiveSession({
     !liveCredential(idToken) ||
     typeof sessionState !== "string" ||
     sessionState.length > SESSION_STATE_MAX_CHARS ||
-    !isValidTurnMode(turnMode)
+    !isValidTurnMode(turnMode) ||
+    (captureHandoff !== undefined &&
+      (captureHandoff === null ||
+        typeof captureHandoff !== "object" ||
+        typeof captureHandoff.adopt !== "function" ||
+        typeof captureHandoff.stop !== "function" ||
+        !Number.isFinite(preRollCutoffAt) ||
+        preRollCutoffAt < 0))
   ) {
     return undefined;
   }
@@ -1234,32 +1247,34 @@ async function startVoiceLiveSession({
   socket.addEventListener("error", acceptPreflightError, { once: true });
 
   let workletTimeout;
-  try {
-    await Promise.race([
-      loadPcmCaptureWorklet(audioContext),
-      new Promise((_, reject) => {
-        workletTimeout = setTimeout(
-          () => reject(new Error("voice_api_unavailable")),
-          Math.max(
-            0,
-            VOICE_LIVE_LIMITS.readyTimeoutMs -
-              (performance.now() - liveStartedAt),
-          ),
-        );
-      }),
-    ]);
-  } catch {
-    detachPreflight();
-    clientTransport.close();
-    if (
-      socket.readyState === WebSocket.CONNECTING ||
-      socket.readyState === WebSocket.OPEN
-    ) {
-      socket.close(1000, "http_fallback");
+  if (captureHandoff === undefined) {
+    try {
+      await Promise.race([
+        loadPcmCaptureWorklet(audioContext),
+        new Promise((_, reject) => {
+          workletTimeout = setTimeout(
+            () => reject(new Error("voice_api_unavailable")),
+            Math.max(
+              0,
+              VOICE_LIVE_LIMITS.readyTimeoutMs -
+                (performance.now() - liveStartedAt),
+            ),
+          );
+        }),
+      ]);
+    } catch {
+      detachPreflight();
+      clientTransport.close();
+      if (
+        socket.readyState === WebSocket.CONNECTING ||
+        socket.readyState === WebSocket.OPEN
+      ) {
+        socket.close(1000, "http_fallback");
+      }
+      return undefined;
+    } finally {
+      if (workletTimeout !== undefined) clearTimeout(workletTimeout);
     }
-    return undefined;
-  } finally {
-    if (workletTimeout !== undefined) clearTimeout(workletTimeout);
   }
   detachPreflight();
   if (
@@ -1282,31 +1297,34 @@ async function startVoiceLiveSession({
 
   let captureNode;
   let captureSource;
-  try {
-    captureNode = new AudioWorkletNode(
-      audioContext,
-      "kotae-pcm-capture",
-      {
-        channelCount: 1,
-        channelCountMode: "explicit",
-        numberOfInputs: 1,
-        numberOfOutputs: 0,
-      },
-    );
-    captureSource = audioContext.createMediaStreamSource(stream);
-  } catch {
-    captureNode?.disconnect();
-    captureSource?.disconnect();
-    if (
-      socket.readyState === WebSocket.CONNECTING ||
-      socket.readyState === WebSocket.OPEN
-    ) {
-      clientTransport.close();
-      socket.close(1000, "http_fallback");
+  if (captureHandoff === undefined) {
+    try {
+      captureNode = new AudioWorkletNode(
+        audioContext,
+        "kotae-pcm-capture",
+        {
+          channelCount: 1,
+          channelCountMode: "explicit",
+          numberOfInputs: 1,
+          numberOfOutputs: 0,
+        },
+      );
+      captureSource = audioContext.createMediaStreamSource(stream);
+    } catch {
+      captureNode?.disconnect();
+      captureSource?.disconnect();
+      if (
+        socket.readyState === WebSocket.CONNECTING ||
+        socket.readyState === WebSocket.OPEN
+      ) {
+        clientTransport.close();
+        socket.close(1000, "http_fallback");
+      }
+      return undefined;
     }
-    return undefined;
   }
 
+  let adoptedCapture;
   let captureStopped = false;
   let authReadyMs = preflightAuthReadyMs;
   let authReadyTimer;
@@ -1340,6 +1358,13 @@ async function startVoiceLiveSession({
   function stopCapture() {
     if (captureStopped) return;
     captureStopped = true;
+    if (adoptedCapture) {
+      const ownedCapture = adoptedCapture;
+      adoptedCapture = undefined;
+      ownedCapture.stop();
+      return;
+    }
+    if (!captureNode || !captureSource) return;
     captureNode.port.onmessage = null;
     try {
       captureNode.port.postMessage(
@@ -1414,7 +1439,7 @@ async function startVoiceLiveSession({
     closeSocket(4002, "voice_live_failed");
   }
 
-  function acceptWorkletMessage(event) {
+  function acceptCaptureFrame(frame) {
     if (
       expectedEpoch !== sessionEpoch ||
       state === "failed" ||
@@ -1424,9 +1449,13 @@ async function startVoiceLiveSession({
     ) {
       return;
     }
+    clientTransport.pushFrame(frame);
+  }
+
+  function acceptWorkletMessage(event) {
     try {
       const frame = safeLiveCaptureFrame(event.data);
-      clientTransport.pushFrame(frame);
+      acceptCaptureFrame(frame);
     } catch (error) {
       failLive(
         error instanceof Error
@@ -1500,6 +1529,44 @@ async function startVoiceLiveSession({
     canFallback() {
       return !commitSent;
     },
+    handoffAmbient({
+      candidateStartedAt,
+      captureHandoff: nextCapture,
+      interruption,
+      stream: nextStream,
+    }) {
+      if (
+        !session.playback ||
+        !shouldStartAmbientLiveHandoff({
+          captureAvailable: Boolean(nextCapture),
+          finalReceived: session.playback.finalReceived,
+          liveState: state,
+        }) ||
+        expectedEpoch !== sessionEpoch ||
+        nextStream !== stream ||
+        !Number.isFinite(candidateStartedAt) ||
+        candidateStartedAt < 0 ||
+        !nextCapture ||
+        typeof nextCapture.adopt !== "function" ||
+        typeof nextCapture.stop !== "function"
+      ) {
+        return undefined;
+      }
+      session.interrupt(interruption);
+      return startVoiceLiveSession({
+        appCheckToken,
+        captureHandoff: nextCapture,
+        expectedEpoch,
+        idToken,
+        preRollCutoffAt: Math.max(
+          0,
+          candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
+        ),
+        sessionState,
+        stream: nextStream,
+        turnMode: "ambient",
+      });
+    },
     matches(expectedSessionState, expectedTurnMode) {
       return (
         expectedSessionState === sessionState &&
@@ -1549,9 +1616,13 @@ async function startVoiceLiveSession({
       });
     },
     interrupt(error = new Error("voice_interrupted")) {
+      const finalized = state === "final" || state === "complete";
+      if (!finalized) {
+        state = "cancelled";
+      }
       clientTransport.close();
       stopCapture();
-      if (state !== "final") {
+      if (!finalized) {
         settleReady(error);
         settleResult(error);
       }
@@ -1565,12 +1636,14 @@ async function startVoiceLiveSession({
     },
   };
 
-  captureNode.port.onmessage = acceptWorkletMessage;
-  captureNode.addEventListener(
-    "processorerror",
-    () => failLive(new Error("voice_api_unavailable")),
-    { once: true },
-  );
+  if (captureNode) {
+    captureNode.port.onmessage = acceptWorkletMessage;
+    captureNode.addEventListener(
+      "processorerror",
+      () => failLive(new Error("voice_api_unavailable")),
+      { once: true },
+    );
+  }
   socket.addEventListener("message", acceptSocketMessage);
   const acceptSocketOpen = () => {
     socketOpenedAt ??= performance.now();
@@ -1638,7 +1711,25 @@ async function startVoiceLiveSession({
     failLive(new Error("voice_api_unavailable"));
     return undefined;
   }
-  captureSource.connect(captureNode);
+  if (captureHandoff) {
+    try {
+      const preRoll = captureHandoff.adopt({
+        cutoffAt: preRollCutoffAt,
+        onError: failLive,
+        onFrame: acceptCaptureFrame,
+      });
+      adoptedCapture = captureHandoff;
+      for (const frame of preRoll) {
+        acceptCaptureFrame(frame);
+      }
+    } catch {
+      captureHandoff.stop();
+      failLive(new Error("voice_api_unavailable"));
+      return undefined;
+    }
+  } else {
+    captureSource.connect(captureNode);
+  }
   return session;
 }
 
@@ -1709,7 +1800,13 @@ function abandonInterruptRecording(recording) {
 }
 
 function stopBargeInMonitoring(playback) {
-  if (!playback || playback.interrupted) return;
+  if (!playback) return;
+  if (playback.bargePcmMonitor) {
+    const monitor = playback.bargePcmMonitor;
+    playback.bargePcmMonitor = undefined;
+    monitor.stop();
+  }
+  if (playback.interrupted) return;
   restorePlaybackGain(playback);
   if (playback.interruptRecording) {
     abandonInterruptRecording(playback.interruptRecording);
@@ -1754,6 +1851,166 @@ function hasVerifiedEchoCancellation(stream) {
   }
 }
 
+async function startBargePcmMonitoring(
+  playback,
+  recording,
+  expectedEpoch,
+) {
+  const context = audioContext;
+  const stream = mediaStream;
+  if (
+    playback.bargePcmMonitor ||
+    playback.interrupted ||
+    playback !== activePlayback ||
+    recording.settled ||
+    playback.interruptRecording !== recording ||
+    expectedEpoch !== sessionEpoch ||
+    !context ||
+    context.state === "closed" ||
+    !stream ||
+    !hasLiveAudioTrack(stream) ||
+    !hasVerifiedEchoCancellation(stream) ||
+    typeof globalThis.AudioWorkletNode !== "function" ||
+    !context.audioWorklet ||
+    typeof context.audioWorklet.addModule !== "function"
+  ) {
+    return;
+  }
+
+  try {
+    await loadPcmCaptureWorklet(context);
+  } catch {
+    return;
+  }
+  if (
+    playback.bargePcmMonitor ||
+    playback.interrupted ||
+    playback !== activePlayback ||
+    recording.settled ||
+    playback.interruptRecording !== recording ||
+    expectedEpoch !== sessionEpoch ||
+    audioContext !== context ||
+    mediaStream !== stream ||
+    context.state === "closed" ||
+    !hasLiveAudioTrack(stream) ||
+    !hasVerifiedEchoCancellation(stream)
+  ) {
+    return;
+  }
+
+  const ring = createBargePcmRing();
+  let adopted = false;
+  let errorSink;
+  let frameSink;
+  let node;
+  let source;
+  let stopped = false;
+  try {
+    node = new AudioWorkletNode(context, "kotae-pcm-capture", {
+      channelCount: 1,
+      channelCountMode: "explicit",
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+    });
+    source = context.createMediaStreamSource(stream);
+  } catch {
+    node?.disconnect();
+    source?.disconnect();
+    ring.clear();
+    return;
+  }
+
+  let monitor;
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    if (playback.bargePcmMonitor === monitor) {
+      playback.bargePcmMonitor = undefined;
+    }
+    node.port.onmessage = null;
+    try {
+      node.port.postMessage(
+        Object.freeze({ type: "stop", version: 1 }),
+      );
+    } catch {
+      // A failed worklet is already leaving the graph.
+    }
+    source.disconnect();
+    node.disconnect();
+    ring.clear();
+    errorSink = undefined;
+    frameSink = undefined;
+  }
+  function failMonitor(error) {
+    const notify = adopted ? errorSink : undefined;
+    stop();
+    notify?.(
+      error instanceof Error
+        ? error
+        : new Error("voice_api_unavailable"),
+    );
+  }
+  monitor = Object.freeze({
+    adopt({ cutoffAt, onError, onFrame }) {
+      if (
+        stopped ||
+        adopted ||
+        playback.bargePcmMonitor !== monitor ||
+        expectedEpoch !== sessionEpoch ||
+        audioContext !== context ||
+        mediaStream !== stream ||
+        context.state === "closed" ||
+        !hasLiveAudioTrack(stream) ||
+        !hasVerifiedEchoCancellation(stream) ||
+        recording.settled ||
+        playback.interruptRecording !== recording ||
+        typeof onError !== "function" ||
+        typeof onFrame !== "function"
+      ) {
+        throw new Error("voice_api_unavailable");
+      }
+      const preRoll = ring.drainSince(cutoffAt);
+      adopted = true;
+      frameSink = onFrame;
+      errorSink = onError;
+      playback.bargePcmMonitor = undefined;
+      return Object.freeze(preRoll.map((entry) => entry.pcm));
+    },
+    snapshot() {
+      return Object.freeze({
+        ...ring.snapshot(),
+        adopted,
+        stopped,
+      });
+    },
+    stop,
+  });
+  node.port.onmessage = (event) => {
+    try {
+      const frame = safeLiveCaptureFrame(event.data);
+      if (adopted) {
+        frameSink(frame);
+      } else {
+        ring.push(frame, performance.now());
+      }
+    } catch (error) {
+      failMonitor(error);
+    }
+  };
+  node.addEventListener(
+    "processorerror",
+    () => failMonitor(new Error("voice_api_unavailable")),
+    { once: true },
+  );
+
+  playback.bargePcmMonitor = monitor;
+  try {
+    source.connect(node);
+  } catch {
+    stop();
+  }
+}
+
 function confirmBargeIn(playback, recording, candidate) {
   if (
     playback.interrupted ||
@@ -1778,7 +2035,24 @@ function confirmBargeIn(playback, recording, candidate) {
     ? recording.interruptOnsetAt
     : performance.now();
   const interruptedLiveSession = activeLiveSession;
-  interruptedLiveSession?.interrupt(interruption);
+  const handoffEpoch = sessionEpoch;
+  if (activeLiveSession === interruptedLiveSession) {
+    activeLiveSession = undefined;
+  }
+  const handoffPromise =
+    !playback.finalReceived &&
+    interruptedLiveSession &&
+    playback.bargePcmMonitor
+      ? interruptedLiveSession.handoffAmbient({
+          candidateStartedAt: interruptionStartedAt,
+          captureHandoff: playback.bargePcmMonitor,
+          interruption,
+          stream: mediaStream,
+        })
+      : undefined;
+  if (!handoffPromise) {
+    interruptedLiveSession?.interrupt(interruption);
+  }
   // Once a final frame has been parsed, keep reading to a clean EOF so
   // trailing bytes cannot be hidden by the interruption. Before final, there
   // is no state that can be committed, so abort the transport immediately.
@@ -1792,8 +2066,27 @@ function confirmBargeIn(playback, recording, candidate) {
   } else {
     dispatchVoiceLatency({ bargeHaltMs });
   }
-  if (activeLiveSession === interruptedLiveSession) {
-    activeLiveSession = undefined;
+  if (handoffPromise) {
+    void handoffPromise
+      .then((nextLiveSession) => {
+        if (!nextLiveSession) return;
+        const claimed = claimAmbientLiveHandoff(
+          nextLiveSession,
+          {
+            activeRecordingMatches: activeRecording === recording,
+            activeSlotEmpty: activeLiveSession === undefined,
+            currentEpoch: sessionEpoch,
+            expectedEpoch: handoffEpoch,
+            recordingSettled: recording.settled,
+          },
+        );
+        if (claimed) {
+          activeLiveSession = claimed;
+        }
+      })
+      .catch(() => {
+        // The MediaRecorder candidate remains the ambient HTTP fallback.
+      });
   }
   globalThis.dispatchEvent(
     new CustomEvent("kotae:voice-interrupted", {
@@ -1822,6 +2115,7 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   const pcm = new Float32Array(analyser.fftSize);
   let vadState = createInterruptVadState(performance.now());
   playback.interruptRecording = recording;
+  void startBargePcmMonitoring(playback, recording, expectedEpoch);
   playback.resetInterruptGuard = () => {
     if (
       !recording.settled &&
@@ -1968,6 +2262,7 @@ function createStreamingPlayback(expectedEpoch) {
   }
 
   playback = {
+    bargePcmMonitor: undefined,
     completion,
     finalReceived: false,
     gainNode,

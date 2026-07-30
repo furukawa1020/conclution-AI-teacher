@@ -69,6 +69,48 @@ type liveTestVoiceService struct {
 	cancelSignalOne sync.Once
 }
 
+type liveEndpointTestService struct {
+	liveTestVoiceService
+	endpointOnce sync.Once
+}
+
+func (service *liveEndpointTestService) ProcessLiveWithEndpoint(
+	ctx context.Context,
+	uid string,
+	input VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+	onEndpoint func(),
+) (VoiceTurnResult, error) {
+	if uid != "user-123" {
+		return VoiceTurnResult{}, errors.New("unexpected uid")
+	}
+	service.mu.Lock()
+	service.input = input
+	service.mu.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			service.signalCanceled()
+			return VoiceTurnResult{}, ctx.Err()
+		case chunk, open := <-audio:
+			if !open {
+				for _, output := range service.output {
+					if err := onAudio(output); err != nil {
+						return VoiceTurnResult{}, err
+					}
+				}
+				return service.result, service.err
+			}
+			copied := append([]byte(nil), chunk...)
+			service.mu.Lock()
+			service.audio = append(service.audio, copied)
+			service.mu.Unlock()
+			service.endpointOnce.Do(onEndpoint)
+		}
+	}
+}
+
 func (service *liveTestVoiceService) Process(
 	context.Context,
 	string,
@@ -325,6 +367,107 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 	}
 }
 
+func TestVoiceLiveEndpointKeepsSingleReaderUntilExplicitCommit(t *testing.T) {
+	t.Parallel()
+	service := &liveEndpointTestService{
+		liveTestVoiceService: liveTestVoiceService{
+			output: [][]byte{{5, 0}},
+			result: VoiceTurnResult{
+				Caption:          "確定後の回答",
+				StateToken:       "sealed-endpoint-state",
+				DetectedDomain:   "daily",
+				AssistanceTarget: "assistant",
+				RespondentStage:  "none",
+				ResearchStatus:   "none",
+				ResearchRecords:  []ResearchRecord{},
+				Route:            "fast",
+			},
+		},
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	_ = readVoiceLiveJSON(t, ctx, conn)
+
+	first := make([]byte, 640)
+	first[0] = 1
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		first,
+	); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := readVoiceLiveJSON(t, ctx, conn)
+	if endpoint["type"] != "endpoint" ||
+		endpoint["version"] != float64(voiceLiveVersion) ||
+		len(endpoint) != 2 {
+		t.Fatalf("endpoint=%#v", endpoint)
+	}
+
+	// An endpoint is advisory. The same sole reader must accept more PCM and
+	// only stop after the client explicitly commits.
+	second := make([]byte, voiceLivePCMFrameBytes)
+	second[0] = 2
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		second,
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(
+		ctx,
+		websocket.MessageText,
+		commit,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	messageType, payload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageBinary ||
+		string(payload) != string([]byte{5, 0}) {
+		t.Fatalf("audio type=%v payload=%v", messageType, payload)
+	}
+	final := readVoiceLiveJSON(t, ctx, conn)
+	if final["type"] != "final" {
+		t.Fatalf("final=%#v", final)
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if len(service.audio) != 2 ||
+		len(service.audio[0]) != len(first) ||
+		len(service.audio[1]) != len(second) {
+		sizes := make([]int, 0, len(service.audio))
+		for _, frame := range service.audio {
+			sizes = append(sizes, len(frame))
+		}
+		t.Fatalf("endpoint service audio sizes=%v", sizes)
+	}
+}
+
 func TestVoiceLiveRejectsWrongOriginAndHandshakeCredentials(t *testing.T) {
 	t.Parallel()
 	server := newVoiceLiveTestServer(
@@ -536,16 +679,19 @@ func TestVoiceLiveStartRequiresJWTAlphabetAndCanonicalState(t *testing.T) {
 	}
 }
 
-func TestVoiceLiveAcceptsBoundedEvenPCMFrameSizes(t *testing.T) {
+func TestVoiceLiveRequiresExactTwentyMillisecondPCMFrames(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name string
-		size int
+		name     string
+		size     int
+		accepted bool
 	}{
-		{name: "twenty milliseconds", size: 640},
-		{name: "current client batch", size: liveTestPCMFrameBytes},
+		{name: "twenty milliseconds", size: 640, accepted: true},
+		{name: "old client batch", size: 3_200},
 		{name: "arbitrary even frame", size: 638},
-		{name: "two small frames batched", size: 1_280},
+		{name: "two frames batched", size: 1_280},
+		{name: "one byte short", size: 639},
+		{name: "one byte long", size: 641},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -586,6 +732,18 @@ func TestVoiceLiveAcceptsBoundedEvenPCMFrameSizes(t *testing.T) {
 				make([]byte, test.size),
 			); err != nil {
 				t.Fatal(err)
+			}
+			if !test.accepted {
+				frame := readVoiceLiveJSON(t, ctx, conn)
+				if frame["type"] != "error" ||
+					frame["code"] != voiceLiveCodeResponseInvalid {
+					t.Fatalf(
+						"%d-byte PCM response=%#v",
+						test.size,
+						frame,
+					)
+				}
+				return
 			}
 			commit, err := json.Marshal(voiceLiveCommitFrame{
 				Type:    "commit",

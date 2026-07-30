@@ -1,9 +1,12 @@
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
-  endOfTurnSilenceMs: 1_100,
+  endOfTurnSilenceMs: 700,
   reflectiveEndOfTurnSilenceMs: 1_700,
   reflectiveSpeechSpanMs: 2_400,
+  hybridEndpointSilenceMs: 440,
+  hybridReflectiveEndpointSilenceMs: 760,
+  hybridEndpointAgreementWindowMs: 1_200,
   candidateCaptureLimitMs: 1_500,
   silentCaptureLimitMs: 30_000,
   spokenCaptureLimitMs: 55_000,
@@ -509,6 +512,51 @@ export function createVadState(startedAt) {
     startedAt: finiteTimestamp(startedAt, "vad_started_at"),
     voiceRunMs: 0,
   });
+}
+
+export function shouldCommitHybridEndpoint({
+  firstVoiceAt,
+  hasSpeech,
+  lastVoiceAt,
+  now,
+  providerEndpointAt,
+}) {
+  if (
+    typeof hasSpeech !== "boolean" ||
+    !Number.isFinite(now) ||
+    now < 0 ||
+    (firstVoiceAt !== null &&
+      (!Number.isFinite(firstVoiceAt) || firstVoiceAt < 0)) ||
+    (lastVoiceAt !== null &&
+      (!Number.isFinite(lastVoiceAt) || lastVoiceAt < 0)) ||
+    (providerEndpointAt !== null &&
+      (!Number.isFinite(providerEndpointAt) ||
+        providerEndpointAt < 0))
+  ) {
+    throw new TypeError("hybrid_endpoint_state_invalid");
+  }
+  if (
+    !hasSpeech ||
+    firstVoiceAt === null ||
+    lastVoiceAt === null ||
+    providerEndpointAt === null ||
+    firstVoiceAt > lastVoiceAt ||
+    lastVoiceAt > providerEndpointAt ||
+    providerEndpointAt > now ||
+    now - providerEndpointAt >
+      VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs
+  ) {
+    return false;
+  }
+  const speechSpan =
+    lastVoiceAt -
+    firstVoiceAt +
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  const requiredSilence =
+    speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+      ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
+      : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+  return now - lastVoiceAt >= requiredSilence;
 }
 
 export function advanceVad(

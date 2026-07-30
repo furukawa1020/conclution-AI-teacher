@@ -232,6 +232,30 @@ func (p *Pipeline) ProcessLive(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 ) (httpapi.VoiceTurnResult, error) {
+	return p.processLive(ctx, uid, input, audio, onAudio, nil)
+}
+
+// ProcessLiveWithEndpoint preserves the same commit boundary as ProcessLive
+// while exposing a non-authoritative STT endpoint hint to the transport.
+func (p *Pipeline) ProcessLiveWithEndpoint(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+	onEndpoint func(),
+) (httpapi.VoiceTurnResult, error) {
+	return p.processLive(ctx, uid, input, audio, onAudio, onEndpoint)
+}
+
+func (p *Pipeline) processLive(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+	onEndpoint func(),
+) (httpapi.VoiceTurnResult, error) {
 	if audio == nil || onAudio == nil {
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
@@ -332,6 +356,16 @@ func (p *Pipeline) ProcessLive(
 	firstInterimMS := int64(-1)
 	firstFinalMS := int64(-1)
 	finalObservedAt := time.Time{}
+	endpointNotified := false
+	providerSpeechEndPending := false
+	notifyEndpoint := func() {
+		if endpointNotified || onEndpoint == nil ||
+			len(finalFragments) == 0 {
+			return
+		}
+		endpointNotified = true
+		onEndpoint()
+	}
 	for {
 		event, eventErr := session.RecvEvent()
 		if errors.Is(eventErr, io.EOF) {
@@ -369,6 +403,10 @@ func (p *Pipeline) ProcessLive(
 				)
 			}
 			continue
+		case speechio.StreamingTranscriptionSpeechEnd:
+			providerSpeechEndPending = true
+			notifyEndpoint()
+			continue
 		case speechio.StreamingTranscriptionFinal:
 		default:
 			continue
@@ -388,6 +426,9 @@ func (p *Pipeline) ProcessLive(
 		finalFragments = append(finalFragments, fragment)
 		latestInterim = ""
 		finalObservedAt = time.Now()
+		if providerSpeechEndPending {
+			notifyEndpoint()
+		}
 		finalTranscript := strings.Join(finalFragments, " ")
 		if utf8.RuneCountInString(finalTranscript) >
 			conversation.MaxUtteranceRunes {
@@ -528,6 +569,7 @@ func (p *Pipeline) ProcessLive(
 				}
 				if synthesisReady && outcome.synthesis != nil {
 					ttsPrestarted = 1
+					releaseAttempted := false
 					synthesisResult, synthesisCompleted :=
 						outcome.synthesis.commitBoundary(ctx)
 					if synthesisCompleted {
@@ -543,6 +585,7 @@ func (p *Pipeline) ProcessLive(
 						}
 					}
 					if err == nil {
+						releaseAttempted = true
 						ttsReleaseMS, err =
 							outcome.synthesis.buffer.release(ctx)
 					}
@@ -563,11 +606,19 @@ func (p *Pipeline) ProcessLive(
 						prestartedTTSDone = true
 					} else {
 						outcome.synthesis.abort(err)
-						synthesisReady = false
 						firstOutputMu.Lock()
-						terminalSynthesisFailure =
-							!firstOutputAt.IsZero()
+						outputDelivered := !firstOutputAt.IsZero()
 						firstOutputMu.Unlock()
+						if releaseAttempted || outputDelivered {
+							synthesisReady = false
+							terminalSynthesisFailure = true
+						} else {
+							// The audited decision exactly matches the final
+							// transcript. Only synthesis failed before commit,
+							// so preserve the decision and retry TTS without a
+							// second model inference.
+							err = nil
+						}
 					}
 				}
 				if synthesisReady {

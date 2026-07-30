@@ -1133,7 +1133,7 @@ func TestPipelineLiveDiscardsPrestartedTTSOnFinalMismatch(t *testing.T) {
 	}
 }
 
-func TestPipelineLivePrestartFailureFallsBackBeforeRelease(t *testing.T) {
+func TestPipelineLivePrestartFailureRetriesOnlyTTSBeforeRelease(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name   string
@@ -1186,10 +1186,13 @@ func TestPipelineLivePrestartFailureFallsBackBeforeRelease(t *testing.T) {
 			}
 			agent := &speculativeTestAgent{
 				speculativeResult: liveTestDecision(
-					"破棄される先読み回答",
-					"provisional-state",
+					"監査済み先読み回答",
+					"spec-state",
 				),
-				normalResult: liveTestDecision("通常再実行", "final-state"),
+				normalResult: liveTestDecision(
+					"再推論してはいけない",
+					"normal-state",
+				),
 			}
 			pipeline, err := New(speech, agent)
 			if err != nil {
@@ -1253,18 +1256,25 @@ func TestPipelineLivePrestartFailureFallsBackBeforeRelease(t *testing.T) {
 			finalOutput := append([]byte(nil), output...)
 			outputMu.Unlock()
 			if !bytes.Equal(finalOutput, []byte{3, 0}) ||
-				outcome.result.StateToken != "final-state" ||
-				outcome.result.Caption != "通常再実行" {
+				outcome.result.StateToken != "spec-state" ||
+				outcome.result.Caption != "監査済み先読み回答" {
 				t.Fatalf("output=%v result=%+v", finalOutput, outcome.result)
 			}
-			if texts := speech.synthesisTexts(); len(texts) != 2 {
+			if texts := speech.synthesisTexts(); len(texts) != 2 ||
+				texts[0] != "監査済み先読み回答" ||
+				texts[1] != "監査済み先読み回答" {
 				t.Fatalf("synthesis texts=%v", texts)
+			}
+			turns := agent.recordedTurns()
+			if len(turns) != 1 || !turns[0].Speculative {
+				t.Fatalf("prestart TTS failure reran agent: %+v", turns)
 			}
 			if outcome.result.LiveTimings.TTSPrestarted != 1 ||
 				outcome.result.LiveTimings.TTSBufferedBytes != 2 ||
 				outcome.result.LiveTimings.TTSReleaseMS != -1 ||
-				outcome.result.LiveTimings.SpecMiss != 1 ||
-				outcome.result.LiveTimings.SpecCancel != 1 {
+				outcome.result.LiveTimings.SpecHit != 1 ||
+				outcome.result.LiveTimings.SpecMiss != 0 ||
+				outcome.result.LiveTimings.SpecCancel != 0 {
 				t.Fatalf("timings=%+v", outcome.result.LiveTimings)
 			}
 		})

@@ -19,7 +19,7 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   maximumCaptureMs: 55_000,
   reflectiveSilenceMs: 1_700,
   reflectiveSpeechMs: 2_400,
-  trailingSilenceMs: 1_100,
+  trailingSilenceMs: 700,
 });
 
 export const VOICE_LIVE_LIMITS = Object.freeze({
@@ -28,14 +28,16 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
   maximumQueuedInputFrames: 200,
   maximumServerTextCharacters: 64 * 1024,
   maximumSocketBufferedBytes: 16 * 1024,
-  outboundChunkBytes: 3_200,
+  outboundChunkBytes: 640,
+  confirmedSpeechLeadInMs: 100,
   readyTimeoutMs: 4_000,
+  terminalCloseTimeoutMs: 1_500,
 });
 
 export const BARGE_PCM_LIMITS = Object.freeze({
   frameDurationMs: 20,
   historyMs: 400,
-  leadInMs: 40,
+  leadInMs: 100,
   maximumBytes: 12_800,
   maximumFrames: 20,
 });
@@ -125,6 +127,81 @@ export function createBargePcmRing() {
   });
 }
 
+export function createConfirmedSpeechPcmGate(sendFrame) {
+  if (typeof sendFrame !== "function") {
+    throw new TypeError("voice_live_gate_sink_invalid");
+  }
+  const ring = createBargePcmRing();
+  let closed = false;
+  let confirmed = false;
+
+  return Object.freeze({
+    clear() {
+      if (closed) return;
+      closed = true;
+      ring.clear();
+    },
+    confirm(candidateStartedAt) {
+      if (
+        closed ||
+        !Number.isFinite(candidateStartedAt) ||
+        candidateStartedAt < 0
+      ) {
+        throw new TypeError("voice_live_gate_confirmation_invalid");
+      }
+      if (confirmed) return 0;
+      const entries = ring.drainSince(
+        Math.max(
+          0,
+          candidateStartedAt -
+            VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs,
+        ),
+      );
+      confirmed = true;
+      for (let index = 0; index < entries.length; index += 1) {
+        try {
+          sendFrame(entries[index].pcm);
+        } catch (error) {
+          closed = true;
+          for (
+            let remaining = index;
+            remaining < entries.length;
+            remaining += 1
+          ) {
+            erasePcmFrame(entries[remaining].pcm);
+          }
+          throw error;
+        }
+      }
+      return entries.length;
+    },
+    push(pcm, capturedAt) {
+      if (closed) {
+        erasePcmFrame(pcm);
+        throw new TypeError("voice_live_gate_closed");
+      }
+      if (confirmed) {
+        try {
+          sendFrame(pcm);
+        } catch (error) {
+          closed = true;
+          erasePcmFrame(pcm);
+          throw error;
+        }
+        return;
+      }
+      ring.push(pcm, capturedAt);
+    },
+    snapshot() {
+      return Object.freeze({
+        ...ring.snapshot(),
+        closed,
+        confirmed,
+      });
+    },
+  });
+}
+
 export function ambientHandoffAssignmentAllowed({
   activeRecordingMatches,
   activeSlotEmpty,
@@ -196,6 +273,69 @@ export function shouldAbortVoiceTransportOnInterrupt(finalReceived) {
   return !finalReceived;
 }
 
+export function isCleanVoiceLiveTerminalClose(value) {
+  return Boolean(
+    isPlainRecord(value) &&
+      hasExactKeys(value, ["code", "reason", "wasClean"]) &&
+      value.code === 1_000 &&
+      value.reason === "complete" &&
+      value.wasClean === true,
+  );
+}
+
+export function estimateAudiblePerformanceTime({
+  baseLatencySeconds,
+  currentContextTime,
+  outputLatencySeconds,
+  outputTimestamp,
+  performanceNow,
+  targetContextTime,
+}) {
+  if (
+    !Number.isFinite(currentContextTime) ||
+    currentContextTime < 0 ||
+    !Number.isFinite(performanceNow) ||
+    performanceNow < 0 ||
+    !Number.isFinite(targetContextTime) ||
+    targetContextTime < 0
+  ) {
+    throw new TypeError("voice_audible_time_invalid");
+  }
+
+  if (
+    outputTimestamp !== null &&
+    typeof outputTimestamp === "object" &&
+    Number.isFinite(outputTimestamp.contextTime) &&
+    outputTimestamp.contextTime >= 0 &&
+    Number.isFinite(outputTimestamp.performanceTime) &&
+    outputTimestamp.performanceTime > 0 &&
+    Math.abs(outputTimestamp.performanceTime - performanceNow) <= 5_000
+  ) {
+    return (
+      outputTimestamp.performanceTime +
+      Math.max(
+        0,
+        targetContextTime - outputTimestamp.contextTime,
+      ) *
+        1_000
+    );
+  }
+
+  const outputLatency =
+    Number.isFinite(outputLatencySeconds) &&
+    outputLatencySeconds >= 0
+      ? outputLatencySeconds
+      : Number.isFinite(baseLatencySeconds) &&
+          baseLatencySeconds >= 0
+        ? baseLatencySeconds
+        : 0;
+  return (
+    performanceNow +
+    Math.max(0, targetContextTime - currentContextTime) * 1_000 +
+    outputLatency * 1_000
+  );
+}
+
 export function safeLiveCaptureFrame(value) {
   if (
     !isPlainRecord(value) ||
@@ -211,6 +351,13 @@ export function safeLiveCaptureFrame(value) {
     !(value.pcm instanceof ArrayBuffer) ||
     value.pcm.byteLength !== VOICE_LIVE_LIMITS.inputFrameBytes
   ) {
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      value.pcm instanceof ArrayBuffer
+    ) {
+      erasePcmFrame(value.pcm);
+    }
     throw new Error("voice_live_frame_invalid");
   }
   return value.pcm;
@@ -229,6 +376,7 @@ export function createLivePcmQueue() {
         !(frame instanceof ArrayBuffer) ||
         frame.byteLength !== VOICE_LIVE_LIMITS.inputFrameBytes
       ) {
+        erasePcmFrame(frame);
         throw new Error("voice_live_frame_invalid");
       }
       if (frames.length >= VOICE_LIVE_LIMITS.maximumQueuedInputFrames) {
@@ -351,6 +499,8 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       if (state !== "ready") invalid();
       flush(true);
       if (queue.size() !== 0) {
+        queue.clear();
+        state = "closed";
         throw new Error("voice_api_unavailable");
       }
       sendText(JSON.stringify({ type: "commit", version: 1 }));
@@ -372,6 +522,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
         !(frame instanceof ArrayBuffer) ||
         frame.byteLength !== VOICE_LIVE_LIMITS.inputFrameBytes
       ) {
+        erasePcmFrame(frame);
         throw new Error("voice_live_frame_invalid");
       }
       if (state === "ready") {
@@ -380,6 +531,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       } else if (state === "connecting" || state === "awaiting-ready") {
         queue.push(frame);
       } else {
+        erasePcmFrame(frame);
         invalid();
       }
     },
@@ -407,6 +559,7 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
     throw new TypeError("validateFinalResult must be a function");
   }
   let audioEventCount = 0;
+  let endpointReceived = false;
   let state = "awaiting-ready";
   let totalAudioBytes = 0;
 
@@ -448,6 +601,17 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
       const event = safeReadyEvent(value);
       state = "ready";
       return event;
+    }
+    if (state === "ready" && value.type === "endpoint") {
+      if (
+        endpointReceived ||
+        !hasExactKeys(value, ["type", "version"]) ||
+        value.version !== 1
+      ) {
+        invalid();
+      }
+      endpointReceived = true;
+      return Object.freeze({ type: "endpoint", version: 1 });
     }
     if (
       state !== "committed" ||
@@ -512,6 +676,7 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
     snapshot() {
       return Object.freeze({
         audioEventCount,
+        endpointReceived,
         state,
         totalAudioBytes,
       });

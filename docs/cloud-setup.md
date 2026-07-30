@@ -10,7 +10,7 @@
 - Firestore: `(default)`、`asia-northeast1`、削除保護、TTL
 - Cloud Run: `kotae-api`、`asia-northeast1`
 - Cloud Run実行ID: `kotae-api-runtime@kotae-ai-u22-2026.iam.gserviceaccount.com`
-- Cloud Speech-to-Text V2: `asia-northeast1`、`long`単独、`ja-JP`
+- Cloud Speech-to-Text V2: `asia-northeast1`、`chirp_3`単独、`ja-JP`
 - Cloud Text-to-Speech: `asia-northeast1`、`ja-JP-Chirp3-HD-Kore`
 - Vertex AI: `global`、高速`gemini-3.6-flash`、精密`gemini-3.1-pro-preview`
 - Secret Manager: `kotae-conversation-state`
@@ -161,7 +161,7 @@ gcloud run deploy kotae-api `
   --cpu=1 `
   --memory=1Gi `
   --concurrency=4 `
-  --min-instances=1 `
+  --min-instances=0 `
   --max-instances=3 `
   --timeout=120 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL" `
@@ -169,7 +169,7 @@ gcloud run deploy kotae-api `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:latest"
 ```
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い60秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い120秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 

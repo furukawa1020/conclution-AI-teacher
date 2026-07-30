@@ -16,6 +16,7 @@ import {
   isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
+  shouldCommitHybridEndpoint,
   shouldStopSessionForLifecycle,
   turnModeForGestureEpoch,
   VOICE_SESSION_LIMITS,
@@ -26,12 +27,15 @@ import {
   BARGE_PCM_LIMITS,
   claimAmbientLiveHandoff,
   createBargePcmRing,
+  createConfirmedSpeechPcmGate,
   createInterruptVadState,
   createLivePcmQueue,
   createVoiceLiveClientTransport,
   createVoiceLiveServerProtocol,
   createVoiceStreamParser,
+  estimateAudiblePerformanceTime,
   INTERRUPT_VAD_LIMITS,
+  isCleanVoiceLiveTerminalClose,
   shouldAbortVoiceTransportOnInterrupt,
   shouldStartAmbientLiveHandoff,
   safeLiveCaptureFrame,
@@ -453,6 +457,30 @@ test("barge-in aborts transport only before a final frame is parsed", () => {
   );
 });
 
+test("live final commits only after the exact clean server close", () => {
+  assert.equal(
+    isCleanVoiceLiveTerminalClose({
+      code: 1_000,
+      reason: "complete",
+      wasClean: true,
+    }),
+    true,
+  );
+  for (const invalid of [
+    { code: 1_000, reason: "", wasClean: true },
+    { code: 1_000, reason: "complete", wasClean: false },
+    { code: 1_001, reason: "complete", wasClean: true },
+    {
+      code: 1_000,
+      reason: "complete",
+      wasClean: true,
+      ignored: true,
+    },
+  ]) {
+    assert.equal(isCleanVoiceLiveTerminalClose(invalid), false);
+  }
+});
+
 test("a parsed final can latch barge-in but trailing junk prevents terminal success", () => {
   const parser = createVoiceStreamParser((result) => result);
   const events = parser.push(
@@ -592,8 +620,10 @@ class MockWebSocket {
 test("live capture accepts only exact 20 ms PCM frames and bounds startup", () => {
   assert.equal(VOICE_LIVE_LIMITS.maximumQueuedInputFrames, 200);
   assert.equal(VOICE_LIVE_LIMITS.readyTimeoutMs, 4_000);
+  assert.equal(VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs, 100);
+  assert.equal(VOICE_LIVE_LIMITS.terminalCloseTimeoutMs, 1_500);
   assert.equal(VOICE_LIVE_LIMITS.maximumSocketBufferedBytes, 16 * 1024);
-  assert.equal(VOICE_LIVE_LIMITS.outboundChunkBytes, 3_200);
+  assert.equal(VOICE_LIVE_LIMITS.outboundChunkBytes, 640);
   const pcm = new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes);
   assert.equal(
     safeLiveCaptureFrame({
@@ -614,6 +644,22 @@ test("live capture accepts only exact 20 ms PCM frames and bounds startup", () =
         ignored: true,
       }),
     /voice_live_frame_invalid/,
+  );
+  const rejectedPcm = filledPcmFrame(91);
+  assert.throws(
+    () =>
+      safeLiveCaptureFrame({
+        type: "frame",
+        version: 1,
+        sampleRateHz: 16_000,
+        pcm: rejectedPcm,
+        ignored: true,
+      }),
+    /voice_live_frame_invalid/,
+  );
+  assert.equal(
+    new Uint8Array(rejectedPcm).every((value) => value === 0),
+    true,
   );
 
   const queue = createLivePcmQueue();
@@ -645,10 +691,10 @@ function filledPcmFrame(value) {
   return frame;
 }
 
-test("barge PCM ring retains only timestamped 400 ms and drains 40 ms pre-roll", () => {
+test("barge PCM ring retains only timestamped 400 ms and drains 100 ms pre-roll", () => {
   assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
   assert.equal(BARGE_PCM_LIMITS.historyMs, 400);
-  assert.equal(BARGE_PCM_LIMITS.leadInMs, 40);
+  assert.equal(BARGE_PCM_LIMITS.leadInMs, 100);
   assert.equal(BARGE_PCM_LIMITS.maximumFrames, 20);
   assert.equal(
     BARGE_PCM_LIMITS.maximumBytes,
@@ -677,9 +723,9 @@ test("barge PCM ring retains only timestamped 400 ms and drains 40 ms pre-roll",
   const drained = ring.drainSince(
     candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
   );
-  assert.equal(drained[0].capturedAt, 320);
+  assert.equal(drained[0].capturedAt, 260);
   assert.equal(drained.at(-1).capturedAt, 400);
-  assert.equal(drained.length, 5);
+  assert.equal(drained.length, 8);
   assert.deepEqual(ring.snapshot(), {
     frameCount: 0,
     newestAt: null,
@@ -701,6 +747,121 @@ test("barge PCM ring retains only timestamped 400 ms and drains 40 ms pre-roll",
     new Uint8Array(cleared).every((value) => value === 0),
     true,
     "monitor teardown must zero the retained frame",
+  );
+});
+
+test("normal live capture sends zero PCM before confirmation then 100 ms pre-roll", () => {
+  const sent = [];
+  const gate = createConfirmedSpeechPcmGate((frame) => sent.push(frame));
+  for (let timestamp = 0; timestamp <= 300; timestamp += 20) {
+    gate.push(filledPcmFrame(timestamp / 20 + 1), timestamp);
+  }
+  assert.equal(sent.length, 0);
+  assert.equal(gate.snapshot().confirmed, false);
+
+  assert.equal(gate.confirm(260), 8);
+  assert.equal(sent.length, 8);
+  assert.deepEqual(
+    sent.map((frame) => new Uint8Array(frame)[0]),
+    [9, 10, 11, 12, 13, 14, 15, 16],
+  );
+  gate.push(filledPcmFrame(99), 320);
+  assert.equal(sent.length, 9);
+  assert.equal(new Uint8Array(sent.at(-1))[0], 99);
+});
+
+test("discarding an unconfirmed live gate zeroizes retained room audio", () => {
+  const gate = createConfirmedSpeechPcmGate(() => {
+    assert.fail("unconfirmed audio must not leave the device");
+  });
+  const retained = filledPcmFrame(77);
+  gate.push(retained, 10);
+  gate.clear();
+  assert.equal(
+    new Uint8Array(retained).every((value) => value === 0),
+    true,
+  );
+  assert.equal(gate.snapshot().closed, true);
+});
+
+test("a failed confirmed-speech sink zeroizes every unreleased PCM frame", () => {
+  const first = filledPcmFrame(31);
+  const second = filledPcmFrame(32);
+  const gate = createConfirmedSpeechPcmGate(() => {
+    throw new Error("voice_api_unavailable");
+  });
+  gate.push(first, 100);
+  gate.push(second, 120);
+  assert.throws(
+    () => gate.confirm(100),
+    /voice_api_unavailable/,
+  );
+  assert.equal(
+    new Uint8Array(first).every((value) => value === 0),
+    true,
+  );
+  assert.equal(
+    new Uint8Array(second).every((value) => value === 0),
+    true,
+  );
+  assert.equal(gate.snapshot().closed, true);
+
+  const liveFrame = filledPcmFrame(41);
+  const confirmedGate = createConfirmedSpeechPcmGate(() => {
+    throw new Error("voice_api_unavailable");
+  });
+  confirmedGate.confirm(0);
+  assert.throws(
+    () => confirmedGate.push(liveFrame, 140),
+    /voice_api_unavailable/,
+  );
+  assert.equal(
+    new Uint8Array(liveFrame).every((value) => value === 0),
+    true,
+  );
+});
+
+test("audible metrics prefer the output-device timestamp then output latency", () => {
+  assert.equal(
+    estimateAudiblePerformanceTime({
+      baseLatencySeconds: 0.2,
+      currentContextTime: 12.05,
+      outputLatencySeconds: 0.3,
+      outputTimestamp: {
+        contextTime: 12,
+        performanceTime: 1_000,
+      },
+      performanceNow: 1_010,
+      targetContextTime: 12.25,
+    }),
+    1_250,
+    "the device timestamp already incorporates the output path",
+  );
+  assert.equal(
+    estimateAudiblePerformanceTime({
+      baseLatencySeconds: 0.2,
+      currentContextTime: 2.95,
+      outputLatencySeconds: 0.08,
+      outputTimestamp: undefined,
+      performanceNow: 5_000,
+      targetContextTime: 3,
+    }),
+    5_130,
+  );
+  assert.equal(
+    estimateAudiblePerformanceTime({
+      baseLatencySeconds: 0.04,
+      currentContextTime: 2.95,
+      outputLatencySeconds: undefined,
+      outputTimestamp: {
+        contextTime: 2.9,
+        performanceTime: 20_000,
+      },
+      performanceNow: 5_000,
+      targetContextTime: 3,
+    }),
+    5_090,
+    "a stale timestamp falls back to base latency when outputLatency is absent",
   );
 });
 
@@ -728,21 +889,22 @@ test("mock ambient handoff sends old state first then bounded PCM pre-roll", () 
     "old-committed-state",
   );
   transport.markReady();
-  transport.commit();
-  assert.equal(socket.sent[1] instanceof ArrayBuffer, true);
-  assert.equal(
-    socket.sent[1].byteLength,
-    preRoll.length * VOICE_LIVE_LIMITS.inputFrameBytes,
-  );
-  const sentPcm = new Uint8Array(socket.sent[1]);
   assert.deepEqual(
-    [0, 1, 2, 3].map(
-      (index) =>
-        sentPcm[index * VOICE_LIVE_LIMITS.inputFrameBytes],
-    ),
-    [18, 19, 20, 21],
+    socket.sent
+      .slice(1)
+      .map((frame) => new Uint8Array(frame)[0]),
+    [15, 16, 17, 18, 19, 20, 21],
   );
-  assert.deepEqual(JSON.parse(socket.sent[2]), {
+  assert.equal(
+    socket.sent.slice(1).every(
+      (frame) =>
+        frame instanceof ArrayBuffer &&
+        frame.byteLength === VOICE_LIVE_LIMITS.inputFrameBytes,
+    ),
+    true,
+  );
+  transport.commit();
+  assert.deepEqual(JSON.parse(socket.sent[8]), {
     type: "commit",
     version: 1,
   });
@@ -802,7 +964,7 @@ test("post-final and stale ambient handoffs fail closed to HTTP ownership", () =
   }
 });
 
-test("mock WebSocket sends auth in first text then 100 ms PCM chunks", () => {
+test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
   const socket = new MockWebSocket();
   const transport = createVoiceLiveClientTransport(
     socket,
@@ -821,7 +983,15 @@ test("mock WebSocket sends auth in first text then 100 ms PCM chunks", () => {
     socket.sent[1].byteLength,
     VOICE_LIVE_LIMITS.outboundChunkBytes,
   );
-  assert.equal(transport.snapshot().queuedFrames, 2);
+  assert.equal(transport.snapshot().queuedFrames, 0);
+  assert.equal(
+    socket.sent.slice(1).every(
+      (frame) =>
+        frame instanceof ArrayBuffer &&
+        frame.byteLength === VOICE_LIVE_LIMITS.inputFrameBytes,
+    ),
+    true,
+  );
 
   for (let index = 0; index < 3; index += 1) {
     transport.pushFrame(
@@ -829,17 +999,17 @@ test("mock WebSocket sends auth in first text then 100 ms PCM chunks", () => {
     );
   }
   assert.equal(
-    socket.sent[2].byteLength,
+    socket.sent[8].byteLength,
     VOICE_LIVE_LIMITS.outboundChunkBytes,
   );
   transport.commit();
-  assert.deepEqual(JSON.parse(socket.sent[3]), {
+  assert.deepEqual(JSON.parse(socket.sent[11]), {
     type: "commit",
     version: 1,
   });
 });
 
-test("live commit flushes an even partial chunk and fails on backpressure", () => {
+test("live commit preserves exact frames and fails on backpressure", () => {
   const partialSocket = new MockWebSocket();
   const partial = createVoiceLiveClientTransport(
     partialSocket,
@@ -856,9 +1026,16 @@ test("live commit flushes an even partial chunk and fails on backpressure", () =
   partial.commit();
   assert.equal(
     partialSocket.sent[1].byteLength,
-    2 * VOICE_LIVE_LIMITS.inputFrameBytes,
+    VOICE_LIVE_LIMITS.inputFrameBytes,
   );
-  assert.equal(partialSocket.sent[1].byteLength % 2, 0);
+  assert.equal(
+    partialSocket.sent[2].byteLength,
+    VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+  assert.deepEqual(JSON.parse(partialSocket.sent[3]), {
+    type: "commit",
+    version: 1,
+  });
 
   const stalledSocket = new MockWebSocket();
   const stalled = createVoiceLiveClientTransport(
@@ -874,13 +1051,22 @@ test("live commit flushes an even partial chunk and fails on backpressure", () =
   }
   stalledSocket.bufferedAmount =
     VOICE_LIVE_LIMITS.maximumSocketBufferedBytes;
+  const backpressuredFrames = [];
   for (let index = 0; index < 5; index += 1) {
-    stalled.pushFrame(
-      new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
-    );
+    const frame = filledPcmFrame(101 + index);
+    backpressuredFrames.push(frame);
+    stalled.pushFrame(frame);
   }
   assert.equal(stalled.snapshot().queuedFrames, 5);
   assert.throws(() => stalled.commit(), /voice_api_unavailable/);
+  assert.equal(stalled.snapshot().queuedFrames, 0);
+  assert.equal(stalled.snapshot().state, "closed");
+  assert.equal(
+    backpressuredFrames.every((frame) =>
+      new Uint8Array(frame).every((value) => value === 0),
+    ),
+    true,
+  );
 });
 
 test("live server protocol gates binary on ready and commit", () => {
@@ -894,6 +1080,19 @@ test("live server protocol gates binary on ready and commit", () => {
   assert.deepEqual(
     protocol.acceptText(JSON.stringify({ type: "ready", version: 1 })),
     { type: "ready", version: 1 },
+  );
+  assert.deepEqual(
+    protocol.acceptText(
+      JSON.stringify({ type: "endpoint", version: 1 }),
+    ),
+    { type: "endpoint", version: 1 },
+  );
+  assert.throws(
+    () =>
+      protocol.acceptText(
+        JSON.stringify({ type: "endpoint", version: 1 }),
+      ),
+    /voice_response_invalid/,
   );
   protocol.markCommitted();
   const audio = protocol.acceptBinary(new ArrayBuffer(4));
@@ -912,6 +1111,80 @@ test("live server protocol gates binary on ready and commit", () => {
     () =>
       protocol.acceptText(
         JSON.stringify({ type: "ready", version: 1 }),
+      ),
+    /voice_response_invalid/,
+  );
+});
+
+test("hybrid endpoint requires provider and local silence agreement", () => {
+  const short = {
+    firstVoiceAt: 100,
+    hasSpeech: true,
+    lastVoiceAt: 1_000,
+    providerEndpointAt: 1_300,
+  };
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...short, now: 1_439 }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...short, now: 1_440 }),
+    true,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      lastVoiceAt: 1_350,
+      now: 1_800,
+    }),
+    false,
+    "speech resumed after the provider endpoint",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...short, now: 2_501 }),
+    false,
+    "a stale provider endpoint cannot stop a later thought",
+  );
+
+  const reflective = {
+    firstVoiceAt: 100,
+    hasSpeech: true,
+    lastVoiceAt: 2_500,
+    providerEndpointAt: 2_900,
+  };
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...reflective,
+      now: 3_259,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...reflective,
+      now: 3_260,
+    }),
+    true,
+  );
+});
+
+test("live endpoint cannot appear before ready or after commit", () => {
+  const beforeReady = createVoiceLiveServerProtocol((result) => result);
+  assert.throws(
+    () =>
+      beforeReady.acceptText(
+        JSON.stringify({ type: "endpoint", version: 1 }),
+      ),
+    /voice_response_invalid/,
+  );
+
+  const afterCommit = createVoiceLiveServerProtocol((result) => result);
+  afterCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
+  afterCommit.markCommitted();
+  assert.throws(
+    () =>
+      afterCommit.acceptText(
+        JSON.stringify({ type: "endpoint", version: 1 }),
       ),
     /voice_response_invalid/,
   );
@@ -954,6 +1227,8 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   assert.match(metric, /ws_open_ms/u);
   assert.match(metric, /auth_ready_ms/u);
   assert.match(metric, /commit_to_first_audio_ms/u);
+  assert.match(metric, /commit_to_audible_ms/u);
+  assert.match(metric, /speech_end_to_audible_ms/u);
   assert.match(metric, /turn_total_ms/u);
   assert.match(metric, /barge_halt_ms/u);
   assert.doesNotMatch(
@@ -966,10 +1241,24 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   assert.match(worklet, /setInt16\(this\.frameOffset, pcm, true\)/u);
   assert.match(worklet, /\[completed\]/u);
   assert.match(worklet, /weighted \/ this\.ratio/u);
-  assert.match(
-    bridge,
-    /sampleRate:\s*16_000/u,
+  const audioContextAt = bridge.indexOf("function createAudioContext()");
+  const audioContextFactory = bridge.slice(
+    audioContextAt,
+    audioContextAt + 700,
   );
+  assert.doesNotMatch(audioContextFactory, /sampleRate:\s*16_000/u);
+  assert.match(audioContextFactory, /latencyHint:\s*"interactive"/u);
+  const microphoneAt = bridge.indexOf(
+    "navigator.mediaDevices.getUserMedia",
+  );
+  const microphoneConstraints = bridge.slice(
+    microphoneAt,
+    microphoneAt + 500,
+  );
+  assert.match(microphoneConstraints, /autoGainControl:\s*false/u);
+  assert.match(microphoneConstraints, /noiseSuppression:\s*false/u);
+  assert.match(microphoneConstraints, /echoCancellation:\s*true/u);
+  assert.doesNotMatch(bridge, /pendingLiveSession/u);
 });
 
 function advancePastInterruptGuard(state, startedAt) {
@@ -1076,6 +1365,8 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
 });
 
 test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
+  assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 700);
+  assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 1_700);
   const startedAt = 20_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -1120,6 +1411,45 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
   state = advanceInterruptVad(state, {
     now:
       state.lastVoiceAt + INTERRUPT_VAD_LIMITS.trailingSilenceMs,
+    outputActive: false,
+    peak: 0.003,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
+  const startedAt = 24_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  const firstVoiceAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  const reflectiveFrames =
+    INTERRUPT_VAD_LIMITS.reflectiveSpeechMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 0; frame < reflectiveFrames; frame += 1) {
+    state = advanceInterruptVad(state, {
+      now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.15,
+      rms: 0.05,
+    });
+  }
+  const lastVoiceAt = state.lastVoiceAt;
+  assert.notEqual(lastVoiceAt, null);
+  state = advanceInterruptVad(state, {
+    now: lastVoiceAt + INTERRUPT_VAD_LIMITS.trailingSilenceMs,
+    outputActive: false,
+    peak: 0.003,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceInterruptVad(state, {
+    now: lastVoiceAt + INTERRUPT_VAD_LIMITS.reflectiveSilenceMs,
     outputActive: false,
     peak: 0.003,
     rms: 0.003,
@@ -1437,7 +1767,8 @@ test("idle and absolute session expiries are checked at their boundaries", () =>
   assert.deepEqual(clock.begin(), { expiry: "maximum", ok: false });
 });
 
-test("VAD confirms 120 ms of voice then ends after 1.1 s of trailing silence", () => {
+test("VAD confirms 120 ms of voice then ends after 700 ms silence", () => {
+  assert.equal(VOICE_SESSION_LIMITS.endOfTurnSilenceMs, 700);
   const startedAt = 1_000;
   let state = createVadState(startedAt);
   const confirmationFrames =
@@ -1484,6 +1815,10 @@ test("VAD confirms 120 ms of voice then ends after 1.1 s of trailing silence", (
 });
 
 test("VAD gives a reflective utterance 1.7 seconds to continue", () => {
+  assert.equal(
+    VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    1_700,
+  );
   const startedAt = 5_000;
   let state = createVadState(startedAt);
   const reflectiveFrames =

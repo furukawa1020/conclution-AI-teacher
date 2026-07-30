@@ -22,12 +22,15 @@ const (
 	voiceLiveSampleRateHz       = 16_000
 	voiceLiveFirstFrameTimeout  = 3 * time.Second
 	voiceLiveGuardTimeout       = 5 * time.Second
+	voiceLiveReaderJoinTimeout  = 500 * time.Millisecond
 	voiceLiveMaxCaptureDuration = 55 * time.Second
 	voiceLiveMaxStartBytes      = 40 * 1024
 	voiceLiveMaxPCMFrameBytes   = 15 * 1024
+	voiceLivePCMFrameBytes      = 640
 	voiceLiveMaxPCMFrames       = 2_800
-	voiceLiveMaxPCMTotalBytes   = 2 * 1024 * 1024
-	voiceLiveMaxTokenBytes      = 8 * 1024
+	voiceLiveMaxPCMTotalBytes   = voiceLivePCMFrameBytes *
+		voiceLiveMaxPCMFrames
+	voiceLiveMaxTokenBytes = 8 * 1024
 )
 
 const (
@@ -270,6 +273,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 
 	outputMetrics := &voiceLiveOutputMetrics{}
 	outcomeChannel := make(chan voiceLiveOutcome, 1)
+	endpointChannel := make(chan struct{}, 1)
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -278,19 +282,39 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}()
-		result, processErr := liveService.ProcessLive(
-			liveCtx,
-			principal.UID,
-			input,
-			audioInput,
-			func(audio []byte) error {
-				return outputMetrics.deliver(
-					liveCtx,
-					conn,
-					audio,
-				)
-			},
-		)
+		onAudio := func(audio []byte) error {
+			return outputMetrics.deliver(
+				liveCtx,
+				conn,
+				audio,
+			)
+		}
+		var result VoiceTurnResult
+		var processErr error
+		if endpointService, supportsEndpoint :=
+			liveService.(VoiceTurnLiveEndpointService); supportsEndpoint {
+			result, processErr = endpointService.ProcessLiveWithEndpoint(
+				liveCtx,
+				principal.UID,
+				input,
+				audioInput,
+				onAudio,
+				func() {
+					select {
+					case endpointChannel <- struct{}{}:
+					default:
+					}
+				},
+			)
+		} else {
+			result, processErr = liveService.ProcessLive(
+				liveCtx,
+				principal.UID,
+				input,
+				audioInput,
+				onAudio,
+			)
+		}
 		outcomeChannel <- voiceLiveOutcome{result: result, err: processErr}
 	}()
 
@@ -300,19 +324,77 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	commitAt := time.Time{}
 	captureDeadline := readyAt.Add(voiceLiveMaxCaptureDuration)
 	captureCtx, cancelCapture := context.WithDeadline(liveCtx, captureDeadline)
-	defer cancelCapture()
-
-	for commitAt.IsZero() {
-		readChannel := make(chan voiceLiveRead, 1)
-		go func() {
+	readChannel := make(chan voiceLiveRead, 1)
+	readerContinue := make(chan bool)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
 			frameType, framePayload, readErr := conn.Read(captureCtx)
-			readChannel <- voiceLiveRead{
+			select {
+			case readChannel <- voiceLiveRead{
 				messageType: frameType,
 				payload:     framePayload,
 				err:         readErr,
+			}:
+			case <-captureCtx.Done():
+				clear(framePayload)
+				return
 			}
-		}()
+			if readErr != nil {
+				return
+			}
+			select {
+			case continueReading := <-readerContinue:
+				if !continueReading {
+					return
+				}
+			case <-captureCtx.Done():
+				return
+			}
+		}
+	}()
+	readerJoined := false
+	joinCaptureReader := func(cancelFirst bool) {
+		if readerJoined {
+			return
+		}
+		readerJoined = true
+		if cancelFirst {
+			cancelCapture()
+		}
+		timer := time.NewTimer(voiceLiveReaderJoinTimeout)
+		defer timer.Stop()
+		select {
+		case <-readerDone:
+		case <-timer.C:
+			cancelLive()
+		}
+		cancelCapture()
+		for {
+			select {
+			case unread := <-readChannel:
+				clear(unread.payload)
+			default:
+				return
+			}
+		}
+	}
+	defer func() {
+		joinCaptureReader(true)
+	}()
+	acknowledgeRead := func(continueReading bool) bool {
+		select {
+		case readerContinue <- continueReading:
+			return true
+		case <-readerDone:
+			return false
+		case <-captureCtx.Done():
+			return false
+		}
+	}
 
+	for commitAt.IsZero() {
 		select {
 		case outcome := <-outcomeChannel:
 			s.finishUnexpectedVoiceLiveOutcome(
@@ -334,6 +416,18 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				true,
 			)
 			return
+		case <-endpointChannel:
+			if err := writeVoiceLiveJSON(
+				liveCtx,
+				conn,
+				voiceLiveOutboundFrame{
+					Type:    "endpoint",
+					Version: voiceLiveVersion,
+				},
+			); err != nil {
+				cancelLive()
+				return
+			}
 		case read := <-readChannel:
 			if read.err != nil {
 				cancelLive()
@@ -353,8 +447,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			}
 			switch read.messageType {
 			case websocket.MessageBinary:
-				if len(read.payload) == 0 ||
-					len(read.payload)%2 != 0 {
+				if len(read.payload) != voiceLivePCMFrameBytes {
 					clear(read.payload)
 					finishVoiceLiveWithError(
 						liveCtx,
@@ -399,6 +492,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					clear(read.payload)
 					return
 				}
+				if !acknowledgeRead(true) {
+					cancelLive()
+					return
+				}
 			case websocket.MessageText:
 				var commit voiceLiveCommitFrame
 				if decodeStrictVoiceLiveJSON(
@@ -430,6 +527,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				}
 				commitAt = time.Now()
 				outputMetrics.markCommitted()
+				if !acknowledgeRead(false) {
+					cancelLive()
+					return
+				}
 				close(audioInput)
 				audioInputClosed = true
 			default:
@@ -453,7 +554,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	cancelCapture()
+	joinCaptureReader(false)
 	processingTimer := time.AfterFunc(s.voice.RequestTimeout, cancelLive)
 	defer processingTimer.Stop()
 	disconnectCtx := conn.CloseRead(liveCtx)

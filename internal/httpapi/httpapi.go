@@ -134,6 +134,20 @@ type VoiceTurnLiveService interface {
 	) (VoiceTurnResult, error)
 }
 
+// VoiceTurnLiveEndpointService optionally reports a provider-confirmed speech
+// endpoint while input remains open. The transport still owns the commit:
+// endpoint observation never authorizes model output or state publication.
+type VoiceTurnLiveEndpointService interface {
+	ProcessLiveWithEndpoint(
+		ctx context.Context,
+		uid string,
+		input VoiceTurnInput,
+		audio <-chan []byte,
+		onAudio func([]byte) error,
+		onEndpoint func(),
+	) (VoiceTurnResult, error)
+}
+
 type VoiceOptions struct {
 	Service         VoiceTurnService
 	RateLimiter     guard.Limiter

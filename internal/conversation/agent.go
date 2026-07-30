@@ -30,46 +30,46 @@ const (
 	respondentAwaitingSpokenReply          = "まとまっていなくていいので、今の答えをそのまま話してもらえますか？"
 	plannerUnavailableSpokenReply          = "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。"
 
-	PrecisionConfidenceThreshold        = 0.78
-	AmbientEVIThreshold                 = 0.35
-	maxModelResponseBytes               = 64 * 1024
-	maxRespondentEvidence               = 8
-	maxRespondentProtected              = 16
-	maxRespondentProtectedRunes         = 160
-	maxResearchQueryRunes               = research.MaxTopicRunes
-	researchDiscoveryTimeout            = 7 * time.Second
-	fastInferenceSequenceTimeout        = 12 * time.Second
-	plannerPrecisionRecoveryTimeout     = 10 * time.Second
-	precisionInferenceSequenceTimeout   = 10 * time.Second
-	criticTimeout                       = 12 * time.Second
-	criticRecoveryTimeout               = 18 * time.Second
-	ordinaryCriticSequenceTimeout       = 8 * time.Second
-	highRiskCriticSequenceTimeout       = 24 * time.Second
+	PrecisionConfidenceThreshold      = 0.78
+	AmbientEVIThreshold               = 0.35
+	maxModelResponseBytes             = 64 * 1024
+	maxRespondentEvidence             = 8
+	maxRespondentProtected            = 16
+	maxRespondentProtectedRunes       = 160
+	maxResearchQueryRunes             = research.MaxTopicRunes
+	researchDiscoveryTimeout          = 7 * time.Second
+	fastInferenceSequenceTimeout      = 8 * time.Second
+	plannerPrecisionRecoveryTimeout   = 6 * time.Second
+	precisionInferenceSequenceTimeout = 10 * time.Second
+	criticTimeout                     = 12 * time.Second
+	criticRecoveryTimeout             = 18 * time.Second
+	ordinaryCriticSequenceTimeout     = 8 * time.Second
+	highRiskCriticSequenceTimeout     = 24 * time.Second
 )
 
 var (
-	errCriticDeadline             = errors.New("conversation: critic deadline")
-	errCriticCanceled             = errors.New("conversation: critic canceled")
-	errCriticFinishSafety         = errors.New("conversation: critic safety finish")
-	errCriticFinishLimit          = errors.New("conversation: critic output limit")
-	errCriticResponseShape        = errors.New("conversation: critic response shape")
-	errCriticJSON                 = errors.New("conversation: critic JSON")
-	errCriticContract             = errors.New("conversation: critic contract")
-	errCriticRepairBounds         = errors.New("conversation: critic repair bounds")
-	errInferencePromptBlocked     = errors.New("conversation: inference prompt blocked")
-	errInferenceFinishSafety      = errors.New("conversation: inference safety finish")
-	errInferenceFinishLimit       = errors.New("conversation: inference output limit")
-	errInferenceFinishPolicy      = errors.New("conversation: inference policy finish")
-	errInferenceResponseShape     = errors.New("conversation: inference response shape")
-	errInferenceJSON              = errors.New("conversation: inference JSON")
-	errInferenceTrailingJSON      = errors.New("conversation: inference trailing JSON")
-	errInferencePlanEnvelope      = errors.New("conversation: inference plan envelope")
-	errInferenceRespondentGuard   = errors.New("conversation: inference respondent guard")
-	errInferenceResearchGuard     = errors.New("conversation: inference research guard")
-	errInferenceDocumentGuard     = errors.New("conversation: inference document guard")
-	errInferenceArbiterGuard      = errors.New("conversation: inference arbiter guard")
-	errInferenceAnswerContract    = errors.New("conversation: inference answer contract")
-	errInferenceStateDelta        = errors.New("conversation: inference state delta")
+	errCriticDeadline           = errors.New("conversation: critic deadline")
+	errCriticCanceled           = errors.New("conversation: critic canceled")
+	errCriticFinishSafety       = errors.New("conversation: critic safety finish")
+	errCriticFinishLimit        = errors.New("conversation: critic output limit")
+	errCriticResponseShape      = errors.New("conversation: critic response shape")
+	errCriticJSON               = errors.New("conversation: critic JSON")
+	errCriticContract           = errors.New("conversation: critic contract")
+	errCriticRepairBounds       = errors.New("conversation: critic repair bounds")
+	errInferencePromptBlocked   = errors.New("conversation: inference prompt blocked")
+	errInferenceFinishSafety    = errors.New("conversation: inference safety finish")
+	errInferenceFinishLimit     = errors.New("conversation: inference output limit")
+	errInferenceFinishPolicy    = errors.New("conversation: inference policy finish")
+	errInferenceResponseShape   = errors.New("conversation: inference response shape")
+	errInferenceJSON            = errors.New("conversation: inference JSON")
+	errInferenceTrailingJSON    = errors.New("conversation: inference trailing JSON")
+	errInferencePlanEnvelope    = errors.New("conversation: inference plan envelope")
+	errInferenceRespondentGuard = errors.New("conversation: inference respondent guard")
+	errInferenceResearchGuard   = errors.New("conversation: inference research guard")
+	errInferenceDocumentGuard   = errors.New("conversation: inference document guard")
+	errInferenceArbiterGuard    = errors.New("conversation: inference arbiter guard")
+	errInferenceAnswerContract  = errors.New("conversation: inference answer contract")
+	errInferenceStateDelta      = errors.New("conversation: inference state delta")
 
 	explicitJapaneseRecentResearchPattern = regexp.MustCompile(
 		`^(?:(?i:crossref)|クロスレフ|外部検索)で\s*` +
@@ -407,6 +407,27 @@ func (agent *vertexAgent) Process(
 				"planner precision recovery failed closed",
 				"failure_class", inferenceFailureClass(recoveryErr),
 				"failure_stage", inferenceFailureStage(recoveryErr),
+				"primary_model_role", "fast",
+				"recovery_model_role", "precision",
+				"recovery_outcome", "failed_closed",
+				"turn_mode", plannerTurnMode(normalized.Ambient),
+				"duration_ms", time.Since(plannerStarted).Milliseconds(),
+			)
+			return agent.completePlannerUnavailable(
+				uid,
+				state,
+				normalized.Ambient,
+			)
+		}
+		// Recovery may restore an answer, but it must not grant a capability
+		// that the failed primary planner never established. In particular,
+		// require a fresh intentional turn before any outbound research.
+		if recoveredPlan.ResearchAction != "none" {
+			slog.WarnContext(
+				ctx,
+				"planner precision recovery blocked capability escalation",
+				"failure_class", "response_invalid",
+				"failure_stage", "research_guard",
 				"primary_model_role", "fast",
 				"recovery_model_role", "precision",
 				"recovery_outcome", "failed_closed",

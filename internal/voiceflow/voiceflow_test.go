@@ -288,6 +288,60 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	}
 }
 
+func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	speech := &fakeSpeech{
+		transcript: "この内容に答えてください",
+		confidence: 0.95,
+	}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		Domain:             "other",
+		AssistanceTarget:   "assistant",
+		RespondentStage:    "none",
+		ResearchStatus:     "none",
+		ResearchRecords:    []conversation.ResearchRecord{},
+		Route:              "planner-unavailable",
+		StateToken:         "fresh-encrypted-state",
+		SpokenReply:        "今の話は聞き取れています。もう一度聞かせてください。",
+		NeedsClarification: true,
+		InterventionPolicy: "clarify",
+		Intervention: conversation.ArbiterDecision{
+			Act: "clarify",
+		},
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pipeline.Process(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{
+			Audio:    []byte("audio"),
+			MIMEType: "audio/webm",
+			Document: &httpapi.VoiceDocument{
+				MIMEType: "application/pdf",
+				Data:     []byte("%PDF"),
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Route != "planner-unavailable" ||
+		result.StateToken != "fresh-encrypted-state" ||
+		result.Caption != agent.result.SpokenReply ||
+		!result.NeedsPaper ||
+		speech.synthesizeCalls != 1 ||
+		speech.synthesizedText != agent.result.SpokenReply {
+		t.Fatalf("planner fallback result = %+v", result)
+	}
+}
+
 func TestPipelineSynthesizesOnlySelectedIntervention(t *testing.T) {
 	t.Parallel()
 

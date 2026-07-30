@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -26,6 +27,26 @@ const researchRecord = Object.freeze({
   url: "https://doi.org/10.1234/kotae.2026.1",
   published: "2026-07-29",
   source: "Crossref",
+});
+
+test("bridge cancellation releases ownership before rejecting the recording", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("function releaseMicrophone()");
+  const end = bridge.indexOf("\n}\n\nfunction hasLiveAudioTrack", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const release = bridge.slice(start, end);
+
+  assert.doesNotMatch(release, /activeRecording\.captureBuffer/u);
+  const detachAt = release.indexOf("activeRecording = undefined");
+  const rejectAt = release.indexOf(
+    'rejectRecording(recording, "request_cancelled")',
+  );
+  assert.ok(detachAt >= 0);
+  assert.ok(rejectAt > detachAt);
 });
 
 test("research discovery stays bounded, immutable, and explicitly unverified", () => {
@@ -212,11 +233,15 @@ test("idle and absolute session expiries are checked at their boundaries", () =>
   assert.deepEqual(clock.begin(), { expiry: "maximum", ok: false });
 });
 
-test("VAD requires 200 ms of voice then ends after 1.1 s of trailing silence", () => {
+test("VAD confirms 120 ms of voice then ends after 1.1 s of trailing silence", () => {
   const startedAt = 1_000;
   let state = createVadState(startedAt);
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.minimumVoiceMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  assert.equal(confirmationFrames, 3);
 
-  for (let sample = 1; sample <= 4; sample += 1) {
+  for (let sample = 1; sample < confirmationFrames; sample += 1) {
     state = advanceVad(state, {
       now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
       peak: 0.08,
@@ -257,7 +282,10 @@ test("VAD requires 200 ms of voice then ends after 1.1 s of trailing silence", (
 test("VAD keeps a weak word ending after speech is confirmed", () => {
   const startedAt = 10_000;
   let state = createVadState(startedAt);
-  for (let sample = 1; sample <= 5; sample += 1) {
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.minimumVoiceMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let sample = 1; sample <= confirmationFrames; sample += 1) {
     state = advanceVad(state, {
       now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
       peak: 0.08,
@@ -283,7 +311,10 @@ test("VAD keeps a weak word ending after speech is confirmed", () => {
 test("VAD caps a spoken capture at 55 seconds", () => {
   const startedAt = 20_000;
   let state = createVadState(startedAt);
-  for (let sample = 1; sample <= 5; sample += 1) {
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.minimumVoiceMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let sample = 1; sample <= confirmationFrames; sample += 1) {
     state = advanceVad(state, {
       now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
       peak: 0.08,
@@ -309,7 +340,10 @@ test("VAD caps a spoken capture at 55 seconds", () => {
 test("VAD refreshes the trailing-silence clock as soon as confirmed speech resumes", () => {
   const startedAt = 30_000;
   let state = createVadState(startedAt);
-  for (let sample = 1; sample <= 5; sample += 1) {
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.minimumVoiceMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let sample = 1; sample <= confirmationFrames; sample += 1) {
     state = advanceVad(state, {
       now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
       peak: 0.08,
@@ -318,30 +352,35 @@ test("VAD refreshes the trailing-silence clock as soon as confirmed speech resum
   }
   assert.equal(state.hasSpeech, true);
 
-  for (let now = startedAt + 240; now <= startedAt + 1_240; now += 40) {
-    state = advanceVad(state, {
-      now,
-      peak: 0.003,
-      rms: 0.003,
-    });
-  }
+  const resumesAt =
+    startedAt +
+    VOICE_SESSION_LIMITS.minimumVoiceMs +
+    VOICE_SESSION_LIMITS.endOfTurnSilenceMs;
+  state = advanceVad(state, {
+    now: resumesAt - VOICE_SESSION_LIMITS.vadIntervalMs,
+    peak: 0.003,
+    rms: 0.003,
+  });
   assert.equal(state.action, null);
 
   state = advanceVad(state, {
-    now: startedAt + 1_280,
+    now: resumesAt,
     peak: 0.08,
     rms: 0.03,
   });
   assert.equal(state.voiceRunMs, VOICE_SESSION_LIMITS.vadIntervalMs);
-  assert.equal(state.lastVoiceAt, startedAt + 1_280);
+  assert.equal(state.lastVoiceAt, resumesAt);
   assert.equal(state.action, null);
 
   state = advanceVad(state, {
-    now: startedAt + 1_320,
+    now: resumesAt + VOICE_SESSION_LIMITS.vadIntervalMs,
     peak: 0.08,
     rms: 0.03,
   });
-  assert.equal(state.lastVoiceAt, startedAt + 1_320);
+  assert.equal(
+    state.lastVoiceAt,
+    resumesAt + VOICE_SESSION_LIMITS.vadIntervalMs,
+  );
   assert.equal(state.action, null);
 });
 
@@ -423,7 +462,7 @@ test("capture buffer clears the complete payload at its byte ceiling", () => {
   assert.equal(capture.snapshot().totalBytes, 0);
 });
 
-test("a false voice candidate is discarded before a fresh capture starts", () => {
+test("an 80 ms noise candidate is discarded before a fresh capture starts", () => {
   const startedAt = 40_000;
   let vadState = createVadState(startedAt);
   let candidateState = createCandidateCaptureState();
@@ -441,18 +480,28 @@ test("a false voice candidate is discarded before a fresh capture starts", () =>
     candidateStartedAt: now,
     phase: "candidate",
   });
+  now += VOICE_SESSION_LIMITS.vadIntervalMs;
+  vadState = advanceVad(vadState, {
+    now,
+    peak: 0.08,
+    rms: 0.03,
+  });
+  candidateState = advanceCandidateCapture(candidateState, vadState, now);
+  assert.equal(vadState.voiceRunMs, 80);
+  assert.equal(vadState.hasSpeech, false);
+  assert.equal(candidateState.phase, "candidate");
   firstCapture.append({ id: "first-webm-header", size: 20 });
 
-  for (let sample = 0; sample < 2; sample += 1) {
+  for (let sample = 0; sample < 4; sample += 1) {
     now += VOICE_SESSION_LIMITS.vadIntervalMs;
     vadState = advanceVad(vadState, {
       now,
       peak: 0.003,
       rms: 0.003,
     });
+    candidateState = advanceCandidateCapture(candidateState, vadState, now);
   }
   assert.equal(vadState.voiceRunMs, 0);
-  candidateState = advanceCandidateCapture(candidateState, vadState, now);
   assert.deepEqual(candidateState, {
     action: "discard",
     candidateStartedAt: null,
@@ -487,12 +536,16 @@ test("a false voice candidate is discarded before a fresh capture starts", () =>
   );
 });
 
-test("capture starts on the first voiced frame but confirms only after 200 ms", () => {
+test("capture starts on the first voiced frame but confirms after 120 ms", () => {
   const startedAt = 50_000;
   let vadState = createVadState(startedAt);
   let candidateState = createCandidateCaptureState();
 
-  for (let sample = 1; sample <= 5; sample += 1) {
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.minimumVoiceMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  assert.equal(confirmationFrames, 3);
+  for (let sample = 1; sample <= confirmationFrames; sample += 1) {
     const now = startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs;
     vadState = advanceVad(vadState, {
       now,
@@ -507,7 +560,7 @@ test("capture starts on the first voiced frame but confirms only after 200 ms", 
         candidateStartedAt: now,
         phase: "candidate",
       });
-    } else if (sample < 5) {
+    } else if (sample < confirmationFrames) {
       assert.deepEqual(candidateState, {
         action: null,
         candidateStartedAt:

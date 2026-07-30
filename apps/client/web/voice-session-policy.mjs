@@ -1,6 +1,6 @@
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
-  minimumVoiceMs: 200,
+  minimumVoiceMs: 120,
   endOfTurnSilenceMs: 1_100,
   candidateCaptureLimitMs: 1_500,
   silentCaptureLimitMs: 30_000,

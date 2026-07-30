@@ -91,7 +91,7 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				t.Fatalf("recognition fallback metadata = %+v", result)
 			}
 			if ambient {
-				if result.Route != "stt-silent" ||
+				if result.Route != routeSilentLowConfidence ||
 					len(result.Audio) != 0 ||
 					result.Caption != "" ||
 					speech.synthesizeCalls != 0 {
@@ -99,7 +99,7 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				}
 				return
 			}
-			if result.Route != "stt-clarify" ||
+			if result.Route != routeClarifyLowConfidence ||
 				result.Caption != lowConfidencePrompt ||
 				speech.synthesizedText != lowConfidencePrompt ||
 				len(result.Audio) == 0 ||
@@ -149,7 +149,7 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if result.Route != "stt-silent" ||
+					if result.Route != routeSilentNoSpeech ||
 						result.StateToken != "existing-state" ||
 						result.DetectedDomain != "unknown" ||
 						result.ResearchStatus != "none" ||
@@ -162,7 +162,7 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if result.Route != "stt-clarify" ||
+					if result.Route != routeClarifyNoSpeech ||
 						result.StateToken != "existing-state" ||
 						result.Caption != lowConfidencePrompt ||
 						len(result.Audio) == 0 {

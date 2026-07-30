@@ -618,7 +618,13 @@ fn human_file_size(bytes: u64) -> String {
 }
 
 fn next_turn_is_intentional(route: &str, spoke: bool) -> bool {
-    spoke || route == "stt-clarify"
+    spoke
+        || matches!(
+            route,
+            "stt-clarify"
+                | "stt-clarify-no-speech"
+                | "stt-clarify-low-confidence"
+        )
 }
 
 #[component]
@@ -1062,7 +1068,20 @@ mod tests {
     fn recognition_clarification_keeps_the_explicit_turn_open() {
         assert!(next_turn_is_intentional("stt-clarify", true));
         assert!(next_turn_is_intentional("stt-clarify", false));
+        assert!(next_turn_is_intentional(
+            "stt-clarify-no-speech",
+            false
+        ));
+        assert!(next_turn_is_intentional(
+            "stt-clarify-low-confidence",
+            false
+        ));
         assert!(!next_turn_is_intentional("stt-silent", false));
+        assert!(!next_turn_is_intentional("stt-silent-no-speech", false));
+        assert!(!next_turn_is_intentional(
+            "stt-silent-low-confidence",
+            false
+        ));
         assert!(next_turn_is_intentional("direct-answer", true));
         assert!(!next_turn_is_intentional("direct-answer", false));
     }

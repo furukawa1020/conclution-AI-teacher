@@ -13,6 +13,10 @@ import (
 const (
 	minUsableTranscriptConfidence = 0.65
 	lowConfidencePrompt           = "今の一文だけ、もう一度聞かせてください。"
+	routeClarifyNoSpeech          = "stt-clarify-no-speech"
+	routeClarifyLowConfidence     = "stt-clarify-low-confidence"
+	routeSilentNoSpeech           = "stt-silent-no-speech"
+	routeSilentLowConfidence      = "stt-silent-low-confidence"
 )
 
 // Pipeline keeps the three trust boundaries explicit: regional speech
@@ -39,20 +43,33 @@ func (p *Pipeline) Process(
 	if err != nil {
 		if errors.Is(err, speechio.ErrNoSpeech) {
 			if input.Ambient {
-				return silentRecognitionResult(input.StateToken), nil
+				return silentRecognitionResult(
+					input.StateToken,
+					routeSilentNoSpeech,
+				), nil
 			}
-			return p.recognitionClarification(ctx, input.StateToken)
+			return p.recognitionClarification(
+				ctx,
+				input.StateToken,
+				routeClarifyNoSpeech,
+			)
 		}
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
 	if transcriptConfidenceTooLow(confidence) {
-		result := silentRecognitionResult(input.StateToken)
 		if input.Ambient {
-			return result, nil
+			return silentRecognitionResult(
+				input.StateToken,
+				routeSilentLowConfidence,
+			), nil
 		}
-		return p.recognitionClarification(ctx, input.StateToken)
+		return p.recognitionClarification(
+			ctx,
+			input.StateToken,
+			routeClarifyLowConfidence,
+		)
 	}
 
 	turn := conversation.VoiceTurn{
@@ -108,6 +125,7 @@ func (p *Pipeline) Process(
 func (p *Pipeline) recognitionClarification(
 	ctx context.Context,
 	stateToken string,
+	route string,
 ) (httpapi.VoiceTurnResult, error) {
 	audio, audioMIME, err := p.speech.Synthesize(ctx, lowConfidencePrompt)
 	if err != nil {
@@ -115,15 +133,17 @@ func (p *Pipeline) recognitionClarification(
 			httpapi.VoicePipelineStageSynthesize,
 		)
 	}
-	result := silentRecognitionResult(stateToken)
+	result := silentRecognitionResult(stateToken, route)
 	result.Audio = audio
 	result.AudioMIMEType = audioMIME
 	result.Caption = lowConfidencePrompt
-	result.Route = "stt-clarify"
 	return result, nil
 }
 
-func silentRecognitionResult(stateToken string) httpapi.VoiceTurnResult {
+func silentRecognitionResult(
+	stateToken string,
+	route string,
+) httpapi.VoiceTurnResult {
 	return httpapi.VoiceTurnResult{
 		StateToken:       stateToken,
 		DetectedDomain:   "unknown",
@@ -131,7 +151,7 @@ func silentRecognitionResult(stateToken string) httpapi.VoiceTurnResult {
 		RespondentStage:  "none",
 		ResearchStatus:   "none",
 		ResearchRecords:  []httpapi.ResearchRecord{},
-		Route:            "stt-silent",
+		Route:            route,
 	}
 }
 

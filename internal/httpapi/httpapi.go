@@ -388,8 +388,7 @@ func normalizedAudioMIME(value string) string {
 }
 
 func validateVoiceResult(result VoiceTurnResult) error {
-	preInferenceRecognitionResult := result.Route == "stt-clarify" ||
-		result.Route == "stt-silent"
+	preInferenceRecognitionResult := isPreInferenceRecognitionRoute(result.Route)
 	if len(result.Audio) > maxAudioBytes ||
 		(len(result.StateToken) == 0 && !preInferenceRecognitionResult) ||
 		len(result.StateToken) > maxStateBytes ||
@@ -432,6 +431,20 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		return errors.New("unsupported synthesized audio type")
 	}
 	return nil
+}
+
+func isPreInferenceRecognitionRoute(route string) bool {
+	switch route {
+	case "stt-clarify",
+		"stt-silent",
+		"stt-clarify-no-speech",
+		"stt-clarify-low-confidence",
+		"stt-silent-no-speech",
+		"stt-silent-low-confidence":
+		return true
+	default:
+		return false
+	}
 }
 
 func validResearchRecords(status string, records []ResearchRecord) bool {

@@ -7,15 +7,17 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 	"google.golang.org/genai"
 )
 
 type fakeGeneration struct {
-	body         string
-	err          error
-	finishReason genai.FinishReason
+	body           string
+	err            error
+	finishReason   genai.FinishReason
+	waitForContext bool
 }
 
 type generatorCall struct {
@@ -35,7 +37,7 @@ type fakeGenerator struct {
 }
 
 func (fake *fakeGenerator) GenerateContent(
-	_ context.Context,
+	ctx context.Context,
 	model string,
 	contents []*genai.Content,
 	config *genai.GenerateContentConfig,
@@ -77,6 +79,10 @@ func (fake *fakeGenerator) GenerateContent(
 		return nil, errors.New("unexpected generation")
 	}
 	generation := fake.generations[index]
+	if generation.waitForContext {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if generation.err != nil {
 		return nil, generation.err
 	}
@@ -221,7 +227,7 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		t.Fatalf("welcome called model %d times, want zero", len(fake.calls))
 	}
 	if phaticLocalSpokenReply !=
-		"こんにちは。質問でも考え途中でも、そのままどうぞ。まず答えて、必要なら一緒に整理します。" {
+		"こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。" {
 		t.Fatalf("unexpected local greeting copy: %q", phaticLocalSpokenReply)
 	}
 	if result.Route != "phatic-local" ||
@@ -321,7 +327,9 @@ func TestAgentPhaticLocalAdvancesExistingPrivateStateWithoutStoringProse(
 		len(opened.Graph.Claims) != 1 ||
 		opened.Graph.Claims[0] != "既存の安全な抽象" ||
 		opened.ConversationSummary != "" ||
-		opened.DocumentSummary != "" {
+		opened.DocumentSummary != "" ||
+		!opened.SelfCorrectionGrace ||
+		!result.SelfCorrectionGrace {
 		t.Fatalf("phatic greeting damaged private state: %#v", opened)
 	}
 	encoded, err := json.Marshal(opened)
@@ -392,8 +400,19 @@ func TestStandaloneGreetingEligibilityIsStrict(t *testing.T) {
 			turn: VoiceTurn{Utterance: "こんにちは。続きがあります"},
 		},
 		{
-			name: "non-punctuation suffix",
+			name: "spoken prolonged sound suffix",
 			turn: VoiceTurn{Utterance: "こんにちはー"},
+			want: true,
+		},
+		{
+			name: "spoken wave dash suffix",
+			turn: VoiceTurn{Utterance: "こんにちは〜！"},
+			want: true,
+		},
+		{
+			name: "spoken ascii tilde suffix",
+			turn: VoiceTurn{Utterance: "こんにちは~~~"},
+			want: true,
 		},
 		{
 			name: "trailing punctuation and whitespace",
@@ -632,6 +651,10 @@ func TestAmbientSilentFastEligibilityFailsClosed(t *testing.T) {
 
 func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
 	for _, required := range []string{
+		"spoken_replyの冒頭で要求されたAを直接返す",
+		"問いの復唱、挨拶、自己紹介、前置きを先に置かない",
+		"dailyの明確な問い",
+		"簡潔にする",
 		"最初のターンが挨拶だけでも",
 		"挨拶を反復するだけで終えず",
 		"質問、考え途中、ぼやきもそのまま話せる",
@@ -640,6 +663,128 @@ func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
 		if !strings.Contains(systemInstruction, required) {
 			t.Fatalf("system instruction is missing %q", required)
 		}
+	}
+}
+
+func TestCriticPolicyUsesTurnPlanAndRouteRisk(t *testing.T) {
+	baseTurn := VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "次は何をすればいい？",
+	}
+	basePlan := validModelPlan()
+	tests := []struct {
+		name      string
+		route     string
+		configure func(*VoiceTurn, *modelPlan)
+		highRisk  bool
+	}{
+		{name: "ordinary fast"},
+		{name: "precision route", route: "precision", highRisk: true},
+		{
+			name: "PDF",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.PDF = &InlinePDF{
+					MIMEType: "application/pdf",
+					Data:     []byte("%PDF-1.7"),
+				}
+			},
+			highRisk: true,
+		},
+		{
+			name: "research",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "research"
+			},
+			highRisk: true,
+		},
+		{
+			name: "technical",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "technical"
+			},
+			highRisk: true,
+		},
+		{
+			name: "health",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "health"
+			},
+			highRisk: true,
+		},
+		{
+			name: "legal",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "legal"
+			},
+			highRisk: true,
+		},
+		{
+			name: "finance",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.Domain = "finance"
+			},
+			highRisk: true,
+		},
+		{
+			name: "safety",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.InterventionPolicy = "safety"
+			},
+			highRisk: true,
+		},
+		{
+			name: "respondent restructure",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.AssistanceTarget = "respondent"
+				plan.RespondentStage = "restructure"
+			},
+			highRisk: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			turn := baseTurn
+			plan := basePlan
+			if test.configure != nil {
+				test.configure(&turn, &plan)
+			}
+			policy := criticPolicyFor(turn, plan, test.route)
+			if test.highRisk {
+				if policy.thinkingLevel != genai.ThinkingLevelHigh ||
+					policy.recoveryThinkingLevel != genai.ThinkingLevelHigh ||
+					policy.sequenceTimeout != highRiskCriticSequenceTimeout {
+					t.Fatalf("high-risk policy = %#v", policy)
+				}
+				return
+			}
+			if policy.thinkingLevel != genai.ThinkingLevelLow ||
+				policy.recoveryThinkingLevel != genai.ThinkingLevelMedium ||
+				policy.sequenceTimeout != ordinaryCriticSequenceTimeout {
+				t.Fatalf("ordinary policy = %#v", policy)
+			}
+		})
+	}
+}
+
+func TestCriticSequenceDeadlineStopsAdditionalRetries(t *testing.T) {
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{waitForContext: true},
+		{body: encodeContract(t, validCriticContract("未到達"))},
+	}}
+	agent := newTestAgent(t, fake)
+	policy := criticPolicyFor(VoiceTurn{}, validModelPlan(), "fast")
+	policy.sequenceTimeout = time.Nanosecond
+
+	_, err := agent.auditAnswerWithRetry(
+		context.Background(),
+		agent.fastModel,
+		policy,
+		VoiceTurn{SchemaVersion: SchemaVersion, Utterance: "質問"},
+		conversationState{},
+		validModelPlan(),
+	)
+	if err == nil || len(fake.calls) != 1 {
+		t.Fatalf("expired critic sequence retried: calls=%d err=%v", len(fake.calls), err)
 	}
 }
 
@@ -782,6 +927,40 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 			fake.calls[3].model != DefaultPrecisionModel ||
 			fake.calls[3].thinkingLevel != genai.ThinkingLevelMedium {
 			t.Fatalf("precision critic recovery failed: result=%#v calls=%#v", result, fake.calls)
+		}
+	})
+
+	t.Run("high risk keeps high thinking through recovery", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "research"
+		precision := fast
+		precision.SpokenReply = "一次資料で検証するまでは結論を保留します。"
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{body: encodePlan(t, precision)},
+			{err: errors.New("primary high-risk critic failure")},
+			{err: errors.New("primary high-risk critic failure again")},
+			{body: encodeContract(t, validCriticContract(precision.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-high-risk-recovery", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "この研究の根拠は十分？",
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "precision" || len(fake.calls) != 5 {
+			t.Fatalf("high-risk recovery failed: result=%#v calls=%#v", result, fake.calls)
+		}
+		for _, index := range []int{2, 3, 4} {
+			if fake.calls[index].thinkingLevel != genai.ThinkingLevelHigh {
+				t.Fatalf("critic call %d weakened: %#v", index, fake.calls[index])
+			}
+		}
+		if fake.calls[4].model != DefaultPrecisionModel {
+			t.Fatalf("recovery did not use precision model: %#v", fake.calls[4])
 		}
 	})
 

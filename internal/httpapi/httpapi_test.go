@@ -1096,16 +1096,29 @@ func TestVoiceResultValidatesCrossrefResearchRecords(t *testing.T) {
 func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 	t.Parallel()
 
-	for _, result := range []VoiceTurnResult{
-		{
+	for _, route := range []string{
+		"stt-silent",
+		"stt-silent-no-speech",
+		"stt-silent-low-confidence",
+	} {
+		result := VoiceTurnResult{
 			DetectedDomain:   "unknown",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
-			Route:            "stt-silent",
-		},
-		{
+			Route:            route,
+		}
+		if err := validateVoiceResult(result); err != nil {
+			t.Fatalf("safe silent pre-inference route %q rejected: %v", route, err)
+		}
+	}
+	for _, route := range []string{
+		"stt-clarify",
+		"stt-clarify-no-speech",
+		"stt-clarify-low-confidence",
+	} {
+		result := VoiceTurnResult{
 			Audio:            []byte("audio"),
 			AudioMIMEType:    "audio/mpeg",
 			Caption:          "もう一度話してもらえますか？",
@@ -1114,11 +1127,10 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 			RespondentStage:  "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
-			Route:            "stt-clarify",
-		},
-	} {
+			Route:            route,
+		}
 		if err := validateVoiceResult(result); err != nil {
-			t.Fatalf("safe pre-inference fallback rejected: %+v: %v", result, err)
+			t.Fatalf("safe spoken pre-inference route %q rejected: %v", route, err)
 		}
 	}
 	invalidFallback := VoiceTurnResult{
@@ -1142,6 +1154,23 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 	}
 	if err := validateVoiceResult(normal); err == nil {
 		t.Fatal("normal model result without encrypted state was accepted")
+	}
+	for _, route := range []string{
+		"stt-clarify-untrusted",
+		"stt-silent-provider-detail",
+		"stt-no-speech",
+	} {
+		unrecognized := VoiceTurnResult{
+			DetectedDomain:   "unknown",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            route,
+		}
+		if err := validateVoiceResult(unrecognized); err == nil {
+			t.Fatalf("unrecognized STT route %q bypassed encrypted state", route)
+		}
 	}
 }
 

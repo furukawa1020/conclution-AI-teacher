@@ -253,12 +253,15 @@ function stopTracks(stream) {
 }
 
 function releaseMicrophone() {
-  if (activeRecording) {
-    activeRecording.discard = true;
-    activeRecording.captureBuffer.clear();
-    activeRecording.totalBytes = 0;
-    requestRecordingStop(activeRecording, "cancelled");
-    activeRecording = undefined;
+  const recording = activeRecording;
+  activeRecording = undefined;
+  if (recording) {
+    recording.discard = true;
+    recording.totalBytes = 0;
+    // Rejecting the owned recording is the single cancellation path: it
+    // stops VAD, clears and detaches the current candidate recorder, and
+    // settles any Rust task waiting on endPromise.
+    rejectRecording(recording, "request_cancelled");
   }
   setTracksEnabled(false);
   stopTracks(mediaStream);

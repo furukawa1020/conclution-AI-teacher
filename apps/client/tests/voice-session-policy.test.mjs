@@ -758,6 +758,21 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
     /wss:\/\/kotae-api-r6kgkvtrmq-an\.a\.run\.app\/api\/v1\/voice\/live\?/u,
   );
   assert.match(bridge, /new WebSocket\(VOICE_LIVE_ENDPOINT\)/u);
+  const liveAt = bridge.indexOf("async function startVoiceLiveSession(");
+  const liveSession = bridge.slice(liveAt, liveAt + 15_000);
+  assert.ok(
+    liveSession.indexOf("new WebSocket(VOICE_LIVE_ENDPOINT)") <
+      liveSession.indexOf("loadPcmCaptureWorklet(audioContext)"),
+    "the WSS handshake must overlap AudioWorklet loading",
+  );
+  assert.match(
+    liveSession,
+    /readyTimeoutMs\s*-\s*\(performance\.now\(\)\s*-\s*liveStartedAt\)/u,
+  );
+  assert.match(
+    liveSession,
+    /authReadyTimer\s*=\s*setTimeout\(/u,
+  );
   const metricAt = bridge.indexOf("function dispatchVoiceLatency(");
   const metric = bridge.slice(metricAt, metricAt + 1_200);
   assert.match(metric, /ws_open_ms/u);

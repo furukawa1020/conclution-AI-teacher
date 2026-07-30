@@ -89,6 +89,7 @@ const finishGate = createTurnGate();
 const sessionClock = createSessionClock({
   now: () => performance.now(),
 });
+const pcmCaptureWorkletLoads = new WeakMap();
 
 function fail(code) {
   throw new Error(code);
@@ -1080,6 +1081,20 @@ function liveVoiceSupported(stream) {
   );
 }
 
+function loadPcmCaptureWorklet(context) {
+  let load = pcmCaptureWorkletLoads.get(context);
+  if (!load) {
+    load = context.audioWorklet.addModule(PCM_CAPTURE_WORKLET_URL);
+    pcmCaptureWorkletLoads.set(context, load);
+    void load.catch(() => {
+      if (pcmCaptureWorkletLoads.get(context) === load) {
+        pcmCaptureWorkletLoads.delete(context);
+      }
+    });
+  }
+  return load;
+}
+
 function liveCredential(value) {
   return (
     typeof value === "string" &&
@@ -1109,23 +1124,164 @@ async function startVoiceLiveSession({
     return undefined;
   }
   const liveStartedAt = performance.now();
-
+  let socket;
+  let socketOpenedAt;
   try {
-    await audioContext.audioWorklet.addModule(PCM_CAPTURE_WORKLET_URL);
+    socket = new WebSocket(VOICE_LIVE_ENDPOINT);
+    socket.binaryType = "arraybuffer";
   } catch {
     return undefined;
   }
+
+  let clientTransport;
+  let protocol;
+  try {
+    clientTransport = createVoiceLiveClientTransport(socket, {
+      type: "start",
+      version: 1,
+      idToken,
+      appCheckToken,
+      sessionState,
+      turnMode,
+      sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
+    });
+    protocol = createVoiceLiveServerProtocol((result) =>
+      safeVoiceResponse(result),
+    );
+  } catch {
+    socket.close(1000, "http_fallback");
+    return undefined;
+  }
+
+  let preflightAuthReadyMs = 0;
+  let preflightError;
+  let preflightState = "connecting";
+  function failPreflight(error, close = true) {
+    if (preflightError) return;
+    preflightError =
+      error instanceof Error
+        ? error
+        : new Error("voice_api_unavailable");
+    preflightState = "failed";
+    clientTransport.close();
+    if (
+      close &&
+      (socket.readyState === WebSocket.CONNECTING ||
+        socket.readyState === WebSocket.OPEN)
+    ) {
+      socket.close(4002, "voice_live_failed");
+    }
+  }
+  const acceptPreflightOpen = () => {
+    socketOpenedAt ??= performance.now();
+    if (expectedEpoch !== sessionEpoch) {
+      failPreflight(new Error("request_cancelled"));
+      return;
+    }
+    try {
+      clientTransport.open();
+      preflightState = "awaiting-ready";
+    } catch {
+      failPreflight(new Error("voice_api_unavailable"));
+    }
+  };
+  const acceptPreflightMessage = (event) => {
+    if (preflightError) return;
+    try {
+      if (typeof event.data !== "string") {
+        fail("voice_response_invalid");
+      }
+      const message = protocol.acceptText(event.data);
+      if (message.type === "error") {
+        failPreflight(new Error(message.code));
+        return;
+      }
+      if (
+        message.type !== "ready" ||
+        preflightState !== "awaiting-ready"
+      ) {
+        fail("voice_response_invalid");
+      }
+      clientTransport.markReady();
+      preflightAuthReadyMs = performance.now() - liveStartedAt;
+      preflightState = "ready";
+    } catch (error) {
+      failPreflight(
+        error instanceof Error
+          ? error
+          : new Error("voice_response_invalid"),
+      );
+    }
+  };
+  const acceptPreflightClose = () => {
+    if (!preflightError) {
+      failPreflight(new Error("voice_api_unavailable"), false);
+    }
+  };
+  const acceptPreflightError = () =>
+    failPreflight(new Error("voice_api_unavailable"));
+  function detachPreflight() {
+    socket.removeEventListener("open", acceptPreflightOpen);
+    socket.removeEventListener("message", acceptPreflightMessage);
+    socket.removeEventListener("close", acceptPreflightClose);
+    socket.removeEventListener("error", acceptPreflightError);
+  }
+  socket.addEventListener("open", acceptPreflightOpen, { once: true });
+  socket.addEventListener("message", acceptPreflightMessage);
+  socket.addEventListener("close", acceptPreflightClose, {
+    once: true,
+  });
+  socket.addEventListener("error", acceptPreflightError, { once: true });
+
+  let workletTimeout;
+  try {
+    await Promise.race([
+      loadPcmCaptureWorklet(audioContext),
+      new Promise((_, reject) => {
+        workletTimeout = setTimeout(
+          () => reject(new Error("voice_api_unavailable")),
+          Math.max(
+            0,
+            VOICE_LIVE_LIMITS.readyTimeoutMs -
+              (performance.now() - liveStartedAt),
+          ),
+        );
+      }),
+    ]);
+  } catch {
+    detachPreflight();
+    clientTransport.close();
+    if (
+      socket.readyState === WebSocket.CONNECTING ||
+      socket.readyState === WebSocket.OPEN
+    ) {
+      socket.close(1000, "http_fallback");
+    }
+    return undefined;
+  } finally {
+    if (workletTimeout !== undefined) clearTimeout(workletTimeout);
+  }
+  detachPreflight();
   if (
     expectedEpoch !== sessionEpoch ||
     !audioContext ||
     audioContext.state === "closed"
   ) {
+    if (
+      socket.readyState === WebSocket.CONNECTING ||
+      socket.readyState === WebSocket.OPEN
+    ) {
+      clientTransport.close();
+      socket.close(1000, "stale");
+    }
     fail("request_cancelled");
+  }
+  if (preflightError) {
+    return undefined;
   }
 
   let captureNode;
   let captureSource;
-  let socket;
   try {
     captureNode = new AudioWorkletNode(
       audioContext,
@@ -1138,28 +1294,22 @@ async function startVoiceLiveSession({
       },
     );
     captureSource = audioContext.createMediaStreamSource(stream);
-    socket = new WebSocket(VOICE_LIVE_ENDPOINT);
   } catch {
     captureNode?.disconnect();
     captureSource?.disconnect();
+    if (
+      socket.readyState === WebSocket.CONNECTING ||
+      socket.readyState === WebSocket.OPEN
+    ) {
+      clientTransport.close();
+      socket.close(1000, "http_fallback");
+    }
     return undefined;
   }
-  socket.binaryType = "arraybuffer";
 
-  const clientTransport = createVoiceLiveClientTransport(socket, {
-    type: "start",
-    version: 1,
-    idToken,
-    appCheckToken,
-    sessionState,
-    turnMode,
-    sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
-  });
-  const protocol = createVoiceLiveServerProtocol((result) =>
-    safeVoiceResponse(result),
-  );
   let captureStopped = false;
-  let authReadyMs = 0;
+  let authReadyMs = preflightAuthReadyMs;
+  let authReadyTimer;
   let commitAt;
   let commitToFirstAudioMs = 0;
   let commitSent = false;
@@ -1171,8 +1321,11 @@ async function startVoiceLiveSession({
   let resolveReady;
   let resolveResult;
   let resultSettled = false;
-  let state = "connecting";
-  let wsOpenMs = 0;
+  let state = preflightState;
+  let wsOpenMs =
+    socketOpenedAt === undefined
+      ? 0
+      : socketOpenedAt - liveStartedAt;
   const readyPromise = new Promise((resolve, reject) => {
     resolveReady = resolve;
     rejectReady = reject;
@@ -1227,6 +1380,10 @@ async function startVoiceLiveSession({
   function settleReady(error) {
     if (readySettled) return;
     readySettled = true;
+    if (authReadyTimer !== undefined) {
+      clearTimeout(authReadyTimer);
+      authReadyTimer = undefined;
+    }
     if (error) {
       rejectReady(error);
     } else {
@@ -1361,20 +1518,7 @@ async function startVoiceLiveSession({
     async commit(playback) {
       stopCapture();
       if (state !== "ready") {
-        let timeout;
-        try {
-          await Promise.race([
-            readyPromise,
-            new Promise((_, reject) => {
-              timeout = setTimeout(
-                () => reject(new Error("voice_api_unavailable")),
-                VOICE_LIVE_LIMITS.readyTimeoutMs,
-              );
-            }),
-          ]);
-        } finally {
-          if (timeout !== undefined) clearTimeout(timeout);
-        }
+        await readyPromise;
       }
       if (state !== "ready" || expectedEpoch !== sessionEpoch) {
         throw new Error(
@@ -1428,24 +1572,27 @@ async function startVoiceLiveSession({
     { once: true },
   );
   socket.addEventListener("message", acceptSocketMessage);
+  const acceptSocketOpen = () => {
+    socketOpenedAt ??= performance.now();
+    if (
+      expectedEpoch !== sessionEpoch ||
+      state !== "connecting"
+    ) {
+      closeSocket(4001, "stale");
+      return;
+    }
+    try {
+      clientTransport.open();
+      wsOpenMs =
+        (socketOpenedAt ?? performance.now()) - liveStartedAt;
+      state = "awaiting-ready";
+    } catch {
+      failLive(new Error("voice_api_unavailable"));
+    }
+  };
   socket.addEventListener(
     "open",
-    () => {
-      if (
-        expectedEpoch !== sessionEpoch ||
-        state !== "connecting"
-      ) {
-        closeSocket(4001, "stale");
-        return;
-      }
-      try {
-        clientTransport.open();
-        wsOpenMs = performance.now() - liveStartedAt;
-        state = "awaiting-ready";
-      } catch {
-        failLive(new Error("voice_api_unavailable"));
-      }
-    },
+    acceptSocketOpen,
     { once: true },
   );
   socket.addEventListener(
@@ -1466,6 +1613,31 @@ async function startVoiceLiveSession({
     () => failLive(new Error("voice_api_unavailable")),
     { once: true },
   );
+  authReadyTimer = setTimeout(
+    () => failLive(new Error("voice_api_unavailable")),
+    Math.max(
+      0,
+      VOICE_LIVE_LIMITS.readyTimeoutMs -
+        (performance.now() - liveStartedAt),
+    ),
+  );
+  if (state === "ready") {
+    settleReady();
+  } else if (state === "connecting") {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.removeEventListener("open", acceptSocketOpen);
+      acceptSocketOpen();
+    } else if (socket.readyState !== WebSocket.CONNECTING) {
+      failLive(new Error("voice_api_unavailable"));
+      return undefined;
+    }
+  } else if (
+    state !== "awaiting-ready" ||
+    socket.readyState !== WebSocket.OPEN
+  ) {
+    failLive(new Error("voice_api_unavailable"));
+    return undefined;
+  }
   captureSource.connect(captureNode);
   return session;
 }

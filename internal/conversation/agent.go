@@ -738,9 +738,16 @@ func (agent *vertexAgent) Process(
 		return agent.completeAmbientSilentFast(uid, preTurnState, fastPlan)
 	}
 	if canCompleteInterpretationClarification(normalized, fastPlan) {
+		clarificationState := state
+		if normalized.Ambient {
+			// Pending-answer recovery is an inference-only hypothesis. A turn
+			// without intentional provenance must not persist its temporary
+			// state mutation even when it receives a foreground reply.
+			clarificationState = preTurnState
+		}
 		return agent.completeInterpretationClarification(
 			uid,
-			state,
+			clarificationState,
 			fastPlan,
 			normalized,
 		)

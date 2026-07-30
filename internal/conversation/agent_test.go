@@ -652,6 +652,74 @@ func TestAgentAmbientPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 	}
 }
 
+func TestAgentForegroundPendingRecoveryClarificationPreservesPreTurnState(
+	t *testing.T,
+) {
+	const uid = "uid-foreground-pending-clarification"
+	awaiting := respondentAwaitingPlan()
+	recovered := validModelPlan()
+	recovered.Confidence = PrecisionConfidenceThreshold - 0.1
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, recovered)},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 3,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の主張"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "既存の保留質問",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.7, Confidence: 1, Act: "clarify", Score: 0.7,
+		},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "続きの質問です",
+		StateToken:    token,
+		Ambient:       true,
+		Foreground:    true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "interpretation-clarify-fast" ||
+		result.SpokenReply != interpretationClarificationSpokenReply ||
+		!result.NeedsClarification ||
+		len(fake.calls) != 2 {
+		t.Fatalf("foreground clarification was not bounded: %#v", result)
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
+		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
+		next.LastIntervention != initial.LastIntervention {
+		t.Fatalf("foreground clarification changed pre-turn state: %#v", next)
+	}
+}
+
 func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T) {
 	const (
 		uid       = "uid-foreground-isolation"

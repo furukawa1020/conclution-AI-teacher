@@ -73,6 +73,63 @@ test("bridge primes App Check before a fresh anonymous sign-in", async () => {
   assert.ok(anonymousSignInAt > initializeAuthAt);
 });
 
+test("empty capture rollover preserves the current conversation intent", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const marker = client.indexOf(
+    "A finite recorder window with no speech is not a new user",
+  );
+  assert.notEqual(marker, -1);
+  const rollover = client.slice(marker, marker + 600);
+
+  assert.match(
+    rollover,
+    /arm_listening\(\s*operation,\s*false,\s*intentional,/u,
+  );
+  assert.doesNotMatch(
+    rollover,
+    /arm_listening\(\s*operation,\s*false,\s*false,/u,
+  );
+});
+
+test("a replacement microphone stream rebuilds its analyser graph", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function ensureAudioGraph(");
+  const end = bridge.indexOf("\n}\n\nfunction recorderOptions", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const ensureGraph = bridge.slice(start, end);
+
+  assert.match(ensureGraph, /analyserStream !== stream/u);
+  assert.match(ensureGraph, /analyserStream = stream/u);
+});
+
+test("stopping a session settles playback before stopping its source", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("function stopSession()");
+  const end = bridge.indexOf("\n}\n\nfunction hasActiveVoiceSession", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const stop = bridge.slice(start, end);
+
+  const detachAt = stop.indexOf("activePlayback = undefined");
+  const rejectAt = stop.indexOf(
+    'playback.reject(new Error("request_cancelled"))',
+  );
+  const stopAt = stop.indexOf("playback.source.stop()");
+  assert.ok(detachAt >= 0);
+  assert.ok(rejectAt > detachAt);
+  assert.ok(stopAt > rejectAt);
+});
+
 test("research discovery stays bounded, immutable, and explicitly unverified", () => {
   const discovery = normalizeResearchDiscovery("needs_primary_evidence", [
     researchRecord,
@@ -297,6 +354,50 @@ test("VAD confirms 120 ms of voice then ends after 1.1 s of trailing silence", (
       startedAt +
       VOICE_SESSION_LIMITS.minimumVoiceMs +
       VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("VAD gives a reflective utterance 1.7 seconds to continue", () => {
+  const startedAt = 5_000;
+  let state = createVadState(startedAt);
+  const reflectiveFrames =
+    VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  assert.equal(Number.isInteger(reflectiveFrames), true);
+
+  for (let sample = 1; sample <= reflectiveFrames; sample += 1) {
+    state = advanceVad(state, {
+      now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
+      peak: 0.08,
+      rms: 0.03,
+    });
+  }
+  const lastVoiceAt = state.lastVoiceAt;
+  assert.notEqual(lastVoiceAt, null);
+
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+
+  state = advanceVad(state, {
+    now:
+      lastVoiceAt +
+      VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs -
+      1,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+
+  state = advanceVad(state, {
+    now:
+      lastVoiceAt + VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
     peak: 0,
     rms: 0.003,
   });
@@ -541,6 +642,7 @@ test("an 80 ms noise candidate is discarded before a fresh capture starts", () =
     candidateStartedAt: null,
     phase: "armed",
   });
+  assert.equal(vadState.firstVoiceAt, null);
   firstCapture.clear();
   assert.deepEqual(firstCapture.take(), { chunks: [], totalBytes: 0 });
 
@@ -551,6 +653,7 @@ test("an 80 ms noise candidate is discarded before a fresh capture starts", () =
     rms: 0.03,
   });
   const nextCandidate = advanceCandidateCapture(candidateState, vadState, now);
+  assert.equal(vadState.firstVoiceAt, now);
   assert.deepEqual(nextCandidate, {
     action: "start",
     candidateStartedAt: now,

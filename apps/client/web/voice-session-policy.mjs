@@ -2,6 +2,8 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
   endOfTurnSilenceMs: 1_100,
+  reflectiveEndOfTurnSilenceMs: 1_700,
+  reflectiveSpeechSpanMs: 2_400,
   candidateCaptureLimitMs: 1_500,
   silentCaptureLimitMs: 30_000,
   spokenCaptureLimitMs: 55_000,
@@ -499,6 +501,7 @@ export function advanceCandidateCapture(
 export function createVadState(startedAt) {
   return Object.freeze({
     action: null,
+    firstVoiceAt: null,
     hasSpeech: false,
     lastVoiceAt: null,
     noiseFloor: 0.006,
@@ -515,6 +518,10 @@ export function advanceVad(
     intervalMs = VOICE_SESSION_LIMITS.vadIntervalMs,
     minimumVoiceMs = VOICE_SESSION_LIMITS.minimumVoiceMs,
     endOfTurnSilenceMs = VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
+    reflectiveEndOfTurnSilenceMs =
+      VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    reflectiveSpeechSpanMs =
+      VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs,
     silentCaptureLimitMs = VOICE_SESSION_LIMITS.silentCaptureLimitMs,
     spokenCaptureLimitMs = VOICE_SESSION_LIMITS.spokenCaptureLimitMs,
   } = {},
@@ -539,6 +546,7 @@ export function advanceVad(
   if (previous.action !== null) return previous;
 
   let {
+    firstVoiceAt,
     hasSpeech,
     lastVoiceAt,
     noiseFloor,
@@ -551,6 +559,9 @@ export function advanceVad(
   const soundsVoiced = rms >= threshold && peak >= threshold * peakMultiplier;
 
   if (soundsVoiced) {
+    if (firstVoiceAt === null) {
+      firstVoiceAt = timestamp;
+    }
     voiceRunMs += intervalMs;
     // Candidate capture starts here. Confirmation still requires the full
     // minimum voice run, but every voiced sample anchors the trailing-silence
@@ -569,13 +580,27 @@ export function advanceVad(
     // Preserve brief gaps and unvoiced consonants without accepting an
     // isolated noise spike as speech.
     voiceRunMs = Math.max(0, voiceRunMs - intervalMs * 0.5);
+    if (!hasSpeech && voiceRunMs === 0) {
+      firstVoiceAt = null;
+      lastVoiceAt = null;
+    }
   }
 
   let action = null;
+  const speechSpanMs =
+    firstVoiceAt === null || lastVoiceAt === null
+      ? 0
+      : lastVoiceAt - firstVoiceAt + intervalMs;
+  const trailingSilenceMs =
+    speechSpanMs >= reflectiveSpeechSpanMs
+      ? reflectiveEndOfTurnSilenceMs
+      : endOfTurnSilenceMs;
+  // Keep direct questions fast, while giving a longer, think-aloud utterance
+  // enough room for a natural Japanese pause before committing the turn.
   if (
     hasSpeech &&
     lastVoiceAt !== null &&
-    timestamp - lastVoiceAt >= endOfTurnSilenceMs
+    timestamp - lastVoiceAt >= trailingSilenceMs
   ) {
     action = "end-of-turn";
   } else {
@@ -589,6 +614,7 @@ export function advanceVad(
 
   return Object.freeze({
     action,
+    firstVoiceAt,
     hasSpeech,
     lastVoiceAt,
     noiseFloor,

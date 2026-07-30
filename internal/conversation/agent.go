@@ -164,11 +164,12 @@ type promptState struct {
 }
 
 type inferencePayload struct {
-	Ambient       bool        `json:"ambient"`
-	Utterance     string      `json:"utterance"`
-	PreviousState promptState `json:"previous_state"`
-	Preliminary   *modelPlan  `json:"preliminary_plan,omitempty"`
-	HasPDF        bool        `json:"has_pdf"`
+	Ambient               bool        `json:"ambient"`
+	Utterance             string      `json:"utterance"`
+	RespondentModeAllowed bool        `json:"respondent_mode_allowed"`
+	PreviousState         promptState `json:"previous_state"`
+	Preliminary           *modelPlan  `json:"preliminary_plan,omitempty"`
+	HasPDF                bool        `json:"has_pdf"`
 }
 
 type criticPayload struct {
@@ -325,6 +326,43 @@ func (agent *vertexAgent) Process(
 	)
 	if err != nil {
 		return VoiceTurnResult{}, err
+	}
+	if state.PendingAnswer.Active &&
+		fastPlan.AssistanceTarget == "respondent" &&
+		fastPlan.RespondentStage == "awaiting_answer" {
+		// A pending frame is only a hypothesis about what the next utterance
+		// will answer. If it makes the planner ask for an answer again, retry
+		// once without that hypothesis. A real answer attempt takes the
+		// restructure path above and never enters this recovery branch.
+		recoveryState := state
+		recoveryState.PendingAnswer = PendingAnswerFrame{
+			RequiredSlots: []answercontract.RequiredSlot{},
+		}
+		recoveredPlan, recoveryErr := agent.inferWithRetry(
+			ctx,
+			agent.fastModel,
+			"fast-pending-recovery",
+			genai.ThinkingLevelLow,
+			normalized,
+			recoveryState,
+			nil,
+		)
+		if recoveryErr != nil {
+			if normalized.Ambient {
+				return agent.completeAmbientSilentFast(
+					uid,
+					recoveryState,
+					fastPlan,
+				)
+			}
+			return agent.completeInterpretationClarification(
+				uid,
+				recoveryState,
+				fastPlan,
+			)
+		}
+		state = recoveryState
+		fastPlan = recoveredPlan
 	}
 	if canCompleteAmbientSilentFast(normalized, fastPlan) {
 		return agent.completeAmbientSilentFast(uid, state, fastPlan)
@@ -591,11 +629,10 @@ func (agent *vertexAgent) Process(
 
 func isStandalonePhaticGreeting(
 	turn VoiceTurn,
-	state conversationState,
+	_ conversationState,
 ) bool {
 	if turn.Ambient ||
-		turn.PDF != nil ||
-		state.PendingAnswer.Active {
+		turn.PDF != nil {
 		return false
 	}
 	greeting := strings.ToLower(strings.TrimRightFunc(
@@ -643,7 +680,9 @@ func (agent *vertexAgent) completePhaticLocal(
 		Graph:               state.Graph,
 		ConversationSummary: "",
 		DocumentSummary:     "",
-		PendingAnswer:       state.PendingAnswer,
+		PendingAnswer: PendingAnswerFrame{
+			RequiredSlots: []answercontract.RequiredSlot{},
+		},
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
 		LastIntervention:    decision,
 	}
@@ -1107,9 +1146,14 @@ func (agent *vertexAgent) infer(
 	state conversationState,
 	preliminary *modelPlan,
 ) (modelPlan, error) {
+	respondentAllowed := respondentModeAllowed(
+		turn.Utterance,
+		state.PendingAnswer.Active,
+	)
 	payload := inferencePayload{
-		Ambient:   turn.Ambient,
-		Utterance: turn.Utterance,
+		Ambient:               turn.Ambient,
+		Utterance:             turn.Utterance,
+		RespondentModeAllowed: respondentAllowed,
 		PreviousState: promptState{
 			Turn:                state.Turn,
 			ThoughtStateGraph:   state.Graph,
@@ -1144,7 +1188,7 @@ func (agent *vertexAgent) infer(
 			CandidateCount:     1,
 			MaxOutputTokens:    3_072,
 			ResponseMIMEType:   "application/json",
-			ResponseJsonSchema: modelResponseSchema(),
+			ResponseJsonSchema: modelResponseSchema(respondentAllowed),
 			ThinkingConfig: &genai.ThinkingConfig{
 				ThinkingLevel: thinkingLevel,
 			},
@@ -1178,6 +1222,11 @@ func (agent *vertexAgent) infer(
 		turn.Ambient,
 	); err != nil {
 		return modelPlan{}, err
+	}
+	if !respondentAllowed &&
+		(plan.AssistanceTarget != "assistant" ||
+			plan.RespondentStage != "none") {
+		return modelPlan{}, ErrModelOutputInvalid
 	}
 	return plan, nil
 }
@@ -1848,6 +1897,33 @@ func needsPrecision(plan modelPlan) bool {
 		plan.Domain == "finance"
 }
 
+func respondentModeAllowed(utterance string, pendingAnswer bool) bool {
+	if pendingAnswer {
+		return true
+	}
+	lower := strings.ToLower(collapseSpace(utterance))
+	for _, signal := range []string{
+		"聞かれ", "訊かれ", "尋ねられ", "問われ", "質問され", "質問を受け",
+		"と言われ", "って言われ",
+		"自分の答え", "自分の回答", "私の答え", "私の回答",
+		"僕の答え", "僕の回答", "回答として", "答えとして",
+		"と答えたい", "と回答したい", "と伝えたい",
+		"どう答え", "何て答え", "なんて答え",
+		"どう返せ", "何て返せ", "なんて返せ",
+		"答えられない", "回答できない",
+		"答えを整え", "回答を整え", "返事を整え",
+		"答えを直して", "回答を直して",
+		"was asked", "asked me", "how should i answer",
+		"how do i answer", "my answer", "my response",
+		"help me answer", "rewrite my answer", "edit my answer",
+	} {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
 func requiresFailClosedPrecision(turn VoiceTurn, plan modelPlan) bool {
 	if turn.PDF != nil ||
 		plan.ResearchAction != "none" ||
@@ -2074,7 +2150,7 @@ func normalizeModelName(value, fallback string) (string, error) {
 	return value, nil
 }
 
-func modelResponseSchema() map[string]any {
+func modelResponseSchema(respondentAllowed bool) map[string]any {
 	stringArray := func() map[string]any {
 		return map[string]any{
 			"type":     "array",
@@ -2084,6 +2160,16 @@ func modelResponseSchema() map[string]any {
 	}
 	unitNumber := func() map[string]any {
 		return map[string]any{"type": "number", "minimum": 0, "maximum": 1}
+	}
+	assistanceTargets := []string{"assistant"}
+	respondentStages := []string{"none"}
+	if respondentAllowed {
+		assistanceTargets = append(assistanceTargets, "respondent")
+		respondentStages = append(
+			respondentStages,
+			"awaiting_answer",
+			"restructure",
+		)
 	}
 	return map[string]any{
 		"type":                 "object",
@@ -2123,11 +2209,11 @@ func modelResponseSchema() map[string]any {
 			},
 			"assistance_target": map[string]any{
 				"type": "string",
-				"enum": []string{"assistant", "respondent"},
+				"enum": assistanceTargets,
 			},
 			"respondent_stage": map[string]any{
 				"type": "string",
-				"enum": []string{"none", "awaiting_answer", "restructure"},
+				"enum": respondentStages,
 			},
 			"answer_attempt": map[string]any{"type": "string"},
 			"respondent_slot_evidence": map[string]any{
@@ -2255,6 +2341,7 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - ユーザーが自分で言い直しそうな途中発話ならself_correction_graceをtrueにする。
 
 誰の答えを支援するか:
+- conversation_data.respondent_mode_allowedはサーバ側の制約である。falseなら必ずassistance_target=assistant、respondent_stage=noneにし、他者への回答支援だと推測しない。
 - 通常の質問へKOTAE自身が答える時はassistance_target=assistant、respondent_stage=none、answer_attempt=""にする。
 - 「こう聞かれたが答えられない」「質問に対して自分はこう言いたい」「結局何をやりたいのと聞かれた」のように、他者の質問へ本人の答えを組み立てる支援ならassistance_target=respondentにする。
 - previous_state.pending_answer.active=trueなら、今の発話をその保留質問への回答試行としてまず検討する。ただし明確に話題を変えた時はassistantへ戻す。

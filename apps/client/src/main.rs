@@ -467,10 +467,13 @@ fn arm_listening(
                     caption,
                 );
             } else {
+                // A finite recorder window with no speech is not a new user
+                // turn. Preserve the current explicit/follow-up intent while
+                // transparently re-arming the microphone.
                 arm_listening(
                     operation,
                     false,
-                    false,
+                    intentional,
                     voice_state,
                     generation,
                     session_state,
@@ -621,9 +624,7 @@ fn next_turn_is_intentional(route: &str, spoke: bool) -> bool {
     spoke
         || matches!(
             route,
-            "stt-clarify"
-                | "stt-clarify-no-speech"
-                | "stt-clarify-low-confidence"
+            "stt-clarify" | "stt-clarify-no-speech" | "stt-clarify-low-confidence"
         )
 }
 
@@ -1068,10 +1069,7 @@ mod tests {
     fn recognition_clarification_keeps_the_explicit_turn_open() {
         assert!(next_turn_is_intentional("stt-clarify", true));
         assert!(next_turn_is_intentional("stt-clarify", false));
-        assert!(next_turn_is_intentional(
-            "stt-clarify-no-speech",
-            false
-        ));
+        assert!(next_turn_is_intentional("stt-clarify-no-speech", false));
         assert!(next_turn_is_intentional(
             "stt-clarify-low-confidence",
             false

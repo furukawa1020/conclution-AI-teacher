@@ -90,6 +90,96 @@ func TestAgentUngroundedRespondentAwaitingCannotTrapOrdinaryConversation(
 	}
 }
 
+func TestAgentPendingRespondentFrameUsesCorrectivePlannerForFreeConversation(
+	t *testing.T,
+) {
+	awaiting := respondentAwaitingPlan()
+	misclassified := respondentAwaitingPlan()
+	misclassified.ThoughtStateDelta.OpenLoops = []string{
+		"自由会話を保留質問への回答待ちだと誤認した",
+	}
+	corrected := directAssistantRegressionPlan(
+		"疲れたという話ですね。まとまっていなくても、そのまま聞かせてください。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, misclassified)},
+		{body: encodePlan(t, corrected)},
+		// The independent critic for the corrected assistant reply is generated
+		// by fakeGenerator's safe default.
+	}}
+	agent := newTestAgent(t, fake)
+
+	first, err := agent.Process(
+		context.Background(),
+		"uid-pending-free-conversation",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "上司に導入目的を聞かれたけど、答えがまとまりません",
+		},
+	)
+	if err != nil {
+		t.Fatalf("create legitimate pending frame: %v", err)
+	}
+	pending, err := agent.codec.open(
+		"uid-pending-free-conversation",
+		first.StateToken,
+	)
+	if err != nil {
+		t.Fatalf("open pending state: %v", err)
+	}
+	if !pending.PendingAnswer.Active {
+		t.Fatal("test setup did not create a pending respondent frame")
+	}
+
+	freeUtterance := "今日は少し疲れたな。答えの練習ではなく、ただ雑談したい"
+	second, err := agent.Process(
+		context.Background(),
+		"uid-pending-free-conversation",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     freeUtterance,
+			StateToken:    first.StateToken,
+		},
+	)
+	if err != nil {
+		t.Fatalf("free-conversation correction: %v", err)
+	}
+	if second.AssistanceTarget != "assistant" ||
+		second.RespondentStage != "none" ||
+		second.SpokenReply != corrected.SpokenReply ||
+		strings.HasPrefix(second.Route, "respondent-awaiting-") {
+		t.Fatalf("corrective assistant plan was not selected: %#v", second)
+	}
+	if len(fake.calls) != 4 ||
+		strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") ||
+		!strings.Contains(fake.calls[3].prompt, "<lac_critic_data>") {
+		t.Fatalf("expected first planner, corrective planner, then critic: %#v", fake.calls)
+	}
+
+	nextState, err := agent.codec.open(
+		"uid-pending-free-conversation",
+		second.StateToken,
+	)
+	if err != nil {
+		t.Fatalf("open corrected state: %v", err)
+	}
+	if nextState.PendingAnswer.Active ||
+		len(nextState.PendingAnswer.RequiredSlots) != 0 {
+		t.Fatalf("corrective assistant did not clear pending frame: %#v", nextState.PendingAnswer)
+	}
+	encodedState, err := jsonMarshalRegressionState(nextState)
+	if err != nil {
+		t.Fatalf("marshal corrected state: %v", err)
+	}
+	if bytes.Contains(
+		encodedState,
+		[]byte("自由会話を保留質問への回答待ちだと誤認した"),
+	) {
+		t.Fatalf("misclassified first-plan delta entered state: %s", encodedState)
+	}
+}
+
 func TestAgentStandaloneGreetingClearsPendingRespondentFrameLocally(
 	t *testing.T,
 ) {

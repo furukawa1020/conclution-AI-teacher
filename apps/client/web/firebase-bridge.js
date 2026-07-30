@@ -56,6 +56,7 @@ let mediaStream;
 let audioContext;
 let analyser;
 let analyserSource;
+let analyserStream;
 let activeRecording;
 let activeRequestController;
 let activePlayback;
@@ -278,6 +279,7 @@ function releaseMicrophone() {
     analyser.disconnect();
     analyser = undefined;
   }
+  analyserStream = undefined;
   if (audioContext && audioContext.state !== "closed") {
     void audioContext.close();
   }
@@ -352,6 +354,7 @@ async function ensureAudioGraph(stream, expectedEpoch) {
     audioContext = context;
     analyser = undefined;
     analyserSource = undefined;
+    analyserStream = undefined;
   }
   if (context.state === "suspended") {
     await context.resume();
@@ -361,13 +364,20 @@ async function ensureAudioGraph(stream, expectedEpoch) {
       audioContext = undefined;
       analyser = undefined;
       analyserSource = undefined;
+      analyserStream = undefined;
     }
     if (context.state !== "closed") {
       void context.close();
     }
     fail("request_cancelled");
   }
-  if (!analyser || !analyserSource) {
+  if (!analyser || !analyserSource || analyserStream !== stream) {
+    if (analyserSource) {
+      analyserSource.disconnect();
+    }
+    if (analyser) {
+      analyser.disconnect();
+    }
     const nextAnalyser = context.createAnalyser();
     nextAnalyser.fftSize = 1024;
     nextAnalyser.smoothingTimeConstant = 0.18;
@@ -375,6 +385,7 @@ async function ensureAudioGraph(stream, expectedEpoch) {
     nextSource.connect(nextAnalyser);
     analyser = nextAnalyser;
     analyserSource = nextSource;
+    analyserStream = stream;
   }
 }
 
@@ -1175,12 +1186,14 @@ function stopSession() {
     activeRequestController = undefined;
   }
   if (activePlayback) {
+    const playback = activePlayback;
+    activePlayback = undefined;
+    playback.reject(new Error("request_cancelled"));
     try {
-      activePlayback.source.stop();
+      playback.source.stop();
     } catch {
       // The source may already have ended.
     }
-    activePlayback = undefined;
   }
   releaseMicrophone();
   sessionClock.reset();

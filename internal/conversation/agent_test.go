@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +385,7 @@ func TestStandaloneGreetingEligibilityIsStrict(t *testing.T) {
 					Active: true,
 				},
 			},
+			want: true,
 		},
 		{
 			name: "greeting with PDF",
@@ -1483,6 +1485,128 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	if bytes.Contains(stateJSON, []byte(utterance)) ||
 		bytes.Contains(stateJSON, []byte(plan.SpokenReply)) {
 		t.Fatalf("awaiting state retained turn prose: %s", stateJSON)
+	}
+}
+
+func TestAgentPendingAwaitingIsReplannedWithoutStaleFrame(t *testing.T) {
+	awaiting := respondentAwaitingPlan()
+	stickyAwaiting := respondentAwaitingPlan()
+	stickyAwaiting.ThoughtStateDelta.Claims = []string{
+		"保留質問に引っ張られた誤分類",
+	}
+	recovered := validModelPlan()
+	recovered.Domain = "daily"
+	recovered.Intent = "answer"
+	recovered.SpokenReply = "そのまま話して大丈夫です。"
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, stickyAwaiting)},
+		{body: encodePlan(t, recovered)},
+		{body: encodeContract(t, validCriticContract(recovered.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+
+	first, err := agent.Process(
+		context.Background(),
+		"uid-pending-recovery",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "上司に目的を聞かれたけど、答えがまとまらない",
+		},
+	)
+	if err != nil {
+		t.Fatalf("create pending frame: %v", err)
+	}
+	second, err := agent.Process(
+		context.Background(),
+		"uid-pending-recovery",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "今日は少し疲れたので、なんとなく話したい",
+			StateToken:    first.StateToken,
+		},
+	)
+	if err != nil {
+		t.Fatalf("recover ordinary continuation: %v", err)
+	}
+	if second.Route != "fast" ||
+		second.AssistanceTarget != "assistant" ||
+		second.RespondentStage != "none" ||
+		second.SpokenReply != recovered.SpokenReply ||
+		len(fake.calls) != 4 {
+		t.Fatalf(
+			"pending recovery did not restore assistant flow: result=%#v calls=%#v",
+			second,
+			fake.calls,
+		)
+	}
+	if !strings.Contains(
+		fake.calls[1].prompt,
+		`"respondent_mode_allowed":true`,
+	) ||
+		!strings.Contains(
+			fake.calls[1].prompt,
+			`"pending_answer":{"active":true`,
+		) ||
+		!strings.Contains(
+			fake.calls[2].prompt,
+			`"respondent_mode_allowed":false`,
+		) ||
+		!strings.Contains(
+			fake.calls[2].prompt,
+			`"pending_answer":{"active":false`,
+		) {
+		t.Fatalf("pending frame was not removed for recovery: %#v", fake.calls)
+	}
+	state, err := agent.codec.open("uid-pending-recovery", second.StateToken)
+	if err != nil {
+		t.Fatalf("open recovered state: %v", err)
+	}
+	if state.PendingAnswer.Active ||
+		len(state.PendingAnswer.RequiredSlots) != 0 ||
+		slices.Contains(state.Graph.Claims, "保留質問に引っ張られた誤分類") {
+		t.Fatalf("stale respondent state survived recovery: %#v", state)
+	}
+}
+
+func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
+	tests := []struct {
+		name      string
+		utterance string
+		pending   bool
+		want      bool
+	}{
+		{
+			name:      "ordinary direct question",
+			utterance: "日本の首都はどこですか？",
+		},
+		{
+			name:      "ordinary free conversation",
+			utterance: "今日は少し疲れたので、なんとなく話したい",
+		},
+		{
+			name:      "reported question",
+			utterance: "上司に目的を聞かれたけど、答えられない",
+			want:      true,
+		},
+		{
+			name:      "explicit answer rewrite",
+			utterance: "自分の回答を整えてほしい",
+			want:      true,
+		},
+		{
+			name:      "pending answer attempt",
+			utterance: "目的は判断基準をそろえることです",
+			pending:   true,
+			want:      true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := respondentModeAllowed(test.utterance, test.pending); got != test.want {
+				t.Fatalf("respondentModeAllowed() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

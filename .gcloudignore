@@ -4,6 +4,7 @@
 .gitignore
 .tools
 .cache
+.gocache
 .gocache-*
 .tmp-go-cache-*
 target

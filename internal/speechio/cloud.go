@@ -78,6 +78,7 @@ type CloudService struct {
 		context.Context,
 		*speechpb.RecognizeRequest,
 	) (*speechpb.RecognizeResponse, error)
+	streamRecognizeCall  func(context.Context) (streamingRecognizeClient, error)
 	streamSynthesizeCall func(context.Context) (streamingSynthesizeClient, error)
 }
 
@@ -124,6 +125,11 @@ func NewCloudService(
 		request *speechpb.RecognizeRequest,
 	) (*speechpb.RecognizeResponse, error) {
 		return speechClient.Recognize(callContext, request)
+	}
+	service.streamRecognizeCall = func(
+		callContext context.Context,
+	) (streamingRecognizeClient, error) {
+		return speechClient.StreamingRecognize(callContext)
 	}
 	service.streamSynthesizeCall = func(
 		callContext context.Context,

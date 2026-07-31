@@ -322,6 +322,31 @@ export function createSessionExpiryWatchdog({
   return Object.freeze({ arm, disarm });
 }
 
+// Only these fixed, content-free reasons may cross the JS/Rust boundary and
+// turn an active voice session into Paused. Unknown strings are deliberately
+// reduced to an ordinary cancellation so error text, transcripts, and device
+// labels can never become event metadata.
+export function classifyVoiceSessionStopReason(reason) {
+  switch (reason) {
+    case "idle":
+    case "maximum":
+      return Object.freeze({ pauseReason: reason, stopCode: "session_expired" });
+    case "hidden":
+    case "pagehide":
+      return Object.freeze({ pauseReason: reason, stopCode: "request_cancelled" });
+    case "microphone_lost":
+      return Object.freeze({
+        pauseReason: reason,
+        stopCode: "microphone_unavailable",
+      });
+    default:
+      return Object.freeze({
+        pauseReason: null,
+        stopCode: "request_cancelled",
+      });
+  }
+}
+
 export function shouldStopSessionForLifecycle(eventType, hidden, active) {
   if (!active) return false;
   if (eventType === "pagehide") return true;

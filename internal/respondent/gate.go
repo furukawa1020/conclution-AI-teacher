@@ -23,6 +23,9 @@ var (
 	properContentPattern = regexp.MustCompile(
 		`「[^」\r\n]{1,80}」|『[^』\r\n]{1,80}』|"[^"\r\n]{1,80}"|[A-Za-zＡ-Ｚａ-ｚ][A-Za-zＡ-Ｚａ-ｚ0-9０-９._-]{0,31}(?:案|社|方式|モデル|版|規格)?|[ァ-ヶー]{3,}`,
 	)
+	nonPropositionalFillerPattern = regexp.MustCompile(
+		`(?i)^(?:えっ?と+|ええと+|えー+と+|あの+|あのー+|うー+ん|んー+|まあ+|その+|なんというか|um+|uh+|erm+)$`,
+	)
 )
 
 var negationMarkers = []string{
@@ -295,13 +298,20 @@ func commitmentPosition(text, targetEvidence string) CommitmentPosition {
 		return PositionAbsent
 	}
 	clauses := semanticClauses(text)
-	for index, clause := range clauses {
+	semanticIndex := 0
+	for _, clause := range clauses {
+		if nonPropositionalFillerPattern.MatchString(
+			strings.TrimSpace(clause),
+		) {
+			continue
+		}
 		if strings.Contains(clause, targetEvidence) {
-			if index == 0 {
+			if semanticIndex == 0 {
 				return PositionFirst
 			}
 			return PositionLater
 		}
+		semanticIndex++
 	}
 	return PositionAbsent
 }

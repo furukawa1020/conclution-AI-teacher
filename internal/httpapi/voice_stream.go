@@ -177,6 +177,8 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		"detectedDomain":   result.DetectedDomain,
 		"assistanceTarget": result.AssistanceTarget,
 		"respondentStage":  result.RespondentStage,
+		"coachPhase":       result.CoachPhase,
+		"coachAction":      result.CoachAction,
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
 		"route":            result.Route,

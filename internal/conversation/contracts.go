@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 )
 
 const (
@@ -27,6 +28,7 @@ const (
 	maxGraphNodesPerKind        = 3
 	maxGraphNodeRunes           = 100
 	maxPendingSubjectRunes      = 100
+	assistantFollowUpSubject    = "KOTAEが直前に尋ねたこと"
 )
 
 var (
@@ -78,6 +80,8 @@ type VoiceTurnResult struct {
 	Intent              string                 `json:"intent"`
 	AssistanceTarget    string                 `json:"assistance_target"`
 	RespondentStage     string                 `json:"respondent_stage"`
+	CoachPhase          string                 `json:"coach_phase"`
+	CoachAction         string                 `json:"coach_action"`
 	ResearchStatus      string                 `json:"research_status"`
 	ResearchRecords     []ResearchRecord       `json:"research_records"`
 	LatentQuestion      string                 `json:"latent_question"`
@@ -140,12 +144,17 @@ type ThoughtStateDelta struct {
 
 // PendingAnswerFrame is the minimum cross-turn state needed to help a person
 // answer someone else's question. It intentionally stores no transcript,
-// answer attempt, hypothesis prose, or reconstructed reply.
+// question span, answer attempt, evidence span, hypothesis prose, reconstructed
+// reply, or model-written prompt.
 type PendingAnswerFrame struct {
-	Active        bool                          `json:"active"`
-	Operator      answercontract.Operator       `json:"operator,omitempty"`
-	Subject       string                        `json:"subject,omitempty"`
-	RequiredSlots []answercontract.RequiredSlot `json:"required_slots,omitempty"`
+	Active            bool                          `json:"active"`
+	Operator          answercontract.Operator       `json:"operator,omitempty"`
+	Subject           string                        `json:"subject,omitempty"`
+	RequiredSlots     []answercontract.RequiredSlot `json:"required_slots,omitempty"`
+	ExpansionOperator answercontract.Operator       `json:"expansion_operator,omitempty"`
+	Phase             respondent.CoachPhase         `json:"phase,omitempty"`
+	Attempts          uint8                         `json:"attempts,omitempty"`
+	AssistantFollowUp bool                          `json:"assistant_follow_up,omitempty"`
 }
 
 func (turn VoiceTurn) Validate() error {
@@ -230,15 +239,32 @@ func normalizeDelta(delta ThoughtStateDelta) (ThoughtStateDelta, error) {
 
 func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error) {
 	if !frame.Active {
-		return PendingAnswerFrame{RequiredSlots: []answercontract.RequiredSlot{}}, nil
+		return emptyPendingAnswer(), nil
+	}
+	if frame.Phase == "" {
+		// Tokens issued by the immediately preceding schema did not yet carry
+		// coaching control state. Treat an authenticated legacy frame as an
+		// unanswered question, without recovering any answer text.
+		frame.Phase = respondent.CoachPhaseAwaitingAnswer
+	}
+	if frame.ExpansionOperator == "" {
+		frame.ExpansionOperator = answercontract.Operator(
+			respondent.ExpansionOperator(respondent.Operator(frame.Operator)),
+		)
 	}
 	frame.Subject = collapseSpace(frame.Subject)
 	target, ok := answercontract.TargetSlot(frame.Operator)
+	_, expansionOK := answercontract.TargetSlot(frame.ExpansionOperator)
 	if !ok ||
+		!expansionOK ||
+		!activeCoachPhase(frame.Phase) ||
+		frame.Attempts > respondent.MaxCoachAttempts ||
 		!utf8.ValidString(frame.Subject) ||
 		frame.Subject == "" ||
 		utf8.RuneCountInString(frame.Subject) > maxPendingSubjectRunes ||
 		containsSensitiveStateText(frame.Subject) ||
+		(frame.AssistantFollowUp && frame.Subject != assistantFollowUpSubject) ||
+		(frame.AssistantFollowUp && frame.Phase == respondent.CoachPhaseExpanding) ||
 		len(frame.RequiredSlots) == 0 ||
 		len(frame.RequiredSlots) > answercontract.MaxRequiredSlots {
 		return PendingAnswerFrame{}, ErrInvalidStateToken
@@ -261,6 +287,24 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 	}
 	frame.RequiredSlots = slots
 	return frame, nil
+}
+
+func emptyPendingAnswer() PendingAnswerFrame {
+	return PendingAnswerFrame{
+		RequiredSlots: []answercontract.RequiredSlot{},
+		Phase:         respondent.CoachPhaseNone,
+	}
+}
+
+func activeCoachPhase(phase respondent.CoachPhase) bool {
+	switch phase {
+	case respondent.CoachPhaseAwaitingAnswer,
+		respondent.CoachPhaseAwaitingRestatement,
+		respondent.CoachPhaseExpanding:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeNodes(nodes []string) ([]string, error) {

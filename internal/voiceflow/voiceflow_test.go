@@ -655,6 +655,8 @@ func TestPipelinePropagatesRespondentAssistanceMetadata(t *testing.T) {
 			Domain:           "conversation",
 			AssistanceTarget: "respondent",
 			RespondentStage:  "restructure",
+			CoachPhase:       "awaiting_restatement",
+			CoachAction:      "restate",
 			ResearchStatus:   "none",
 			ResearchRecords:  []conversation.ResearchRecord{},
 			Route:            "respondent-restructure",
@@ -677,6 +679,8 @@ func TestPipelinePropagatesRespondentAssistanceMetadata(t *testing.T) {
 	}
 	if result.AssistanceTarget != "respondent" ||
 		result.RespondentStage != "restructure" ||
+		result.CoachPhase != "awaiting_restatement" ||
+		result.CoachAction != "restate" ||
 		result.Caption != agent.result.SpokenReply ||
 		speech.synthesizedText != agent.result.SpokenReply {
 		t.Fatalf("respondent result = %+v", result)

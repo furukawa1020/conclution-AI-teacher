@@ -8,6 +8,9 @@ import (
 )
 
 var (
+	nonPropositionalFillerPattern = regexp.MustCompile(
+		`(?i)^(?:えっ?と+|ええと+|えー+と+|あの+|あのー+|うー+ん|んー+|まあ+|その+|なんというか|um+|uh+|erm+)$`,
+	)
 	arabicNumberPattern = regexp.MustCompile(
 		`[0-9０-９]+([.．][0-9０-９]+)?(円|人|件|日|時間|分|秒|年|月|週|%|％|個|回|倍|GB|MB|KB|キロ|メートル|cm|mm)?`,
 	)
@@ -58,7 +61,10 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 	commitmentAnchored := commitment.PositionClass == PositionAbsent ||
 		containsNormalized(originalAnswer, commitment.FirstCommitment)
 	commitmentFronted := commitment.PositionClass == PositionFirst &&
-		startsWithNormalized(originalAnswer, commitment.FirstCommitment)
+		startsWithCommitmentIgnoringFillers(
+			originalAnswer,
+			commitment.FirstCommitment,
+		)
 	targetSatisfied := targetFilled &&
 		commitment.FillsTarget &&
 		coverage == 1 &&
@@ -159,6 +165,39 @@ func startsWithNormalized(container, value string) bool {
 	container = collapseSpace(container)
 	value = collapseSpace(value)
 	return value != "" && strings.HasPrefix(container, value)
+}
+
+// startsWithCommitmentIgnoringFillers permits only whole, fixed
+// non-propositional filler clauses before the answer. Reasons, conditions,
+// uncertainty, and mixed-content clauses remain substantive.
+func startsWithCommitmentIgnoringFillers(container, value string) bool {
+	if startsWithNormalized(container, value) {
+		return true
+	}
+	containerClauses := semanticClauses(container)
+	valueClauses := semanticClauses(value)
+	if len(containerClauses) == 0 || len(valueClauses) == 0 {
+		return false
+	}
+	firstSubstantive := 0
+	for firstSubstantive < len(containerClauses) &&
+		nonPropositionalFillerPattern.MatchString(containerClauses[firstSubstantive]) {
+		firstSubstantive++
+	}
+	if firstSubstantive == 0 ||
+		len(containerClauses)-firstSubstantive < len(valueClauses) {
+		return false
+	}
+	for index, clause := range valueClauses {
+		candidate := containerClauses[firstSubstantive+index]
+		if index == len(valueClauses)-1 {
+			return strings.HasPrefix(candidate, clause)
+		}
+		if candidate != clause {
+			return false
+		}
+	}
+	return false
 }
 
 func containsNormalized(container, value string) bool {

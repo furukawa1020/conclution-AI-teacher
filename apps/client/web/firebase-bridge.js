@@ -13,6 +13,7 @@ import {
 import {
   advanceCandidateCapture,
   advanceVad,
+  classifyVoiceSessionStopReason,
   createCandidateCaptureState,
   createCaptureBuffer,
   createRetryableInitializer,
@@ -44,6 +45,7 @@ import {
   safeLiveCaptureFrame,
   safeLiveCaptureSignal,
   shouldStartAmbientLiveHandoff,
+  validatedPlaybackDrainTimeoutMs,
   VOICE_LIVE_LIMITS,
   shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
@@ -81,6 +83,7 @@ const ALLOWED_CONFIG_KEYS = Object.freeze([
 
 let authInstance;
 let mediaStream;
+let mediaStreamLossBinding;
 let audioContext;
 let analyser;
 let analyserSource;
@@ -106,7 +109,7 @@ const sessionClock = createSessionClock({
 const sessionExpiryWatchdog = createSessionExpiryWatchdog({
   check: () => sessionClock.check(),
   clearTimer: (timer) => clearTimeout(timer),
-  expire: () => stopSession("session_expired"),
+  expire: (reason) => stopSession(reason),
   millisecondsUntilExpiry: () => sessionClock.millisecondsUntilExpiry(),
   setTimer: (callback, delay) => setTimeout(callback, delay),
 });
@@ -368,6 +371,33 @@ function stopTracks(stream) {
   }
 }
 
+function detachMediaStreamLossListener() {
+  const binding = mediaStreamLossBinding;
+  mediaStreamLossBinding = undefined;
+  if (!binding) return;
+  binding.track.removeEventListener("ended", binding.onEnded);
+}
+
+function installMediaStreamLossListener(stream, expectedEpoch) {
+  detachMediaStreamLossListener();
+  const tracks = stream.getAudioTracks();
+  if (tracks.length !== 1) {
+    fail("microphone_unavailable");
+  }
+  const track = tracks[0];
+  const onEnded = () => {
+    if (
+      mediaStream === stream &&
+      expectedEpoch === sessionEpoch &&
+      sessionClock.isStarted()
+    ) {
+      stopSession("microphone_lost");
+    }
+  };
+  track.addEventListener("ended", onEnded, { once: true });
+  mediaStreamLossBinding = Object.freeze({ onEnded, track });
+}
+
 function releaseMicrophone(code = "request_cancelled") {
   const recording = activeRecording;
   activeRecording = undefined;
@@ -379,6 +409,7 @@ function releaseMicrophone(code = "request_cancelled") {
     // settles any Rust task waiting on endPromise.
     rejectRecording(recording, code);
   }
+  detachMediaStreamLossListener();
   setTracksEnabled(false);
   stopTracks(mediaStream);
   mediaStream = undefined;
@@ -415,7 +446,7 @@ function ensureActiveSession(expectedEpoch) {
   }
   const status = sessionClock.check();
   if (!status.ok) {
-    stopSession("session_expired");
+    stopSession(status.expiry);
     return false;
   }
   return expectedEpoch === sessionEpoch && sessionClock.isStarted();
@@ -427,7 +458,7 @@ function markSessionSpeech(expectedEpoch) {
   }
   const status = sessionClock.markSpeech();
   if (!status.ok) {
-    stopSession("session_expired");
+    stopSession(status.expiry);
     return false;
   }
   if (!sessionExpiryWatchdog.arm()) {
@@ -445,9 +476,20 @@ function hasLiveAudioTrack(stream) {
   );
 }
 
-async function ensureMediaStream(expectedEpoch) {
+async function ensureMediaStream(expectedEpoch, allowAcquisition) {
   if (hasLiveAudioTrack(mediaStream)) {
     return mediaStream;
+  }
+  if (expectedEpoch !== sessionEpoch) {
+    fail(stoppedSessionCode(expectedEpoch));
+  }
+  if (allowAcquisition !== true) {
+    // Foreground continuation may reuse the microphone selected by an
+    // explicit gesture, but it may never acquire a replacement device on its
+    // own. Losing that track pauses the encrypted session until the user taps
+    // Resume, which creates a new Intentional gesture epoch.
+    stopSession("microphone_lost");
+    fail("microphone_unavailable");
   }
   if (
     !navigator.mediaDevices ||
@@ -481,6 +523,7 @@ async function ensureMediaStream(expectedEpoch) {
     fail("microphone_unavailable");
   }
   mediaStream = stream;
+  installMediaStreamLossListener(stream, expectedEpoch);
   return mediaStream;
 }
 
@@ -1001,7 +1044,7 @@ function createRecording(stream) {
 
 async function beginTurn(serializedSessionState, turnMode) {
   if (document.hidden) {
-    stopSession();
+    stopSession("hidden");
     fail("request_cancelled");
   }
   if (
@@ -1024,7 +1067,7 @@ async function beginTurn(serializedSessionState, turnMode) {
   try {
     const sessionStatus = sessionClock.begin();
     if (!sessionStatus.ok) {
-      stopSession();
+      stopSession(sessionStatus.expiry);
       fail("session_expired");
     }
     primeVoiceTransportConnection();
@@ -1039,7 +1082,10 @@ async function beginTurn(serializedSessionState, turnMode) {
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
         }
-        const stream = await ensureMediaStream(expectedEpoch);
+        const stream = await ensureMediaStream(
+          expectedEpoch,
+          turnMode === "intentional",
+        );
         await ensureAudioGraph(stream, expectedEpoch);
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
@@ -1182,6 +1228,21 @@ function boundedString(value, maxLength) {
   return typeof value === "string" && Array.from(value).length <= maxLength;
 }
 
+function hasValidCoachMetadata(assistanceTarget, phase, action) {
+  if (assistanceTarget === "assistant") {
+    return phase === "none" && action === "none";
+  }
+  if (assistanceTarget !== "respondent") return false;
+  return (
+    (phase === "awaiting_answer" && action === "elicit") ||
+    (phase === "awaiting_restatement" && action === "restate") ||
+    (phase === "expanding" && action === "expand") ||
+    (phase === "complete" && action === "complete") ||
+    (phase === "blocked" &&
+      (action === "retry" || action === "release"))
+  );
+}
+
 function clearPendingDocument(reason = "cleared") {
   const hadPendingDocument = pendingDocument !== undefined;
   pendingDocument = undefined;
@@ -1240,6 +1301,11 @@ function safeVoiceResponse(payload) {
     !["none", "awaiting_answer", "restructure"].includes(
       payload.respondentStage,
     ) ||
+    !hasValidCoachMetadata(
+      payload.assistanceTarget,
+      payload.coachPhase,
+      payload.coachAction,
+    ) ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
     (payload.caption !== undefined &&
@@ -1266,6 +1332,8 @@ function safeVoiceResponse(payload) {
     detectedDomain: payload.detectedDomain,
     assistanceTarget: payload.assistanceTarget,
     respondentStage: payload.respondentStage,
+    coachPhase: payload.coachPhase,
+    coachAction: payload.coachAction,
     needsPaper: payload.needsPaper,
     researchStatus: research.status,
     researchRecords: research.records,
@@ -2112,16 +2180,9 @@ async function startVoiceLiveSession({
       commitAt = performance.now();
 
       const result = await resultPromise;
-      try {
-        await playback.completion;
-      } catch (error) {
-        if (!playback.interrupted) throw error;
-      }
       const snapshot = protocol.snapshot();
-      emitLatency();
       return Object.freeze({
-        ...result,
-        interrupted: playback.interrupted,
+        finalResult: result,
         streamedAudio: snapshot.audioEventCount > 0,
       });
     },
@@ -2140,6 +2201,9 @@ async function startVoiceLiveSession({
     },
     recordBargeIn(bargeHaltMs) {
       emitLatency(bargeHaltMs);
+    },
+    recordCompletion() {
+      emitLatency();
     },
     state() {
       return state;
@@ -2917,7 +2981,7 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   }
   const sessionStatus = sessionClock.check();
   if (!sessionClock.isStarted() || !sessionStatus.ok) {
-    stopSession("session_expired");
+    stopSession(sessionStatus.expiry ?? "maximum");
     fail("session_expired");
   }
 
@@ -3019,10 +3083,11 @@ function createStreamingPlayback(expectedEpoch) {
   let sealed = false;
   let settled = false;
   let streamedAudio = false;
+  const playbackContext = audioContext;
   const sources = new Set();
-  const gainNode = audioContext.createGain();
-  gainNode.gain.setValueAtTime(1, audioContext.currentTime);
-  gainNode.connect(audioContext.destination);
+  const gainNode = playbackContext.createGain();
+  gainNode.gain.setValueAtTime(1, playbackContext.currentTime);
+  gainNode.connect(playbackContext.destination);
   const completion = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
@@ -3136,6 +3201,12 @@ function createStreamingPlayback(expectedEpoch) {
   playback = {
     bargePcmMonitor: undefined,
     completion,
+    drainTimeoutMs() {
+      return validatedPlaybackDrainTimeoutMs({
+        currentContextTime: playbackContext.currentTime,
+        scheduledEndContextTime: nextStartAt,
+      });
+    },
     finalReceived: false,
     gainNode,
     hasStreamedAudio: () => streamedAudio,
@@ -3205,6 +3276,41 @@ function haltStreamingPlayback(playback, error) {
   playback.gainNode?.disconnect();
 }
 
+async function awaitValidatedPlaybackCompletion(
+  playback,
+  expectedEpoch,
+) {
+  if (
+    !playback ||
+    typeof playback.drainTimeoutMs !== "function" ||
+    expectedEpoch !== sessionEpoch
+  ) {
+    fail(
+      expectedEpoch === sessionEpoch
+        ? "voice_response_invalid"
+        : stoppedSessionCode(expectedEpoch),
+    );
+  }
+  const drainTimeoutMs = playback.drainTimeoutMs();
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error("audio_playback_blocked")),
+      drainTimeoutMs,
+    );
+  });
+  try {
+    await Promise.race([playback.completion, deadline]);
+  } catch (error) {
+    if (!playback.interrupted) throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (expectedEpoch !== sessionEpoch) {
+    fail(stoppedSessionCode(expectedEpoch));
+  }
+}
+
 async function consumeVoiceStream(response, playback, expectedEpoch) {
   if (
     !isNdjsonContentType(response.headers.get("Content-Type")) ||
@@ -3271,20 +3377,9 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
     }
     if (!playback.interrupted) {
       playback.seal();
-      try {
-        await playback.completion;
-      } catch (error) {
-        // A barge-in can race this await after terminal EOF. The stream is
-        // already fully validated, so preserve its final state and report the
-        // interruption with that result. Other cancellation still fails.
-        if (!playback.interrupted) {
-          throw error;
-        }
-      }
     }
     return Object.freeze({
-      ...completed.finalResult,
-      interrupted: playback.interrupted,
+      finalResult: completed.finalResult,
       streamedAudio: completed.audioEventCount > 0,
     });
   } catch (error) {
@@ -3390,13 +3485,23 @@ async function finishTurn(serializedSessionState, turnMode) {
       }
       playback = createStreamingPlayback(expectedEpoch);
       try {
-        return await awaitVoiceTurnResult(
+        const completed = await awaitVoiceTurnResult(
           liveSession.commit(
             playback,
             recording.lastVoiceAt,
           ),
           () => liveSession.cancel(new Error("voice_turn_timeout")),
         );
+        await awaitValidatedPlaybackCompletion(
+          playback,
+          expectedEpoch,
+        );
+        liveSession.recordCompletion();
+        return Object.freeze({
+          ...completed.finalResult,
+          interrupted: playback.interrupted,
+          streamedAudio: completed.streamedAudio,
+        });
       } catch (error) {
         if (
           turnTimedOut ||
@@ -3489,10 +3594,16 @@ async function finishTurn(serializedSessionState, turnMode) {
     if (!response.ok) {
       fail(mapVoiceResponseError(response.status));
     }
-    return await awaitVoiceTurnResult(
+    const completed = await awaitVoiceTurnResult(
       consumeVoiceStream(response, playback, expectedEpoch),
       () => requestController.abort(),
     );
+    await awaitValidatedPlaybackCompletion(playback, expectedEpoch);
+    return Object.freeze({
+      ...completed.finalResult,
+      interrupted: playback.interrupted,
+      streamedAudio: completed.streamedAudio,
+    });
   } catch (error) {
     liveSession?.cancel(
       error instanceof Error ? error : new Error("voice_api_unavailable"),
@@ -3598,9 +3709,9 @@ async function attachDocument(inputId) {
   });
 }
 
-function stopSession(code = "request_cancelled") {
-  const stopCode =
-    code === "session_expired" ? "session_expired" : "request_cancelled";
+function stopSession(reason = "request_cancelled") {
+  const { pauseReason, stopCode } =
+    classifyVoiceSessionStopReason(reason);
   const stoppedEpoch = sessionEpoch;
   rememberStoppedSession(stoppedEpoch, stopCode);
   sessionEpoch += 1;
@@ -3638,6 +3749,13 @@ function stopSession(code = "request_cancelled") {
   sessionClock.reset();
 
   clearPendingDocument("session-stopped");
+  if (pauseReason !== null) {
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:voice-session-paused", {
+        detail: Object.freeze({ reason: pauseReason, version: 1 }),
+      }),
+    );
+  }
 }
 
 function hasActiveVoiceSession() {
@@ -3663,7 +3781,7 @@ document.addEventListener("visibilitychange", () => {
       hasActiveVoiceSession(),
     )
   ) {
-    stopSession();
+    stopSession("hidden");
   }
 });
 globalThis.addEventListener("pagehide", () => {
@@ -3674,7 +3792,7 @@ globalThis.addEventListener("pagehide", () => {
       hasActiveVoiceSession(),
     )
   ) {
-    stopSession();
+    stopSession("pagehide");
   }
 });
 

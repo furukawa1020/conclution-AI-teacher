@@ -93,6 +93,8 @@ type VoiceTurnResult struct {
 	DetectedDomain   string
 	AssistanceTarget string
 	RespondentStage  string
+	CoachPhase       string
+	CoachAction      string
 	ResearchStatus   string
 	ResearchRecords  []ResearchRecord
 	Route            string
@@ -352,6 +354,8 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"detectedDomain":   result.DetectedDomain,
 		"assistanceTarget": result.AssistanceTarget,
 		"respondentStage":  result.RespondentStage,
+		"coachPhase":       result.CoachPhase,
+		"coachAction":      result.CoachAction,
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
 		"route":            result.Route,
@@ -513,6 +517,11 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		(result.RespondentStage != "none" &&
 			result.RespondentStage != "awaiting_answer" &&
 			result.RespondentStage != "restructure") ||
+		!validCoachMetadata(
+			result.AssistanceTarget,
+			result.CoachPhase,
+			result.CoachAction,
+		) ||
 		(result.ResearchStatus != "none" &&
 			result.ResearchStatus != "needs_primary_evidence" &&
 			result.ResearchStatus != "unavailable") ||
@@ -545,6 +554,29 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		return errors.New("unsupported synthesized audio type")
 	}
 	return nil
+}
+
+func validCoachMetadata(assistanceTarget string, phase string, action string) bool {
+	if assistanceTarget == "assistant" {
+		return phase == "none" && action == "none"
+	}
+	if assistanceTarget != "respondent" {
+		return false
+	}
+	switch phase {
+	case "awaiting_answer":
+		return action == "elicit"
+	case "awaiting_restatement":
+		return action == "restate"
+	case "expanding":
+		return action == "expand"
+	case "complete":
+		return action == "complete"
+	case "blocked":
+		return action == "retry" || action == "release"
+	default:
+		return false
+	}
 }
 
 func isPreInferenceRecognitionRoute(route string) bool {

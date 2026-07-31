@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 	"google.golang.org/genai"
 )
 
@@ -635,9 +636,12 @@ func TestAgentAmbientPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "ambient-silent-fast" ||
+	if result.Route != "respondent-wait-fast" ||
 		result.SpokenReply != "" ||
-		len(fake.calls) != 2 {
+		result.AssistanceTarget != "assistant" ||
+		result.CoachPhase != "none" ||
+		result.CoachAction != "none" ||
+		len(fake.calls) != 1 {
 		t.Fatalf("ambient pending recovery did not stay silent: %#v", result)
 	}
 	state, err := agent.codec.open(uid, result.StateToken)
@@ -716,7 +720,7 @@ func TestAgentForegroundPendingRecoveryClarificationPreservesPreTurnState(
 	}
 	if next.Turn != initial.Turn+1 ||
 		!reflect.DeepEqual(next.Graph, initial.Graph) ||
-		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
+		next.PendingAnswer.Active ||
 		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
 		next.LastIntervention != initial.LastIntervention {
 		t.Fatalf("foreground clarification changed pre-turn state: %#v", next)
@@ -792,7 +796,7 @@ func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T
 	}
 	if next.Turn != initial.Turn+1 ||
 		!reflect.DeepEqual(next.Graph, initial.Graph) ||
-		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
+		next.PendingAnswer.Active ||
 		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
 		next.LastIntervention != initial.LastIntervention {
 		t.Fatalf("foreground turn changed ambient-isolated state: %#v", next)
@@ -2264,9 +2268,11 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	if result.Route != "respondent-awaiting-fast" ||
 		result.AssistanceTarget != "respondent" ||
 		result.RespondentStage != "awaiting_answer" ||
+		result.CoachPhase != "awaiting_answer" ||
+		result.CoachAction != "elicit" ||
 		result.Intervention.Act != "clarify" ||
 		!result.NeedsClarification ||
-		result.SpokenReply != plan.SpokenReply {
+		result.SpokenReply != purposeCoachPrompt() {
 		t.Fatalf("respondent awaiting result: %#v", result)
 	}
 	if len(fake.calls) != 1 {
@@ -2279,7 +2285,8 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	}
 	if !state.PendingAnswer.Active ||
 		state.PendingAnswer.Operator != answercontract.OperatorPurpose ||
-		state.PendingAnswer.Subject != "導入目的" ||
+		state.PendingAnswer.Subject != "質問が求める目的" ||
+		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingAnswer ||
 		len(state.PendingAnswer.RequiredSlots) != 1 ||
 		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotPurpose {
 		t.Fatalf("pending question frame: %#v", state.PendingAnswer)
@@ -2380,6 +2387,7 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 		name      string
 		utterance string
 		pending   bool
+		allowNew  bool
 		want      bool
 	}{
 		{
@@ -2393,11 +2401,13 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 		{
 			name:      "reported question",
 			utterance: "上司に目的を聞かれたけど、答えられない",
+			allowNew:  true,
 			want:      true,
 		},
 		{
 			name:      "explicit answer rewrite",
 			utterance: "自分の回答を整えてほしい",
+			allowNew:  true,
 			want:      true,
 		},
 		{
@@ -2406,10 +2416,20 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 			pending:   true,
 			want:      true,
 		},
+		{
+			name:      "ambient keyword cannot create mode",
+			utterance: "上司に目的を聞かれたけど、答えられない",
+			allowNew:  false,
+			want:      false,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := respondentModeAllowed(test.utterance, test.pending); got != test.want {
+			if got := respondentModeAllowed(
+				test.utterance,
+				test.pending,
+				test.allowNew,
+			); got != test.want {
 				t.Fatalf("respondentModeAllowed() = %v, want %v", got, test.want)
 			}
 		})
@@ -2440,7 +2460,7 @@ func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	if result.Route != "respondent-awaiting-precision" ||
-		result.SpokenReply != respondentAwaitingSpokenReply ||
+		result.SpokenReply != purposeCoachPrompt() ||
 		len(fake.calls) != 2 ||
 		fake.calls[1].model != DefaultPrecisionModel ||
 		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
@@ -2452,7 +2472,7 @@ func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
 	}
 }
 
-func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *testing.T) {
+func TestAgentRespondentRequiresPersonRatherThanAIToPutAnswerFirst(t *testing.T) {
 	awaiting := respondentAwaitingPlan()
 	restructure := respondentRestructurePlan(
 		"判断のばらつきを減らします。目的は評価基準をそろえることです。",
@@ -2481,11 +2501,13 @@ func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *test
 	if err != nil {
 		t.Fatalf("restructure Process: %v", err)
 	}
-	if second.Route != "respondent-restructure-fast" ||
-		second.SpokenReply != restructure.SpokenReply ||
-		second.Intervention.Act != "restructure" ||
-		second.NeedsClarification {
-		t.Fatalf("safe respondent restructure: %#v", second)
+	if second.Route != "respondent-restate-fast" ||
+		second.CoachPhase != "awaiting_restatement" ||
+		second.CoachAction != "restate" ||
+		second.SpokenReply == restructure.SpokenReply ||
+		second.Intervention.Act != "clarify" ||
+		!second.NeedsClarification {
+		t.Fatalf("AI reconstruction stood in for the person's answer: %#v", second)
 	}
 	if len(fake.calls) != 3 ||
 		!strings.Contains(fake.calls[1].prompt, `"pending_answer":{"active":true`) ||
@@ -2498,8 +2520,10 @@ func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *test
 	if err != nil {
 		t.Fatalf("open resolved state: %v", err)
 	}
-	if state.PendingAnswer.Active || len(state.PendingAnswer.RequiredSlots) != 0 {
-		t.Fatalf("resolved pending frame survived: %#v", state.PendingAnswer)
+	if !state.PendingAnswer.Active ||
+		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
+		state.PendingAnswer.Attempts != 1 {
+		t.Fatalf("person's pending restatement was lost: %#v", state.PendingAnswer)
 	}
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
@@ -2535,7 +2559,9 @@ func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "respondent-meaning-clarify-fast" ||
+	if result.Route != "respondent-restate-fast" ||
+		result.CoachPhase != "awaiting_restatement" ||
+		result.CoachAction != "restate" ||
 		result.Intervention.Act != "clarify" ||
 		!result.NeedsClarification ||
 		result.SpokenReply == plan.SpokenReply ||
@@ -2571,7 +2597,9 @@ func TestAgentRespondentPendingFrameRetainsNoAnswerAttempt(t *testing.T) {
 	}
 	if !state.PendingAnswer.Active ||
 		state.PendingAnswer.Operator != answercontract.OperatorChoice ||
-		state.PendingAnswer.Subject != "採用案" ||
+		state.PendingAnswer.Subject != "質問が求める選択" ||
+		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
+		state.PendingAnswer.Attempts != 1 ||
 		len(state.PendingAnswer.RequiredSlots) != 1 ||
 		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotSelection {
 		t.Fatalf("blocked pending frame: %#v", state.PendingAnswer)
@@ -3410,6 +3438,14 @@ func respondentAwaitingPlan() modelPlan {
 		"",
 	)
 	return plan
+}
+
+func purposeCoachPrompt() string {
+	return respondent.GuideAwaiting(
+		respondent.OperatorPurpose,
+		0,
+		false,
+	).SpokenReply
 }
 
 func respondentRestructurePlan(answerAttempt, reconstruction string) modelPlan {

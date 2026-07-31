@@ -323,6 +323,19 @@ func TestGateJapaneseHardCases(t *testing.T) {
 	}
 }
 
+func TestGateIgnoresNonPropositionalLeadingFillers(t *testing.T) {
+	input := purposeInput(
+		"えっと。うーん。目的は評価基準をそろえることです。",
+		"",
+	)
+	assessment := Gate(input)
+	if assessment.Outcome != OutcomeKeep ||
+		assessment.OriginalCommitmentPosition != PositionFirst ||
+		!assessment.TargetSatisfied {
+		t.Fatalf("fillers were treated as a competing answer: %#v", assessment)
+	}
+}
+
 func TestGateRejectsMalformedContracts(t *testing.T) {
 	tests := []Input{
 		{

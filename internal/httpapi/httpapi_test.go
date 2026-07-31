@@ -525,6 +525,8 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 			DetectedDomain:   "casual",
 			AssistanceTarget: "respondent",
 			RespondentStage:  "restructure",
+			CoachPhase:       "awaiting_restatement",
+			CoachAction:      "restate",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "fast",
@@ -575,7 +577,9 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 		t.Fatalf("response caption = %s", response.Body.String())
 	}
 	if !strings.Contains(response.Body.String(), `"assistanceTarget":"respondent"`) ||
-		!strings.Contains(response.Body.String(), `"respondentStage":"restructure"`) {
+		!strings.Contains(response.Body.String(), `"respondentStage":"restructure"`) ||
+		!strings.Contains(response.Body.String(), `"coachPhase":"awaiting_restatement"`) ||
+		!strings.Contains(response.Body.String(), `"coachAction":"restate"`) {
 		t.Fatalf("response assistance metadata = %s", response.Body.String())
 	}
 	if !strings.Contains(response.Body.String(), `"researchStatus":"none"`) ||
@@ -670,6 +674,8 @@ func TestVoiceTurnReturnsValidatedResearchMetadata(t *testing.T) {
 			DetectedDomain:   "research",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "needs_primary_evidence",
 			ResearchRecords:  []ResearchRecord{record},
 			Route:            "research-metadata",
@@ -1131,6 +1137,8 @@ func TestVoiceTurnAllowsDeliberateSilence(t *testing.T) {
 			DetectedDomain:   "planning",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "silent",
@@ -1169,6 +1177,8 @@ func TestVoiceResultCaptionMustMatchSpokenShapeAndStayBounded(t *testing.T) {
 		DetectedDomain:   "general",
 		AssistanceTarget: "assistant",
 		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
 		ResearchStatus:   "none",
 		ResearchRecords:  []ResearchRecord{},
 		Route:            "fast",
@@ -1205,6 +1215,8 @@ func TestVoiceResultRejectsInconsistentAssistanceMetadata(t *testing.T) {
 		DetectedDomain:   "general",
 		AssistanceTarget: "assistant",
 		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
 		ResearchStatus:   "none",
 		ResearchRecords:  []ResearchRecord{},
 		Route:            "fast",
@@ -1239,6 +1251,72 @@ func TestVoiceResultRejectsInconsistentAssistanceMetadata(t *testing.T) {
 	}
 }
 
+func TestVoiceResultAllowsOnlyAuthoritativeCoachPhaseActionPairs(t *testing.T) {
+	t.Parallel()
+
+	base := VoiceTurnResult{
+		Audio:            []byte("audio"),
+		AudioMIMEType:    "audio/mpeg",
+		Caption:          "structural coaching",
+		StateToken:       "state",
+		DetectedDomain:   "general",
+		AssistanceTarget: "respondent",
+		RespondentStage:  "restructure",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "respondent-coach",
+	}
+	validPairs := []struct {
+		phase  string
+		action string
+	}{
+		{phase: "awaiting_answer", action: "elicit"},
+		{phase: "awaiting_restatement", action: "restate"},
+		{phase: "expanding", action: "expand"},
+		{phase: "complete", action: "complete"},
+		{phase: "blocked", action: "retry"},
+		{phase: "blocked", action: "release"},
+	}
+	for _, pair := range validPairs {
+		result := base
+		result.CoachPhase = pair.phase
+		result.CoachAction = pair.action
+		if err := validateVoiceResult(result); err != nil {
+			t.Fatalf("valid coach pair %q/%q rejected: %v", pair.phase, pair.action, err)
+		}
+	}
+
+	for _, pair := range []struct {
+		phase  string
+		action string
+	}{
+		{phase: "", action: ""},
+		{phase: "awaiting_answer", action: "complete"},
+		{phase: "complete", action: "release"},
+		{phase: "unknown", action: "retry"},
+	} {
+		result := base
+		result.CoachPhase = pair.phase
+		result.CoachAction = pair.action
+		if err := validateVoiceResult(result); err == nil {
+			t.Fatalf("invalid coach pair %q/%q accepted", pair.phase, pair.action)
+		}
+	}
+
+	assistant := base
+	assistant.AssistanceTarget = "assistant"
+	assistant.RespondentStage = "none"
+	assistant.CoachPhase = "none"
+	assistant.CoachAction = "none"
+	if err := validateVoiceResult(assistant); err != nil {
+		t.Fatalf("assistant none/none rejected: %v", err)
+	}
+	assistant.CoachAction = "elicit"
+	if err := validateVoiceResult(assistant); err == nil {
+		t.Fatal("assistant accepted a coaching action")
+	}
+}
+
 func TestVoiceResultValidatesCrossrefResearchRecords(t *testing.T) {
 	t.Parallel()
 
@@ -1251,6 +1329,8 @@ func TestVoiceResultValidatesCrossrefResearchRecords(t *testing.T) {
 		DetectedDomain:   "research",
 		AssistanceTarget: "assistant",
 		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
 		ResearchStatus:   "needs_primary_evidence",
 		ResearchRecords:  []ResearchRecord{record},
 		Route:            "research-metadata",
@@ -1345,6 +1425,8 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 			DetectedDomain:   "unknown",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            route,
@@ -1365,6 +1447,8 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 			DetectedDomain:   "unknown",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            route,
@@ -1377,6 +1461,8 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 		DetectedDomain:   "unknown",
 		AssistanceTarget: "untrusted",
 		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
 		ResearchStatus:   "none",
 		ResearchRecords:  []ResearchRecord{},
 		Route:            "stt-silent",
@@ -1388,6 +1474,8 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 		DetectedDomain:   "general",
 		AssistanceTarget: "assistant",
 		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
 		ResearchStatus:   "none",
 		ResearchRecords:  []ResearchRecord{},
 		Route:            "fast",
@@ -1404,6 +1492,8 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 			DetectedDomain:   "unknown",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            route,

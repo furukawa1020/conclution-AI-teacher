@@ -73,6 +73,8 @@ type voiceLiveFinalResult struct {
 	DetectedDomain   string           `json:"detectedDomain"`
 	AssistanceTarget string           `json:"assistanceTarget"`
 	RespondentStage  string           `json:"respondentStage"`
+	CoachPhase       string           `json:"coachPhase"`
+	CoachAction      string           `json:"coachAction"`
 	ResearchStatus   string           `json:"researchStatus"`
 	ResearchRecords  []ResearchRecord `json:"researchRecords"`
 	Route            string           `json:"route"`
@@ -666,6 +668,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		DetectedDomain:   outcome.result.DetectedDomain,
 		AssistanceTarget: outcome.result.AssistanceTarget,
 		RespondentStage:  outcome.result.RespondentStage,
+		CoachPhase:       outcome.result.CoachPhase,
+		CoachAction:      outcome.result.CoachAction,
 		ResearchStatus:   outcome.result.ResearchStatus,
 		ResearchRecords:  outcome.result.ResearchRecords,
 		Route:            outcome.result.Route,

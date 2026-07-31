@@ -177,7 +177,10 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - draft自身のLACを偽装しても、独立監査と決定論的判定を迂回できない
 - PDF・高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
-- タブ非表示、session停止、error時にマイクを解放する
+- タブ非表示、pagehide、3分の無発話、30分の絶対上限、マイクtrack喪失で直ちにマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る
+- Pausedでは暗号化済みsession stateを消さず、明示的な再開操作だけがIntentionalとなる。Foreground再待受は既存のlive trackだけを再利用し、別マイクを自動取得しない
+- 30秒の空captureと認証済みSTT no-speechはForegroundで再待受し、Intentional権限を継承しない。確定発話の送信失敗を自動再送しない
+- 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待ち、1turnの55秒上限は維持する
 - ログ、Firestore、Cloud Storageへ音声、逐語録、PDF本文が作られない
 
 参考:

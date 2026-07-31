@@ -10,6 +10,7 @@ async function readFile(path, encoding) {
 import {
   advanceCandidateCapture,
   advanceVad,
+  classifyVoiceSessionStopReason,
   createCaptureBuffer,
   createCandidateCaptureState,
   createRetryableInitializer,
@@ -47,9 +48,416 @@ import {
   shouldStartAmbientLiveHandoff,
   safeLiveCaptureFrame,
   safeLiveCaptureSignal,
+  validatedPlaybackDrainTimeoutMs,
   VOICE_LIVE_LIMITS,
+  VOICE_PLAYBACK_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
+
+function executableBridgeFunction(source, signature, nextSignature) {
+  const start = source.indexOf(signature);
+  const end = source.indexOf(`\n\n${nextSignature}`, start);
+  assert.notEqual(start, -1, `${signature} is missing`);
+  assert.notEqual(end, -1, `${nextSignature} is missing`);
+  return source.slice(start, end);
+}
+
+class FakePlaybackTimers {
+  constructor() {
+    this.nextId = 1;
+    this.pending = new Map();
+  }
+
+  clearTimeout(id) {
+    this.pending.delete(id);
+  }
+
+  fireNext() {
+    const entry = this.pending.entries().next().value;
+    assert.ok(entry, "a playback deadline must be armed");
+    const [id, timer] = entry;
+    this.pending.delete(id);
+    timer.callback();
+    return timer.delay;
+  }
+
+  setTimeout(callback, delay) {
+    const id = this.nextId;
+    this.nextId += 1;
+    this.pending.set(id, { callback, delay });
+    return id;
+  }
+}
+
+class FakePlaybackSource {
+  constructor() {
+    this.buffer = undefined;
+    this.disconnected = false;
+    this.ended = false;
+    this.listeners = new Map();
+    this.startedAt = undefined;
+    this.stopped = false;
+  }
+
+  addEventListener(type, listener) {
+    this.listeners.set(type, listener);
+  }
+
+  connect() {}
+
+  disconnect() {
+    this.disconnected = true;
+  }
+
+  end() {
+    if (this.ended) return;
+    this.ended = true;
+    const listener = this.listeners.get("ended");
+    this.listeners.delete("ended");
+    listener?.();
+  }
+
+  start(at) {
+    this.startedAt = at;
+  }
+
+  stop() {
+    this.stopped = true;
+    // Some browser engines dispatch ended synchronously from stop().
+    this.end();
+  }
+}
+
+class FakePlaybackAudioContext {
+  constructor() {
+    this.baseLatency = 0;
+    this.currentTime = 0;
+    this.destination = Object.freeze({});
+    this.outputLatency = 0;
+    this.sources = [];
+    this.state = "running";
+  }
+
+  createBufferSource() {
+    const source = new FakePlaybackSource();
+    this.sources.push(source);
+    return source;
+  }
+
+  createGain() {
+    return {
+      connected: false,
+      disconnected: false,
+      connect() {
+        this.connected = true;
+      },
+      disconnect() {
+        this.disconnected = true;
+      },
+      gain: {
+        setValueAtTime() {},
+      },
+    };
+  }
+}
+
+class ControlledVoiceReader {
+  constructor() {
+    this.cancelledWith = undefined;
+    this.closed = false;
+    this.failedWith = undefined;
+    this.pendingRead = undefined;
+    this.queue = [];
+    this.released = false;
+  }
+
+  cancel(error) {
+    this.cancelledWith = error;
+    this.closed = true;
+    if (this.pendingRead) {
+      const { resolve } = this.pendingRead;
+      this.pendingRead = undefined;
+      resolve({ done: true, value: undefined });
+    }
+    return Promise.resolve();
+  }
+
+  close() {
+    this.closed = true;
+    if (this.pendingRead) {
+      const { resolve } = this.pendingRead;
+      this.pendingRead = undefined;
+      resolve({ done: true, value: undefined });
+    }
+  }
+
+  fail(error) {
+    this.failedWith = error;
+    if (this.pendingRead) {
+      const { reject } = this.pendingRead;
+      this.pendingRead = undefined;
+      reject(error);
+    }
+  }
+
+  pushText(value) {
+    const chunk = new TextEncoder().encode(value);
+    if (this.pendingRead) {
+      const { resolve } = this.pendingRead;
+      this.pendingRead = undefined;
+      resolve({ done: false, value: chunk });
+      return;
+    }
+    this.queue.push(chunk);
+  }
+
+  read() {
+    if (this.queue.length > 0) {
+      return Promise.resolve({ done: false, value: this.queue.shift() });
+    }
+    if (this.failedWith) return Promise.reject(this.failedWith);
+    if (this.closed) {
+      return Promise.resolve({ done: true, value: undefined });
+    }
+    assert.equal(this.pendingRead, undefined, "only one read may be pending");
+    return new Promise((resolve, reject) => {
+      this.pendingRead = { reject, resolve };
+    });
+  }
+
+  releaseLock() {
+    this.released = true;
+  }
+}
+
+function fakeVoiceStreamResponse(reader) {
+  return {
+    body: {
+      getReader: () => reader,
+    },
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type"
+          ? "application/x-ndjson; charset=utf-8"
+          : null;
+      },
+    },
+  };
+}
+
+function fakePcmEvent(sequence, byteLength = 4_800) {
+  return {
+    pcm: new ArrayBuffer(byteLength),
+    sampleRateHz: 24_000,
+    sequence,
+  };
+}
+
+async function flushPlaybackMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function waitForPlaybackState(predicate) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return;
+    await flushPlaybackMicrotasks();
+  }
+  assert.fail("playback state did not settle");
+}
+
+async function createExecutablePlaybackHarness() {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const executable = [
+    executableBridgeFunction(
+      bridge,
+      "function stopBargeInMonitoring(",
+      "function rampPlaybackGain(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function createStreamingPlayback(",
+      "function haltStreamingPlayback(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function haltStreamingPlayback(",
+      "async function awaitValidatedPlaybackCompletion(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "async function awaitValidatedPlaybackCompletion(",
+      "async function consumeVoiceStream(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function isNdjsonContentType(",
+      "function pcm16BytesAudioBuffer(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "async function consumeVoiceStream(",
+      "async function finishTurn(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function stopSession(",
+      "function hasActiveVoiceSession(",
+    ),
+  ].join("\n\n");
+  const context = new FakePlaybackAudioContext();
+  const timers = new FakePlaybackTimers();
+  const state = {
+    abandonedInterrupts: 0,
+    clearedDocuments: [],
+    micEnabled: false,
+    pauseEvents: [],
+    releasedCodes: [],
+    resetCount: 0,
+    restoredGain: 0,
+  };
+
+  function pcmBuffer(decodedBytes, sampleRateHz) {
+    return {
+      duration: decodedBytes / (sampleRateHz * 2),
+      getChannelData: () => Float32Array.of(0.25),
+      numberOfChannels: 1,
+      sampleRate: sampleRateHz,
+    };
+  }
+
+  const factory = new Function(
+    "dependencies",
+    `"use strict";
+let activeLiveSession;
+let activePlayback;
+let activeRequestController;
+let audioContext = dependencies.audioContext;
+let documentEpoch = 0;
+let sessionEpoch = 1;
+const stoppedSessionCodes = new Map();
+const CustomEvent = dependencies.CustomEvent;
+const TextDecoder = dependencies.TextDecoder;
+const VOICE_STREAM_LIMITS = dependencies.VOICE_STREAM_LIMITS;
+const abandonInterruptRecording = dependencies.abandonInterruptRecording;
+const classifyVoiceSessionStopReason = dependencies.classifyVoiceSessionStopReason;
+const clearPendingDocument = dependencies.clearPendingDocument;
+const clearTimeout = dependencies.clearTimeout;
+const createVoiceStreamParser = dependencies.createVoiceStreamParser;
+const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
+const fail = dependencies.fail;
+const finishGate = dependencies.finishGate;
+const globalThis = dependencies.eventTarget;
+const pcm16AudioBuffer = dependencies.pcm16AudioBuffer;
+const pcm16BytesAudioBuffer = dependencies.pcm16BytesAudioBuffer;
+const performance = dependencies.performance;
+const releaseMicrophone = dependencies.releaseMicrophone;
+const restorePlaybackGain = dependencies.restorePlaybackGain;
+const retirePendingLiveSession = dependencies.retirePendingLiveSession;
+const safeVoiceResponse = dependencies.safeVoiceResponse;
+const sessionClock = dependencies.sessionClock;
+const sessionExpiryWatchdog = dependencies.sessionExpiryWatchdog;
+const setTimeout = dependencies.setTimeout;
+const setTracksEnabled = dependencies.setTracksEnabled;
+const startBargeInMonitoring = dependencies.startBargeInMonitoring;
+const validatedPlaybackDrainTimeoutMs = dependencies.validatedPlaybackDrainTimeoutMs;
+
+function rememberStoppedSession(expectedEpoch, code) {
+  stoppedSessionCodes.set(expectedEpoch, code);
+}
+
+function stoppedSessionCode(expectedEpoch) {
+  return stoppedSessionCodes.get(expectedEpoch) ?? "request_cancelled";
+}
+
+${executable}
+
+return Object.freeze({
+  awaitValidatedPlaybackCompletion,
+  consumeVoiceStream,
+  createStreamingPlayback,
+  getActivePlayback: () => activePlayback,
+  getSessionEpoch: () => sessionEpoch,
+  haltStreamingPlayback,
+  stopSession,
+});`,
+  );
+  const runtime = factory({
+    CustomEvent: class {
+      constructor(type, options) {
+        this.detail = options?.detail;
+        this.type = type;
+      }
+    },
+    TextDecoder,
+    VOICE_STREAM_LIMITS,
+    abandonInterruptRecording(recording) {
+      recording.settled = true;
+      state.abandonedInterrupts += 1;
+    },
+    audioContext: context,
+    classifyVoiceSessionStopReason,
+    clearPendingDocument(reason) {
+      state.clearedDocuments.push(reason);
+    },
+    clearTimeout: (id) => timers.clearTimeout(id),
+    createVoiceStreamParser,
+    estimateAudiblePerformanceTime,
+    eventTarget: {
+      dispatchEvent(event) {
+        state.pauseEvents.push(event);
+        return true;
+      },
+    },
+    fail(code) {
+      throw new Error(code);
+    },
+    finishGate: {
+      reset() {
+        state.resetCount += 1;
+      },
+    },
+    pcm16AudioBuffer(_audioBase64, decodedBytes, sampleRateHz) {
+      return pcmBuffer(decodedBytes, sampleRateHz);
+    },
+    pcm16BytesAudioBuffer(_pcm, decodedBytes, sampleRateHz) {
+      return pcmBuffer(decodedBytes, sampleRateHz);
+    },
+    performance: { now: () => 0 },
+    releaseMicrophone(code) {
+      state.micEnabled = false;
+      state.releasedCodes.push(code);
+    },
+    restorePlaybackGain() {
+      state.restoredGain += 1;
+    },
+    retirePendingLiveSession() {},
+    safeVoiceResponse: (result) => Object.freeze({ ...result }),
+    sessionClock: {
+      reset() {
+        state.resetCount += 1;
+      },
+    },
+    sessionExpiryWatchdog: {
+      disarm() {
+        state.resetCount += 1;
+      },
+    },
+    setTimeout: (callback, delay) => timers.setTimeout(callback, delay),
+    setTracksEnabled(enabled) {
+      state.micEnabled = enabled;
+    },
+    startBargeInMonitoring(playback) {
+      state.micEnabled = true;
+      playback.interruptRecording = { settled: false };
+    },
+    validatedPlaybackDrainTimeoutMs,
+  });
+  return { context, runtime, state, timers };
+}
 
 const researchRecord = Object.freeze({
   title: "A-first responses under working-memory load",
@@ -133,7 +541,9 @@ test("explicit voice start warms only the fixed transport without private data",
   const begin = bridge.slice(beginStart, beginEnd);
   const sessionAt = begin.indexOf("sessionClock.begin()");
   const warmAt = begin.indexOf("primeVoiceTransportConnection()");
-  const microphoneAt = begin.indexOf("ensureMediaStream(expectedEpoch)");
+  const microphoneAt = begin.indexOf(
+    "const stream = await ensureMediaStream(",
+  );
   assert.ok(sessionAt >= 0);
   assert.ok(warmAt > sessionAt);
   assert.ok(microphoneAt > warmAt);
@@ -229,7 +639,7 @@ test("terminal barge-in commits final state before foreground continuation", asy
   assert.ok(foregroundResumeAt > interruptedAt);
 });
 
-test("barge-in racing terminal playback preserves the validated final", async () => {
+test("barge-in racing bounded local playback preserves the validated final", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -240,15 +650,274 @@ test("barge-in racing terminal playback preserves the validated final", async ()
   assert.notEqual(end, -1);
   const consume = bridge.slice(start, end);
   const terminalAt = consume.indexOf("const completed = parser.finish()");
-  const playbackAt = consume.indexOf("await playback.completion");
-  const returnAt = consume.indexOf("...completed.finalResult");
-  assert.ok(terminalAt >= 0);
-  assert.ok(playbackAt > terminalAt);
-  assert.ok(returnAt > playbackAt);
-  assert.match(
-    consume,
-    /catch \(error\) \{[\s\S]*if \(!playback\.interrupted\) \{[\s\S]*throw error;/u,
+  const sealAt = consume.indexOf("playback.seal()");
+  const returnAt = consume.indexOf(
+    "finalResult: completed.finalResult",
   );
+  assert.ok(terminalAt >= 0);
+  assert.ok(sealAt > terminalAt);
+  assert.ok(returnAt > sealAt);
+  assert.doesNotMatch(consume, /await playback\.completion/u);
+
+  const drainStart = bridge.indexOf(
+    "async function awaitValidatedPlaybackCompletion(",
+  );
+  const drainEnd = bridge.indexOf(
+    "\n}\n\nasync function consumeVoiceStream",
+    drainStart,
+  );
+  assert.notEqual(drainStart, -1);
+  assert.notEqual(drainEnd, -1);
+  const drain = bridge.slice(drainStart, drainEnd);
+  assert.match(
+    drain,
+    /Promise\.race\(\[playback\.completion, deadline\]\)/u,
+  );
+  assert.match(
+    drain,
+    /catch \(error\) \{[\s\S]*if \(!playback\.interrupted\) throw error;/u,
+  );
+});
+
+test("validated playback drain follows scheduled audio with a protocol-sized cap", () => {
+  assert.equal(VOICE_PLAYBACK_LIMITS.drainGraceMs, 4_000);
+  assert.equal(
+    VOICE_PLAYBACK_LIMITS.maximumDrainMs,
+    Math.ceil(
+      (VOICE_STREAM_LIMITS.maximumAudioTotalBytes /
+        (24_000 * 2)) *
+        1_000,
+    ) + VOICE_PLAYBACK_LIMITS.drainGraceMs,
+  );
+  assert.equal(
+    validatedPlaybackDrainTimeoutMs({
+      currentContextTime: 10,
+      scheduledEndContextTime: 12.5,
+    }),
+    6_500,
+  );
+  assert.equal(
+    validatedPlaybackDrainTimeoutMs({
+      currentContextTime: 12.5,
+      scheduledEndContextTime: 10,
+    }),
+    VOICE_PLAYBACK_LIMITS.drainGraceMs,
+  );
+  assert.equal(
+    validatedPlaybackDrainTimeoutMs({
+      currentContextTime: 0,
+      scheduledEndContextTime: 10_000,
+    }),
+    VOICE_PLAYBACK_LIMITS.maximumDrainMs,
+  );
+  for (const invalid of [
+    {},
+    { currentContextTime: -1, scheduledEndContextTime: 1 },
+    { currentContextTime: 0, scheduledEndContextTime: Infinity },
+    {
+      currentContextTime: 0,
+      scheduledEndContextTime: 1,
+      ignored: true,
+    },
+  ]) {
+    assert.throws(
+      () => validatedPlaybackDrainTimeoutMs(invalid),
+      /voice_playback_deadline_invalid/u,
+    );
+  }
+});
+
+test("executable finish boundary waits for the last Web Audio source", async () => {
+  const { context, runtime, state, timers } =
+    await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1);
+  playback.schedulePcm(fakePcmEvent(0));
+  playback.schedulePcm(fakePcmEvent(1));
+  playback.finalReceived = true;
+  playback.seal();
+
+  let finished = false;
+  const finishBoundary = runtime
+    .awaitValidatedPlaybackCompletion(playback, 1)
+    .then(() => {
+      finished = true;
+    });
+  await flushPlaybackMicrotasks();
+  assert.equal(finished, false);
+  assert.equal(state.micEnabled, true, "barge-in remains active while audible");
+  assert.equal(context.sources.length, 2);
+
+  context.sources[0].end();
+  await flushPlaybackMicrotasks();
+  assert.equal(finished, false, "one remaining source must hold the turn");
+  assert.equal(state.micEnabled, true);
+
+  context.sources[1].end();
+  await finishBoundary;
+  assert.equal(finished, true);
+  assert.equal(state.micEnabled, false);
+  assert.equal(runtime.getActivePlayback(), undefined);
+  assert.equal(timers.pending.size, 0);
+});
+
+test("executable drain timeout halts sources and disables the barge mic", async () => {
+  const { context, runtime, state, timers } =
+    await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1);
+  playback.schedulePcm(fakePcmEvent(0));
+  playback.finalReceived = true;
+  playback.seal();
+
+  const finishBoundary = runtime
+    .awaitValidatedPlaybackCompletion(playback, 1)
+    .catch((error) => {
+      runtime.haltStreamingPlayback(playback, error);
+      throw error;
+    });
+  assert.equal(state.micEnabled, true);
+  assert.equal(timers.pending.size, 1);
+  const delay = timers.fireNext();
+  assert.ok(delay >= VOICE_PLAYBACK_LIMITS.drainGraceMs);
+  assert.ok(delay <= VOICE_PLAYBACK_LIMITS.maximumDrainMs);
+
+  await assert.rejects(finishBoundary, /audio_playback_blocked/u);
+  assert.equal(context.sources[0].stopped, true);
+  assert.equal(context.sources[0].disconnected, true);
+  assert.equal(state.micEnabled, false);
+  assert.equal(runtime.getActivePlayback(), undefined);
+  assert.equal(timers.pending.size, 0);
+});
+
+test("executable pre-final and post-final barge races keep their ownership", async (t) => {
+  await t.test("pre-final interruption aborts without a validated final", async () => {
+    const { context, runtime, state } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1);
+    const reader = new ControlledVoiceReader();
+    reader.pushText(
+      streamLine({ type: "ready", version: 1 }) +
+        streamLine({
+          type: "audio",
+          version: 1,
+          sequence: 0,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }),
+    );
+    const consume = runtime.consumeVoiceStream(
+      fakeVoiceStreamResponse(reader),
+      playback,
+      1,
+    );
+    await waitForPlaybackState(() => playback.hasStreamedAudio());
+    assert.equal(playback.finalReceived, false);
+
+    playback.interruptedBeforeFinal =
+      shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+    playback.interrupted = true;
+    const interruption = Object.assign(new Error("voice_interrupted"), {
+      name: "AbortError",
+    });
+    runtime.haltStreamingPlayback(playback, interruption);
+    reader.fail(interruption);
+
+    await assert.rejects(consume, (error) => error === interruption);
+    assert.equal(playback.interruptedBeforeFinal, true);
+    assert.equal(reader.cancelledWith, interruption);
+    assert.equal(reader.released, true);
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(
+      state.micEnabled,
+      true,
+      "confirmed barge capture remains owned by the next utterance",
+    );
+  });
+
+  await t.test("post-final interruption preserves the validated final", async () => {
+    const { context, runtime, state, timers } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1);
+    const reader = new ControlledVoiceReader();
+    const expectedFinal = finalVoiceResult();
+    reader.pushText(
+      streamLine({ type: "ready", version: 1 }) +
+        streamLine({
+          type: "audio",
+          version: 1,
+          sequence: 0,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }) +
+        streamLine({
+          type: "final",
+          version: 1,
+          result: expectedFinal,
+        }),
+    );
+    const consume = runtime.consumeVoiceStream(
+      fakeVoiceStreamResponse(reader),
+      playback,
+      1,
+    );
+    await waitForPlaybackState(() => playback.finalReceived);
+
+    playback.interruptedBeforeFinal =
+      shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+    playback.interrupted = true;
+    runtime.haltStreamingPlayback(
+      playback,
+      new Error("voice_interrupted"),
+    );
+    reader.close();
+
+    const completed = await consume;
+    await runtime.awaitValidatedPlaybackCompletion(playback, 1);
+    assert.deepEqual(completed.finalResult, expectedFinal);
+    assert.equal(completed.streamedAudio, true);
+    assert.equal(playback.interruptedBeforeFinal, false);
+    assert.equal(reader.cancelledWith, undefined);
+    assert.equal(reader.released, true);
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(state.micEnabled, true);
+    assert.equal(timers.pending.size, 0);
+  });
+});
+
+test("expiry and pagehide cancel an executable playback drain", async (t) => {
+  for (const scenario of [
+    { reason: "idle", stopCode: "session_expired" },
+    { reason: "pagehide", stopCode: "request_cancelled" },
+  ]) {
+    await t.test(scenario.reason, async () => {
+      const { context, runtime, state, timers } =
+        await createExecutablePlaybackHarness();
+      const playback = runtime.createStreamingPlayback(1);
+      playback.schedulePcm(fakePcmEvent(0));
+      playback.finalReceived = true;
+      playback.seal();
+      const drain = runtime.awaitValidatedPlaybackCompletion(playback, 1);
+
+      runtime.stopSession(scenario.reason);
+
+      await assert.rejects(
+        drain,
+        (error) => error instanceof Error && error.message === scenario.stopCode,
+      );
+      assert.equal(runtime.getSessionEpoch(), 2);
+      assert.equal(runtime.getActivePlayback(), undefined);
+      assert.equal(context.sources[0].stopped, true);
+      assert.equal(state.micEnabled, false);
+      assert.deepEqual(state.releasedCodes, [scenario.stopCode]);
+      const pauseEvent = state.pauseEvents.find(
+        (event) => event.type === "kotae:voice-session-paused",
+      );
+      assert.deepEqual(pauseEvent?.detail, {
+        reason: scenario.reason,
+        version: 1,
+      });
+      assert.equal(timers.pending.size, 0);
+    });
+  }
 });
 
 test("automatic rearm is foreground and only a fresh gesture is intentional", async () => {
@@ -305,6 +974,29 @@ test("an authenticated silent foreground miss rearms without ending the session"
   );
 });
 
+test("successful turns rearm but confirmed-speech failures never resend", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const submitStart = client.indexOf("fn submit_turn(");
+  const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
+  const submit = client.slice(submitStart, submitEnd);
+  const failureStart = submit.indexOf("Err(FinishTurnError::Message(message))");
+  const failureEnd = submit.indexOf("};", failureStart);
+  const failure = submit.slice(failureStart, failureEnd);
+  assert.match(failure, /cloud::stop_session\(\)/u);
+  assert.match(failure, /voice_state\.set\(VoiceState::Error\(message\)\)/u);
+  assert.doesNotMatch(failure, /finish_turn|submit_turn|arm_listening/u);
+
+  const successStart = submit.lastIndexOf("arm_listening(");
+  assert.ok(successStart > failureEnd);
+  assert.match(
+    submit.slice(successStart),
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+  );
+});
+
 test("a replacement microphone stream rebuilds its analyser graph", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
@@ -318,6 +1010,79 @@ test("a replacement microphone stream rebuilds its analyser graph", async () => 
 
   assert.match(ensureGraph, /analyserStream !== stream/u);
   assert.match(ensureGraph, /analyserStream = stream/u);
+});
+
+test("foreground rearm never acquires a replacement microphone", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const ensureStart = bridge.indexOf("async function ensureMediaStream(");
+  const ensureEnd = bridge.indexOf("\n}\n\nfunction createAudioContext", ensureStart);
+  assert.notEqual(ensureStart, -1);
+  assert.notEqual(ensureEnd, -1);
+  const ensure = bridge.slice(ensureStart, ensureEnd);
+  const reuseAt = ensure.indexOf("hasLiveAudioTrack(mediaStream)");
+  const foregroundGuardAt = ensure.indexOf("allowAcquisition !== true");
+  const pauseAt = ensure.indexOf('stopSession("microphone_lost")');
+  const acquisitionAt = ensure.indexOf("navigator.mediaDevices.getUserMedia");
+  assert.ok(reuseAt >= 0);
+  assert.ok(foregroundGuardAt > reuseAt);
+  assert.ok(pauseAt > foregroundGuardAt);
+  assert.ok(acquisitionAt > pauseAt);
+
+  const beginStart = bridge.indexOf("async function beginTurn(");
+  const beginEnd = bridge.indexOf("\n}\n\nasync function waitForTurnEnd", beginStart);
+  const begin = bridge.slice(beginStart, beginEnd);
+  assert.match(
+    begin,
+    /ensureMediaStream\(\s*expectedEpoch,\s*turnMode === "intentional",\s*\)/u,
+  );
+  const lossListenerStart = bridge.indexOf(
+    "function installMediaStreamLossListener(",
+  );
+  const lossListenerEnd = bridge.indexOf(
+    "\n}\n\nfunction releaseMicrophone",
+    lossListenerStart,
+  );
+  const lossListener = bridge.slice(lossListenerStart, lossListenerEnd);
+  assert.match(
+    lossListener,
+    /stopSession\("microphone_lost"\)[\s\S]*addEventListener\("ended", onEnded, \{ once: true \}\)/u,
+  );
+});
+
+test("finite lifecycle stops pause Rust while preserving opaque session state", async () => {
+  const [bridge, client] = await Promise.all([
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+  ]);
+  const stopStart = bridge.indexOf("function stopSession(");
+  const stopEnd = bridge.indexOf("\n}\n\nfunction hasActiveVoiceSession", stopStart);
+  const stop = bridge.slice(stopStart, stopEnd);
+  const eventAt = stop.indexOf('new CustomEvent("kotae:voice-session-paused"');
+  assert.ok(eventAt >= 0);
+  const eventBlock = stop.slice(eventAt, eventAt + 350);
+  assert.match(eventBlock, /detail: Object\.freeze\(\{ reason: pauseReason, version: 1 \}\)/u);
+  assert.doesNotMatch(eventBlock, /audio|caption|sessionState|transcript/u);
+  assert.match(bridge, /stopSession\("hidden"\)/u);
+  assert.match(bridge, /stopSession\("pagehide"\)/u);
+  assert.match(bridge, /expire: \(reason\) => stopSession\(reason\)/u);
+
+  const listenerStart = client.indexOf(
+    "pub fn install_voice_session_paused_listener(",
+  );
+  const listenerEnd = client.indexOf("\n    pub fn stop_session()", listenerStart);
+  const listener = client.slice(listenerStart, listenerEnd);
+  assert.match(listener, /session_stop_pauses\(current_state\)/u);
+  assert.match(listener, /generation\.set\(next\)/u);
+  assert.match(listener, /voice_state\.set\(VoiceState::Paused\)/u);
+  assert.doesNotMatch(listener, /session_state\.set|String::new\(\)/u);
+  assert.equal(
+    client.match(/voice_state\.set\(VoiceState::Ready\)/gu)?.length,
+    1,
+    "Ready must remain explicit End only",
+  );
 });
 
 test("stopping a session settles playback before stopping every source", async () => {
@@ -1791,7 +2556,7 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
   assert.match(
     bargeMonitor,
-    /stopSession\("session_expired"\);[\s\S]*fail\("session_expired"\)/u,
+    /stopSession\(sessionStatus\.expiry \?\? "maximum"\);[\s\S]*fail\("session_expired"\)/u,
   );
   const stopAt = bridge.indexOf("function stopSession(");
   const stop = bridge.slice(stopAt, stopAt + 2_500);
@@ -1902,7 +2667,7 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
 });
 
-test("the client owns one finite deadline across live and HTTP response paths", async () => {
+test("network keeps one finite deadline while validated playback drains separately", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -1934,6 +2699,18 @@ test("the client owns one finite deadline across live and HTTP response paths", 
     finish,
     /awaitVoiceTurnResult\(\s*consumeVoiceStream\(/u,
   );
+  assert.equal(
+    (
+      finish.match(
+        /await awaitValidatedPlaybackCompletion\([\s\S]*?playback,[\s\S]*?expectedEpoch,?[\s\S]*?\)/gu,
+      ) ?? []
+    ).length,
+    2,
+  );
+  assert.doesNotMatch(
+    finish,
+    /awaitVoiceTurnResult\(\s*awaitValidatedPlaybackCompletion/u,
+  );
   assert.match(
     finish,
     /turnTimedOut \|\|[\s\S]*!liveSession\.canFallback\(\)/u,
@@ -1942,6 +2719,34 @@ test("the client owns one finite deadline across live and HTTP response paths", 
     finish,
     /if \(turnTimedOut\) \{[\s\S]*fail\("voice_turn_timeout"\)/u,
   );
+
+  const liveStart = bridge.indexOf(
+    "async function startVoiceLiveSession(",
+  );
+  const liveEnd = bridge.indexOf(
+    "\n}\n\nfunction isNdjsonContentType",
+    liveStart,
+  );
+  const live = bridge.slice(liveStart, liveEnd);
+  const commitAt = live.indexOf("async commit(playback, lastVoiceAt)");
+  const interruptAt = live.indexOf(
+    'interrupt(error = new Error("voice_interrupted"))',
+    commitAt,
+  );
+  const commit = live.slice(commitAt, interruptAt);
+  assert.match(commit, /const result = await resultPromise/u);
+  assert.doesNotMatch(commit, /await playback\.completion/u);
+
+  const consumeStart = bridge.indexOf(
+    "async function consumeVoiceStream(",
+  );
+  const consumeEnd = bridge.indexOf(
+    "\n}\n\nasync function finishTurn",
+    consumeStart,
+  );
+  const consume = bridge.slice(consumeStart, consumeEnd);
+  assert.match(consume, /const completed = parser\.finish\(\)/u);
+  assert.doesNotMatch(consume, /await playback\.completion/u);
 });
 
 test("stream bridge uses direct authenticated CORS with bounded PCM playback", async () => {
@@ -2116,6 +2921,31 @@ test("hidden documents and pagehide stop only active voice sessions", () => {
     ),
     true,
   );
+});
+
+test("voice session pause reasons are finite and contain no user content", () => {
+  const expected = new Map([
+    ["idle", "session_expired"],
+    ["maximum", "session_expired"],
+    ["hidden", "request_cancelled"],
+    ["pagehide", "request_cancelled"],
+    ["microphone_lost", "microphone_unavailable"],
+  ]);
+
+  for (const [reason, stopCode] of expected) {
+    const classified = classifyVoiceSessionStopReason(reason);
+    assert.deepEqual(classified, { pauseReason: reason, stopCode });
+    assert.equal(Object.isFrozen(classified), true);
+  }
+
+  assert.deepEqual(
+    classifyVoiceSessionStopReason("私の会話内容を含む任意文字列"),
+    { pauseReason: null, stopCode: "request_cancelled" },
+  );
+  assert.deepEqual(classifyVoiceSessionStopReason({ transcript: "secret" }), {
+    pauseReason: null,
+    stopCode: "request_cancelled",
+  });
 });
 
 test("an unsent PDF expires at five minutes, not before", () => {

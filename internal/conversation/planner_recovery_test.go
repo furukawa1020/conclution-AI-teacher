@@ -350,7 +350,7 @@ func TestAgentPrecisionRecoveryDoesNotRepeatPendingPlannerOrPrecision(t *testing
 		t.Fatalf("Process: %v", err)
 	}
 	if result.Route != "respondent-awaiting-precision-recovery" ||
-		result.SpokenReply != respondentAwaitingSpokenReply ||
+		result.SpokenReply != purposeCoachPrompt() ||
 		len(fake.calls) != 3 ||
 		fake.calls[0].model != DefaultFastModel ||
 		fake.calls[1].model != DefaultFastModel ||

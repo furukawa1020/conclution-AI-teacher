@@ -95,6 +95,8 @@ func TestVoiceStreamPublishesStateOnlyAfterOrderedPCM(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "fast",
@@ -149,7 +151,9 @@ func TestVoiceStreamPublishesStateOnlyAfterOrderedPCM(t *testing.T) {
 		}
 	}
 	if !strings.Contains(lines[3], `"sessionState":"opaque-final-state"`) ||
-		!strings.Contains(lines[3], `"audioMimeType":"audio/L16"`) {
+		!strings.Contains(lines[3], `"audioMimeType":"audio/L16"`) ||
+		!strings.Contains(lines[3], `"coachPhase":"none"`) ||
+		!strings.Contains(lines[3], `"coachAction":"none"`) {
 		t.Fatalf("invalid final frame: %s", lines[3])
 	}
 	if service.calls != 1 ||
@@ -209,6 +213,8 @@ func TestVoiceStreamAcceptsSilentFinalWithEmptyAudioMIME(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "ambient-silent",
@@ -255,6 +261,8 @@ func TestVoiceStreamRejectsTheChunkAfterTheSharedCeiling(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "fast",

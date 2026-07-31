@@ -9,6 +9,22 @@ export const VOICE_STREAM_LIMITS = Object.freeze({
   maximumResponseBytes: 24 * MEBIBYTE,
 });
 
+const OUTPUT_SAMPLE_RATE_HZ = 24_000;
+const PCM16_BYTES_PER_SAMPLE = 2;
+
+export const VOICE_PLAYBACK_LIMITS = Object.freeze({
+  drainGraceMs: 4_000,
+  // This is a local-device wait only. It covers every PCM byte accepted by
+  // the bounded response protocol without extending the independent network
+  // deadline.
+  maximumDrainMs:
+    Math.ceil(
+      (VOICE_STREAM_LIMITS.maximumAudioTotalBytes /
+        (OUTPUT_SAMPLE_RATE_HZ * PCM16_BYTES_PER_SAMPLE)) *
+        1_000,
+    ) + 4_000,
+});
+
 export const INTERRUPT_VAD_LIMITS = Object.freeze({
   candidateGapMs: 120,
   // Four 40 ms voiced frames confirm after 120 ms wall-clock from the first
@@ -296,6 +312,34 @@ export function isCleanVoiceLiveTerminalClose(value) {
       value.code === 1_000 &&
       value.reason === "complete" &&
       value.wasClean === true,
+  );
+}
+
+export function validatedPlaybackDrainTimeoutMs(value) {
+  if (
+    !isPlainRecord(value) ||
+    !hasExactKeys(value, [
+      "currentContextTime",
+      "scheduledEndContextTime",
+    ]) ||
+    !Number.isFinite(value.currentContextTime) ||
+    value.currentContextTime < 0 ||
+    !Number.isFinite(value.scheduledEndContextTime) ||
+    value.scheduledEndContextTime < 0
+  ) {
+    throw new TypeError("voice_playback_deadline_invalid");
+  }
+  const maximumRemainingMs =
+    VOICE_PLAYBACK_LIMITS.maximumDrainMs -
+    VOICE_PLAYBACK_LIMITS.drainGraceMs;
+  const scheduledRemainingMs = Math.max(
+    0,
+    (value.scheduledEndContextTime - value.currentContextTime) *
+      1_000,
+  );
+  return Math.ceil(
+    Math.min(maximumRemainingMs, scheduledRemainingMs) +
+      VOICE_PLAYBACK_LIMITS.drainGraceMs,
   );
 }
 

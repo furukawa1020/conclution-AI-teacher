@@ -16,6 +16,41 @@ func TestEvaluateRejectsModelReportedCoverageSpoofing(t *testing.T) {
 	}
 }
 
+func TestEvaluateAllowsOnlyFixedNonPropositionalFillersBeforeCommitment(t *testing.T) {
+	for _, answer := range []string{
+		"えっと。賛成です。",
+		"うーん。まあ、賛成です。",
+		"um. 賛成です。",
+	} {
+		contract := validContract()
+		contract.CounterfactualRepair.ReconstructedAnswer = answer
+		assessment, err := Evaluate(contract, answer)
+		if err != nil {
+			t.Fatalf("Evaluate(%q): %v", answer, err)
+		}
+		if assessment.Outcome != OutcomeKeep || !assessment.TargetSatisfied {
+			t.Fatalf("fixed fillers hid a first commitment for %q: %#v", answer, assessment)
+		}
+	}
+
+	for _, answer := range []string{
+		"たぶん。賛成です。",
+		"条件次第です。賛成です。",
+		"理由は費用です。賛成です。",
+		"えっと理由は費用です。賛成です。",
+	} {
+		contract := validContract()
+		contract.CounterfactualRepair.ReconstructedAnswer = answer
+		assessment, err := Evaluate(contract, answer)
+		if err != nil {
+			t.Fatalf("Evaluate(%q): %v", answer, err)
+		}
+		if assessment.Outcome != OutcomeReject || assessment.TargetSatisfied {
+			t.Fatalf("substantive preface was ignored for %q: %#v", answer, assessment)
+		}
+	}
+}
+
 func TestEvaluateRejectsInvalidHypothesisDistribution(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -255,6 +255,8 @@ func TestVoiceLiveForegroundKeepsAmbientAuthorityAndExpectsReply(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "foreground-test",
@@ -342,6 +344,8 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "fast",
@@ -418,6 +422,8 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 		result["sessionState"] != "sealed-final-state" ||
 		result["audioMimeType"] != "audio/L16" ||
 		result["audioBase64"] != "" ||
+		result["coachPhase"] != "none" ||
+		result["coachAction"] != "none" ||
 		result["caption"] != "Aです。理由はBです。" {
 		t.Fatalf("final result=%#v", final["result"])
 	}
@@ -466,6 +472,8 @@ func TestVoiceLiveEndpointKeepsSingleReaderUntilExplicitCommit(t *testing.T) {
 				DetectedDomain:   "daily",
 				AssistanceTarget: "assistant",
 				RespondentStage:  "none",
+				CoachPhase:       "none",
+				CoachAction:      "none",
 				ResearchStatus:   "none",
 				ResearchRecords:  []ResearchRecord{},
 				Route:            "fast",
@@ -790,6 +798,8 @@ func TestVoiceLiveRequiresExactTwentyMillisecondPCMFrames(t *testing.T) {
 					DetectedDomain:   "daily",
 					AssistanceTarget: "assistant",
 					RespondentStage:  "none",
+					CoachPhase:       "none",
+					CoachAction:      "none",
 					ResearchStatus:   "none",
 					ResearchRecords:  []ResearchRecord{},
 					Route:            "silent-fast",
@@ -873,6 +883,8 @@ func TestVoiceLiveSilentFinalContainsNoBinaryAudio(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "ambient-silent-fast",

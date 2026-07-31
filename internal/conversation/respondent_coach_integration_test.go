@@ -865,6 +865,8 @@ func TestAgentPendingCoachHonorsExplicitOptOutWithoutCallingAModel(t *testing.T)
 				result.AssistanceTarget != "assistant" ||
 				result.CoachPhase != "none" ||
 				result.CoachAction != "none" ||
+				result.ArgumentStructure != "direct_answer" ||
+				result.InterventionPolicy != "wait" ||
 				result.SpokenReply != test.wantReply {
 				t.Fatalf("explicit opt-out was not honored locally: %#v", result)
 			}

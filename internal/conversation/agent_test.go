@@ -727,7 +727,7 @@ func TestAgentForegroundPendingRecoveryClarificationPreservesPreTurnState(
 	}
 }
 
-func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T) {
+func TestAgentForegroundUpdatesOnlyShortLivedConversationContinuity(t *testing.T) {
 	const (
 		uid       = "uid-foreground-isolation"
 		utterance = "日本の首都はどこ"
@@ -735,7 +735,7 @@ func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T
 	plan := validModelPlan()
 	plan.SpokenReply = "日本の首都は東京です。"
 	plan.ConversationSummary = "保存してはいけない前面会話summary"
-	plan.ThoughtStateDelta.Claims = []string{"保存してはいけない前面会話claim"}
+	plan.ThoughtStateDelta.Claims = []string{"前面会話の短期claim"}
 	plan.AnswerContract = validCriticContract(plan.SpokenReply)
 	fake := &fakeGenerator{generations: []fakeGeneration{{
 		body: encodePlan(t, plan),
@@ -795,11 +795,16 @@ func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T
 		t.Fatalf("open next state: %v", err)
 	}
 	if next.Turn != initial.Turn+1 ||
-		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		!reflect.DeepEqual(
+			next.Graph.Claims,
+			[]string{"既存の主張", "前面会話の短期claim"},
+		) ||
 		next.PendingAnswer.Active ||
-		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
-		next.LastIntervention != initial.LastIntervention {
-		t.Fatalf("foreground turn changed ambient-isolated state: %#v", next)
+		next.SelfCorrectionGrace != plan.SelfCorrectionGrace ||
+		next.LastIntervention == initial.LastIntervention ||
+		next.Support == nil ||
+		next.Support.QuestionCooldown != questionCooldownAfterPass-1 {
+		t.Fatalf("foreground turn did not update bounded continuity: %#v", next)
 	}
 	encoded, err := json.Marshal(next)
 	if err != nil {
@@ -808,11 +813,54 @@ func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T
 	for _, forbidden := range []string{
 		utterance,
 		plan.ConversationSummary,
-		plan.ThoughtStateDelta.Claims[0],
 	} {
 		if bytes.Contains(encoded, []byte(forbidden)) {
-			t.Fatalf("foreground content entered semantic state: %s", encoded)
+			t.Fatalf("raw foreground content entered state: %s", encoded)
 		}
+	}
+	if !bytes.Contains(encoded, []byte(plan.ThoughtStateDelta.Claims[0])) {
+		t.Fatalf("bounded foreground graph delta was not retained: %s", encoded)
+	}
+}
+
+func TestAgentForegroundSelfRepairWaitsWithoutTurningSilenceIntoQuestion(t *testing.T) {
+	const uid = "uid-foreground-self-repair"
+	plan := validModelPlan()
+	plan.InterventionPolicy = "wait"
+	plan.SpokenReply = ""
+	plan.SelfCorrectionGrace = true
+	plan.Intervention = modelArbiter{
+		Benefit: 0.2, InterruptionCost: 0.8, Urgency: 0.1,
+		Confidence: 0.9, Act: "silent",
+	}
+	plan.AnswerContract = validCriticContract("")
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "えっと、その、まだ続きがあって",
+		Ambient:       true,
+		Foreground:    true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.SpokenReply != "" ||
+		result.Intervention.Act != "silent" ||
+		result.InterventionPolicy != "wait" ||
+		!result.SelfCorrectionGrace ||
+		len(fake.calls) != 2 {
+		t.Fatalf("foreground self-repair was converted into a prompt: %#v", result)
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if !next.SelfCorrectionGrace || next.Turn != 1 {
+		t.Fatalf("foreground self-repair state was not retained: %#v", next)
 	}
 }
 
@@ -1352,8 +1400,8 @@ func TestNormalizeAndValidatePlanAcceptsGreetingContractAfterCanonicalization(
 	}
 }
 
-func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
-	t.Run("provider failure fails closed without retry or model hop", func(t *testing.T) {
+func TestAgentCriticRetriesOnlyTransientLowRiskFailure(t *testing.T) {
+	t.Run("transient provider failure retries once without model hop", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1371,10 +1419,13 @@ func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
 			t.Fatalf("Process: %v", err)
 		}
 		if result.Route != "verification-unavailable" ||
-			len(fake.calls) != 2 ||
+			len(fake.calls) != 3 ||
 			fake.calls[1].model != DefaultFastModel ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
-			t.Fatalf("critic retried or model-hopped: result=%#v calls=%#v", result, fake.calls)
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[1].prompt != fake.calls[2].prompt {
+			t.Fatalf("critic retry escaped its bounded policy: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
@@ -1407,7 +1458,7 @@ func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
 		}
 	})
 
-	t.Run("provider unavailable is not retried", func(t *testing.T) {
+	t.Run("transient provider unavailable recovers on one retry", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1423,10 +1474,13 @@ func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "verification-unavailable" ||
-			len(fake.calls) != 2 ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
-			t.Fatalf("provider critic was retried: result=%#v calls=%#v", result, fake.calls)
+		if result.Route != "fast" ||
+			result.SpokenReply != plan.SpokenReply ||
+			len(fake.calls) != 3 ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[1].prompt != fake.calls[2].prompt {
+			t.Fatalf("provider critic did not recover within one retry: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
@@ -1934,7 +1988,7 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 			t.Fatalf("Process should fall back: %v", err)
 		}
 		if result.Route != "precision-unavailable" ||
-			!result.NeedsClarification ||
+			result.NeedsClarification ||
 			result.SpokenReply == fast.SpokenReply ||
 			strings.Contains(result.SpokenReply, "標本数") {
 			t.Fatalf("high-risk fast draft escaped fail-closed path: %#v", result)
@@ -2009,7 +2063,7 @@ func TestAgentRejectsLowUrgencySafetyIntervention(t *testing.T) {
 	if err != nil ||
 		result.Route != "planner-unavailable" ||
 		result.SpokenReply != plannerUnavailableSpokenReply ||
-		!result.NeedsClarification ||
+		result.NeedsClarification ||
 		result.StateToken == "" ||
 		strings.Contains(result.SpokenReply, secretDraft) {
 		t.Fatalf("low-urgency safety did not fail closed: result=%#v err=%v", result, err)
@@ -2256,7 +2310,7 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 		body: encodePlan(t, plan),
 	}}}
 	agent := newTestAgent(t, fake)
-	utterance := "上司に結局何のために入れるのと聞かれたけど、うまく答えられない"
+	utterance := "上司に結局何のために入れるのと聞かれたけど、うまく答えられない。答え方を一問だけ手伝ってください"
 
 	result, err := agent.Process(context.Background(), "uid-respondent-await", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -2324,7 +2378,7 @@ func TestAgentPendingAwaitingIsReplannedWithoutStaleFrame(t *testing.T) {
 		"uid-pending-recovery",
 		VoiceTurn{
 			SchemaVersion: SchemaVersion,
-			Utterance:     "上司に目的を聞かれたけど、答えがまとまらない",
+			Utterance:     "上司に目的を聞かれたけど、答えがまとまらない。答え方を一問だけ手伝ってください",
 		},
 	)
 	if err != nil {
@@ -2335,7 +2389,7 @@ func TestAgentPendingAwaitingIsReplannedWithoutStaleFrame(t *testing.T) {
 		"uid-pending-recovery",
 		VoiceTurn{
 			SchemaVersion: SchemaVersion,
-			Utterance:     "今日は少し疲れたので、なんとなく話したい",
+			Utterance:     "別の話をすると、今日は少し疲れました",
 			StateToken:    first.StateToken,
 		},
 	)
@@ -2399,8 +2453,14 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 			utterance: "今日は少し疲れたので、なんとなく話したい",
 		},
 		{
-			name:      "reported question",
+			name:      "reported question is not consent",
 			utterance: "上司に目的を聞かれたけど、答えられない",
+			allowNew:  true,
+			want:      false,
+		},
+		{
+			name:      "explicit how-to-answer request",
+			utterance: "上司に目的を聞かれました。どう答えればいいですか",
 			allowNew:  true,
 			want:      true,
 		},
@@ -2417,8 +2477,8 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 			want:      true,
 		},
 		{
-			name:      "ambient keyword cannot create mode",
-			utterance: "上司に目的を聞かれたけど、答えられない",
+			name:      "passive ambient explicit words cannot create mode",
+			utterance: "上司に目的を聞かれました。答え方を手伝ってください",
 			allowNew:  false,
 			want:      false,
 		},
@@ -2433,6 +2493,21 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 				t.Fatalf("respondentModeAllowed() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestSystemInstructionForbidsCoerciveDependenceAndHiddenPractice(t *testing.T) {
+	for _, required := range []string{
+		"単に「こう聞かれた」「答えられなかった」と出来事を共有しただけならassistant",
+		"人間、友人、家族、治療者を装わない",
+		"排他性や罪悪感を作らず",
+		"滞在時間や再訪を促さない",
+		"ひきこもり、性格が治る・変わると約束しない",
+		"短期・UID-boundの会話継続用semantic stateだけは更新してよい",
+	} {
+		if !strings.Contains(systemInstruction, required) {
+			t.Fatalf("system instruction lost safety boundary %q", required)
+		}
 	}
 }
 
@@ -2453,7 +2528,7 @@ func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
 		"uid-respondent-await-high-risk",
 		VoiceTurn{
 			SchemaVersion: SchemaVersion,
-			Utterance:     "家族から薬をどう考えているか聞かれたけど、答えられない",
+			Utterance:     "家族から薬をどう考えているか聞かれました。答え方を一問だけ手伝ってください",
 		},
 	)
 	if err != nil {
@@ -2472,7 +2547,7 @@ func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
 	}
 }
 
-func TestAgentRespondentRequiresPersonRatherThanAIToPutAnswerFirst(t *testing.T) {
+func TestAgentRespondentDoesNotCountAIReconstructionAsVerifiedFirst(t *testing.T) {
 	awaiting := respondentAwaitingPlan()
 	restructure := respondentRestructurePlan(
 		"判断のばらつきを減らします。目的は評価基準をそろえることです。",
@@ -2481,18 +2556,25 @@ func TestAgentRespondentRequiresPersonRatherThanAIToPutAnswerFirst(t *testing.T)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, awaiting)},
 		{body: encodePlan(t, restructure)},
-		{body: encodeContract(t, validCriticContract(restructure.SpokenReply))},
+		{body: encodeContract(t, respondentCriticContract(
+			restructure,
+			restructure.SpokenReply,
+		))},
 	}}
 	agent := newTestAgent(t, fake)
+	agent.coachRestatementBinding = false
 
 	first, err := agent.Process(context.Background(), "uid-respondent-flow", VoiceTurn{
 		SchemaVersion: SchemaVersion,
-		Utterance:     "結局何のために入れるのかと聞かれたけど、答えがまとまらない",
+		Utterance:     "結局何のために入れるのかと聞かれたけど、答えがまとまらない。答え方を一問だけ手伝ってください",
 	})
 	if err != nil {
 		t.Fatalf("awaiting Process: %v", err)
 	}
-	secondUtterance := "今の答えは「" + restructure.AnswerAttempt + "」です"
+	// This test covers a person adopting the reconstruction as their own answer.
+	// Quoted material is intentionally covered by the separate continuity-rejection
+	// tests and must not be treated as a speaker-owned A.
+	secondUtterance := restructure.AnswerAttempt
 	second, err := agent.Process(context.Background(), "uid-respondent-flow", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     secondUtterance,
@@ -2501,12 +2583,13 @@ func TestAgentRespondentRequiresPersonRatherThanAIToPutAnswerFirst(t *testing.T)
 	if err != nil {
 		t.Fatalf("restructure Process: %v", err)
 	}
-	if second.Route != "respondent-restate-fast" ||
-		second.CoachPhase != "awaiting_restatement" ||
-		second.CoachAction != "restate" ||
+	if second.Route != "respondent-complete-fast" ||
+		second.CoachPhase != "complete" ||
+		second.CoachAction != "complete" ||
 		second.SpokenReply == restructure.SpokenReply ||
-		second.Intervention.Act != "clarify" ||
-		!second.NeedsClarification {
+		second.SpokenReply != "うん、答えは聞こえました。次は今の答えを最初に置くと、もっと伝わりやすいです。そのままで大丈夫です。" ||
+		second.Intervention.Act != "reflect" ||
+		second.NeedsClarification {
 		t.Fatalf("AI reconstruction stood in for the person's answer: %#v", second)
 	}
 	if len(fake.calls) != 3 ||
@@ -2520,10 +2603,11 @@ func TestAgentRespondentRequiresPersonRatherThanAIToPutAnswerFirst(t *testing.T)
 	if err != nil {
 		t.Fatalf("open resolved state: %v", err)
 	}
-	if !state.PendingAnswer.Active ||
-		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
-		state.PendingAnswer.Attempts != 1 {
-		t.Fatalf("person's pending restatement was lost: %#v", state.PendingAnswer)
+	if state.PendingAnswer.Active ||
+		state.Support == nil ||
+		state.Support.VerifiedFirstAnswers != 0 ||
+		state.Support.QuestionCooldown != questionCooldownAfterPass {
+		t.Fatalf("AI reconstruction advanced adaptive success: %#v", state)
 	}
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
@@ -2548,22 +2632,26 @@ func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
 	)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, plan)},
-		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		{body: encodeContract(t, respondentCriticContract(
+			plan,
+			plan.SpokenReply,
+		))},
 	}}
 	agent := newTestAgent(t, fake)
+	agent.coachRestatementBinding = false
 
 	result, err := agent.Process(context.Background(), "uid-respondent-reject", VoiceTurn{
 		SchemaVersion: SchemaVersion,
-		Utterance:     "自分の答えは「" + plan.AnswerAttempt + "」です",
+		Utterance:     "答え方を一問だけ手伝ってください。自分の答えは「" + plan.AnswerAttempt + "」です",
 	})
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "respondent-restate-fast" ||
-		result.CoachPhase != "awaiting_restatement" ||
-		result.CoachAction != "restate" ||
-		result.Intervention.Act != "clarify" ||
-		!result.NeedsClarification ||
+	if result.Route != "respondent-complete-fast" ||
+		result.CoachPhase != "complete" ||
+		result.CoachAction != "complete" ||
+		result.Intervention.Act != "reflect" ||
+		result.NeedsClarification ||
 		result.SpokenReply == plan.SpokenReply ||
 		strings.Contains(result.SpokenReply, "B案") ||
 		strings.Contains(result.SpokenReply, "4万円") {
@@ -2571,7 +2659,7 @@ func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
 	}
 }
 
-func TestAgentRespondentPendingFrameRetainsNoAnswerAttempt(t *testing.T) {
+func TestAgentCompletedRespondentStateRetainsNoAnswerAttempt(t *testing.T) {
 	plan := respondentChoicePlan(
 		"田中さんの判断です。A案を選びます。",
 		"佐藤さんの判断です。B案を選びます。",
@@ -2579,10 +2667,14 @@ func TestAgentRespondentPendingFrameRetainsNoAnswerAttempt(t *testing.T) {
 	)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, plan)},
-		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		{body: encodeContract(t, respondentCriticContract(
+			plan,
+			plan.SpokenReply,
+		))},
 	}}
 	agent := newTestAgent(t, fake)
-	utterance := "回答としては「" + plan.AnswerAttempt + "」と伝えたい"
+	agent.coachRestatementBinding = false
+	utterance := "回答を整えるのを手伝ってください。回答としては「" + plan.AnswerAttempt + "」と伝えたい"
 
 	result, err := agent.Process(context.Background(), "uid-respondent-retention", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -2595,14 +2687,11 @@ func TestAgentRespondentPendingFrameRetainsNoAnswerAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open blocked respondent state: %v", err)
 	}
-	if !state.PendingAnswer.Active ||
-		state.PendingAnswer.Operator != answercontract.OperatorChoice ||
-		state.PendingAnswer.Subject != "質問が求める選択" ||
-		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
-		state.PendingAnswer.Attempts != 1 ||
-		len(state.PendingAnswer.RequiredSlots) != 1 ||
-		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotSelection {
-		t.Fatalf("blocked pending frame: %#v", state.PendingAnswer)
+	if state.PendingAnswer.Active ||
+		state.Support == nil ||
+		state.Support.VerifiedFirstAnswers != 0 ||
+		state.Support.QuestionCooldown != questionCooldownAfterPass {
+		t.Fatalf("completed late answer retained respondent control: %#v", state)
 	}
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
@@ -2700,10 +2789,11 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 				if result.SpokenReply != "" || result.Intervention.Act != "silent" {
 					t.Fatalf("ambient critic failure spoke: %#v", result)
 				}
-			} else if result.SpokenReply == "" ||
-				result.Intervention.Act != "clarify" ||
-				countQuestions(result.SpokenReply) != 1 {
-				t.Fatalf("intentional critic failure did not ask one question: %#v", result)
+			} else if result.SpokenReply != verificationUnavailableSpokenReply ||
+				result.Intervention.Act != "reflect" ||
+				result.NeedsClarification ||
+				countQuestions(result.SpokenReply) != 0 {
+				t.Fatalf("intentional critic failure blamed the speaker: %#v", result)
 			}
 		})
 	}
@@ -3306,7 +3396,7 @@ func TestAgentRejectsInvalidFastOutputAndSanitizesProviderError(t *testing.T) {
 		if err != nil ||
 			result.Route != "planner-unavailable" ||
 			result.SpokenReply != plannerUnavailableSpokenReply ||
-			!result.NeedsClarification ||
+			result.NeedsClarification ||
 			result.StateToken == "" ||
 			strings.Contains(result.SpokenReply, secretDraft) {
 			t.Fatalf("invalid planner output did not fail closed: result=%#v err=%v", result, err)
@@ -3340,7 +3430,7 @@ func TestAgentRejectsInvalidFastOutputAndSanitizesProviderError(t *testing.T) {
 		if err != nil ||
 			result.Route != "planner-unavailable" ||
 			result.SpokenReply != plannerUnavailableSpokenReply ||
-			!result.NeedsClarification ||
+			result.NeedsClarification ||
 			result.StateToken == "" ||
 			strings.Contains(result.SpokenReply, secretProviderDetail) {
 			t.Fatalf("provider failure was not sanitized: result=%#v err=%v", result, err)
@@ -3629,6 +3719,19 @@ func respondentDraftContract(
 			RepairGain:                    0,
 		},
 	}
+}
+
+func respondentCriticContract(
+	plan modelPlan,
+	candidate string,
+) answercontract.Contract {
+	contract := validCriticContract(candidate)
+	contract.QuestionFrame = plan.AnswerContract.QuestionFrame
+	contract.CommitmentFront.FilledSlots = append(
+		[]answercontract.RequiredSlot(nil),
+		contract.QuestionFrame.RequiredSlots...,
+	)
+	return contract
 }
 
 func encodePlan(t *testing.T, plan modelPlan) string {

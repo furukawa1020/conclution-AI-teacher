@@ -1,16 +1,40 @@
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
+  softVoiceMinimumMs: 600,
+  softVoiceSnrRatio: 1.45,
+  softVoicePeakToRmsRatio: 1.6,
+  softVoiceEnvelopeRatio: 1.18,
+  // A new turn has no calibrated room floor yet. For only this bounded
+  // bootstrap window, voice-shaped low-level audio may start a candidate from
+  // an absolute floor. It still needs sustained, changing-envelope evidence.
+  softVoiceBootstrapMs: 1_200,
+  softVoiceBootstrapMinimumRms: 0.004,
+  // Envelope evidence is a renewable lease rather than a permanent flag. A
+  // stationary fan/hum therefore cannot keep an already-confirmed turn alive.
+  softVoiceEvidenceLeaseMs: 400,
+  // Confirmation also needs envelope changes spread across time; one short
+  // echo followed by a stationary tail is not a quiet utterance.
+  softVoiceMinimumEvidenceSpanMs: 320,
+  // After clear speech, a short but genuinely changing quiet word may refresh
+  // the endpoint without opting the whole turn into the three-second mode.
+  softVoiceContinuationEvidenceSpanMs: 120,
   endOfTurnSilenceMs: 1_200,
   reflectiveEndOfTurnSilenceMs: 2_200,
+  softVoiceEndOfTurnSilenceMs: 3_000,
   reflectiveSpeechSpanMs: 1_600,
   hybridEndpointSilenceMs: 1_200,
   hybridReflectiveEndpointSilenceMs: 2_200,
+  hybridSoftVoiceEndpointSilenceMs: 3_000,
   hybridEndpointAgreementWindowMs: 2_000,
+  hybridSoftVoiceAgreementWindowMs: 3_500,
   // A voice candidate must either reach the 120 ms confirmation threshold
   // promptly or be discarded. This also bounds unconfirmed room audio before
   // a fresh candidate and its isolated recorder are created.
   candidateCaptureLimitMs: 200,
+  // Quiet speech needs a longer, still finite privacy window because it is
+  // confirmed from sustained signal-to-noise and envelope evidence.
+  softCandidateCaptureLimitMs: 1_200,
   silentCaptureLimitMs: 30_000,
   spokenCaptureLimitMs: 55_000,
   idleSessionLimitMs: 3 * 60_000,
@@ -262,6 +286,15 @@ export function createSessionClock({
       responseActive = false;
       lastSpeechAt = timestamp;
       return Object.freeze({ expiry: null, ok: true });
+    },
+    cancelResponse() {
+      const timestamp = currentTime();
+      if (startedAt === null || !responseActive) {
+        return Object.freeze({ expiry: "maximum", ok: false });
+      }
+      responseActive = false;
+      const expiry = expiryAt(timestamp);
+      return Object.freeze({ expiry, ok: expiry === null });
     },
     check() {
       const expiry = expiryAt(currentTime());
@@ -548,6 +581,7 @@ export function createCandidateCaptureState() {
   return Object.freeze({
     action: null,
     candidateStartedAt: null,
+    captureLimitMs: null,
     phase: CANDIDATE_CAPTURE_PHASES.armed,
   });
 }
@@ -559,6 +593,8 @@ export function advanceCandidateCapture(
   {
     candidateCaptureLimitMs =
       VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
+    softCandidateCaptureLimitMs =
+      VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
   } = {},
 ) {
   if (
@@ -568,6 +604,11 @@ export function advanceCandidateCapture(
     (previous.candidateStartedAt !== null &&
       (!Number.isFinite(previous.candidateStartedAt) ||
         previous.candidateStartedAt < 0)) ||
+    (previous.captureLimitMs !== undefined &&
+      previous.captureLimitMs !== null &&
+      (!Number.isFinite(previous.captureLimitMs) ||
+        previous.captureLimitMs < candidateCaptureLimitMs ||
+        previous.captureLimitMs > softCandidateCaptureLimitMs)) ||
     vadState === null ||
     typeof vadState !== "object" ||
     typeof vadState.hasSpeech !== "boolean" ||
@@ -575,11 +616,30 @@ export function advanceCandidateCapture(
     !Number.isFinite(vadState.voiceRunMs) ||
     vadState.voiceRunMs < 0 ||
     !Number.isFinite(candidateCaptureLimitMs) ||
-    candidateCaptureLimitMs <= 0
+    candidateCaptureLimitMs <= 0 ||
+    !Number.isFinite(softCandidateCaptureLimitMs) ||
+    softCandidateCaptureLimitMs < candidateCaptureLimitMs ||
+    (vadState.softVoiceCandidate !== undefined &&
+      typeof vadState.softVoiceCandidate !== "boolean")
   ) {
     throw new TypeError("candidate_capture_state_invalid");
   }
   const timestamp = finiteTimestamp(now, "candidate_capture_time");
+  const requestedCaptureLimitMs = vadState.softVoiceCandidate
+    ? softCandidateCaptureLimitMs
+    : candidateCaptureLimitMs;
+  const previousCaptureLimitMs =
+    previous.captureLimitMs ??
+    (previous.phase === CANDIDATE_CAPTURE_PHASES.armed
+      ? null
+      : candidateCaptureLimitMs);
+  // Once any frame needs the quiet-speech window, retain that finite absolute
+  // limit for this candidate. Classification may later become clear again,
+  // but the onset timestamp never moves and the limit can never exceed 1.2 s.
+  const effectiveCaptureLimitMs =
+    previousCaptureLimitMs === null
+      ? requestedCaptureLimitMs
+      : Math.max(previousCaptureLimitMs, requestedCaptureLimitMs);
   if (
     previous.candidateStartedAt !== null &&
     timestamp < previous.candidateStartedAt
@@ -594,6 +654,7 @@ export function advanceCandidateCapture(
     return Object.freeze({
       action: null,
       candidateStartedAt: previous.candidateStartedAt,
+      captureLimitMs: previousCaptureLimitMs,
       phase: CANDIDATE_CAPTURE_PHASES.confirmed,
     });
   }
@@ -602,12 +663,14 @@ export function advanceCandidateCapture(
       return Object.freeze({
         action: null,
         candidateStartedAt: null,
+        captureLimitMs: null,
         phase: CANDIDATE_CAPTURE_PHASES.armed,
       });
     }
     return Object.freeze({
       action: "start",
       candidateStartedAt: timestamp,
+      captureLimitMs: effectiveCaptureLimitMs,
       phase: vadState.hasSpeech
         ? CANDIDATE_CAPTURE_PHASES.confirmed
         : CANDIDATE_CAPTURE_PHASES.candidate,
@@ -615,11 +678,12 @@ export function advanceCandidateCapture(
   }
   if (
     vadState.voiceRunMs === 0 ||
-    timestamp - previous.candidateStartedAt >= candidateCaptureLimitMs
+    timestamp - previous.candidateStartedAt >= effectiveCaptureLimitMs
   ) {
     return Object.freeze({
       action: "discard",
       candidateStartedAt: null,
+      captureLimitMs: null,
       phase: CANDIDATE_CAPTURE_PHASES.armed,
     });
   }
@@ -627,12 +691,14 @@ export function advanceCandidateCapture(
     return Object.freeze({
       action: "confirm",
       candidateStartedAt: previous.candidateStartedAt,
+      captureLimitMs: effectiveCaptureLimitMs,
       phase: CANDIDATE_CAPTURE_PHASES.confirmed,
     });
   }
   return Object.freeze({
     action: null,
     candidateStartedAt: previous.candidateStartedAt,
+    captureLimitMs: effectiveCaptureLimitMs,
     phase: CANDIDATE_CAPTURE_PHASES.candidate,
   });
 }
@@ -640,11 +706,19 @@ export function advanceCandidateCapture(
 export function createVadState(startedAt) {
   return Object.freeze({
     action: null,
+    clearVoiceRunMs: 0,
     firstVoiceAt: null,
     hasSpeech: false,
     lastVoiceAt: null,
     noiseFloor: 0.006,
     sampleVoiced: false,
+    softVoiceCandidate: false,
+    softVoiceConfirmed: false,
+    softVoiceEvidenceAt: null,
+    softVoiceEvidenceStartedAt: null,
+    softVoiceMaxRms: 0,
+    softVoiceMinRms: null,
+    softVoiceRunMs: 0,
     startedAt: finiteTimestamp(startedAt, "vad_started_at"),
     voiceRunMs: 0,
   });
@@ -656,9 +730,11 @@ export function shouldCommitHybridEndpoint({
   lastVoiceAt,
   now,
   providerEndpointAt,
+  softVoiceConfirmed = false,
 }) {
   if (
     typeof hasSpeech !== "boolean" ||
+    typeof softVoiceConfirmed !== "boolean" ||
     !Number.isFinite(now) ||
     now < 0 ||
     (firstVoiceAt !== null &&
@@ -678,9 +754,7 @@ export function shouldCommitHybridEndpoint({
     providerEndpointAt === null ||
     firstVoiceAt > lastVoiceAt ||
     lastVoiceAt > providerEndpointAt ||
-    providerEndpointAt > now ||
-    now - providerEndpointAt >
-      VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs
+    providerEndpointAt > now
   ) {
     return false;
   }
@@ -688,10 +762,15 @@ export function shouldCommitHybridEndpoint({
     lastVoiceAt -
     firstVoiceAt +
     VOICE_SESSION_LIMITS.vadIntervalMs;
-  const requiredSilence =
-    speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+  const requiredSilence = softVoiceConfirmed
+    ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
+    : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
       ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
       : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+  const agreementWindow = softVoiceConfirmed
+    ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
+    : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
+  if (now - providerEndpointAt > agreementWindow) return false;
   return now - lastVoiceAt >= requiredSilence;
 }
 
@@ -701,9 +780,28 @@ export function advanceVad(
   {
     intervalMs = VOICE_SESSION_LIMITS.vadIntervalMs,
     minimumVoiceMs = VOICE_SESSION_LIMITS.minimumVoiceMs,
+    softVoiceMinimumMs = VOICE_SESSION_LIMITS.softVoiceMinimumMs,
+    softVoiceSnrRatio = VOICE_SESSION_LIMITS.softVoiceSnrRatio,
+    softVoicePeakToRmsRatio =
+      VOICE_SESSION_LIMITS.softVoicePeakToRmsRatio,
+    softVoiceEnvelopeRatio =
+      VOICE_SESSION_LIMITS.softVoiceEnvelopeRatio,
+    softVoiceBootstrapMs = VOICE_SESSION_LIMITS.softVoiceBootstrapMs,
+    softVoiceBootstrapMinimumRms =
+      VOICE_SESSION_LIMITS.softVoiceBootstrapMinimumRms,
+    softVoiceEvidenceLeaseMs =
+      VOICE_SESSION_LIMITS.softVoiceEvidenceLeaseMs,
+    softVoiceMinimumEvidenceSpanMs =
+      VOICE_SESSION_LIMITS.softVoiceMinimumEvidenceSpanMs,
+    softVoiceContinuationEvidenceSpanMs =
+      VOICE_SESSION_LIMITS.softVoiceContinuationEvidenceSpanMs,
+    softCandidateCaptureLimitMs =
+      VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
     endOfTurnSilenceMs = VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
     reflectiveEndOfTurnSilenceMs =
       VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    softVoiceEndOfTurnSilenceMs =
+      VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
     reflectiveSpeechSpanMs =
       VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs,
     silentCaptureLimitMs = VOICE_SESSION_LIMITS.silentCaptureLimitMs,
@@ -730,44 +828,207 @@ export function advanceVad(
   if (previous.action !== null) return previous;
 
   let {
+    clearVoiceRunMs = previous.voiceRunMs,
     firstVoiceAt,
     hasSpeech,
     lastVoiceAt,
     noiseFloor,
+    softVoiceCandidate = false,
+    softVoiceConfirmed = false,
+    softVoiceEvidenceAt = null,
+    softVoiceEvidenceStartedAt = null,
+    softVoiceMaxRms = 0,
+    softVoiceMinRms = null,
+    softVoiceRunMs = 0,
     voiceRunMs,
   } = previous;
+  const elapsed = timestamp - previous.startedAt;
   const threshold = hasSpeech
     ? Math.max(0.009, noiseFloor * 1.7)
     : Math.max(0.014, noiseFloor * 2.8);
   const peakMultiplier = hasSpeech ? 1.35 : 1.8;
-  const soundsVoiced = rms >= threshold && peak >= threshold * peakMultiplier;
+  const soundsClear =
+    rms >= threshold && peak >= threshold * peakMultiplier;
+  // This path is relative to the learned room floor. It deliberately has no
+  // lower fixed speech threshold: low-SNR evidence must instead persist and
+  // show a changing speech envelope before it can become an utterance.
+  const hasVoiceShapedPeak =
+    peak >= rms * softVoicePeakToRmsRatio;
+  const bootstrapSoftVoice =
+    !hasSpeech &&
+    (elapsed <= softVoiceBootstrapMs || softVoiceCandidate) &&
+    rms >= softVoiceBootstrapMinimumRms;
+  const soundsSoft =
+    !soundsClear &&
+    hasVoiceShapedPeak &&
+    (rms >= noiseFloor * softVoiceSnrRatio || bootstrapSoftVoice);
+  let sampleVoiced = soundsClear || soundsSoft;
 
-  if (soundsVoiced) {
-    if (firstVoiceAt === null) {
-      firstVoiceAt = timestamp;
+  let hasRecentSoftEnvelope = false;
+  if (soundsSoft) {
+    softVoiceCandidate = true;
+    softVoiceRunMs += intervalMs;
+    softVoiceMinRms =
+      softVoiceMinRms === null
+        ? rms
+        : Math.min(softVoiceMinRms, rms);
+    softVoiceMaxRms = Math.max(softVoiceMaxRms, rms);
+    const envelopeChanged =
+      softVoiceMinRms > 0 &&
+      softVoiceMaxRms >= softVoiceMinRms * softVoiceEnvelopeRatio;
+    if (envelopeChanged) {
+      // Reset the range after each observation so old speech dynamics cannot
+      // grant an unlimited lease to later stationary room noise or echo.
+      if (softVoiceEvidenceStartedAt === null) {
+        softVoiceEvidenceStartedAt = timestamp;
+      }
+      softVoiceEvidenceAt = timestamp;
+      softVoiceMinRms = rms;
+      softVoiceMaxRms = rms;
     }
-    voiceRunMs += intervalMs;
-    // Candidate capture starts here. Confirmation still requires the full
-    // minimum voice run, but every voiced sample anchors the trailing-silence
-    // deadline so a natural pause cannot cut off resumed speech.
+    hasRecentSoftEnvelope =
+      softVoiceEvidenceAt !== null &&
+      timestamp - softVoiceEvidenceAt <= softVoiceEvidenceLeaseMs;
+  }
+  const hasSustainedSoftEnvelope =
+    hasRecentSoftEnvelope &&
+    softVoiceEvidenceStartedAt !== null &&
+    softVoiceEvidenceAt - softVoiceEvidenceStartedAt >=
+      softVoiceMinimumEvidenceSpanMs;
+  const hasSoftContinuationEnvelope =
+    hasRecentSoftEnvelope &&
+    softVoiceEvidenceStartedAt !== null &&
+    softVoiceEvidenceAt - softVoiceEvidenceStartedAt >=
+      softVoiceContinuationEvidenceSpanMs;
+
+  if (hasSpeech) {
+    if (soundsClear) {
+      clearVoiceRunMs += intervalMs;
+      lastVoiceAt = timestamp;
+      softVoiceCandidate = false;
+      softVoiceEvidenceAt = null;
+      softVoiceEvidenceStartedAt = null;
+      softVoiceMaxRms = 0;
+      softVoiceMinRms = null;
+      softVoiceRunMs = 0;
+    } else if (soundsSoft) {
+      clearVoiceRunMs = Math.max(
+        0,
+        clearVoiceRunMs - intervalMs * 0.5,
+      );
+      if (
+        !softVoiceConfirmed &&
+        softVoiceRunMs >= softVoiceMinimumMs &&
+        hasSustainedSoftEnvelope
+      ) {
+        softVoiceConfirmed = true;
+      }
+      if (
+        (softVoiceConfirmed && hasRecentSoftEnvelope) ||
+        (!softVoiceConfirmed && hasSoftContinuationEnvelope)
+      ) {
+        lastVoiceAt = timestamp;
+      } else if (
+        softVoiceRunMs >= softCandidateCaptureLimitMs &&
+        !hasRecentSoftEnvelope
+      ) {
+        softVoiceCandidate = false;
+        softVoiceEvidenceAt = null;
+        softVoiceEvidenceStartedAt = null;
+        softVoiceMaxRms = 0;
+        softVoiceMinRms = null;
+        softVoiceRunMs = 0;
+        sampleVoiced = false;
+      }
+    } else {
+      clearVoiceRunMs = Math.max(
+        0,
+        clearVoiceRunMs - intervalMs * 0.5,
+      );
+      softVoiceRunMs = Math.max(
+        0,
+        softVoiceRunMs - intervalMs * 0.5,
+      );
+      if (softVoiceRunMs === 0) {
+        softVoiceCandidate = false;
+        softVoiceEvidenceAt = null;
+        softVoiceEvidenceStartedAt = null;
+        softVoiceMaxRms = 0;
+        softVoiceMinRms = null;
+      }
+      sampleVoiced = false;
+    }
+  } else if (soundsClear) {
+    if (firstVoiceAt === null) firstVoiceAt = timestamp;
+    clearVoiceRunMs += intervalMs;
+    softVoiceRunMs = Math.max(
+      0,
+      softVoiceRunMs - intervalMs * 0.5,
+    );
     lastVoiceAt = timestamp;
-    if (voiceRunMs >= minimumVoiceMs) {
+    if (clearVoiceRunMs >= minimumVoiceMs) {
       hasSpeech = true;
+      softVoiceCandidate = false;
+      softVoiceEvidenceAt = null;
+      softVoiceEvidenceStartedAt = null;
+      softVoiceMaxRms = 0;
+      softVoiceMinRms = null;
+      softVoiceRunMs = 0;
+    }
+  } else if (soundsSoft) {
+    if (firstVoiceAt === null) firstVoiceAt = timestamp;
+    clearVoiceRunMs = Math.max(
+      0,
+      clearVoiceRunMs - intervalMs * 0.5,
+    );
+    lastVoiceAt = timestamp;
+    if (
+      softVoiceRunMs >= softVoiceMinimumMs &&
+      hasSustainedSoftEnvelope
+    ) {
+      hasSpeech = true;
+      softVoiceConfirmed = true;
+    } else if (
+      softVoiceRunMs >= softCandidateCaptureLimitMs &&
+      !hasRecentSoftEnvelope
+    ) {
+      // A stationary hum can remain above the learned floor indefinitely. A
+      // full probe with no envelope movement is room noise, not quiet speech.
+      noiseFloor = Math.min(0.04, Math.max(0.0025, rms));
+      clearVoiceRunMs = 0;
+      softVoiceCandidate = false;
+      softVoiceEvidenceAt = null;
+      softVoiceEvidenceStartedAt = null;
+      softVoiceMaxRms = 0;
+      softVoiceMinRms = null;
+      softVoiceRunMs = 0;
+      sampleVoiced = false;
     }
   } else {
-    if (!hasSpeech) {
-      noiseFloor = Math.min(
-        0.04,
-        Math.max(0.0025, noiseFloor * 0.94 + rms * 0.06),
-      );
-    }
+    noiseFloor = Math.min(
+      0.04,
+      Math.max(0.0025, noiseFloor * 0.94 + rms * 0.06),
+    );
     // Preserve brief gaps and unvoiced consonants without accepting an
     // isolated noise spike as speech.
-    voiceRunMs = Math.max(0, voiceRunMs - intervalMs * 0.5);
-    if (!hasSpeech && voiceRunMs === 0) {
-      firstVoiceAt = null;
-      lastVoiceAt = null;
+    clearVoiceRunMs = Math.max(
+      0,
+      clearVoiceRunMs - intervalMs * 0.5,
+    );
+    softVoiceRunMs = Math.max(0, softVoiceRunMs - intervalMs);
+    if (softVoiceRunMs === 0 && clearVoiceRunMs === 0) {
+      softVoiceCandidate = false;
+      softVoiceEvidenceAt = null;
+      softVoiceEvidenceStartedAt = null;
+      softVoiceMaxRms = 0;
+      softVoiceMinRms = null;
     }
+  }
+
+  voiceRunMs = Math.max(clearVoiceRunMs, softVoiceRunMs);
+  if (!hasSpeech && voiceRunMs === 0) {
+    firstVoiceAt = null;
+    lastVoiceAt = null;
   }
 
   let action = null;
@@ -775,8 +1036,9 @@ export function advanceVad(
     firstVoiceAt === null || lastVoiceAt === null
       ? 0
       : lastVoiceAt - firstVoiceAt + intervalMs;
-  const trailingSilenceMs =
-    speechSpanMs >= reflectiveSpeechSpanMs
+  const trailingSilenceMs = softVoiceConfirmed
+    ? softVoiceEndOfTurnSilenceMs
+    : speechSpanMs >= reflectiveSpeechSpanMs
       ? reflectiveEndOfTurnSilenceMs
       : endOfTurnSilenceMs;
   // Keep direct questions fast, while giving a longer, think-aloud utterance
@@ -788,7 +1050,6 @@ export function advanceVad(
   ) {
     action = "end-of-turn";
   } else {
-    const elapsed = timestamp - previous.startedAt;
     if (!hasSpeech && elapsed >= silentCaptureLimitMs) {
       action = "silence";
     } else if (hasSpeech && elapsed >= spokenCaptureLimitMs) {
@@ -798,11 +1059,19 @@ export function advanceVad(
 
   return Object.freeze({
     action,
+    clearVoiceRunMs,
     firstVoiceAt,
     hasSpeech,
     lastVoiceAt,
     noiseFloor,
-    sampleVoiced: soundsVoiced,
+    sampleVoiced,
+    softVoiceCandidate,
+    softVoiceConfirmed,
+    softVoiceEvidenceAt,
+    softVoiceEvidenceStartedAt,
+    softVoiceMaxRms,
+    softVoiceMinRms,
+    softVoiceRunMs,
     startedAt: previous.startedAt,
     voiceRunMs,
   });

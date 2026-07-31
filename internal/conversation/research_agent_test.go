@@ -317,7 +317,7 @@ func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
 			}
 			if result.Route != "planner-unavailable" ||
 				result.SpokenReply != plannerUnavailableSpokenReply ||
-				!result.NeedsClarification ||
+				result.NeedsClarification ||
 				result.ResearchStatus != "none" ||
 				len(result.ResearchRecords) != 0 ||
 				result.StateToken == "" ||
@@ -1039,7 +1039,7 @@ func assertResearchGuardPlannerFallback(
 	t.Helper()
 	wantRoute := "planner-unavailable"
 	wantSpokenReply := plannerUnavailableSpokenReply
-	wantClarification := true
+	wantClarification := false
 	if result.Route != wantRoute ||
 		result.SpokenReply != wantSpokenReply ||
 		result.NeedsClarification != wantClarification ||

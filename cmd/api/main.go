@@ -124,6 +124,7 @@ func main() {
 			cfg.StateKey,
 			cfg.VertexPriority,
 			cfg.CoachRestatementBinding,
+			cfg.StateV2Writes,
 		)
 		if err != nil {
 			logger.Error("initialize conversation agent", "error", err)

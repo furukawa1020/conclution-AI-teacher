@@ -22,6 +22,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
 	t.Setenv("KOTAE_VERTEX_PRIORITY", "")
 	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "")
+	t.Setenv("KOTAE_STATE_V2_WRITES", "")
 }
 
 func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
@@ -60,6 +61,28 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.CoachRestatementBinding {
 		t.Fatal("restatement tag issuance must remain opt-in for staged rollout")
+	}
+	if cfg.StateV2Writes {
+		t.Fatal("extended state writes must remain opt-in for staged rollout")
+	}
+}
+
+func TestLoadParsesStateV2WritesStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.StateV2Writes {
+		t.Fatal("state v2 writes were not enabled")
+	}
+
+	t.Setenv("KOTAE_STATE_V2_WRITES", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_STATE_V2_WRITES") {
+		t.Fatalf("malformed state v2 writes error = %v", err)
 	}
 }
 

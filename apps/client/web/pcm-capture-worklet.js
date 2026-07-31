@@ -1,7 +1,9 @@
 const OUTPUT_SAMPLE_RATE_HZ = 16_000;
 const FRAME_SAMPLES = 320;
 const FRAME_BYTES = FRAME_SAMPLES * 2;
-const MAXIMUM_PRE_CONFIRM_FRAMES = 25;
+// 75 x 20 ms = the finite 1.2 s quiet-candidate window plus 300 ms
+// pre-roll. This is a hard 48 KB PCM16 ceiling, not an open-ended recorder.
+const MAXIMUM_PRE_CONFIRM_FRAMES = 75;
 const MAXIMUM_QUEUED_FRAMES = 200;
 const CONTROL_VERSION = 1;
 

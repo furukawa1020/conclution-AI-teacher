@@ -82,7 +82,7 @@ func TestAgentPrecisionRecoveryCannotEscalateToOutboundResearch(t *testing.T) {
 	}
 	if result.Route != "planner-unavailable" ||
 		result.SpokenReply != plannerUnavailableSpokenReply ||
-		!result.NeedsClarification ||
+		result.NeedsClarification ||
 		result.ResearchStatus != "none" ||
 		len(result.ResearchRecords) != 0 ||
 		result.StateToken == "" ||
@@ -123,7 +123,7 @@ func TestAgentPlannerRecoveryFailsClosedWithoutPublishingDraft(t *testing.T) {
 		}
 		if result.Route != "planner-unavailable" ||
 			result.SpokenReply != plannerUnavailableSpokenReply ||
-			!result.NeedsClarification ||
+			result.NeedsClarification ||
 			result.StateToken == "" ||
 			len(fake.calls) != 3 {
 			t.Fatalf("unsafe failed-closed result=%#v calls=%#v", result, fake.calls)
@@ -235,7 +235,7 @@ func TestAgentPlannerUnavailablePreservesStateAndGivesAmbientNotice(t *testing.T
 	}
 	if result.Route != "planner-unavailable" ||
 		result.SpokenReply != plannerUnavailableSpokenReply ||
-		!result.NeedsClarification ||
+		result.NeedsClarification ||
 		result.StateToken == "" ||
 		result.StateToken == token {
 		t.Fatalf("ambient fallback notice was not bounded and fresh: %#v", result)
@@ -308,7 +308,7 @@ func TestAgentPlannerUnavailableForegroundGetsFixedNoticeAndIsolatesState(
 	}
 	if result.Route != "planner-unavailable" ||
 		result.SpokenReply != plannerUnavailableSpokenReply ||
-		!result.NeedsClarification {
+		result.NeedsClarification {
 		t.Fatalf("foreground planner fallback did not speak fixed notice: %#v", result)
 	}
 	next, err := agent.codec.open(
@@ -481,8 +481,9 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 			t.Fatalf("Process: %v", err)
 		}
 		if result.Route != "verification-unavailable" ||
-			result.SpokenReply !=
-				"回答の意味を安全に確認できませんでした。もう一度試してもらえますか？" ||
+			result.SpokenReply != verificationUnavailableSpokenReply ||
+			strings.Contains(result.SpokenReply, "回答の意味") ||
+			strings.Contains(result.SpokenReply, "もう一度") ||
 			result.StateToken == "" ||
 			len(fake.calls) != 1 {
 			t.Fatalf(

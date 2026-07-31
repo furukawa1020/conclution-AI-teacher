@@ -976,7 +976,7 @@ test("an authenticated silent foreground miss rearms without ending the session"
   );
 });
 
-test("successful turns rearm but confirmed-speech failures never resend", async () => {
+test("successful and transiently failed turns rearm without resending confirmed speech", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
@@ -984,9 +984,25 @@ test("successful turns rearm but confirmed-speech failures never resend", async 
   const submitStart = client.indexOf("fn submit_turn(");
   const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
   const submit = client.slice(submitStart, submitEnd);
-  const failureStart = submit.indexOf("Err(FinishTurnError::Message(message))");
-  const failureEnd = submit.indexOf("};", failureStart);
-  const failure = submit.slice(failureStart, failureEnd);
+  const recoverableStart = submit.indexOf(
+    "Err(FinishTurnError::Recoverable(message))",
+  );
+  const terminalStart = submit.indexOf(
+    "Err(FinishTurnError::Message(message))",
+    recoverableStart,
+  );
+  const recoverable = submit.slice(recoverableStart, terminalStart);
+  assert.match(
+    recoverable,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+  );
+  assert.doesNotMatch(
+    recoverable,
+    /cloud::stop_session\(\)|finish_turn|submit_turn/u,
+  );
+
+  const failureEnd = submit.indexOf("};", terminalStart);
+  const failure = submit.slice(terminalStart, failureEnd);
   assert.match(failure, /cloud::stop_session\(\)/u);
   assert.match(failure, /voice_state\.set\(VoiceState::Error\(message\)\)/u);
   assert.doesNotMatch(failure, /finish_turn|submit_turn|arm_listening/u);
@@ -996,6 +1012,100 @@ test("successful turns rearm but confirmed-speech failures never resend", async 
   assert.match(
     submit.slice(successStart),
     /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+  );
+});
+
+test("only reviewed transient finish errors preserve the foreground session", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const classifierStart = client.indexOf("fn recoverable_finish_turn_code(");
+  const classifierEnd = client.indexOf("\n}\n", classifierStart) + 2;
+  const classifier = client.slice(classifierStart, classifierEnd);
+  for (const code of [
+    "no_speech",
+    "rate_limited",
+    "voice_api_unavailable",
+    "voice_turn_too_large",
+    "voice_turn_timeout",
+    "voice_turn_unavailable",
+  ]) {
+    assert.match(classifier, new RegExp(`"${code}"`, "u"));
+  }
+  for (const code of [
+    "authentication_failed",
+    "audio_playback_blocked",
+    "request_cancelled",
+    "session_expired",
+    "voice_response_invalid",
+    "voice_turn_invalid",
+  ]) {
+    assert.doesNotMatch(classifier, new RegExp(`"${code}"`, "u"));
+  }
+});
+
+test("an oversized local capture rearms from wait without resending or closing the session", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const classifierStart = client.indexOf("fn recoverable_wait_turn_code(");
+  const classifierEnd = client.indexOf("\n}\n", classifierStart) + 2;
+  const classifier = client.slice(classifierStart, classifierEnd);
+  assert.match(classifier, /"voice_turn_too_large"/u);
+
+  const armStart = client.indexOf("fn arm_listening(");
+  const armEnd = client.indexOf(
+    "\n}\n\n#[allow(clippy::too_many_arguments)]\nfn resume_foreground_interruption",
+    armStart,
+  );
+  const arm = client.slice(armStart, armEnd);
+  const recoverableStart = arm.indexOf(
+    "Err(WaitTurnError::Recoverable(message))",
+  );
+  const terminalStart = arm.indexOf(
+    "Err(WaitTurnError::Terminal(message))",
+    recoverableStart,
+  );
+  assert.ok(recoverableStart >= 0);
+  assert.ok(terminalStart > recoverableStart);
+  const recoverable = arm.slice(recoverableStart, terminalStart);
+  assert.match(
+    recoverable,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+  );
+  assert.doesNotMatch(
+    recoverable,
+    /cloud::stop_session\(\)|finish_turn|submit_turn/u,
+  );
+
+  const resumeStart = client.indexOf("fn resume_foreground_interruption(");
+  const resumeEnd = client.indexOf(
+    "\n}\n\n#[allow(clippy::too_many_arguments)]\nfn submit_turn",
+    resumeStart,
+  );
+  const resume = client.slice(resumeStart, resumeEnd);
+  const resumeRecoverableStart = resume.indexOf(
+    "Err(WaitTurnError::Recoverable(message))",
+  );
+  const resumeTerminalStart = resume.indexOf(
+    "Err(WaitTurnError::Terminal(message))",
+    resumeRecoverableStart,
+  );
+  assert.ok(resumeRecoverableStart >= 0);
+  assert.ok(resumeTerminalStart > resumeRecoverableStart);
+  const resumeRecoverable = resume.slice(
+    resumeRecoverableStart,
+    resumeTerminalStart,
+  );
+  assert.match(
+    resumeRecoverable,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+  );
+  assert.doesNotMatch(
+    resumeRecoverable,
+    /cloud::stop_session\(\)|finish_turn|submit_turn/u,
   );
 });
 
@@ -1502,9 +1612,9 @@ test("live capture accepts only exact 20 ms PCM frames and bounds startup", () =
       CONFIRMED_SPEECH_PCM_LIMITS.historyMs,
     "the normal-listen lead-in must fit in the bounded PCM history",
   );
-  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.historyMs, 500);
-  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumFrames, 25);
-  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumBytes, 16_000);
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.historyMs, 1_500);
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumFrames, 75);
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumBytes, 48_000);
   assert.equal(VOICE_LIVE_LIMITS.handoffReadyTimeoutMs, 450);
   assert.equal(VOICE_LIVE_LIMITS.terminalCloseTimeoutMs, 1_500);
   assert.equal(VOICE_LIVE_LIMITS.maximumSocketBufferedBytes, 16 * 1024);
@@ -1607,25 +1717,25 @@ function filledPcmFrame(value) {
   return frame;
 }
 
-test("barge PCM ring retains only timestamped 400 ms and drains 100 ms pre-roll", () => {
+test("barge PCM ring retains the slowest candidate and 100 ms pre-roll", () => {
   assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
-  assert.equal(BARGE_PCM_LIMITS.historyMs, 400);
+  assert.equal(BARGE_PCM_LIMITS.historyMs, 460);
   assert.equal(BARGE_PCM_LIMITS.leadInMs, 100);
-  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 20);
+  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 23);
   assert.equal(
     BARGE_PCM_LIMITS.maximumBytes,
-    20 * VOICE_LIVE_LIMITS.inputFrameBytes,
+    23 * VOICE_LIVE_LIMITS.inputFrameBytes,
   );
 
   const ring = createBargePcmRing();
   const evicted = filledPcmFrame(255);
   ring.push(evicted, 0);
-  for (let index = 1; index <= 20; index += 1) {
+  for (let index = 1; index <= 23; index += 1) {
     ring.push(filledPcmFrame(index), index * 20);
   }
   assert.deepEqual(ring.snapshot(), {
-    frameCount: 20,
-    newestAt: 400,
+    frameCount: 23,
+    newestAt: 460,
     oldestAt: 20,
     totalBytes: BARGE_PCM_LIMITS.maximumBytes,
   });
@@ -1640,8 +1750,8 @@ test("barge PCM ring retains only timestamped 400 ms and drains 100 ms pre-roll"
     candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
   );
   assert.equal(drained[0].capturedAt, 260);
-  assert.equal(drained.at(-1).capturedAt, 400);
-  assert.equal(drained.length, 8);
+  assert.equal(drained.at(-1).capturedAt, 460);
+  assert.equal(drained.length, 11);
   assert.deepEqual(ring.snapshot(), {
     frameCount: 0,
     newestAt: null,
@@ -1652,11 +1762,11 @@ test("barge PCM ring retains only timestamped 400 ms and drains 100 ms pre-roll"
   const expired = filledPcmFrame(91);
   const cleared = filledPcmFrame(92);
   ring.push(expired, 500);
-  ring.push(cleared, 920);
+  ring.push(cleared, 980);
   assert.equal(
     new Uint8Array(expired).every((value) => value === 0),
     true,
-    "timestamp eviction must zero audio older than 400 ms",
+    "timestamp eviction must zero audio older than 460 ms",
   );
   ring.clear();
   assert.equal(
@@ -1770,6 +1880,71 @@ test("normal live capture keeps the full lead-in across bounded VAD jitter", () 
   assert.deepEqual(
     sent.map((frame) => new Uint8Array(frame)[0]),
     Array.from({ length: 24 }, (_, index) => index + 1),
+  );
+});
+
+test("late quiet confirmation preserves its full finite candidate and 300 ms lead-in", () => {
+  assert.equal(
+    CONFIRMED_SPEECH_PCM_LIMITS.historyMs,
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs +
+      VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs,
+  );
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumFrames, 75);
+  assert.equal(
+    CONFIRMED_SPEECH_PCM_LIMITS.maximumBytes,
+    CONFIRMED_SPEECH_PCM_LIMITS.maximumFrames *
+      VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+
+  let now = 0;
+  let vadState = createVadState(now);
+  let candidateState = createCandidateCaptureState();
+  for (let frame = 0; frame < 10; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    vadState = advanceVad(vadState, { now, peak: 0.004, rms: 0.003 });
+  }
+
+  let candidateStartedAt = null;
+  for (let frame = 1; frame <= 29; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms =
+      frame < 21 ? 0.0065 : frame % 2 === 1 ? 0.0085 : 0.0065;
+    vadState = advanceVad(vadState, { now, peak: rms * 2, rms });
+    candidateState = advanceCandidateCapture(
+      candidateState,
+      vadState,
+      now,
+    );
+    if (candidateState.action === "start") {
+      candidateStartedAt = candidateState.candidateStartedAt;
+    }
+  }
+  assert.equal(candidateStartedAt, 440);
+  assert.equal(candidateState.action, "confirm");
+  assert.equal(vadState.softVoiceConfirmed, true);
+  assert.ok(
+    now - candidateStartedAt <
+      VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+  );
+
+  const sent = [];
+  const gate = createConfirmedSpeechPcmGate((frame) => sent.push(frame));
+  for (
+    let capturedAt = 0;
+    capturedAt < now;
+    capturedAt += CONFIRMED_SPEECH_PCM_LIMITS.frameDurationMs
+  ) {
+    gate.push(filledPcmFrame(capturedAt / 20 + 1), capturedAt);
+  }
+  gate.confirm(candidateStartedAt);
+
+  const firstExpectedAt =
+    candidateStartedAt - VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs;
+  assert.equal(new Uint8Array(sent[0])[0], firstExpectedAt / 20 + 1);
+  assert.equal(
+    sent.length,
+    (now - firstExpectedAt) /
+      CONFIRMED_SPEECH_PCM_LIMITS.frameDurationMs,
   );
 });
 
@@ -2180,6 +2355,43 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     }),
     true,
   );
+
+  const softVoice = {
+    firstVoiceAt: 600,
+    hasSpeech: true,
+    lastVoiceAt: 1_000,
+    providerEndpointAt: 1_300,
+    softVoiceConfirmed: true,
+  };
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...softVoice, now: 3_999 }),
+    false,
+    "a confirmed quiet speaker keeps a three-second thinking pause",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...softVoice, now: 4_000 }),
+    true,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...softVoice, now: 4_801 }),
+    false,
+    "soft-voice provider agreement is longer but still finite",
+  );
+});
+
+test("bridge forwards soft-voice confirmation to hybrid endpoint policy", async () => {
+  const source = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /softVoiceConfirmed: recording\.softVoiceConfirmed/u,
+  );
+  assert.match(
+    source,
+    /recording\.softVoiceConfirmed = vadState\.softVoiceConfirmed/u,
+  );
 });
 
 test("live endpoint is rejected before ready and ignored after commit", () => {
@@ -2475,6 +2687,84 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
     rms: 0.003,
   });
   assert.equal(state.action, "end-of-turn");
+});
+
+test("interrupt recorder deadline covers the slowest finite gapped confirmation", () => {
+  let now = 0;
+  let state = createInterruptVadState(now);
+  let candidateStartedAt = null;
+  for (let frame = 1; frame <= 10; frame += 1) {
+    now += INTERRUPT_VAD_LIMITS.intervalMs;
+    const voiced = [1, 4, 7, 10].includes(frame);
+    state = advanceInterruptVad(state, {
+      now,
+      outputActive: true,
+      peak: voiced ? 0.16 : 0.003,
+      rms: voiced ? 0.08 : 0.003,
+    });
+    if (state.action === "start") {
+      candidateStartedAt = state.candidateStartedAt;
+    }
+  }
+
+  assert.equal(state.action, "confirm");
+  assert.equal(now - candidateStartedAt, 360);
+  assert.ok(
+    now - candidateStartedAt <
+      INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
+  );
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 400);
+  assert.equal(
+    BARGE_PCM_LIMITS.historyMs,
+    now - candidateStartedAt + BARGE_PCM_LIMITS.leadInMs,
+  );
+  assert.equal(
+    BARGE_PCM_LIMITS.maximumFrames,
+    BARGE_PCM_LIMITS.historyMs / BARGE_PCM_LIMITS.frameDurationMs,
+  );
+});
+
+test("an overdue interrupt candidate discards before it can confirm without its recorder", async () => {
+  const startedAt = 0;
+  let state = createInterruptVadState(startedAt);
+  state = advanceInterruptVad(state, {
+    now: 40,
+    outputActive: true,
+    peak: 0.16,
+    rms: 0.08,
+  });
+  assert.equal(state.action, "start");
+  const candidateStartedAt = state.candidateStartedAt;
+
+  // Model a blocked main thread: the independent MediaRecorder watchdog may
+  // have detached the candidate before this next VAD task gets to run.
+  state = advanceInterruptVad(state, {
+    now:
+      candidateStartedAt +
+      INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
+    outputActive: true,
+    peak: 0.16,
+    rms: 0.08,
+  });
+  assert.equal(state.action, "discard");
+  assert.equal(state.phase, "armed");
+  assert.equal(state.candidateStartedAt, null);
+  assert.equal(state.voiceRunMs, 0);
+
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const monitorStart = bridge.indexOf("function startBargeInMonitoring(");
+  const monitorEnd = bridge.indexOf(
+    "\n}\n\nfunction createStreamingPlayback",
+    monitorStart,
+  );
+  const monitor = bridge.slice(monitorStart, monitorEnd);
+  assert.match(
+    monitor,
+    /vadState\.action === "discard"[\s\S]*restorePlaybackGain\(playback\)[\s\S]*discardCurrentCandidate\(recording, "interrupt-rejected"\)/u,
+  );
 });
 
 test("interrupt VAD preserves 2.2 seconds for reflective speech", () => {
@@ -3082,6 +3372,22 @@ test("an active response defers only idle expiry until playback completes", () =
   });
 });
 
+test("a failed response clears the hold without extending the idle lease", () => {
+  let now = 30_000;
+  const clock = createSessionClock({ now: () => now });
+  assert.deepEqual(clock.begin(), { expiry: null, ok: true });
+  const initialSpeechAt = clock.snapshot().lastSpeechAt;
+  assert.deepEqual(clock.beginResponse(), { expiry: null, ok: true });
+
+  now += 60_000;
+  assert.deepEqual(clock.cancelResponse(), { expiry: null, ok: true });
+  assert.equal(clock.snapshot().responseActive, false);
+  assert.equal(clock.snapshot().lastSpeechAt, initialSpeechAt);
+
+  now = initialSpeechAt + VOICE_SESSION_LIMITS.idleSessionLimitMs;
+  assert.deepEqual(clock.check(), { expiry: "idle", ok: false });
+});
+
 test("finishTurn holds the idle clock through validated playback only", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
@@ -3112,6 +3418,10 @@ test("finishTurn holds the idle clock through validated playback only", async ()
     "if (responseClockActive)",
     httpCompleteAt,
   );
+  const failureCancelAt = finish.indexOf(
+    "cancelSessionResponse(expectedEpoch)",
+    failureCleanupAt,
+  );
 
   assert.ok(beginAt >= 0);
   assert.ok(liveDrainAt > beginAt);
@@ -3119,6 +3429,11 @@ test("finishTurn holds the idle clock through validated playback only", async ()
   assert.ok(httpDrainAt > liveCompleteAt);
   assert.ok(httpCompleteAt > httpDrainAt);
   assert.ok(failureCleanupAt > httpCompleteAt);
+  assert.ok(failureCancelAt > failureCleanupAt);
+  assert.equal(
+    finish.indexOf("completeSessionResponse(expectedEpoch)", failureCleanupAt),
+    -1,
+  );
 });
 
 test("expired speech cannot revive a session clock", () => {
@@ -3233,6 +3548,307 @@ test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
     rms: 0.003,
   });
   assert.equal(state.action, "end-of-turn");
+});
+
+test("VAD opens the relative-SNR path only at its noise-relative boundary", () => {
+  const startedAt = 2_500;
+  let now = startedAt;
+  let state = createVadState(startedAt);
+  for (let frame = 0; frame < 15; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.004, rms: 0.003 });
+  }
+
+  const belowRms =
+    state.noiseFloor * (VOICE_SESSION_LIMITS.softVoiceSnrRatio - 0.01);
+  now += VOICE_SESSION_LIMITS.vadIntervalMs;
+  state = advanceVad(
+    state,
+    {
+      now,
+      peak: belowRms * 2,
+      rms: belowRms,
+    },
+    { softVoiceBootstrapMs: 0 },
+  );
+  assert.equal(state.sampleVoiced, false);
+  assert.equal(state.firstVoiceAt, null);
+
+  const boundaryRms =
+    state.noiseFloor * VOICE_SESSION_LIMITS.softVoiceSnrRatio;
+  now += VOICE_SESSION_LIMITS.vadIntervalMs;
+  state = advanceVad(
+    state,
+    {
+      now,
+      peak:
+        boundaryRms * VOICE_SESSION_LIMITS.softVoicePeakToRmsRatio,
+      rms: boundaryRms,
+    },
+    { softVoiceBootstrapMs: 0 },
+  );
+  assert.equal(state.sampleVoiced, true);
+  assert.equal(state.softVoiceCandidate, true);
+  assert.equal(state.hasSpeech, false);
+});
+
+test("cold-start bootstrap confirms changing quiet speech without learning it as room noise", () => {
+  let now = 0;
+  let state = createVadState(now);
+  let candidate = createCandidateCaptureState();
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.softVoiceMinimumMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < confirmationFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+    candidate = advanceCandidateCapture(candidate, state, now);
+  }
+
+  assert.equal(state.hasSpeech, true);
+  assert.equal(state.softVoiceConfirmed, true);
+  assert.equal(state.noiseFloor, 0.006);
+  assert.equal(candidate.action, "confirm");
+  assert.equal(candidate.phase, "confirmed");
+});
+
+test("cold-start bootstrap rejects stationary room sound and does not immediately rearm it", () => {
+  let now = 0;
+  let state = createVadState(now);
+  let candidate = createCandidateCaptureState();
+  const probeFrames =
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < probeFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.013, rms: 0.0065 });
+    candidate = advanceCandidateCapture(candidate, state, now);
+  }
+
+  assert.equal(state.hasSpeech, false);
+  assert.equal(state.sampleVoiced, false);
+  assert.equal(state.softVoiceCandidate, false);
+  assert.equal(state.noiseFloor, 0.0065);
+  assert.equal(candidate.action, "discard");
+
+  now += VOICE_SESSION_LIMITS.vadIntervalMs;
+  state = advanceVad(state, { now, peak: 0.013, rms: 0.0065 });
+  candidate = advanceCandidateCapture(candidate, state, now);
+  assert.equal(state.sampleVoiced, false);
+  assert.equal(candidate.action, null);
+  assert.equal(candidate.phase, "armed");
+});
+
+test("sustained dynamic quiet speech gets a longer candidate and thinking pause", () => {
+  assert.equal(VOICE_SESSION_LIMITS.softVoiceMinimumMs, 600);
+  assert.equal(VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs, 3_000);
+  assert.ok(
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs >
+      VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
+  );
+
+  const startedAt = 4_000;
+  let now = startedAt;
+  let vadState = createVadState(startedAt);
+  let candidateState = createCandidateCaptureState();
+  for (let frame = 0; frame < 15; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    vadState = advanceVad(vadState, {
+      now,
+      peak: 0.004,
+      rms: 0.003,
+    });
+  }
+
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.softVoiceMinimumMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 1; frame <= confirmationFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.009;
+    assert.ok(rms < 0.014, "test signal must stay below the clear path");
+    vadState = advanceVad(vadState, {
+      now,
+      peak: rms * 2,
+      rms,
+    });
+    candidateState = advanceCandidateCapture(
+      candidateState,
+      vadState,
+      now,
+    );
+    if (
+      now - candidateState.candidateStartedAt ===
+      VOICE_SESSION_LIMITS.candidateCaptureLimitMs
+    ) {
+      assert.equal(candidateState.phase, "candidate");
+      assert.equal(candidateState.action, null);
+    }
+  }
+
+  assert.equal(vadState.hasSpeech, true);
+  assert.equal(vadState.softVoiceConfirmed, true);
+  assert.equal(candidateState.action, "confirm");
+  assert.equal(candidateState.phase, "confirmed");
+  const lastVoiceAt = vadState.lastVoiceAt;
+
+  vadState = advanceVad(vadState, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs - 1,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(vadState.action, null);
+  vadState = advanceVad(vadState, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(vadState.action, "end-of-turn");
+});
+
+test("a clear utterance can fade into verified quiet speech without a 1.2 second cutoff", () => {
+  let now = 0;
+  let state = createVadState(now);
+  for (let frame = 0; frame < 15; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.004, rms: 0.003 });
+  }
+  for (let frame = 0; frame < 3; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.08, rms: 0.03 });
+  }
+  const clearLastVoiceAt = state.lastVoiceAt;
+  assert.equal(state.hasSpeech, true);
+  assert.equal(state.softVoiceConfirmed, false);
+
+  const quietFrames =
+    (VOICE_SESSION_LIMITS.softVoiceMinimumMs +
+      VOICE_SESSION_LIMITS.endOfTurnSilenceMs) /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < quietFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+    assert.equal(state.action, null);
+  }
+
+  assert.ok(now - clearLastVoiceAt > VOICE_SESSION_LIMITS.endOfTurnSilenceMs);
+  assert.equal(state.softVoiceConfirmed, true);
+  assert.equal(state.lastVoiceAt, now);
+});
+
+test("a brief dynamic quiet word refreshes a clear turn without forcing long-pause mode", () => {
+  let now = 0;
+  let state = createVadState(now);
+  for (let frame = 0; frame < 15; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.004, rms: 0.003 });
+  }
+  for (let frame = 0; frame < 3; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.08, rms: 0.03 });
+  }
+  const clearLastVoiceAt = state.lastVoiceAt;
+
+  for (let frame = 0; frame < 5; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+  }
+  assert.ok(state.lastVoiceAt > clearLastVoiceAt);
+  assert.equal(state.lastVoiceAt, now);
+  assert.equal(state.softVoiceConfirmed, false);
+
+  state = advanceVad(state, {
+    now: now + VOICE_SESSION_LIMITS.endOfTurnSilenceMs - 1,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now: now + VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("stationary soft tail and a short echo burst cannot extend a clear utterance", () => {
+  let now = 0;
+  let state = createVadState(now);
+  for (let frame = 0; frame < 15; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.004, rms: 0.003 });
+  }
+  for (let frame = 0; frame < 3; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.08, rms: 0.03 });
+  }
+  const clearLastVoiceAt = state.lastVoiceAt;
+
+  for (let frame = 0; frame < 4; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+  }
+  assert.equal(state.softVoiceConfirmed, false);
+  assert.equal(state.lastVoiceAt, clearLastVoiceAt);
+
+  while (
+    now < clearLastVoiceAt + VOICE_SESSION_LIMITS.endOfTurnSilenceMs
+  ) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.017, rms: 0.0085 });
+  }
+  assert.equal(state.softVoiceConfirmed, false);
+  assert.equal(state.lastVoiceAt, clearLastVoiceAt);
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("relative-SNR VAD rejects short spikes and stationary room noise", () => {
+  const primeRoom = (startedAt) => {
+    let now = startedAt;
+    let state = createVadState(startedAt);
+    for (let frame = 0; frame < 15; frame += 1) {
+      now += VOICE_SESSION_LIMITS.vadIntervalMs;
+      state = advanceVad(state, { now, peak: 0.004, rms: 0.003 });
+    }
+    return { now, state };
+  };
+
+  let { now, state } = primeRoom(7_000);
+  let candidate = createCandidateCaptureState();
+  for (let frame = 0; frame < 4; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.009 : 0.0065;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+    candidate = advanceCandidateCapture(candidate, state, now);
+  }
+  for (let frame = 0; frame < 4; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.004, rms: 0.003 });
+    candidate = advanceCandidateCapture(candidate, state, now);
+  }
+  assert.equal(state.hasSpeech, false);
+  assert.equal(state.voiceRunMs, 0);
+  assert.equal(candidate.action, "discard");
+
+  ({ now, state } = primeRoom(10_000));
+  candidate = createCandidateCaptureState();
+  const probeFrames =
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < probeFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(state, { now, peak: 0.015, rms: 0.0075 });
+    candidate = advanceCandidateCapture(candidate, state, now);
+    assert.equal(state.hasSpeech, false);
+  }
+  assert.equal(state.sampleVoiced, false);
+  assert.equal(state.voiceRunMs, 0);
+  assert.equal(state.firstVoiceAt, null);
+  assert.equal(candidate.action, "discard");
 });
 
 test("VAD gives a reflective utterance 2.2 seconds to continue", () => {
@@ -3492,6 +4108,7 @@ test("an 80 ms noise candidate is discarded before a fresh capture starts", () =
   assert.deepEqual(candidateState, {
     action: "start",
     candidateStartedAt: now,
+    captureLimitMs: VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
     phase: "candidate",
   });
   now += VOICE_SESSION_LIMITS.vadIntervalMs;
@@ -3519,6 +4136,7 @@ test("an 80 ms noise candidate is discarded before a fresh capture starts", () =
   assert.deepEqual(candidateState, {
     action: "discard",
     candidateStartedAt: null,
+    captureLimitMs: null,
     phase: "armed",
   });
   assert.equal(vadState.firstVoiceAt, null);
@@ -3536,6 +4154,7 @@ test("an 80 ms noise candidate is discarded before a fresh capture starts", () =
   assert.deepEqual(nextCandidate, {
     action: "start",
     candidateStartedAt: now,
+    captureLimitMs: VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
     phase: "candidate",
   });
 
@@ -3574,6 +4193,7 @@ test("capture starts on the first voiced frame but confirms after 120 ms", () =>
       assert.deepEqual(candidateState, {
         action: "start",
         candidateStartedAt: now,
+        captureLimitMs: VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
         phase: "candidate",
       });
     } else if (sample < confirmationFrames) {
@@ -3581,6 +4201,7 @@ test("capture starts on the first voiced frame but confirms after 120 ms", () =>
         action: null,
         candidateStartedAt:
           startedAt + VOICE_SESSION_LIMITS.vadIntervalMs,
+        captureLimitMs: VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
         phase: "candidate",
       });
     } else {
@@ -3589,6 +4210,7 @@ test("capture starts on the first voiced frame but confirms after 120 ms", () =>
         action: "confirm",
         candidateStartedAt:
           startedAt + VOICE_SESSION_LIMITS.vadIntervalMs,
+        captureLimitMs: VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
         phase: "confirmed",
       });
     }
@@ -3652,6 +4274,7 @@ test("candidate capture has a finite privacy deadline", () => {
   assert.deepEqual(state, {
     action: "discard",
     candidateStartedAt: null,
+    captureLimitMs: null,
     phase: "armed",
   });
 });
@@ -3681,8 +4304,104 @@ test("a late accumulated VAD confirmation cannot cross the privacy deadline", ()
     {
       action: "discard",
       candidateStartedAt: null,
+      captureLimitMs: null,
       phase: "armed",
     },
+  );
+});
+
+test("a clear onset upgrades once to the absolute soft deadline and barge-in remains finite", async () => {
+  let now = 0;
+  let vadState = createVadState(now);
+  let candidate = createCandidateCaptureState();
+
+  now += VOICE_SESSION_LIMITS.vadIntervalMs;
+  vadState = advanceVad(vadState, { now, peak: 0.05, rms: 0.02 });
+  candidate = advanceCandidateCapture(candidate, vadState, now);
+  assert.equal(candidate.action, "start");
+  assert.equal(vadState.softVoiceCandidate, false);
+
+  const softFrames =
+    VOICE_SESSION_LIMITS.softVoiceMinimumMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < softFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    vadState = advanceVad(vadState, { now, peak: rms * 2, rms });
+    candidate = advanceCandidateCapture(candidate, vadState, now);
+  }
+  assert.equal(candidate.action, "confirm");
+  assert.equal(vadState.softVoiceConfirmed, true);
+  assert.ok(
+    now - candidate.candidateStartedAt >
+      VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
+  );
+  assert.ok(
+    now - candidate.candidateStartedAt <
+      VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+  );
+
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 400);
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const deadlineAt = bridge.indexOf("function armCandidateDeadline(");
+  const deadline = bridge.slice(deadlineAt, deadlineAt + 2_400);
+  assert.match(
+    deadline,
+    /captureLimitMs <= candidate\.captureLimitMs[\s\S]*candidate\.startedAt \+ captureLimitMs - performance\.now\(\)/u,
+    "the quiet upgrade must be one-way and remain anchored to candidate onset",
+  );
+  const normalVadAt = bridge.indexOf("function armVad(");
+  const normalVad = bridge.slice(normalVadAt, normalVadAt + 5_500);
+  assert.match(
+    normalVad,
+    /vadState\.softVoiceCandidate[\s\S]*armCandidateDeadline\([\s\S]*VOICE_SESSION_LIMITS\.softCandidateCaptureLimitMs/u,
+  );
+  const interruptAt = bridge.indexOf("function startBargeInMonitoring(");
+  const interrupt = bridge.slice(interruptAt, interruptAt + 5_500);
+  assert.match(
+    interrupt,
+    /startCandidateRecorder\([\s\S]*vadState\.candidateStartedAt,[\s\S]*INTERRUPT_VAD_LIMITS\.candidateCaptureLimitMs/u,
+  );
+});
+
+test("a quiet candidate keeps its finite upgraded deadline when the ending becomes clear", () => {
+  let now = 0;
+  let vadState = createVadState(now);
+  let candidate = createCandidateCaptureState();
+  for (let frame = 0; frame < 6; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    vadState = advanceVad(vadState, {
+      now,
+      peak: 0.013,
+      rms: 0.0065,
+    });
+    candidate = advanceCandidateCapture(candidate, vadState, now);
+  }
+  assert.equal(candidate.phase, "candidate");
+  assert.equal(
+    candidate.captureLimitMs,
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+  );
+
+  for (let frame = 0; frame < 3; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    vadState = advanceVad(vadState, { now, peak: 0.08, rms: 0.03 });
+    candidate = advanceCandidateCapture(candidate, vadState, now);
+  }
+  assert.equal(vadState.softVoiceCandidate, false);
+  assert.equal(vadState.hasSpeech, true);
+  assert.equal(candidate.action, "confirm");
+  assert.equal(candidate.phase, "confirmed");
+  assert.equal(
+    candidate.captureLimitMs,
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+  );
+  assert.ok(
+    now - candidate.candidateStartedAt >
+      VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
   );
 });
 

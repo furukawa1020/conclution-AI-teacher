@@ -324,15 +324,76 @@ func TestGateJapaneseHardCases(t *testing.T) {
 }
 
 func TestGateIgnoresNonPropositionalLeadingFillers(t *testing.T) {
-	input := purposeInput(
+	for _, utterance := range []string{
 		"えっと。うーん。目的は評価基準をそろえることです。",
-		"",
-	)
+		"えっと目的は評価基準をそろえることです。",
+	} {
+		input := purposeInput(utterance, "")
+		input.RequireTargetAtUtteranceFront = true
+		assessment := Gate(input)
+		if assessment.Outcome != OutcomeKeep ||
+			assessment.OriginalCommitmentPosition != PositionFirst ||
+			!assessment.TargetSatisfied {
+			t.Fatalf("fillers were treated as a competing answer: utterance=%q assessment=%#v", utterance, assessment)
+		}
+	}
+}
+
+func TestGateDoesNotFrontEvidenceInsideTheFirstClause(t *testing.T) {
+	for _, utterance := range []string{
+		"判断のばらつきを減らしたくて目的は評価基準をそろえることです",
+		"判断のばらつきを減らします：目的は評価基準をそろえることです",
+		"判断のばらつきを減らします—目的は評価基準をそろえることです",
+	} {
+		input := purposeInput(utterance, "")
+		input.RequireTargetAtUtteranceFront = true
+		assessment := Gate(input)
+		if assessment.Outcome != OutcomeClarify ||
+			assessment.OriginalCommitmentPosition != PositionLater ||
+			assessment.TargetSatisfied {
+			t.Fatalf("evidence inside first clause was treated as fronted: utterance=%q assessment=%#v", utterance, assessment)
+		}
+	}
+}
+
+func TestStrictCoachGateRequiresTargetEvidenceToIncludeFrontModifiers(t *testing.T) {
+	input := Input{
+		Frame: QuestionFrame{
+			Operator: OperatorBoolean,
+			Subject:  "A案の採用",
+			RequiredSlots: []Slot{
+				SlotPolarity,
+				SlotCondition,
+			},
+		},
+		Attempt: AnswerAttempt{
+			Text: "雨ならA案は採用しません。",
+			SlotEvidence: []SlotBinding{
+				{Slot: SlotPolarity, Span: "雨ならA案は採用しません"},
+				{Slot: SlotCondition, Span: "雨ならA案は採用しません"},
+			},
+		},
+		RequireTargetAtUtteranceFront: true,
+	}
 	assessment := Gate(input)
 	if assessment.Outcome != OutcomeKeep ||
 		assessment.OriginalCommitmentPosition != PositionFirst ||
 		!assessment.TargetSatisfied {
-		t.Fatalf("fillers were treated as a competing answer: %#v", assessment)
+		t.Fatalf("target evidence with its front modifier was rejected: %#v", assessment)
+	}
+
+	input.Frame.Operator = OperatorPurpose
+	input.Frame.Subject = "導入目的"
+	input.Frame.RequiredSlots = []Slot{SlotPurpose, SlotCause}
+	input.Attempt.Text = "判断のばらつきを減らしたくて目的は評価基準をそろえることです"
+	input.Attempt.SlotEvidence = []SlotBinding{
+		{Slot: SlotPurpose, Span: "目的は評価基準をそろえることです"},
+		{Slot: SlotCause, Span: "判断のばらつきを減らしたくて目的は評価基準をそろえることです"},
+	}
+	assessment = Gate(input)
+	if assessment.OriginalCommitmentPosition != PositionLater ||
+		assessment.TargetSatisfied {
+		t.Fatalf("a different slot's broad span fronted the target: %#v", assessment)
 	}
 }
 

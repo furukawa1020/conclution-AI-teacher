@@ -33,6 +33,7 @@ type Config struct {
 	PrecisionModel          string
 	VertexPriority          bool
 	CoachRestatementBinding bool
+	StateV2Writes           bool
 	SpeechLocation          string
 	SpeechModel             string
 	SpeechVoice             string
@@ -118,6 +119,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	stateV2Writes, err := envStrictBool("KOTAE_STATE_V2_WRITES", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		AppEnv:                  envOr("KOTAE_ENV", "production"),
@@ -129,6 +134,7 @@ func Load() (Config, error) {
 		PrecisionModel:          envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
 		VertexPriority:          vertexPriority,
 		CoachRestatementBinding: coachRestatementBinding,
+		StateV2Writes:           stateV2Writes,
 		SpeechLocation:          envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
 		SpeechModel:             envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
 		SpeechVoice:             envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),

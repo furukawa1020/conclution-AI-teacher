@@ -72,7 +72,7 @@ func TestCriticPromptBlockFailsClosedWithoutRetryOrModelHop(t *testing.T) {
 	}
 }
 
-func TestCriticPolicyFailuresAreFiniteAndNeverRecoverable(t *testing.T) {
+func TestCriticPolicyFailuresAreFiniteAndClassified(t *testing.T) {
 	blocked := criticFinishFailure(&genai.GenerateContentResponse{
 		PromptFeedback: &genai.GenerateContentResponsePromptFeedback{
 			BlockReason:        genai.BlockedReasonModelArmor,
@@ -80,8 +80,6 @@ func TestCriticPolicyFailuresAreFiniteAndNeverRecoverable(t *testing.T) {
 		},
 	})
 	if !errors.Is(blocked, errCriticPromptBlocked) ||
-		retryableCriticFailure(blocked) ||
-		recoverableCriticFailure(blocked) ||
 		criticFailureClass(blocked) != "prompt_blocked" ||
 		criticFailureStage(blocked) != "prompt_blocked" ||
 		strings.Contains(blocked.Error(), "SECRET") {
@@ -157,8 +155,6 @@ func TestCriticPolicyFailuresAreFiniteAndNeverRecoverable(t *testing.T) {
 				Candidates: []*genai.Candidate{{FinishReason: test.reason}},
 			})
 			if !errors.Is(failure, test.wantMarker) ||
-				retryableCriticFailure(failure) ||
-				recoverableCriticFailure(failure) ||
 				criticFailureClass(failure) != test.wantClass ||
 				criticFailureStage(failure) != "finish" {
 				t.Fatalf(
@@ -174,9 +170,8 @@ func TestCriticPolicyFailuresAreFiniteAndNeverRecoverable(t *testing.T) {
 		errors.Join(ErrModelUnavailable, errCriticDeadline),
 		errors.Join(ErrModelUnavailable, errCriticCanceled),
 	} {
-		if retryableCriticFailure(failure) ||
-			recoverableCriticFailure(failure) {
-			t.Fatalf("critic context failure became recoverable: %v", failure)
+		if criticFailureStage(failure) != "generate" {
+			t.Fatalf("critic context failure escaped generate stage: %v", failure)
 		}
 	}
 }

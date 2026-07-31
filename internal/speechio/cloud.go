@@ -20,6 +20,7 @@ const (
 	maxSpokenReplyRunes        = 1_200
 	maxStreamingAudioChunkSize = 1 << 20
 	maxStreamingAudioTotalSize = 16 << 20
+	conversationSpeechModel    = "long"
 
 	// StreamingAudioContentType describes the raw audio bytes returned by
 	// StreamSynthesize. The stream has no container or file header.
@@ -92,6 +93,9 @@ func NewCloudService(
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(location) == "" {
 		return nil, errors.New("project and speech location are required")
 	}
+	if err := validateConversationSpeechModel(speechModel); err != nil {
+		return nil, err
+	}
 
 	speechClient, err := speech.NewClient(
 		ctx,
@@ -150,6 +154,9 @@ func (s *CloudService) Transcribe(
 	if len(audio) == 0 {
 		return "", 0, ErrNoSpeech
 	}
+	if err := validateConversationSpeechModel(s.speechModel); err != nil {
+		return "", 0, err
+	}
 
 	response, err := s.recognize(ctx, audio, s.speechModel)
 	if err != nil {
@@ -187,6 +194,13 @@ func (s *CloudService) recognize(
 		},
 		AudioSource: &speechpb.RecognizeRequest_Content{Content: audio},
 	})
+}
+
+func validateConversationSpeechModel(model string) error {
+	if model != conversationSpeechModel {
+		return errors.New("speech model is not approved for continuous conversation")
+	}
+	return nil
 }
 
 func recognizedText(response *speechpb.RecognizeResponse) (string, float32) {

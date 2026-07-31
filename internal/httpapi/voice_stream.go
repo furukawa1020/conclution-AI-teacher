@@ -114,6 +114,14 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 				"duration_ms", time.Since(started).Milliseconds(),
 				"audio_chunks", sequence,
 			)
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				_ = encoder.Encode(voiceStreamFrame{
+					Type:    "error",
+					Version: voiceStreamVersion,
+					Code:    "voice_turn_timeout",
+				})
+				flusher.Flush()
+			}
 			return
 		}
 		logAttributes := []any{
@@ -169,6 +177,8 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		"detectedDomain":   result.DetectedDomain,
 		"assistanceTarget": result.AssistanceTarget,
 		"respondentStage":  result.RespondentStage,
+		"coachPhase":       result.CoachPhase,
+		"coachAction":      result.CoachAction,
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
 		"route":            result.Route,

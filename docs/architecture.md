@@ -37,8 +37,8 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 │  └─ JS bridge: MediaRecorder / Web Audio VAD │
 │                 Firebase Auth / App Check    │
 └───────────────────┬──────────────────────────┘
-                    │ same-origin HTTPS
-                    │ POST /api/v1/voice/turns
+                    │ authenticated WSS / HTTPS CORS
+                    │ /api/v1/voice/live | turns:stream
                     ▼
 ┌──────────────────────────────────────────────┐
 │ Cloud Run / Go（asia-northeast1）             │
@@ -49,7 +49,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 ┌──────────────────┐   ┌─────────────────────────────┐
 │ Cloud STT V2     │   │ Vertex AI（global）          │
 │ asia-northeast1  │   │ Gemini fast / precision     │
-│ long, no fallback│   │ Thought Graph + EVI + LAC   │
+│ long, fixed         │ │ Thought Graph + EVI + LAC   │
 └────────┬─────────┘   └────────────┬────────────────┘
          └──── transcript ──────────┘
                                     │ silence / reply text
@@ -117,8 +117,8 @@ LACの指標は内部評価用で、画面へ分析文を大量表示しませ�
 
 - 静的なWasm UI: Firebase Hosting
 - REST API: Firebase Hostingの`/api/**` rewriteからCloud Run `kotae-api`
-- 一発話ごとの音声request: `POST /api/v1/voice/turns`
+- 音声の主経路: `WSS /api/v1/voice/live`、検証済みfallback: `POST /api/v1/voice/turns:stream`
 - Cloud Run、Speech-to-Text、Text-to-Speech: `asia-northeast1`
 - Vertex AI: `global`
 
-現在はWebSocketやVertex Live APIを使いません。一発話ごとのHTTPS requestに収め、処理中と音声再生中はマイクを無効にします。full-duplex、barge-in、話者本人認証、保存音声履歴、Vault、任意Web巡回、論文本文のclaim-level検証、無人の後日再評価は将来候補であり、現在の公開経路の保証には含めません。
+通常の音声ターンは認証付きWebSocketで20 ms PCMを増分送信し、利用できない場合だけ同じ認証境界のHTTPS requestへ退避します。AI処理中と音声再生中は、利用者が開始したセッション内に限って端末内VADで訂正・割り込みを待ち、確認前PCMはAudioWorklet内の固定長リングから外へ出しません。確認済みbarge-inだけをForeground turnへ引き継ぎます。Vertex Live API、話者本人認証、保存音声履歴、Vault、任意Web巡回、論文本文のclaim-level検証、無人の後日再評価は現在の公開経路の保証には含めません。

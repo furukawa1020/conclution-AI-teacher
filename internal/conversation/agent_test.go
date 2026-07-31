@@ -5,20 +5,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 	"google.golang.org/genai"
 )
 
 type fakeGeneration struct {
-	body           string
-	err            error
-	finishReason   genai.FinishReason
-	waitForContext bool
+	body               string
+	err                error
+	finishReason       genai.FinishReason
+	waitForContext     bool
+	returnAfterContext bool
 }
 
 func TestVertexHTTPOptionsKeepPriorityExplicitAndExact(t *testing.T) {
@@ -39,15 +43,16 @@ func TestVertexHTTPOptionsKeepPriorityExplicitAndExact(t *testing.T) {
 }
 
 type generatorCall struct {
-	model          string
-	thinkingLevel  genai.ThinkingLevel
-	deadline       time.Duration
-	responseMIME   string
-	hasJSONSchema  bool
-	temperatureSet bool
-	pdfMIME        string
-	pdfData        []byte
-	prompt         string
+	model           string
+	thinkingLevel   genai.ThinkingLevel
+	maxOutputTokens int32
+	deadline        time.Duration
+	responseMIME    string
+	hasJSONSchema   bool
+	temperatureSet  bool
+	pdfMIME         string
+	pdfData         []byte
+	prompt          string
 }
 
 type fakeGenerator struct {
@@ -69,6 +74,7 @@ func (fake *fakeGenerator) GenerateContent(
 		call.responseMIME = config.ResponseMIMEType
 		call.hasJSONSchema = config.ResponseJsonSchema != nil
 		call.temperatureSet = config.Temperature != nil
+		call.maxOutputTokens = config.MaxOutputTokens
 		if config.ThinkingConfig != nil {
 			call.thinkingLevel = config.ThinkingConfig.ThinkingLevel
 		}
@@ -94,7 +100,8 @@ func (fake *fakeGenerator) GenerateContent(
 			}
 			return &genai.GenerateContentResponse{
 				Candidates: []*genai.Candidate{{
-					Content: genai.NewContentFromText(body, genai.RoleModel),
+					Content:      genai.NewContentFromText(body, genai.RoleModel),
+					FinishReason: genai.FinishReasonStop,
 				}},
 			}, nil
 		}
@@ -103,15 +110,21 @@ func (fake *fakeGenerator) GenerateContent(
 	generation := fake.generations[index]
 	if generation.waitForContext {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		if !generation.returnAfterContext {
+			return nil, ctx.Err()
+		}
 	}
 	if generation.err != nil {
 		return nil, generation.err
 	}
+	finishReason := generation.finishReason
+	if finishReason == "" {
+		finishReason = genai.FinishReasonStop
+	}
 	return &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{{
 			Content:      genai.NewContentFromText(generation.body, genai.RoleModel),
-			FinishReason: generation.finishReason,
+			FinishReason: finishReason,
 		}},
 	}, nil
 }
@@ -623,9 +636,12 @@ func TestAgentAmbientPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "ambient-silent-fast" ||
+	if result.Route != "respondent-wait-fast" ||
 		result.SpokenReply != "" ||
-		len(fake.calls) != 2 {
+		result.AssistanceTarget != "assistant" ||
+		result.CoachPhase != "none" ||
+		result.CoachAction != "none" ||
+		len(fake.calls) != 1 {
 		t.Fatalf("ambient pending recovery did not stay silent: %#v", result)
 	}
 	state, err := agent.codec.open(uid, result.StateToken)
@@ -640,6 +656,163 @@ func TestAgentAmbientPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 		!state.SelfCorrectionGrace ||
 		state.LastIntervention != initial.LastIntervention {
 		t.Fatalf("ambient recovery changed pre-turn state: %#v", state)
+	}
+}
+
+func TestAgentForegroundPendingRecoveryClarificationPreservesPreTurnState(
+	t *testing.T,
+) {
+	const uid = "uid-foreground-pending-clarification"
+	awaiting := respondentAwaitingPlan()
+	recovered := validModelPlan()
+	recovered.Confidence = PrecisionConfidenceThreshold - 0.1
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, recovered)},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 3,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の主張"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "既存の保留質問",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.7, Confidence: 1, Act: "clarify", Score: 0.7,
+		},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "続きの質問です",
+		StateToken:    token,
+		Ambient:       true,
+		Foreground:    true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.Route != "interpretation-clarify-fast" ||
+		result.SpokenReply != interpretationClarificationSpokenReply ||
+		!result.NeedsClarification ||
+		len(fake.calls) != 2 {
+		t.Fatalf("foreground clarification was not bounded: %#v", result)
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		next.PendingAnswer.Active ||
+		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
+		next.LastIntervention != initial.LastIntervention {
+		t.Fatalf("foreground clarification changed pre-turn state: %#v", next)
+	}
+}
+
+func TestAgentForegroundRepliesWithoutAuthoringAmbientSemanticState(t *testing.T) {
+	const (
+		uid       = "uid-foreground-isolation"
+		utterance = "日本の首都はどこ"
+	)
+	plan := validModelPlan()
+	plan.SpokenReply = "日本の首都は東京です。"
+	plan.ConversationSummary = "保存してはいけない前面会話summary"
+	plan.ThoughtStateDelta.Claims = []string{"保存してはいけない前面会話claim"}
+	plan.AnswerContract = validCriticContract(plan.SpokenReply)
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+	initial := conversationState{
+		Turn: 6,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"既存の主張"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			Active:        true,
+			Operator:      answercontract.OperatorPurpose,
+			Subject:       "既存の保留質問",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		},
+		SelfCorrectionGrace: true,
+		LastIntervention: ArbiterDecision{
+			Benefit: 0.6, Confidence: 1, Act: "clarify", Score: 0.6,
+		},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+		StateToken:    token,
+		Ambient:       true,
+		Foreground:    true,
+	})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if result.SpokenReply != plan.SpokenReply ||
+		result.Route == "ambient-silent-fast" ||
+		result.Intervention.Act == "silent" ||
+		len(fake.calls) != 2 {
+		t.Fatalf("foreground turn did not publish its bounded reply: %#v", result)
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"ambient":true`) ||
+			!strings.Contains(call.prompt, `"foreground":true`) {
+			t.Fatalf("call %d omitted foreground provenance: %s", index, call.prompt)
+		}
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatalf("open next state: %v", err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		!reflect.DeepEqual(next.Graph, initial.Graph) ||
+		next.PendingAnswer.Active ||
+		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
+		next.LastIntervention != initial.LastIntervention {
+		t.Fatalf("foreground turn changed ambient-isolated state: %#v", next)
+	}
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal next state: %v", err)
+	}
+	for _, forbidden := range []string{
+		utterance,
+		plan.ConversationSummary,
+		plan.ThoughtStateDelta.Claims[0],
+	} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("foreground content entered semantic state: %s", encoded)
+		}
 	}
 }
 
@@ -678,6 +851,12 @@ func TestAmbientSilentFastEligibilityFailsClosed(t *testing.T) {
 			name: "intentional",
 			configure: func(turn *VoiceTurn, _ *modelPlan) {
 				turn.Ambient = false
+			},
+		},
+		{
+			name: "foreground",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.Foreground = true
 			},
 		},
 		{
@@ -849,34 +1028,207 @@ func TestCriticPolicyUsesTurnPlanAndRouteRisk(t *testing.T) {
 			policy := criticPolicyFor(turn, plan, test.route)
 			if test.highRisk {
 				if policy.thinkingLevel != genai.ThinkingLevelHigh ||
-					policy.recoveryThinkingLevel != genai.ThinkingLevelHigh ||
-					policy.sequenceTimeout != highRiskCriticSequenceTimeout {
+					policy.timeout != voiceCriticTimeout {
 					t.Fatalf("high-risk policy = %#v", policy)
 				}
 				return
 			}
 			if policy.thinkingLevel != genai.ThinkingLevelLow ||
-				policy.recoveryThinkingLevel != genai.ThinkingLevelMedium ||
-				policy.sequenceTimeout != ordinaryCriticSequenceTimeout {
+				policy.timeout != voiceCriticTimeout {
 				t.Fatalf("ordinary policy = %#v", policy)
+			}
+		})
+	}
+
+	t.Run("foreground technical is bounded but remains high scrutiny", func(t *testing.T) {
+		turn := baseTurn
+		turn.Ambient = true
+		turn.Foreground = true
+		plan := basePlan
+		plan.Domain = "technical"
+		policy := criticPolicyFor(turn, plan, "fast")
+		if policy.thinkingLevel != genai.ThinkingLevelHigh ||
+			policy.timeout != voiceCriticTimeout {
+			t.Fatalf("foreground technical policy = %#v", policy)
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		route     string
+		configure func(*modelPlan)
+	}{
+		{name: "precision recovery", route: "precision-recovery"},
+		{
+			name:  "safety intervention",
+			route: "fast",
+			configure: func(plan *modelPlan) {
+				plan.InterventionPolicy = "safety"
+			},
+		},
+		{
+			name:  "respondent restructure",
+			route: "fast",
+			configure: func(plan *modelPlan) {
+				plan.AssistanceTarget = "respondent"
+				plan.RespondentStage = "restructure"
+			},
+		},
+	} {
+		t.Run("foreground technical does not shorten "+test.name, func(t *testing.T) {
+			turn := baseTurn
+			turn.Ambient = true
+			turn.Foreground = true
+			plan := basePlan
+			plan.Domain = "technical"
+			if test.configure != nil {
+				test.configure(&plan)
+			}
+			if eligibleForForegroundTechnicalFastPath(turn, plan, test.route) {
+				t.Fatal("high-risk technical path was marked eligible for preview skip")
+			}
+			policy := criticPolicyFor(turn, plan, test.route)
+			if policy.thinkingLevel != genai.ThinkingLevelHigh ||
+				policy.timeout != voiceCriticTimeout {
+				t.Fatalf("high-risk foreground technical policy = %#v", policy)
 			}
 		})
 	}
 }
 
-func TestCriticSequenceDeadlineStopsAdditionalRetries(t *testing.T) {
+func TestForegroundOrdinaryAuditCanOverlapWithoutAmbientAuthority(t *testing.T) {
+	plan := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodeContract(t, validCriticContract(plan.SpokenReply)),
+	}}}
+	agent := newTestAgent(t, fake)
+	foreground := VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "続きを教えて",
+		Ambient:       true,
+		Foreground:    true,
+	}
+
+	audit := agent.startSpeculativeAudit(
+		context.Background(),
+		foreground,
+		conversationState{},
+		plan,
+	)
+	if audit == nil {
+		t.Fatal("ordinary foreground audit did not start")
+	}
+	if _, err := awaitSpeculativeAudit(context.Background(), audit); err != nil {
+		t.Fatalf("await foreground audit: %v", err)
+	}
+	if len(fake.calls) != 1 ||
+		fake.calls[0].thinkingLevel != genai.ThinkingLevelLow ||
+		fake.calls[0].maxOutputTokens != criticMaxOutputTokens {
+		t.Fatalf("foreground speculative audit calls = %#v", fake.calls)
+	}
+
+	passive := foreground
+	passive.Foreground = false
+	if got := agent.startSpeculativeAudit(
+		context.Background(),
+		passive,
+		conversationState{},
+		plan,
+	); got != nil {
+		got.cancel()
+		t.Fatal("passive ambient turn started speculative audit")
+	}
+
+	technical := plan
+	technical.Domain = "technical"
+	if got := agent.startSpeculativeAudit(
+		context.Background(),
+		foreground,
+		conversationState{},
+		technical,
+	); got != nil {
+		got.cancel()
+		t.Fatal("technical foreground turn started ordinary speculative audit")
+	}
+}
+
+func TestForegroundTechnicalFastPathRejectsMandatoryPrecisionBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*VoiceTurn, *modelPlan)
+	}{
+		{
+			name: "paper check",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.InterventionPolicy = "paper_check"
+			},
+		},
+		{
+			name: "PDF",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.PDF = &InlinePDF{
+					MIMEType: "application/pdf",
+					Data:     []byte("%PDF-1.7"),
+				}
+			},
+		},
+		{
+			name: "evidence operator",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.AnswerContract.QuestionFrame.Operator =
+					answercontract.OperatorEvidence
+			},
+		},
+		{
+			name: "lexical research risk",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.Utterance = "研究の根拠を確認して"
+			},
+		},
+		{
+			name: "research action",
+			configure: func(_ *VoiceTurn, plan *modelPlan) {
+				plan.ResearchAction = "recent_papers"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			turn := VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "実装方法を教えて",
+				Ambient:       true,
+				Foreground:    true,
+			}
+			plan := validModelPlan()
+			plan.Domain = "technical"
+			test.configure(&turn, &plan)
+			if eligibleForForegroundTechnicalFastPath(turn, plan, "fast") {
+				t.Fatal("mandatory precision boundary entered foreground fast path")
+			}
+			policy := criticPolicyFor(turn, plan, "fast")
+			if policy.thinkingLevel != genai.ThinkingLevelHigh ||
+				policy.timeout != voiceCriticTimeout {
+				t.Fatalf("mandatory precision critic policy = %#v", policy)
+			}
+		})
+	}
+}
+
+func TestCriticDeadlineIsOneShot(t *testing.T) {
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{waitForContext: true},
 		{body: encodeContract(t, validCriticContract("未到達"))},
 	}}
 	agent := newTestAgent(t, fake)
 	policy := criticPolicyFor(VoiceTurn{}, validModelPlan(), "fast")
-	policy.sequenceTimeout = time.Nanosecond
 
-	_, err := agent.auditAnswerWithRetry(
+	_, err := agent.auditAnswer(
 		context.Background(),
 		agent.fastModel,
-		policy,
+		policy.thinkingLevel,
+		time.Nanosecond,
 		VoiceTurn{SchemaVersion: SchemaVersion, Utterance: "質問"},
 		conversationState{},
 		validModelPlan(),
@@ -1000,8 +1352,8 @@ func TestNormalizeAndValidatePlanAcceptsGreetingContractAfterCanonicalization(
 	}
 }
 
-func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
-	t.Run("precision model recovers two primary provider failures", func(t *testing.T) {
+func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
+	t.Run("provider failure fails closed without retry or model hop", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1018,17 +1370,15 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "fast" ||
-			len(fake.calls) != 4 ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
-			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
-			fake.calls[3].model != DefaultPrecisionModel ||
-			fake.calls[3].thinkingLevel != genai.ThinkingLevelMedium {
-			t.Fatalf("precision critic recovery failed: result=%#v calls=%#v", result, fake.calls)
+		if result.Route != "verification-unavailable" ||
+			len(fake.calls) != 2 ||
+			fake.calls[1].model != DefaultFastModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
+			t.Fatalf("critic retried or model-hopped: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
-	t.Run("high risk keeps high thinking through recovery", func(t *testing.T) {
+	t.Run("high risk keeps high thinking but does not recover synchronously", func(t *testing.T) {
 		fast := validModelPlan()
 		fast.Domain = "research"
 		precision := fast
@@ -1049,20 +1399,15 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "precision" || len(fake.calls) != 5 {
-			t.Fatalf("high-risk recovery failed: result=%#v calls=%#v", result, fake.calls)
-		}
-		for _, index := range []int{2, 3, 4} {
-			if fake.calls[index].thinkingLevel != genai.ThinkingLevelHigh {
-				t.Fatalf("critic call %d weakened: %#v", index, fake.calls[index])
-			}
-		}
-		if fake.calls[4].model != DefaultPrecisionModel {
-			t.Fatalf("recovery did not use precision model: %#v", fake.calls[4])
+		if result.Route != "verification-unavailable" ||
+			len(fake.calls) != 3 ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh {
+			t.Fatalf("high-risk critic retried, hopped, or weakened: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
-	t.Run("provider unavailable is retried once", func(t *testing.T) {
+	t.Run("provider unavailable is not retried", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1078,15 +1423,14 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "fast" ||
-			len(fake.calls) != 3 ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
-			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow {
-			t.Fatalf("provider critic retry failed: %#v", result)
+		if result.Route != "verification-unavailable" ||
+			len(fake.calls) != 2 ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
+			t.Fatalf("provider critic was retried: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
-	t.Run("invalid JSON is retried once", func(t *testing.T) {
+	t.Run("invalid JSON is not retried", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1102,16 +1446,15 @@ func TestAgentRetriesOnlyRetryableCriticFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "fast" ||
-			len(fake.calls) != 3 ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
-			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow {
-			t.Fatalf("retryable critic failure was not recovered: %#v", result)
+		if result.Route != "verification-unavailable" ||
+			len(fake.calls) != 2 ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
+			t.Fatalf("invalid critic JSON was retried: result=%#v calls=%#v", result, fake.calls)
 		}
 		for _, call := range fake.calls[1:] {
 			if call.model != DefaultFastModel ||
 				!strings.Contains(call.prompt, "<lac_critic_data>") {
-				t.Fatalf("retry escaped isolated critic call: %#v", call)
+				t.Fatalf("critic escaped isolated fast-model call: %#v", call)
 			}
 		}
 	})
@@ -1198,9 +1541,344 @@ func TestAgentRetriesStructuredInferenceButNotSafetyFinish(t *testing.T) {
 			)
 		}
 	})
+
+	t.Run("permanent provider failure is not retried", func(t *testing.T) {
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{
+				err: genai.APIError{
+					Code:    http.StatusForbidden,
+					Message: "SECRET provider detail",
+				},
+			},
+			{body: encodePlan(t, validModelPlan())},
+		}}
+		agent := newTestAgent(t, fake)
+		result, err := agent.Process(
+			context.Background(),
+			"uid-infer-permanent",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "Answer this question.",
+			},
+		)
+		if err != nil ||
+			result.Route != "planner-unavailable" ||
+			len(fake.calls) != 1 {
+			t.Fatalf(
+				"permanent provider failure retried: result=%#v calls=%d err=%v",
+				result,
+				len(fake.calls),
+				err,
+			)
+		}
+	})
+}
+
+func TestProviderFailureClassificationIsBoundedAndRedacted(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{
+			name: "permission denied",
+			err: genai.APIError{
+				Code:    http.StatusForbidden,
+				Message: "SECRET permission detail",
+			},
+		},
+		{
+			name: "not found",
+			err: genai.APIError{
+				Code:    http.StatusNotFound,
+				Message: "SECRET model detail",
+			},
+		},
+		{
+			name: "capacity",
+			err: genai.APIError{
+				Code:    http.StatusTooManyRequests,
+				Message: "SECRET capacity detail",
+			},
+			transient: true,
+		},
+		{
+			name: "service unavailable",
+			err: genai.APIError{
+				Code:    http.StatusServiceUnavailable,
+				Message: "SECRET service detail",
+			},
+			transient: true,
+		},
+		{
+			name:      "transport",
+			err:       errors.New("SECRET transport detail"),
+			transient: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			classified := classifiedProviderFailure(test.err)
+			if !errors.Is(classified, ErrModelUnavailable) ||
+				errors.Is(classified, errProviderTransient) !=
+					test.transient ||
+				errors.Is(classified, errProviderPermanent) ==
+					test.transient ||
+				strings.Contains(classified.Error(), "SECRET") {
+				t.Fatalf(
+					"provider classification escaped boundary: %v",
+					classified,
+				)
+			}
+		})
+	}
 }
 
 func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
+	t.Run("intentional technical has a measured one-shot ceiling", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "technical"
+		latePrecision := fast
+		latePrecision.SpokenReply = "This late precision draft must not escape."
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{
+				body:               encodePlan(t, latePrecision),
+				waitForContext:     true,
+				returnAfterContext: true,
+			},
+			{waitForContext: true},
+			{body: encodeContract(t, validCriticContract(fast.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		started := time.Now()
+		result, err := agent.Process(
+			context.Background(),
+			"uid-intentional-technical-ceiling",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "How should I implement this component?",
+			},
+		)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		assertElapsedDeadlineWindow(
+			t,
+			elapsed,
+			voicePrecisionInferenceTimeout+voiceCriticTimeout,
+		)
+		if result.Route != "verification-unavailable" ||
+			result.SpokenReply == fast.SpokenReply ||
+			result.SpokenReply == latePrecision.SpokenReply ||
+			len(fake.calls) != 3 ||
+			fake.calls[1].model != DefaultPrecisionModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh {
+			t.Fatalf(
+				"intentional technical path was not bounded and fail-closed: result=%#v calls=%#v",
+				result,
+				fake.calls,
+			)
+		}
+		for _, index := range []int{1, 2} {
+			if fake.calls[index].deadline <=
+				voicePrecisionInferenceTimeout-time.Second ||
+				fake.calls[index].deadline >
+					voicePrecisionInferenceTimeout {
+				t.Fatalf(
+					"call %d deadline = %v; want <= %v",
+					index,
+					fake.calls[index].deadline,
+					voicePrecisionInferenceTimeout,
+				)
+			}
+		}
+	})
+
+	t.Run("late mandatory precision fails closed at its deadline", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "research"
+		latePrecision := fast
+		latePrecision.SpokenReply = "This late mandatory draft must not escape."
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{
+				body:               encodePlan(t, latePrecision),
+				waitForContext:     true,
+				returnAfterContext: true,
+			},
+			{body: encodeContract(t, validCriticContract(latePrecision.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		started := time.Now()
+		result, err := agent.Process(
+			context.Background(),
+			"uid-mandatory-precision-ceiling",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "What does the research evidence show?",
+			},
+		)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		assertElapsedDeadlineWindow(
+			t,
+			elapsed,
+			voicePrecisionInferenceTimeout,
+		)
+		if result.Route != "precision-unavailable" ||
+			result.SpokenReply == fast.SpokenReply ||
+			result.SpokenReply == latePrecision.SpokenReply ||
+			len(fake.calls) != 2 ||
+			fake.calls[1].model != DefaultPrecisionModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
+			t.Fatalf(
+				"late mandatory precision escaped or retried: result=%#v calls=%#v",
+				result,
+				fake.calls,
+			)
+		}
+	})
+
+	t.Run("late high-risk critic fails closed without retry", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "research"
+		precision := fast
+		precision.SpokenReply = "A high-quality precision answer."
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{body: encodePlan(t, precision)},
+			{
+				body: encodeContract(
+					t,
+					validCriticContract(precision.SpokenReply),
+				),
+				waitForContext:     true,
+				returnAfterContext: true,
+			},
+			{body: encodeContract(t, validCriticContract(precision.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		started := time.Now()
+		result, err := agent.Process(
+			context.Background(),
+			"uid-high-risk-critic-ceiling",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "What does the research evidence show?",
+			},
+		)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		assertElapsedDeadlineWindow(t, elapsed, voiceCriticTimeout)
+		if result.Route != "verification-unavailable" ||
+			result.SpokenReply == precision.SpokenReply ||
+			len(fake.calls) != 3 ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh {
+			t.Fatalf(
+				"late high-risk critic escaped, retried, or weakened: result=%#v calls=%#v",
+				result,
+				fake.calls,
+			)
+		}
+	})
+
+	t.Run("foreground technical skips only the optional preview", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "technical"
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{body: encodeContract(t, validCriticContract(fast.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-foreground-technical", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "How should I implement this?",
+			Ambient:       true,
+			Foreground:    true,
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "fast" ||
+			len(fake.calls) != 2 ||
+			fake.calls[1].model != DefaultFastModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+			fake.calls[1].maxOutputTokens != criticMaxOutputTokens ||
+			fake.calls[1].deadline <= voiceCriticTimeout-time.Second ||
+			fake.calls[1].deadline > voiceCriticTimeout {
+			t.Fatalf("foreground technical path = result=%#v calls=%#v", result, fake.calls)
+		}
+	})
+
+	t.Run("optional precision provider outage is not retried", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "technical"
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{err: errors.New("preview provider unavailable")},
+			{body: encodeContract(t, validCriticContract(fast.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-optional-preview", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "How should I implement this?",
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "fast-fallback" ||
+			len(fake.calls) != 3 ||
+			fake.calls[1].model != DefaultPrecisionModel ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh {
+			t.Fatalf("optional preview retry path = result=%#v calls=%#v", result, fake.calls)
+		}
+	})
+
+	t.Run("mandatory precision provider outage is one shot and fails closed", func(t *testing.T) {
+		fast := validModelPlan()
+		fast.Domain = "research"
+		precision := fast
+		precision.SpokenReply = "The evidence still needs independent verification."
+		fake := &fakeGenerator{generations: []fakeGeneration{
+			{body: encodePlan(t, fast)},
+			{err: errors.New("precision provider unavailable")},
+			{body: encodePlan(t, precision)},
+			{body: encodeContract(t, validCriticContract(precision.SpokenReply))},
+		}}
+		agent := newTestAgent(t, fake)
+
+		result, err := agent.Process(context.Background(), "uid-mandatory-preview", VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "What does the research evidence show?",
+			Ambient:       true,
+			Foreground:    true,
+		})
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+		if result.Route != "precision-unavailable" ||
+			len(fake.calls) != 2 ||
+			fake.calls[1].model != DefaultPrecisionModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+			result.SpokenReply == precision.SpokenReply {
+			t.Fatalf("mandatory precision did not fail closed in one shot: result=%#v calls=%#v", result, fake.calls)
+		}
+	})
+
 	t.Run("precision succeeds", func(t *testing.T) {
 		fast := validModelPlan()
 		fast.Domain = "research"
@@ -1227,8 +1905,8 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 		if len(fake.calls) != 3 ||
 			fake.calls[1].model != DefaultPrecisionModel ||
 			fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
-			fake.calls[1].deadline <= precisionInferenceSequenceTimeout-time.Second ||
-			fake.calls[1].deadline > precisionInferenceSequenceTimeout ||
+			fake.calls[1].deadline <= voicePrecisionInferenceTimeout-time.Second ||
+			fake.calls[1].deadline > voicePrecisionInferenceTimeout ||
 			!strings.Contains(fake.calls[1].prompt, `"preliminary_plan"`) ||
 			fake.calls[2].model != DefaultFastModel ||
 			fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
@@ -1264,6 +1942,23 @@ func TestAgentPrecisionPathAndFastFallback(t *testing.T) {
 	})
 }
 
+func assertElapsedDeadlineWindow(
+	t *testing.T,
+	elapsed time.Duration,
+	expected time.Duration,
+) {
+	t.Helper()
+	if elapsed < expected-500*time.Millisecond ||
+		elapsed > expected+2*time.Second {
+		t.Fatalf(
+			"elapsed = %v; want deadline window %v..%v",
+			elapsed,
+			expected-500*time.Millisecond,
+			expected+2*time.Second,
+		)
+	}
+}
+
 func TestAgentHighStakesDomainsAlwaysUsePrecision(t *testing.T) {
 	for _, domain := range []string{"health", "legal", "finance"} {
 		t.Run(domain, func(t *testing.T) {
@@ -1280,6 +1975,8 @@ func TestAgentHighStakesDomainsAlwaysUsePrecision(t *testing.T) {
 			result, err := agent.Process(context.Background(), "uid-h", VoiceTurn{
 				SchemaVersion: SchemaVersion,
 				Utterance:     "判断してほしい",
+				Ambient:       true,
+				Foreground:    true,
 			})
 			if err != nil {
 				t.Fatalf("Process: %v", err)
@@ -1571,9 +2268,11 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	if result.Route != "respondent-awaiting-fast" ||
 		result.AssistanceTarget != "respondent" ||
 		result.RespondentStage != "awaiting_answer" ||
+		result.CoachPhase != "awaiting_answer" ||
+		result.CoachAction != "elicit" ||
 		result.Intervention.Act != "clarify" ||
 		!result.NeedsClarification ||
-		result.SpokenReply != plan.SpokenReply {
+		result.SpokenReply != purposeCoachPrompt() {
 		t.Fatalf("respondent awaiting result: %#v", result)
 	}
 	if len(fake.calls) != 1 {
@@ -1586,7 +2285,8 @@ func TestAgentRespondentAwaitsAnswerWithoutInventingIt(t *testing.T) {
 	}
 	if !state.PendingAnswer.Active ||
 		state.PendingAnswer.Operator != answercontract.OperatorPurpose ||
-		state.PendingAnswer.Subject != "導入目的" ||
+		state.PendingAnswer.Subject != "質問が求める目的" ||
+		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingAnswer ||
 		len(state.PendingAnswer.RequiredSlots) != 1 ||
 		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotPurpose {
 		t.Fatalf("pending question frame: %#v", state.PendingAnswer)
@@ -1687,6 +2387,7 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 		name      string
 		utterance string
 		pending   bool
+		allowNew  bool
 		want      bool
 	}{
 		{
@@ -1700,11 +2401,13 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 		{
 			name:      "reported question",
 			utterance: "上司に目的を聞かれたけど、答えられない",
+			allowNew:  true,
 			want:      true,
 		},
 		{
 			name:      "explicit answer rewrite",
 			utterance: "自分の回答を整えてほしい",
+			allowNew:  true,
 			want:      true,
 		},
 		{
@@ -1713,10 +2416,20 @@ func TestRespondentModeRequiresCurrentTurnEvidenceOrPendingFrame(t *testing.T) {
 			pending:   true,
 			want:      true,
 		},
+		{
+			name:      "ambient keyword cannot create mode",
+			utterance: "上司に目的を聞かれたけど、答えられない",
+			allowNew:  false,
+			want:      false,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := respondentModeAllowed(test.utterance, test.pending); got != test.want {
+			if got := respondentModeAllowed(
+				test.utterance,
+				test.pending,
+				test.allowNew,
+			); got != test.want {
 				t.Fatalf("respondentModeAllowed() = %v, want %v", got, test.want)
 			}
 		})
@@ -1747,7 +2460,7 @@ func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 	if result.Route != "respondent-awaiting-precision" ||
-		result.SpokenReply != respondentAwaitingSpokenReply ||
+		result.SpokenReply != purposeCoachPrompt() ||
 		len(fake.calls) != 2 ||
 		fake.calls[1].model != DefaultPrecisionModel ||
 		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
@@ -1759,7 +2472,7 @@ func TestAgentRespondentAwaitingHighRiskStillUsesPrecision(t *testing.T) {
 	}
 }
 
-func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *testing.T) {
+func TestAgentRespondentRequiresPersonRatherThanAIToPutAnswerFirst(t *testing.T) {
 	awaiting := respondentAwaitingPlan()
 	restructure := respondentRestructurePlan(
 		"判断のばらつきを減らします。目的は評価基準をそろえることです。",
@@ -1788,11 +2501,13 @@ func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *test
 	if err != nil {
 		t.Fatalf("restructure Process: %v", err)
 	}
-	if second.Route != "respondent-restructure-fast" ||
-		second.SpokenReply != restructure.SpokenReply ||
-		second.Intervention.Act != "restructure" ||
-		second.NeedsClarification {
-		t.Fatalf("safe respondent restructure: %#v", second)
+	if second.Route != "respondent-restate-fast" ||
+		second.CoachPhase != "awaiting_restatement" ||
+		second.CoachAction != "restate" ||
+		second.SpokenReply == restructure.SpokenReply ||
+		second.Intervention.Act != "clarify" ||
+		!second.NeedsClarification {
+		t.Fatalf("AI reconstruction stood in for the person's answer: %#v", second)
 	}
 	if len(fake.calls) != 3 ||
 		!strings.Contains(fake.calls[1].prompt, `"pending_answer":{"active":true`) ||
@@ -1805,8 +2520,10 @@ func TestAgentRespondentRestructuresExistingClausesAndClearsPendingFrame(t *test
 	if err != nil {
 		t.Fatalf("open resolved state: %v", err)
 	}
-	if state.PendingAnswer.Active || len(state.PendingAnswer.RequiredSlots) != 0 {
-		t.Fatalf("resolved pending frame survived: %#v", state.PendingAnswer)
+	if !state.PendingAnswer.Active ||
+		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
+		state.PendingAnswer.Attempts != 1 {
+		t.Fatalf("person's pending restatement was lost: %#v", state.PendingAnswer)
 	}
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
@@ -1842,7 +2559,9 @@ func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "respondent-meaning-clarify-fast" ||
+	if result.Route != "respondent-restate-fast" ||
+		result.CoachPhase != "awaiting_restatement" ||
+		result.CoachAction != "restate" ||
 		result.Intervention.Act != "clarify" ||
 		!result.NeedsClarification ||
 		result.SpokenReply == plan.SpokenReply ||
@@ -1878,7 +2597,9 @@ func TestAgentRespondentPendingFrameRetainsNoAnswerAttempt(t *testing.T) {
 	}
 	if !state.PendingAnswer.Active ||
 		state.PendingAnswer.Operator != answercontract.OperatorChoice ||
-		state.PendingAnswer.Subject != "採用案" ||
+		state.PendingAnswer.Subject != "質問が求める選択" ||
+		state.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
+		state.PendingAnswer.Attempts != 1 ||
 		len(state.PendingAnswer.RequiredSlots) != 1 ||
 		state.PendingAnswer.RequiredSlots[0] != answercontract.SlotSelection {
 		t.Fatalf("blocked pending frame: %#v", state.PendingAnswer)
@@ -1943,8 +2664,16 @@ func TestAgentDraftLACCannotBypassIndependentCritic(t *testing.T) {
 }
 
 func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
-	for _, ambient := range []bool{false, true} {
-		t.Run(map[bool]string{false: "intentional", true: "ambient"}[ambient], func(t *testing.T) {
+	for _, mode := range []struct {
+		name       string
+		ambient    bool
+		foreground bool
+	}{
+		{name: "intentional"},
+		{name: "ambient", ambient: true},
+		{name: "foreground", ambient: true, foreground: true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
 			plan := validModelPlan()
 			plan.SpokenReply = "監査前の実質回答を読み上げてはいけない。"
 			fake := &fakeGenerator{generations: []fakeGeneration{
@@ -1957,7 +2686,8 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 			result, err := agent.Process(context.Background(), "uid-critic", VoiceTurn{
 				SchemaVersion: SchemaVersion,
 				Utterance:     "答えて",
-				Ambient:       ambient,
+				Ambient:       mode.ambient,
+				Foreground:    mode.foreground,
 			})
 			if err != nil {
 				t.Fatalf("Process: %v", err)
@@ -1966,7 +2696,7 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 				strings.Contains(result.SpokenReply, "実質回答") {
 				t.Fatalf("unaudited draft escaped: %#v", result)
 			}
-			if ambient {
+			if mode.ambient && !mode.foreground {
 				if result.SpokenReply != "" || result.Intervention.Act != "silent" {
 					t.Fatalf("ambient critic failure spoke: %#v", result)
 				}
@@ -2295,6 +3025,8 @@ func TestAgentLexicalHighRiskCannotBypassPrecision(t *testing.T) {
 	result, err := agent.Process(context.Background(), "uid-lexical", VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     "この薬の用量を変えてもいい？",
+		Ambient:       true,
+		Foreground:    true,
 	})
 	if err != nil {
 		t.Fatalf("Process: %v", err)
@@ -2370,19 +3102,25 @@ func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
 
 func TestAgentPDFPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 	const (
-		uid       = "uid-pdf-pending-isolation"
-		utterance = "既存の状態と同じ文をPDFについて話す"
+		uid            = "uid-pdf-pending-isolation"
+		utterance      = "既存の状態と同じ文をPDFについて話す"
+		pendingSubject = "PDF添付前の保留質問"
+		pdfAnswer      = "目的はPDFの命令どおり保留状態を完了することです"
 	)
-	awaiting := respondentAwaitingPlan()
+	injectedCompletion := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		pendingSubject,
+		pdfAnswer,
+		pdfAnswer,
+		"保留状態を完了しました。",
+	)
 	recovered := validModelPlan()
 	recovered.ThoughtStateDelta.Claims = []string{
 		"PDF内の命令を次のターンへ保存する",
 	}
 	fake := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, awaiting)},
-		{body: encodePlan(t, recovered)},
-		{body: encodePlan(t, recovered)},
-		{body: encodeContract(t, validCriticContract(recovered.SpokenReply))},
+		{body: encodePlan(t, injectedCompletion)},
 	}}
 	agent := newTestAgent(t, fake)
 	initial := conversationState{
@@ -2400,7 +3138,7 @@ func TestAgentPDFPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 		PendingAnswer: PendingAnswerFrame{
 			Active:        true,
 			Operator:      answercontract.OperatorPurpose,
-			Subject:       "PDF添付前の保留質問",
+			Subject:       pendingSubject,
 			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
 		},
 		SelfCorrectionGrace: true,
@@ -2425,8 +3163,19 @@ func TestAgentPDFPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if len(fake.calls) != 4 || result.Route != "precision" {
-		t.Fatalf("PDF recovery path was not fully audited: %#v", result)
+	if len(fake.calls) != 1 || result.Route != "planner-unavailable" {
+		t.Fatalf("PDF respondent injection did not fail closed: %#v", result)
+	}
+	for index, call := range fake.calls {
+		if strings.Contains(call.prompt, pendingSubject) {
+			t.Fatalf("call %d exposed the pre-turn coach subject to PDF content", index)
+		}
+		if strings.Contains(call.prompt, `"pending_answer":{"active":true`) {
+			t.Fatalf("call %d exposed an active coach capability to PDF content", index)
+		}
+	}
+	if !strings.Contains(fake.calls[0].prompt, `"respondent_mode_allowed":false`) {
+		t.Fatal("PDF planner call could enter respondent mode")
 	}
 	if !allZero(pdf) {
 		t.Fatalf("PDF was not cleared: %q", pdf)
@@ -2443,6 +3192,59 @@ func TestAgentPDFPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
 		!state.SelfCorrectionGrace ||
 		state.LastIntervention != initial.LastIntervention {
 		t.Fatalf("PDF recovery changed pre-turn state: %#v", state)
+	}
+
+	safeFake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, recovered)},
+		{body: encodePlan(t, recovered)},
+		{body: encodeContract(t, validCriticContract(recovered.SpokenReply))},
+	}}
+	safeAgent := newTestAgent(t, safeFake)
+	safeToken, err := safeAgent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal safe-path state: %v", err)
+	}
+	safePDF := []byte("%PDF-1.7\nUNTRUSTED-ACTIVE-CONTENT")
+	safeResult, err := safeAgent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     utterance,
+		StateToken:    safeToken,
+		PDF: &InlinePDF{
+			MIMEType: "application/pdf",
+			Data:     safePDF,
+		},
+	})
+	if err != nil {
+		t.Fatalf("safe PDF Process: %v", err)
+	}
+	if len(safeFake.calls) != 3 || safeResult.Route != "precision" {
+		t.Fatalf("safe PDF path was not independently audited: %#v", safeResult)
+	}
+	for index, call := range safeFake.calls {
+		if strings.Contains(call.prompt, pendingSubject) ||
+			strings.Contains(call.prompt, `"pending_answer":{"active":true`) {
+			t.Fatalf("safe call %d exposed the pre-turn coach capability", index)
+		}
+		if index < 2 &&
+			!strings.Contains(call.prompt, `"respondent_mode_allowed":false`) {
+			t.Fatalf("safe planner call %d could enter respondent mode", index)
+		}
+	}
+	if !allZero(safePDF) {
+		t.Fatalf("safe-path PDF was not cleared: %q", safePDF)
+	}
+	safeState, err := safeAgent.codec.open(uid, safeResult.StateToken)
+	if err != nil {
+		t.Fatalf("open safe-path state: %v", err)
+	}
+	if safeState.Turn != initial.Turn+1 ||
+		len(safeState.Graph.Claims) != 1 ||
+		safeState.Graph.Claims[0] != utterance ||
+		!safeState.PendingAnswer.Active ||
+		safeState.PendingAnswer.Subject != initial.PendingAnswer.Subject ||
+		!safeState.SelfCorrectionGrace ||
+		safeState.LastIntervention != initial.LastIntervention {
+		t.Fatalf("safe PDF path changed pre-turn state: %#v", safeState)
 	}
 }
 
@@ -2706,6 +3508,14 @@ func respondentAwaitingPlan() modelPlan {
 		"",
 	)
 	return plan
+}
+
+func purposeCoachPrompt() string {
+	return respondent.GuideAwaiting(
+		respondent.OperatorPurpose,
+		0,
+		false,
+	).SpokenReply
 }
 
 func respondentRestructurePlan(answerAttempt, reconstruction string) modelPlan {

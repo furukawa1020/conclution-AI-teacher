@@ -96,6 +96,9 @@ func (s *CloudService) OpenStreamingTranscription(
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("streaming transcription canceled: %w", err)
 	}
+	if err := validateConversationSpeechModel(s.speechModel); err != nil {
+		return nil, err
+	}
 	if s.streamRecognizeCall == nil {
 		return nil, errors.New("streaming transcription is unavailable")
 	}
@@ -137,14 +140,6 @@ func streamingRecognitionConfigRequest(
 	streamingFeatures := &speechpb.StreamingRecognitionFeatures{
 		EnableVoiceActivityEvents: true,
 		InterimResults:            true,
-	}
-	// Endpointing sensitivity is currently a Chirp 3 feature. Activating it
-	// only for that configured production model preserves compatibility with
-	// the existing "long" model and takes effect automatically after the
-	// planned environment switch.
-	if strings.EqualFold(strings.TrimSpace(model), "chirp_3") {
-		streamingFeatures.EndpointingSensitivity =
-			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_SHORT
 	}
 
 	return &speechpb.StreamingRecognizeRequest{

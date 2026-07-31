@@ -10,7 +10,7 @@
 - Firestore: `(default)`、`asia-northeast1`、削除保護、TTL
 - Cloud Run: `kotae-api`、`asia-northeast1`
 - Cloud Run実行ID: `kotae-api-runtime@kotae-ai-u22-2026.iam.gserviceaccount.com`
-- Cloud Speech-to-Text V2: `asia-northeast1`、`chirp_3`単独、`ja-JP`
+- Cloud Speech-to-Text V2: `asia-northeast1`、自然会話向け`long`単独、`ja-JP`
 - Cloud Text-to-Speech: `asia-northeast1`、`ja-JP-Chirp3-HD-Kore`
 - Vertex AI: `global`、高速`gemini-3.6-flash`、精密`gemini-3.1-pro-preview`
 - Secret Manager: `kotae-conversation-state`
@@ -161,7 +161,7 @@ gcloud run deploy kotae-api `
   --cpu=1 `
   --memory=1Gi `
   --concurrency=4 `
-  --min-instances=0 `
+  --min-instances=1 `
   --max-instances=3 `
   --timeout=120 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL" `

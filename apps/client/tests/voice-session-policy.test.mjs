@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
-import { readFile as readFileRaw } from "node:fs/promises";
+import { readFile as readRawFile } from "node:fs/promises";
 import test from "node:test";
+
+async function readFile(path, encoding) {
+  const source = await readRawFile(path, encoding);
+  return typeof source === "string"
+    ? source.replaceAll("\r\n", "\n")
+    : source;
+}
 
 import {
   advanceCandidateCapture,
   advanceVad,
+  classifyVoiceSessionStopReason,
   createCaptureBuffer,
   createCandidateCaptureState,
   createRetryableInitializer,
   createSessionClock,
+  createSessionExpiryWatchdog,
   createStopLatch,
   createTurnGate,
   createVadState,
@@ -26,6 +35,7 @@ import {
   advanceInterruptVad,
   BARGE_PCM_LIMITS,
   claimAmbientLiveHandoff,
+  CONFIRMED_SPEECH_PCM_LIMITS,
   createBargePcmRing,
   createConfirmedSpeechPcmGate,
   createInterruptVadState,
@@ -39,15 +49,416 @@ import {
   shouldAbortVoiceTransportOnInterrupt,
   shouldStartAmbientLiveHandoff,
   safeLiveCaptureFrame,
+  safeLiveCaptureSignal,
+  validatedPlaybackDrainTimeoutMs,
   VOICE_LIVE_LIMITS,
+  VOICE_PLAYBACK_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
 
-async function readFile(path, encoding) {
-  const contents = await readFileRaw(path, encoding);
-  return typeof contents === "string"
-    ? contents.replaceAll("\r\n", "\n")
-    : contents;
+function executableBridgeFunction(source, signature, nextSignature) {
+  const start = source.indexOf(signature);
+  const end = source.indexOf(`\n\n${nextSignature}`, start);
+  assert.notEqual(start, -1, `${signature} is missing`);
+  assert.notEqual(end, -1, `${nextSignature} is missing`);
+  return source.slice(start, end);
+}
+
+class FakePlaybackTimers {
+  constructor() {
+    this.nextId = 1;
+    this.pending = new Map();
+  }
+
+  clearTimeout(id) {
+    this.pending.delete(id);
+  }
+
+  fireNext() {
+    const entry = this.pending.entries().next().value;
+    assert.ok(entry, "a playback deadline must be armed");
+    const [id, timer] = entry;
+    this.pending.delete(id);
+    timer.callback();
+    return timer.delay;
+  }
+
+  setTimeout(callback, delay) {
+    const id = this.nextId;
+    this.nextId += 1;
+    this.pending.set(id, { callback, delay });
+    return id;
+  }
+}
+
+class FakePlaybackSource {
+  constructor() {
+    this.buffer = undefined;
+    this.disconnected = false;
+    this.ended = false;
+    this.listeners = new Map();
+    this.startedAt = undefined;
+    this.stopped = false;
+  }
+
+  addEventListener(type, listener) {
+    this.listeners.set(type, listener);
+  }
+
+  connect() {}
+
+  disconnect() {
+    this.disconnected = true;
+  }
+
+  end() {
+    if (this.ended) return;
+    this.ended = true;
+    const listener = this.listeners.get("ended");
+    this.listeners.delete("ended");
+    listener?.();
+  }
+
+  start(at) {
+    this.startedAt = at;
+  }
+
+  stop() {
+    this.stopped = true;
+    // Some browser engines dispatch ended synchronously from stop().
+    this.end();
+  }
+}
+
+class FakePlaybackAudioContext {
+  constructor() {
+    this.baseLatency = 0;
+    this.currentTime = 0;
+    this.destination = Object.freeze({});
+    this.outputLatency = 0;
+    this.sources = [];
+    this.state = "running";
+  }
+
+  createBufferSource() {
+    const source = new FakePlaybackSource();
+    this.sources.push(source);
+    return source;
+  }
+
+  createGain() {
+    return {
+      connected: false,
+      disconnected: false,
+      connect() {
+        this.connected = true;
+      },
+      disconnect() {
+        this.disconnected = true;
+      },
+      gain: {
+        setValueAtTime() {},
+      },
+    };
+  }
+}
+
+class ControlledVoiceReader {
+  constructor() {
+    this.cancelledWith = undefined;
+    this.closed = false;
+    this.failedWith = undefined;
+    this.pendingRead = undefined;
+    this.queue = [];
+    this.released = false;
+  }
+
+  cancel(error) {
+    this.cancelledWith = error;
+    this.closed = true;
+    if (this.pendingRead) {
+      const { resolve } = this.pendingRead;
+      this.pendingRead = undefined;
+      resolve({ done: true, value: undefined });
+    }
+    return Promise.resolve();
+  }
+
+  close() {
+    this.closed = true;
+    if (this.pendingRead) {
+      const { resolve } = this.pendingRead;
+      this.pendingRead = undefined;
+      resolve({ done: true, value: undefined });
+    }
+  }
+
+  fail(error) {
+    this.failedWith = error;
+    if (this.pendingRead) {
+      const { reject } = this.pendingRead;
+      this.pendingRead = undefined;
+      reject(error);
+    }
+  }
+
+  pushText(value) {
+    const chunk = new TextEncoder().encode(value);
+    if (this.pendingRead) {
+      const { resolve } = this.pendingRead;
+      this.pendingRead = undefined;
+      resolve({ done: false, value: chunk });
+      return;
+    }
+    this.queue.push(chunk);
+  }
+
+  read() {
+    if (this.queue.length > 0) {
+      return Promise.resolve({ done: false, value: this.queue.shift() });
+    }
+    if (this.failedWith) return Promise.reject(this.failedWith);
+    if (this.closed) {
+      return Promise.resolve({ done: true, value: undefined });
+    }
+    assert.equal(this.pendingRead, undefined, "only one read may be pending");
+    return new Promise((resolve, reject) => {
+      this.pendingRead = { reject, resolve };
+    });
+  }
+
+  releaseLock() {
+    this.released = true;
+  }
+}
+
+function fakeVoiceStreamResponse(reader) {
+  return {
+    body: {
+      getReader: () => reader,
+    },
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type"
+          ? "application/x-ndjson; charset=utf-8"
+          : null;
+      },
+    },
+  };
+}
+
+function fakePcmEvent(sequence, byteLength = 4_800) {
+  return {
+    pcm: new ArrayBuffer(byteLength),
+    sampleRateHz: 24_000,
+    sequence,
+  };
+}
+
+async function flushPlaybackMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function waitForPlaybackState(predicate) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return;
+    await flushPlaybackMicrotasks();
+  }
+  assert.fail("playback state did not settle");
+}
+
+async function createExecutablePlaybackHarness() {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const executable = [
+    executableBridgeFunction(
+      bridge,
+      "function stopBargeInMonitoring(",
+      "function rampPlaybackGain(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function createStreamingPlayback(",
+      "function haltStreamingPlayback(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function haltStreamingPlayback(",
+      "async function awaitValidatedPlaybackCompletion(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "async function awaitValidatedPlaybackCompletion(",
+      "async function consumeVoiceStream(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function isNdjsonContentType(",
+      "function pcm16BytesAudioBuffer(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "async function consumeVoiceStream(",
+      "async function finishTurn(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function stopSession(",
+      "function hasActiveVoiceSession(",
+    ),
+  ].join("\n\n");
+  const context = new FakePlaybackAudioContext();
+  const timers = new FakePlaybackTimers();
+  const state = {
+    abandonedInterrupts: 0,
+    clearedDocuments: [],
+    micEnabled: false,
+    pauseEvents: [],
+    releasedCodes: [],
+    resetCount: 0,
+    restoredGain: 0,
+  };
+
+  function pcmBuffer(decodedBytes, sampleRateHz) {
+    return {
+      duration: decodedBytes / (sampleRateHz * 2),
+      getChannelData: () => Float32Array.of(0.25),
+      numberOfChannels: 1,
+      sampleRate: sampleRateHz,
+    };
+  }
+
+  const factory = new Function(
+    "dependencies",
+    `"use strict";
+let activeLiveSession;
+let activePlayback;
+let activeRequestController;
+let audioContext = dependencies.audioContext;
+let documentEpoch = 0;
+let sessionEpoch = 1;
+const stoppedSessionCodes = new Map();
+const CustomEvent = dependencies.CustomEvent;
+const TextDecoder = dependencies.TextDecoder;
+const VOICE_STREAM_LIMITS = dependencies.VOICE_STREAM_LIMITS;
+const abandonInterruptRecording = dependencies.abandonInterruptRecording;
+const classifyVoiceSessionStopReason = dependencies.classifyVoiceSessionStopReason;
+const clearPendingDocument = dependencies.clearPendingDocument;
+const clearTimeout = dependencies.clearTimeout;
+const createVoiceStreamParser = dependencies.createVoiceStreamParser;
+const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
+const fail = dependencies.fail;
+const finishGate = dependencies.finishGate;
+const globalThis = dependencies.eventTarget;
+const pcm16AudioBuffer = dependencies.pcm16AudioBuffer;
+const pcm16BytesAudioBuffer = dependencies.pcm16BytesAudioBuffer;
+const performance = dependencies.performance;
+const releaseMicrophone = dependencies.releaseMicrophone;
+const restorePlaybackGain = dependencies.restorePlaybackGain;
+const retirePendingLiveSession = dependencies.retirePendingLiveSession;
+const safeVoiceResponse = dependencies.safeVoiceResponse;
+const sessionClock = dependencies.sessionClock;
+const sessionExpiryWatchdog = dependencies.sessionExpiryWatchdog;
+const setTimeout = dependencies.setTimeout;
+const setTracksEnabled = dependencies.setTracksEnabled;
+const startBargeInMonitoring = dependencies.startBargeInMonitoring;
+const validatedPlaybackDrainTimeoutMs = dependencies.validatedPlaybackDrainTimeoutMs;
+
+function rememberStoppedSession(expectedEpoch, code) {
+  stoppedSessionCodes.set(expectedEpoch, code);
+}
+
+function stoppedSessionCode(expectedEpoch) {
+  return stoppedSessionCodes.get(expectedEpoch) ?? "request_cancelled";
+}
+
+${executable}
+
+return Object.freeze({
+  awaitValidatedPlaybackCompletion,
+  consumeVoiceStream,
+  createStreamingPlayback,
+  getActivePlayback: () => activePlayback,
+  getSessionEpoch: () => sessionEpoch,
+  haltStreamingPlayback,
+  stopSession,
+});`,
+  );
+  const runtime = factory({
+    CustomEvent: class {
+      constructor(type, options) {
+        this.detail = options?.detail;
+        this.type = type;
+      }
+    },
+    TextDecoder,
+    VOICE_STREAM_LIMITS,
+    abandonInterruptRecording(recording) {
+      recording.settled = true;
+      state.abandonedInterrupts += 1;
+    },
+    audioContext: context,
+    classifyVoiceSessionStopReason,
+    clearPendingDocument(reason) {
+      state.clearedDocuments.push(reason);
+    },
+    clearTimeout: (id) => timers.clearTimeout(id),
+    createVoiceStreamParser,
+    estimateAudiblePerformanceTime,
+    eventTarget: {
+      dispatchEvent(event) {
+        state.pauseEvents.push(event);
+        return true;
+      },
+    },
+    fail(code) {
+      throw new Error(code);
+    },
+    finishGate: {
+      reset() {
+        state.resetCount += 1;
+      },
+    },
+    pcm16AudioBuffer(_audioBase64, decodedBytes, sampleRateHz) {
+      return pcmBuffer(decodedBytes, sampleRateHz);
+    },
+    pcm16BytesAudioBuffer(_pcm, decodedBytes, sampleRateHz) {
+      return pcmBuffer(decodedBytes, sampleRateHz);
+    },
+    performance: { now: () => 0 },
+    releaseMicrophone(code) {
+      state.micEnabled = false;
+      state.releasedCodes.push(code);
+    },
+    restorePlaybackGain() {
+      state.restoredGain += 1;
+    },
+    retirePendingLiveSession() {},
+    safeVoiceResponse: (result) => Object.freeze({ ...result }),
+    sessionClock: {
+      reset() {
+        state.resetCount += 1;
+      },
+    },
+    sessionExpiryWatchdog: {
+      disarm() {
+        state.resetCount += 1;
+      },
+    },
+    setTimeout: (callback, delay) => timers.setTimeout(callback, delay),
+    setTracksEnabled(enabled) {
+      state.micEnabled = enabled;
+    },
+    startBargeInMonitoring(playback) {
+      state.micEnabled = true;
+      playback.interruptRecording = { settled: false };
+    },
+    validatedPlaybackDrainTimeoutMs,
+  });
+  return { context, runtime, state, timers };
 }
 
 const researchRecord = Object.freeze({
@@ -63,7 +474,7 @@ test("bridge cancellation releases ownership before rejecting the recording", as
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
-  const start = bridge.indexOf("function releaseMicrophone()");
+  const start = bridge.indexOf("function releaseMicrophone(");
   const end = bridge.indexOf("\n}\n\nfunction hasLiveAudioTrack", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
@@ -71,11 +482,15 @@ test("bridge cancellation releases ownership before rejecting the recording", as
 
   assert.doesNotMatch(release, /activeRecording\.captureBuffer/u);
   const detachAt = release.indexOf("activeRecording = undefined");
-  const rejectAt = release.indexOf(
-    'rejectRecording(recording, "request_cancelled")',
-  );
+  const rejectAt = release.indexOf("rejectRecording(recording, code)");
   assert.ok(detachAt >= 0);
   assert.ok(rejectAt > detachAt);
+  const stopVadAt = bridge.indexOf("function stopVad(");
+  const stopVad = bridge.slice(stopVadAt, stopVadAt + 500);
+  assert.match(
+    stopVad,
+    /recording\.vadPcm\.fill\(0\);[\s\S]*recording\.vadPcm = undefined/u,
+  );
 });
 
 test("bridge primes App Check before a fresh anonymous sign-in", async () => {
@@ -128,7 +543,9 @@ test("explicit voice start warms only the fixed transport without private data",
   const begin = bridge.slice(beginStart, beginEnd);
   const sessionAt = begin.indexOf("sessionClock.begin()");
   const warmAt = begin.indexOf("primeVoiceTransportConnection()");
-  const microphoneAt = begin.indexOf("ensureMediaStream(expectedEpoch)");
+  const microphoneAt = begin.indexOf(
+    "const stream = await ensureMediaStream(",
+  );
   assert.ok(sessionAt >= 0);
   assert.ok(warmAt > sessionAt);
   assert.ok(microphoneAt > warmAt);
@@ -176,34 +593,32 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
     finish,
     /Promise\.all\(\[\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
   );
-  const joinedAt = finish.indexOf("await Promise.all([");
+  const joinedAt = finish.indexOf("Promise.all([");
   const encodeAt = finish.indexOf("arrayBufferToBase64(audioBuffer)");
   assert.ok(joinedAt >= 0);
   assert.ok(encodeAt > joinedAt);
 });
 
-test("empty capture rollover ends the explicit gesture epoch", async () => {
+test("empty capture drops authority and keeps the bounded session alive", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
-  const marker = client.indexOf(
-    "The explicit gesture authorizes only this finite recording",
-  );
+  const marker = client.indexOf("A silent bounded window carries no speech");
   assert.notEqual(marker, -1);
-  const rollover = client.slice(marker, marker + 600);
+  const rollover = client.slice(marker, marker + 1_300);
 
   assert.match(
     rollover,
-    /arm_listening\(\s*operation,\s*false,\s*intentional_for_gesture_epoch\(false\),/u,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
   );
   assert.doesNotMatch(
     rollover,
-    /arm_listening\(\s*operation,\s*false,\s*intentional,/u,
+    /cloud::stop_session\(\)|VoiceState::Ready|VoiceTurnMode::Intentional/u,
   );
 });
 
-test("terminal barge-in commits final state before ambient continuation", async () => {
+test("terminal barge-in commits final state before foreground continuation", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
@@ -217,16 +632,16 @@ test("terminal barge-in commits final state before ambient continuation", async 
     "session_state.set(result.session_state.clone())",
   );
   const interruptedAt = submit.indexOf("if result.interrupted");
-  const ambientResumeAt = submit.indexOf(
-    "resume_ambient_interruption(",
+  const foregroundResumeAt = submit.indexOf(
+    "resume_foreground_interruption(",
     interruptedAt,
   );
   assert.ok(stateCommitAt >= 0);
   assert.ok(interruptedAt > stateCommitAt);
-  assert.ok(ambientResumeAt > interruptedAt);
+  assert.ok(foregroundResumeAt > interruptedAt);
 });
 
-test("barge-in racing terminal playback preserves the validated final", async () => {
+test("barge-in racing bounded local playback preserves the validated final", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -237,29 +652,286 @@ test("barge-in racing terminal playback preserves the validated final", async ()
   assert.notEqual(end, -1);
   const consume = bridge.slice(start, end);
   const terminalAt = consume.indexOf("const completed = parser.finish()");
-  const playbackAt = consume.indexOf("await playback.completion");
-  const returnAt = consume.indexOf("...completed.finalResult");
+  const sealAt = consume.indexOf("playback.seal()");
+  const returnAt = consume.indexOf(
+    "finalResult: completed.finalResult",
+  );
   assert.ok(terminalAt >= 0);
-  assert.ok(playbackAt > terminalAt);
-  assert.ok(returnAt > playbackAt);
+  assert.ok(sealAt > terminalAt);
+  assert.ok(returnAt > sealAt);
+  assert.doesNotMatch(consume, /await playback\.completion/u);
+
+  const drainStart = bridge.indexOf(
+    "async function awaitValidatedPlaybackCompletion(",
+  );
+  const drainEnd = bridge.indexOf(
+    "\n}\n\nasync function consumeVoiceStream",
+    drainStart,
+  );
+  assert.notEqual(drainStart, -1);
+  assert.notEqual(drainEnd, -1);
+  const drain = bridge.slice(drainStart, drainEnd);
   assert.match(
-    consume,
-    /catch \(error\) \{[\s\S]*if \(!playback\.interrupted\) \{[\s\S]*throw error;/u,
+    drain,
+    /Promise\.race\(\[playback\.completion, deadline\]\)/u,
+  );
+  assert.match(
+    drain,
+    /catch \(error\) \{[\s\S]*if \(!playback\.interrupted\) throw error;/u,
   );
 });
 
-test("automatic rearm is ambient and only a fresh gesture is intentional", async () => {
+test("validated playback drain follows scheduled audio with a protocol-sized cap", () => {
+  assert.equal(VOICE_PLAYBACK_LIMITS.drainGraceMs, 4_000);
+  assert.equal(
+    VOICE_PLAYBACK_LIMITS.maximumDrainMs,
+    Math.ceil(
+      (VOICE_STREAM_LIMITS.maximumAudioTotalBytes /
+        (24_000 * 2)) *
+        1_000,
+    ) + VOICE_PLAYBACK_LIMITS.drainGraceMs,
+  );
+  assert.equal(
+    validatedPlaybackDrainTimeoutMs({
+      currentContextTime: 10,
+      scheduledEndContextTime: 12.5,
+    }),
+    6_500,
+  );
+  assert.equal(
+    validatedPlaybackDrainTimeoutMs({
+      currentContextTime: 12.5,
+      scheduledEndContextTime: 10,
+    }),
+    VOICE_PLAYBACK_LIMITS.drainGraceMs,
+  );
+  assert.equal(
+    validatedPlaybackDrainTimeoutMs({
+      currentContextTime: 0,
+      scheduledEndContextTime: 10_000,
+    }),
+    VOICE_PLAYBACK_LIMITS.maximumDrainMs,
+  );
+  for (const invalid of [
+    {},
+    { currentContextTime: -1, scheduledEndContextTime: 1 },
+    { currentContextTime: 0, scheduledEndContextTime: Infinity },
+    {
+      currentContextTime: 0,
+      scheduledEndContextTime: 1,
+      ignored: true,
+    },
+  ]) {
+    assert.throws(
+      () => validatedPlaybackDrainTimeoutMs(invalid),
+      /voice_playback_deadline_invalid/u,
+    );
+  }
+});
+
+test("executable finish boundary waits for the last Web Audio source", async () => {
+  const { context, runtime, state, timers } =
+    await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1);
+  playback.schedulePcm(fakePcmEvent(0));
+  playback.schedulePcm(fakePcmEvent(1));
+  playback.finalReceived = true;
+  playback.seal();
+
+  let finished = false;
+  const finishBoundary = runtime
+    .awaitValidatedPlaybackCompletion(playback, 1)
+    .then(() => {
+      finished = true;
+    });
+  await flushPlaybackMicrotasks();
+  assert.equal(finished, false);
+  assert.equal(state.micEnabled, true, "barge-in remains active while audible");
+  assert.equal(context.sources.length, 2);
+
+  context.sources[0].end();
+  await flushPlaybackMicrotasks();
+  assert.equal(finished, false, "one remaining source must hold the turn");
+  assert.equal(state.micEnabled, true);
+
+  context.sources[1].end();
+  await finishBoundary;
+  assert.equal(finished, true);
+  assert.equal(state.micEnabled, false);
+  assert.equal(runtime.getActivePlayback(), undefined);
+  assert.equal(timers.pending.size, 0);
+});
+
+test("executable drain timeout halts sources and disables the barge mic", async () => {
+  const { context, runtime, state, timers } =
+    await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1);
+  playback.schedulePcm(fakePcmEvent(0));
+  playback.finalReceived = true;
+  playback.seal();
+
+  const finishBoundary = runtime
+    .awaitValidatedPlaybackCompletion(playback, 1)
+    .catch((error) => {
+      runtime.haltStreamingPlayback(playback, error);
+      throw error;
+    });
+  assert.equal(state.micEnabled, true);
+  assert.equal(timers.pending.size, 1);
+  const delay = timers.fireNext();
+  assert.ok(delay >= VOICE_PLAYBACK_LIMITS.drainGraceMs);
+  assert.ok(delay <= VOICE_PLAYBACK_LIMITS.maximumDrainMs);
+
+  await assert.rejects(finishBoundary, /audio_playback_blocked/u);
+  assert.equal(context.sources[0].stopped, true);
+  assert.equal(context.sources[0].disconnected, true);
+  assert.equal(state.micEnabled, false);
+  assert.equal(runtime.getActivePlayback(), undefined);
+  assert.equal(timers.pending.size, 0);
+});
+
+test("executable pre-final and post-final barge races keep their ownership", async (t) => {
+  await t.test("pre-final interruption aborts without a validated final", async () => {
+    const { context, runtime, state } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1);
+    const reader = new ControlledVoiceReader();
+    reader.pushText(
+      streamLine({ type: "ready", version: 1 }) +
+        streamLine({
+          type: "audio",
+          version: 1,
+          sequence: 0,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }),
+    );
+    const consume = runtime.consumeVoiceStream(
+      fakeVoiceStreamResponse(reader),
+      playback,
+      1,
+    );
+    await waitForPlaybackState(() => playback.hasStreamedAudio());
+    assert.equal(playback.finalReceived, false);
+
+    playback.interruptedBeforeFinal =
+      shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+    playback.interrupted = true;
+    const interruption = Object.assign(new Error("voice_interrupted"), {
+      name: "AbortError",
+    });
+    runtime.haltStreamingPlayback(playback, interruption);
+    reader.fail(interruption);
+
+    await assert.rejects(consume, (error) => error === interruption);
+    assert.equal(playback.interruptedBeforeFinal, true);
+    assert.equal(reader.cancelledWith, interruption);
+    assert.equal(reader.released, true);
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(
+      state.micEnabled,
+      true,
+      "confirmed barge capture remains owned by the next utterance",
+    );
+  });
+
+  await t.test("post-final interruption preserves the validated final", async () => {
+    const { context, runtime, state, timers } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1);
+    const reader = new ControlledVoiceReader();
+    const expectedFinal = finalVoiceResult();
+    reader.pushText(
+      streamLine({ type: "ready", version: 1 }) +
+        streamLine({
+          type: "audio",
+          version: 1,
+          sequence: 0,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }) +
+        streamLine({
+          type: "final",
+          version: 1,
+          result: expectedFinal,
+        }),
+    );
+    const consume = runtime.consumeVoiceStream(
+      fakeVoiceStreamResponse(reader),
+      playback,
+      1,
+    );
+    await waitForPlaybackState(() => playback.finalReceived);
+
+    playback.interruptedBeforeFinal =
+      shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+    playback.interrupted = true;
+    runtime.haltStreamingPlayback(
+      playback,
+      new Error("voice_interrupted"),
+    );
+    reader.close();
+
+    const completed = await consume;
+    await runtime.awaitValidatedPlaybackCompletion(playback, 1);
+    assert.deepEqual(completed.finalResult, expectedFinal);
+    assert.equal(completed.streamedAudio, true);
+    assert.equal(playback.interruptedBeforeFinal, false);
+    assert.equal(reader.cancelledWith, undefined);
+    assert.equal(reader.released, true);
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(state.micEnabled, true);
+    assert.equal(timers.pending.size, 0);
+  });
+});
+
+test("expiry and pagehide cancel an executable playback drain", async (t) => {
+  for (const scenario of [
+    { reason: "idle", stopCode: "session_expired" },
+    { reason: "pagehide", stopCode: "request_cancelled" },
+  ]) {
+    await t.test(scenario.reason, async () => {
+      const { context, runtime, state, timers } =
+        await createExecutablePlaybackHarness();
+      const playback = runtime.createStreamingPlayback(1);
+      playback.schedulePcm(fakePcmEvent(0));
+      playback.finalReceived = true;
+      playback.seal();
+      const drain = runtime.awaitValidatedPlaybackCompletion(playback, 1);
+
+      runtime.stopSession(scenario.reason);
+
+      await assert.rejects(
+        drain,
+        (error) => error instanceof Error && error.message === scenario.stopCode,
+      );
+      assert.equal(runtime.getSessionEpoch(), 2);
+      assert.equal(runtime.getActivePlayback(), undefined);
+      assert.equal(context.sources[0].stopped, true);
+      assert.equal(state.micEnabled, false);
+      assert.deepEqual(state.releasedCodes, [scenario.stopCode]);
+      const pauseEvent = state.pauseEvents.find(
+        (event) => event.type === "kotae:voice-session-paused",
+      );
+      assert.deepEqual(pauseEvent?.detail, {
+        reason: scenario.reason,
+        version: 1,
+      });
+      assert.equal(timers.pending.size, 0);
+    });
+  }
+});
+
+test("automatic rearm is foreground and only a fresh gesture is intentional", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
-  const automatic = client.indexOf(
-    "intentional_for_gesture_epoch(false)",
-  );
-  const explicit = client.indexOf("intentional_for_gesture_epoch(true)");
+  const automatic = client.indexOf("VoiceTurnMode::Foreground");
+  const explicit = client.indexOf("turn_mode_for_gesture_epoch(true)");
   assert.ok(automatic >= 0);
   assert.ok(explicit >= 0);
-  const resumeStart = client.indexOf("fn resume_ambient_interruption(");
+  const resumeStart = client.indexOf("fn resume_foreground_interruption(");
   const resumeEnd = client.indexOf(
     "\n}\n\n#[allow(clippy::too_many_arguments)]\nfn submit_turn",
     resumeStart,
@@ -267,11 +939,63 @@ test("automatic rearm is ambient and only a fresh gesture is intentional", async
   const resume = client.slice(resumeStart, resumeEnd);
   assert.match(
     resume,
-    /submit_turn\(\s*operation,\s*false,/u,
+    /submit_turn\(\s*operation,\s*VoiceTurnMode::Foreground,/u,
   );
   assert.match(
     resume,
-    /arm_listening\(\s*operation,\s*false,\s*false,/u,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
+  );
+});
+
+test("an authenticated silent foreground miss rearms without ending the session", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const submitStart = client.indexOf("fn submit_turn(");
+  const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
+  assert.notEqual(submitStart, -1);
+  assert.notEqual(submitEnd, -1);
+  const submit = client.slice(submitStart, submitEnd);
+  const missAt = submit.indexOf("silent_recognition_miss(&result.route)");
+  const interruptedAt = submit.indexOf("if result.interrupted", missAt);
+  assert.ok(missAt >= 0);
+  assert.ok(interruptedAt > missAt);
+  const miss = submit.slice(missAt, interruptedAt);
+  assert.match(
+    miss,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,[\s\S]*return;/u,
+  );
+  assert.doesNotMatch(
+    miss,
+    /cloud::stop_session\(\)|VoiceState::Ready/u,
+  );
+  assert.match(
+    client,
+    /"stt-silent-no-speech" \| "stt-silent-low-confidence"/u,
+  );
+});
+
+test("successful turns rearm but confirmed-speech failures never resend", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const submitStart = client.indexOf("fn submit_turn(");
+  const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
+  const submit = client.slice(submitStart, submitEnd);
+  const failureStart = submit.indexOf("Err(FinishTurnError::Message(message))");
+  const failureEnd = submit.indexOf("};", failureStart);
+  const failure = submit.slice(failureStart, failureEnd);
+  assert.match(failure, /cloud::stop_session\(\)/u);
+  assert.match(failure, /voice_state\.set\(VoiceState::Error\(message\)\)/u);
+  assert.doesNotMatch(failure, /finish_turn|submit_turn|arm_listening/u);
+
+  const successStart = submit.lastIndexOf("arm_listening(");
+  assert.ok(successStart > failureEnd);
+  assert.match(
+    submit.slice(successStart),
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
   );
 });
 
@@ -290,21 +1014,99 @@ test("a replacement microphone stream rebuilds its analyser graph", async () => 
   assert.match(ensureGraph, /analyserStream = stream/u);
 });
 
+test("foreground rearm never acquires a replacement microphone", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const ensureStart = bridge.indexOf("async function ensureMediaStream(");
+  const ensureEnd = bridge.indexOf("\n}\n\nfunction createAudioContext", ensureStart);
+  assert.notEqual(ensureStart, -1);
+  assert.notEqual(ensureEnd, -1);
+  const ensure = bridge.slice(ensureStart, ensureEnd);
+  const reuseAt = ensure.indexOf("hasLiveAudioTrack(mediaStream)");
+  const foregroundGuardAt = ensure.indexOf("allowAcquisition !== true");
+  const pauseAt = ensure.indexOf('stopSession("microphone_lost")');
+  const acquisitionAt = ensure.indexOf("navigator.mediaDevices.getUserMedia");
+  assert.ok(reuseAt >= 0);
+  assert.ok(foregroundGuardAt > reuseAt);
+  assert.ok(pauseAt > foregroundGuardAt);
+  assert.ok(acquisitionAt > pauseAt);
+
+  const beginStart = bridge.indexOf("async function beginTurn(");
+  const beginEnd = bridge.indexOf("\n}\n\nasync function waitForTurnEnd", beginStart);
+  const begin = bridge.slice(beginStart, beginEnd);
+  assert.match(
+    begin,
+    /ensureMediaStream\(\s*expectedEpoch,\s*turnMode === "intentional",\s*\)/u,
+  );
+  const lossListenerStart = bridge.indexOf(
+    "function installMediaStreamLossListener(",
+  );
+  const lossListenerEnd = bridge.indexOf(
+    "\n}\n\nfunction releaseMicrophone",
+    lossListenerStart,
+  );
+  const lossListener = bridge.slice(lossListenerStart, lossListenerEnd);
+  assert.match(
+    lossListener,
+    /stopSession\("microphone_lost"\)[\s\S]*addEventListener\("ended", onEnded, \{ once: true \}\)/u,
+  );
+});
+
+test("finite lifecycle stops pause Rust while preserving opaque session state", async () => {
+  const [bridge, client] = await Promise.all([
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+  ]);
+  const stopStart = bridge.indexOf("function stopSession(");
+  const stopEnd = bridge.indexOf("\n}\n\nfunction hasActiveVoiceSession", stopStart);
+  const stop = bridge.slice(stopStart, stopEnd);
+  const eventAt = stop.indexOf('new CustomEvent("kotae:voice-session-paused"');
+  assert.ok(eventAt >= 0);
+  const eventBlock = stop.slice(eventAt, eventAt + 350);
+  assert.match(eventBlock, /detail: Object\.freeze\(\{ reason: pauseReason, version: 1 \}\)/u);
+  assert.doesNotMatch(eventBlock, /audio|caption|sessionState|transcript/u);
+  assert.match(bridge, /stopSession\("hidden"\)/u);
+  assert.match(bridge, /stopSession\("pagehide"\)/u);
+  assert.match(bridge, /expire: \(reason\) => stopSession\(reason\)/u);
+
+  const listenerStart = client.indexOf(
+    "pub fn install_voice_session_paused_listener(",
+  );
+  const listenerEnd = client.indexOf("\n    pub fn stop_session()", listenerStart);
+  const listener = client.slice(listenerStart, listenerEnd);
+  const metadataAt = listener.indexOf("valid_voice_pause_metadata(");
+  const cleanupAt = listener.indexOf("stop_session_js()");
+  const pausedAt = listener.indexOf("voice_state.set(VoiceState::Paused)");
+  assert.ok(metadataAt >= 0);
+  assert.ok(cleanupAt > metadataAt);
+  assert.ok(pausedAt > cleanupAt);
+  assert.match(listener, /keys\.length\(\)/u);
+  assert.match(listener, /session_stop_pauses\(current_state\)/u);
+  assert.match(listener, /generation\.set\(next\)/u);
+  assert.match(listener, /voice_state\.set\(VoiceState::Paused\)/u);
+  assert.doesNotMatch(listener, /session_state\.set|String::new\(\)/u);
+  assert.equal(
+    client.match(/voice_state\.set\(VoiceState::Ready\)/gu)?.length,
+    1,
+    "Ready must remain explicit End only",
+  );
+});
+
 test("stopping a session settles playback before stopping every source", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
-  const start = bridge.indexOf("function stopSession()");
+  const start = bridge.indexOf("function stopSession(");
   const end = bridge.indexOf("\n}\n\nfunction hasActiveVoiceSession", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const stop = bridge.slice(start, end);
 
   const detachAt = stop.indexOf("activePlayback = undefined");
-  const rejectAt = stop.indexOf(
-    'playback.reject(new Error("request_cancelled"))',
-  );
+  const rejectAt = stop.indexOf("playback.reject(new Error(stopCode))");
   const sourcesAt = stop.indexOf("for (const source of playback.sources)");
   const stopAt = stop.indexOf("source.stop()");
   assert.ok(detachAt >= 0);
@@ -570,6 +1372,38 @@ test("voice stream fails closed on missing ready, sequence gaps, and truncation"
   assert.throws(() => truncated.finish(), /voice_response_invalid/);
 });
 
+test("voice stream preserves reviewed server failures after ready", () => {
+  for (const code of ["voice_turn_timeout", "voice_turn_unavailable"]) {
+    const parser = createVoiceStreamParser((result) => result);
+    parser.push(streamLine({ type: "ready", version: 1 }));
+    assert.throws(
+      () =>
+        parser.push(
+          streamLine({
+            type: "error",
+            version: 1,
+            code,
+          }),
+        ),
+      new RegExp(code),
+    );
+  }
+
+  const unreviewed = createVoiceStreamParser((result) => result);
+  unreviewed.push(streamLine({ type: "ready", version: 1 }));
+  assert.throws(
+    () =>
+      unreviewed.push(
+        streamLine({
+          type: "error",
+          version: 1,
+          code: "provider private detail",
+        }),
+      ),
+    /voice_response_invalid/,
+  );
+});
+
 test("voice stream rejects odd PCM, extra fields, and anything after final", () => {
   const oddPcm = createVoiceStreamParser((result) => result);
   oddPcm.push(streamLine({ type: "ready", version: 1 }));
@@ -656,29 +1490,57 @@ class MockWebSocket {
 test("live capture accepts only exact 20 ms PCM frames and bounds startup", () => {
   assert.equal(VOICE_LIVE_LIMITS.maximumQueuedInputFrames, 200);
   assert.equal(VOICE_LIVE_LIMITS.readyTimeoutMs, 4_000);
-  assert.equal(VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs, 100);
+  assert.equal(VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs, 300);
+  assert.equal(
+    VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs %
+      BARGE_PCM_LIMITS.frameDurationMs,
+    0,
+    "the normal-listen lead-in must align to whole PCM frames",
+  );
+  assert.ok(
+    VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs <=
+      CONFIRMED_SPEECH_PCM_LIMITS.historyMs,
+    "the normal-listen lead-in must fit in the bounded PCM history",
+  );
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.historyMs, 500);
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumFrames, 25);
+  assert.equal(CONFIRMED_SPEECH_PCM_LIMITS.maximumBytes, 16_000);
   assert.equal(VOICE_LIVE_LIMITS.handoffReadyTimeoutMs, 450);
   assert.equal(VOICE_LIVE_LIMITS.terminalCloseTimeoutMs, 1_500);
   assert.equal(VOICE_LIVE_LIMITS.maximumSocketBufferedBytes, 16 * 1024);
   assert.equal(VOICE_LIVE_LIMITS.outboundChunkBytes, 640);
+  assert.equal(VOICE_LIVE_LIMITS.workletCreditWindowFrames, 8);
+  assert.equal(VOICE_LIVE_LIMITS.workletSealTimeoutMs, 1_500);
   const pcm = new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes);
   assert.equal(
     safeLiveCaptureFrame({
+      contextFrame: 9_700,
+      generation: 7,
+      sequence: 0,
       type: "frame",
       version: 1,
-      sampleRateHz: 16_000,
       pcm,
+    }, {
+      cutoffContextFrame: 9_600,
+      generation: 7,
+      sequence: 0,
     }),
     pcm,
   );
   assert.throws(
     () =>
       safeLiveCaptureFrame({
+        contextFrame: 9_700,
+        generation: 7,
+        sequence: 0,
         type: "frame",
         version: 1,
-        sampleRateHz: 16_000,
         pcm,
         ignored: true,
+      }, {
+        cutoffContextFrame: 9_600,
+        generation: 7,
+        sequence: 0,
       }),
     /voice_live_frame_invalid/,
   );
@@ -686,17 +1548,34 @@ test("live capture accepts only exact 20 ms PCM frames and bounds startup", () =
   assert.throws(
     () =>
       safeLiveCaptureFrame({
+        contextFrame: 9_500,
+        generation: 7,
+        sequence: 0,
         type: "frame",
         version: 1,
-        sampleRateHz: 16_000,
         pcm: rejectedPcm,
-        ignored: true,
+      }, {
+        cutoffContextFrame: 9_600,
+        generation: 7,
+        sequence: 0,
       }),
     /voice_live_frame_invalid/,
   );
   assert.equal(
     new Uint8Array(rejectedPcm).every((value) => value === 0),
     true,
+  );
+  assert.equal(
+    safeLiveCaptureSignal(
+      {
+        generation: 7,
+        lastSequence: 0,
+        type: "sealed",
+        version: 1,
+      },
+      { generation: 7, lastSequence: 0, sealing: true },
+    ),
+    "sealed",
   );
 
   const queue = createLivePcmQueue();
@@ -787,24 +1666,111 @@ test("barge PCM ring retains only timestamped 400 ms and drains 100 ms pre-roll"
   );
 });
 
-test("normal live capture sends zero PCM before confirmation then 100 ms pre-roll", () => {
+test("normal live capture sends zero PCM before confirmation and preserves the shortest valid turn in order", () => {
   const sent = [];
   const gate = createConfirmedSpeechPcmGate((frame) => sent.push(frame));
-  for (let timestamp = 0; timestamp <= 300; timestamp += 20) {
+  const candidateStartedAt = 300;
+  const confirmedAt =
+    candidateStartedAt +
+    VOICE_SESSION_LIMITS.minimumVoiceMs -
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (
+    let timestamp = 0;
+    timestamp <= confirmedAt;
+    timestamp += BARGE_PCM_LIMITS.frameDurationMs
+  ) {
     gate.push(filledPcmFrame(timestamp / 20 + 1), timestamp);
   }
   assert.equal(sent.length, 0);
   assert.equal(gate.snapshot().confirmed, false);
 
-  assert.equal(gate.confirm(260), 8);
-  assert.equal(sent.length, 8);
+  assert.equal(gate.confirm(candidateStartedAt), 20);
+  assert.equal(sent.length, 20);
   assert.deepEqual(
     sent.map((frame) => new Uint8Array(frame)[0]),
-    [9, 10, 11, 12, 13, 14, 15, 16],
+    Array.from({ length: 20 }, (_, index) => index + 1),
   );
-  gate.push(filledPcmFrame(99), 320);
-  assert.equal(sent.length, 9);
-  assert.equal(new Uint8Array(sent.at(-1))[0], 99);
+
+  const endpointAt =
+    confirmedAt + VOICE_SESSION_LIMITS.endOfTurnSilenceMs;
+  for (
+    let timestamp =
+      confirmedAt + BARGE_PCM_LIMITS.frameDurationMs;
+    timestamp <= endpointAt;
+    timestamp += BARGE_PCM_LIMITS.frameDurationMs
+  ) {
+    gate.push(filledPcmFrame(timestamp / 20 + 1), timestamp);
+  }
+  const expectedFrameCount =
+    20 +
+    VOICE_SESSION_LIMITS.endOfTurnSilenceMs /
+      BARGE_PCM_LIMITS.frameDurationMs;
+  assert.equal(sent.length, expectedFrameCount);
+  assert.deepEqual(
+    sent.map((frame) => new Uint8Array(frame)[0]),
+    Array.from({ length: expectedFrameCount }, (_, index) => index + 1),
+    "the 300 ms lead-in and shortest valid speech turn must be sent once, in order",
+  );
+});
+
+test("normal live confirmation zeroizes PCM older than its bounded 300 ms lead-in", () => {
+  const sent = [];
+  const gate = createConfirmedSpeechPcmGate((frame) => sent.push(frame));
+  const frames = new Map();
+  const candidateStartedAt = 400;
+  for (
+    let timestamp = 20;
+    timestamp <= candidateStartedAt;
+    timestamp += BARGE_PCM_LIMITS.frameDurationMs
+  ) {
+    const frame = filledPcmFrame(timestamp / 20);
+    frames.set(timestamp, frame);
+    gate.push(frame, timestamp);
+  }
+  assert.equal(sent.length, 0);
+
+  assert.equal(gate.confirm(candidateStartedAt), 16);
+  assert.deepEqual(
+    sent.map((frame) => new Uint8Array(frame)[0]),
+    Array.from({ length: 16 }, (_, index) => index + 5),
+  );
+  for (const timestamp of [20, 40, 60, 80]) {
+    assert.equal(
+      new Uint8Array(frames.get(timestamp)).every(
+        (value) => value === 0,
+      ),
+      true,
+      `PCM captured at ${timestamp} ms must be zeroized`,
+    );
+  }
+  assert.deepEqual(gate.snapshot(), {
+    frameCount: 0,
+    newestAt: null,
+    oldestAt: null,
+    totalBytes: 0,
+    closed: false,
+    confirmed: true,
+  });
+});
+
+test("normal live capture keeps the full lead-in across bounded VAD jitter", () => {
+  const sent = [];
+  const gate = createConfirmedSpeechPcmGate((frame) => sent.push(frame));
+  const candidateStartedAt = 300;
+  const delayedConfirmationAt = 460;
+  for (
+    let timestamp = 0;
+    timestamp <= delayedConfirmationAt;
+    timestamp += BARGE_PCM_LIMITS.frameDurationMs
+  ) {
+    gate.push(filledPcmFrame(timestamp / 20 + 1), timestamp);
+  }
+
+  assert.equal(gate.confirm(candidateStartedAt), 24);
+  assert.deepEqual(
+    sent.map((frame) => new Uint8Array(frame)[0]),
+    Array.from({ length: 24 }, (_, index) => index + 1),
+  );
 });
 
 test("discarding an unconfirmed live gate zeroizes retained room audio", () => {
@@ -1047,6 +2013,17 @@ test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
 });
 
 test("live commit preserves exact frames and fails on backpressure", () => {
+  const emptySocket = new MockWebSocket();
+  const empty = createVoiceLiveClientTransport(
+    emptySocket,
+    { ...liveStartFrame(), turnMode: "foreground" },
+  );
+  empty.open();
+  empty.markReady();
+  assert.throws(() => empty.commit(), /voice_api_unavailable/);
+  assert.equal(emptySocket.sent.length, 1);
+  assert.equal(empty.snapshot().inputFrameCount, 0);
+
   const partialSocket = new MockWebSocket();
   const partial = createVoiceLiveClientTransport(
     partialSocket,
@@ -1161,11 +2138,11 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     providerEndpointAt: 1_300,
   };
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 1_439 }),
+    shouldCommitHybridEndpoint({ ...short, now: 2_199 }),
     false,
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 1_440 }),
+    shouldCommitHybridEndpoint({ ...short, now: 2_200 }),
     true,
   );
   assert.equal(
@@ -1178,7 +2155,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     "speech resumed after the provider endpoint",
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 2_501 }),
+    shouldCommitHybridEndpoint({ ...short, now: 3_301 }),
     false,
     "a stale provider endpoint cannot stop a later thought",
   );
@@ -1192,20 +2169,20 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
-      now: 3_259,
+      now: 4_699,
     }),
     false,
   );
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
-      now: 3_260,
+      now: 4_700,
     }),
     true,
   );
 });
 
-test("live endpoint cannot appear before ready or after commit", () => {
+test("live endpoint is rejected before ready and ignored after commit", () => {
   const beforeReady = createVoiceLiveServerProtocol((result) => result);
   assert.throws(
     () =>
@@ -1218,9 +2195,28 @@ test("live endpoint cannot appear before ready or after commit", () => {
   const afterCommit = createVoiceLiveServerProtocol((result) => result);
   afterCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   afterCommit.markCommitted();
+  assert.deepEqual(
+    afterCommit.acceptText(
+      JSON.stringify({ type: "endpoint", version: 1 }),
+    ),
+    { type: "endpoint", version: 1 },
+  );
+  assert.equal(afterCommit.snapshot().endpointReceived, true);
   assert.throws(
     () =>
       afterCommit.acceptText(
+        JSON.stringify({ type: "endpoint", version: 1 }),
+      ),
+    /voice_response_invalid/,
+  );
+
+  const afterAudio = createVoiceLiveServerProtocol((result) => result);
+  afterAudio.acceptText(JSON.stringify({ type: "ready", version: 1 }));
+  afterAudio.markCommitted();
+  afterAudio.acceptBinary(new ArrayBuffer(4));
+  assert.throws(
+    () =>
+      afterAudio.acceptText(
         JSON.stringify({ type: "endpoint", version: 1 }),
       ),
     /voice_response_invalid/,
@@ -1307,6 +2303,20 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   assert.match(
     bridge,
     /activeRecording === recording/u,
+  );
+  const endpointAt = liveSession.indexOf(
+    'if (message.type === "endpoint")',
+  );
+  const endpointHandler = liveSession.slice(endpointAt, endpointAt + 900);
+  assert.ok(endpointAt >= 0, "live endpoint handler must exist");
+  assert.match(
+    endpointHandler,
+    /if \(state === "committed"\) \{\s*return;\s*\}/u,
+  );
+  assert.ok(
+    endpointHandler.indexOf('state === "committed"') <
+      endpointHandler.indexOf('state !== "ready"'),
+    "an in-flight endpoint advisory must be ignored after local commit",
   );
 });
 
@@ -1414,8 +2424,8 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
 });
 
 test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
-  assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 700);
-  assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 1_700);
+  assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 1_200);
+  assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 2_200);
   const startedAt = 20_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -1467,7 +2477,7 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
+test("interrupt VAD preserves 2.2 seconds for reflective speech", () => {
   const startedAt = 24_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -1506,19 +2516,31 @@ test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("barge-in aborts pre-final audio and preserves ambient authority", async () => {
+test("barge-in starts with audible output and preserves foreground response mode", async () => {
   const [bridge, client] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
   ]);
   const confirmAt = bridge.indexOf("function confirmBargeIn(");
-  const confirm = bridge.slice(confirmAt, confirmAt + 4_500);
+  const confirm = bridge.slice(confirmAt, confirmAt + 7_000);
+  assert.match(
+    confirm,
+    /playback\.hasStreamedAudio\?\.\(\) !== true/u,
+  );
   assert.match(
     confirm,
     /if \(!playback\.finalReceived && activeRequestController\)/u,
   );
   assert.match(confirm, /activeRequestController\.abort\(\)/u);
   assert.match(confirm, /haltStreamingPlayback\(playback, interruption\)/u);
+  assert.ok(
+    confirm.indexOf("markSessionSpeech(expectedEpoch)") <
+      confirm.indexOf("candidate.confirmed = true"),
+  );
+  assert.match(
+    confirm,
+    /!markSessionSpeech\(expectedEpoch\)[\s\S]*expectedEpoch !== sessionEpoch[\s\S]*playback !== activePlayback[\s\S]*recording\.settled[\s\S]*!candidateEventIsCurrent\(recording, candidate\)/u,
+  );
   assert.match(confirm, /new CustomEvent\("kotae:voice-interrupted"/u);
   assert.match(confirm, /finalReceived: playback\.finalReceived/u);
   assert.match(confirm, /activeLiveSession = undefined/u);
@@ -1535,17 +2557,42 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(bridge, /rampPlaybackGain\(playback, 0\.1, 0\.008\)/u);
   assert.match(bridge, /rampPlaybackGain\(playback, 1, 0\.02\)/u);
   assert.match(bridge, /source\.connect\(gainNode\)/u);
-  const playbackAt = bridge.lastIndexOf(
-    "playback = createStreamingPlayback(expectedEpoch)",
+  const bargeMonitorAt = bridge.indexOf("function startBargeInMonitoring(");
+  const bargeMonitor = bridge.slice(bargeMonitorAt, bargeMonitorAt + 2_000);
+  assert.ok(
+    bargeMonitor.indexOf("sessionClock.check()") <
+      bargeMonitor.indexOf("setTracksEnabled(true)"),
   );
-  const requestWindow = bridge.slice(playbackAt, playbackAt + 2_500);
   assert.match(
-    requestWindow,
+    bargeMonitor,
+    /stopSession\(sessionStatus\.expiry \?\? "maximum"\);[\s\S]*fail\("session_expired"\)/u,
+  );
+  const stopAt = bridge.indexOf("function stopSession(");
+  const stop = bridge.slice(stopAt, stopAt + 2_500);
+  assert.match(stop, /sessionExpiryWatchdog\.disarm\(\)/u);
+  assert.match(stop, /releaseMicrophone\(stopCode\)/u);
+  assert.match(stop, /rememberStoppedSession\(stoppedEpoch, stopCode\)/u);
+  assert.match(
+    bridge,
+    /const MAX_STOPPED_SESSION_CODES = 8;[\s\S]*const stoppedSessionCodes = new Map\(\)/u,
+  );
+  assert.match(bridge, /fail\(stoppedSessionCode\(expectedEpoch\)\)/u);
+  const finishAt = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finish = bridge.slice(finishAt, finishEnd);
+  assert.doesNotMatch(
+    finish,
     /startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
   assert.ok(
-    requestWindow.indexOf("startBargeInMonitoring") <
-      requestWindow.indexOf("fetch(VOICE_ENDPOINT"),
+    finish.indexOf('stopCode === "session_expired"') <
+      finish.indexOf("playback?.interruptedBeforeFinal"),
+  );
+  const scheduleAt = bridge.indexOf("function scheduleBuffer(");
+  const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);
+  assert.match(
+    schedule,
+    /if \(!streamedAudio\)[\s\S]*startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
   const handoffAt = bridge.indexOf("handoffAmbient({");
   const handoff = bridge.slice(handoffAt, handoffAt + 2_000);
@@ -1554,10 +2601,11 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(handoff, /appCheckToken,/u);
   assert.match(handoff, /idToken,/u);
   assert.match(handoff, /sessionState,/u);
-  assert.match(handoff, /turnMode: "ambient"/u);
+  assert.match(handoff, /turnMode: "foreground"/u);
+  assert.doesNotMatch(handoff, /preRollCutoffAt/u);
   assert.match(
-    handoff,
-    /candidateStartedAt - BARGE_PCM_LIMITS\.leadInMs/u,
+    confirm,
+    /BARGE_PCM_LIMITS\.leadInMs[\s\S]*BARGE_PCM_LIMITS\.frameDurationMs[\s\S]*captureHandoff\.confirm\(\{[\s\S]*candidateContextFrame: candidate\.contextFrame/u,
   );
   const liveSessionAt = bridge.indexOf(
     "async function startVoiceLiveSession(",
@@ -1566,6 +2614,14 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   assert.match(
     liveSession,
     /if \(captureHandoff === undefined\) \{[\s\S]*new AudioWorkletNode/u,
+  );
+  assert.match(
+    liveSession,
+    /processorOptions:[\s\S]*maximumPreConfirmFrames:[\s\S]*maximumQueuedFrames:/u,
+  );
+  assert.match(
+    liveSession,
+    /await sealCapture\(\);[\s\S]*protocol\.markCommitted\(\)/u,
   );
   assert.match(liveSession, /captureHandoff\.adopt\(\{/u);
   assert.match(liveSession, /adoptedCapture = captureHandoff/u);
@@ -1582,26 +2638,174 @@ test("barge-in aborts pre-final audio and preserves ambient authority", async ()
   const monitorAt = bridge.indexOf(
     "async function startBargePcmMonitoring(",
   );
-  const monitor = bridge.slice(monitorAt, monitorAt + 6_500);
-  assert.match(monitor, /const ring = createBargePcmRing\(\)/u);
-  assert.match(monitor, /ring\.push\(frame, performance\.now\(\)\)/u);
-  assert.match(monitor, /const preRoll = ring\.drainSince\(cutoffAt\)/u);
+  const monitor = bridge.slice(monitorAt, monitorAt + 12_000);
+  assert.match(
+    monitor,
+    /maximumPreConfirmFrames: BARGE_PCM_LIMITS\.maximumFrames/u,
+  );
+  assert.match(
+    monitor,
+    /initialCredit: 0[\s\S]*type: "confirm"/u,
+  );
+  assert.match(
+    monitor,
+    /safeLiveCaptureFrame\(event\.data,[\s\S]*sequence: expectedSequence/u,
+  );
+  assert.match(
+    monitor,
+    /frames: 1,[\s\S]*type: "credit"/u,
+  );
   assert.match(monitor, /frameSink = onFrame/u);
-  assert.match(monitor, /ring\.clear\(\)/u);
+  assert.match(
+    monitor,
+    /async seal\(\)[\s\S]*type: "seal"[\s\S]*await sealed/u,
+  );
 
   const interruptionAt = client.indexOf(
-    "fn resume_ambient_interruption(",
+    "fn resume_foreground_interruption(",
   );
   const continuation = client.slice(interruptionAt, interruptionAt + 2_500);
   assert.match(continuation, /cloud::wait_for_turn_end\(\)\.await/u);
   assert.match(
     continuation,
-    /submit_turn\(\s*operation,\s*false,/u,
+    /submit_turn\(\s*operation,\s*VoiceTurnMode::Foreground,/u,
   );
   assert.doesNotMatch(
     continuation,
     /session_state\.set\(result\.session_state/u,
   );
+});
+
+test("network keeps one finite deadline while validated playback drains separately", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    bridge,
+    /const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;/u,
+  );
+  const finishAt = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finish = bridge.slice(finishAt, finishEnd);
+  assert.match(
+    finish,
+    /turnDeadlineAt[\s\S]*function awaitVoiceTurnResult\(/u,
+  );
+  assert.match(
+    finish,
+    /turnTimedOut = true;[\s\S]*reject\(new Error\("voice_turn_timeout"\)\)/u,
+  );
+  assert.match(
+    finish,
+    /awaitVoiceTurnResult\(\s*liveSession\.commit\(/u,
+  );
+  assert.match(
+    finish,
+    /awaitVoiceTurnResult\(\s*fetch\(VOICE_ENDPOINT/u,
+  );
+  assert.match(
+    finish,
+    /awaitVoiceTurnResult\(\s*consumeVoiceStream\(/u,
+  );
+  assert.equal(
+    (
+      finish.match(
+        /await awaitValidatedPlaybackCompletion\([\s\S]*?playback,[\s\S]*?expectedEpoch,?[\s\S]*?\)/gu,
+      ) ?? []
+    ).length,
+    2,
+  );
+  assert.doesNotMatch(
+    finish,
+    /awaitVoiceTurnResult\(\s*awaitValidatedPlaybackCompletion/u,
+  );
+  assert.match(
+    finish,
+    /turnTimedOut \|\|[\s\S]*!liveSession\.canFallback\(\)/u,
+  );
+  assert.match(
+    finish,
+    /if \(turnTimedOut\) \{[\s\S]*fail\("voice_turn_timeout"\)/u,
+  );
+
+  const liveStart = bridge.indexOf(
+    "async function startVoiceLiveSession(",
+  );
+  const liveEnd = bridge.indexOf(
+    "\n}\n\nfunction isNdjsonContentType",
+    liveStart,
+  );
+  const live = bridge.slice(liveStart, liveEnd);
+  const commitAt = live.indexOf("async commit(playback, lastVoiceAt)");
+  const interruptAt = live.indexOf(
+    'interrupt(error = new Error("voice_interrupted"))',
+    commitAt,
+  );
+  const commit = live.slice(commitAt, interruptAt);
+  assert.match(commit, /const result = await resultPromise/u);
+  assert.doesNotMatch(commit, /await playback\.completion/u);
+
+  const consumeStart = bridge.indexOf(
+    "async function consumeVoiceStream(",
+  );
+  const consumeEnd = bridge.indexOf(
+    "\n}\n\nasync function finishTurn",
+    consumeStart,
+  );
+  const consume = bridge.slice(consumeStart, consumeEnd);
+  assert.match(consume, /const completed = parser\.finish\(\)/u);
+  assert.doesNotMatch(consume, /await playback\.completion/u);
+});
+
+test("coach metadata accepts only authoritative phase and action pairs", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const validatorSource = executableBridgeFunction(
+    bridge,
+    "function hasValidCoachMetadata(",
+    "function clearPendingDocument(",
+  );
+  const validate = Function(
+    `"use strict"; ${validatorSource}; return hasValidCoachMetadata;`,
+  )();
+
+  for (const [target, phase, action] of [
+    ["assistant", "none", "none"],
+    ["respondent", "awaiting_answer", "elicit"],
+    ["respondent", "awaiting_restatement", "restate"],
+    ["respondent", "expanding", "expand"],
+    ["respondent", "complete", "complete"],
+    ["respondent", "blocked", "retry"],
+    ["respondent", "blocked", "release"],
+  ]) {
+    assert.equal(validate(target, phase, action), true);
+  }
+  for (const [target, phase, action] of [
+    ["assistant", "complete", "complete"],
+    ["respondent", "none", "none"],
+    ["respondent", "awaiting_answer", "complete"],
+    ["respondent", "blocked", "expand"],
+    ["unknown", "none", "none"],
+    ["respondent", "scored", "answer-for-user"],
+  ]) {
+    assert.equal(validate(target, phase, action), false);
+  }
+
+  const responseStart = bridge.indexOf("function safeVoiceResponse(");
+  const responseEnd = bridge.indexOf(
+    "\n}\n\nfunction mapVoiceResponseError",
+    responseStart,
+  );
+  const response = bridge.slice(responseStart, responseEnd);
+  assert.match(
+    response,
+    /hasValidCoachMetadata\(\s*payload\.assistanceTarget,\s*payload\.coachPhase,\s*payload\.coachAction,\s*\)/u,
+  );
+  assert.match(response, /coachPhase: payload\.coachPhase/u);
+  assert.match(response, /coachAction: payload\.coachAction/u);
 });
 
 test("stream bridge uses direct authenticated CORS with bounded PCM playback", async () => {
@@ -1617,7 +2821,7 @@ test("stream bridge uses direct authenticated CORS with bounded PCM playback", a
     bridge,
     /const VOICE_ENDPOINT = "\/api\/v1\/voice\/turns/u,
   );
-  const fetchAt = bridge.indexOf("const response = await fetch(VOICE_ENDPOINT");
+  const fetchAt = bridge.indexOf("fetch(VOICE_ENDPOINT");
   const fetchBlock = bridge.slice(fetchAt, fetchAt + 700);
   assert.match(fetchBlock, /credentials: "omit"/u);
   assert.match(fetchBlock, /mode: "cors"/u);
@@ -1778,6 +2982,31 @@ test("hidden documents and pagehide stop only active voice sessions", () => {
   );
 });
 
+test("voice session pause reasons are finite and contain no user content", () => {
+  const expected = new Map([
+    ["idle", "session_expired"],
+    ["maximum", "session_expired"],
+    ["hidden", "request_cancelled"],
+    ["pagehide", "request_cancelled"],
+    ["microphone_lost", "microphone_unavailable"],
+  ]);
+
+  for (const [reason, stopCode] of expected) {
+    const classified = classifyVoiceSessionStopReason(reason);
+    assert.deepEqual(classified, { pauseReason: reason, stopCode });
+    assert.equal(Object.isFrozen(classified), true);
+  }
+
+  assert.deepEqual(
+    classifyVoiceSessionStopReason("私の会話内容を含む任意文字列"),
+    { pauseReason: null, stopCode: "request_cancelled" },
+  );
+  assert.deepEqual(classifyVoiceSessionStopReason({ transcript: "secret" }), {
+    pauseReason: null,
+    stopCode: "request_cancelled",
+  });
+});
+
 test("an unsent PDF expires at five minutes, not before", () => {
   const attachedAt = 50_000;
   assert.equal(
@@ -1806,18 +3035,161 @@ test("idle and absolute session expiries are checked at their boundaries", () =>
   now += 1;
   assert.deepEqual(clock.begin(), { expiry: "idle", ok: false });
 
-  clock.reset();
   now = 1_000_000;
-  assert.deepEqual(clock.begin(), { expiry: null, ok: true });
+  const absoluteClock = createSessionClock({
+    now: () => now,
+    idleLimitMs: VOICE_SESSION_LIMITS.maximumSessionMs * 2,
+  });
+  assert.deepEqual(absoluteClock.begin(), { expiry: null, ok: true });
   now += VOICE_SESSION_LIMITS.maximumSessionMs - 1;
-  clock.markSpeech();
-  assert.deepEqual(clock.begin(), { expiry: null, ok: true });
+  assert.deepEqual(absoluteClock.begin(), { expiry: null, ok: true });
   now += 1;
-  assert.deepEqual(clock.begin(), { expiry: "maximum", ok: false });
+  assert.deepEqual(absoluteClock.begin(), {
+    expiry: "maximum",
+    ok: false,
+  });
 });
 
-test("VAD confirms 120 ms of voice then ends after 700 ms silence", () => {
-  assert.equal(VOICE_SESSION_LIMITS.endOfTurnSilenceMs, 700);
+test("an active response defers only idle expiry until playback completes", () => {
+  let now = 20_000;
+  const clock = createSessionClock({ now: () => now });
+  assert.deepEqual(clock.begin(), { expiry: null, ok: true });
+  assert.deepEqual(clock.beginResponse(), { expiry: null, ok: true });
+
+  now += VOICE_SESSION_LIMITS.idleSessionLimitMs;
+  assert.deepEqual(clock.check(), { expiry: null, ok: true });
+  assert.equal(clock.snapshot().responseActive, true);
+  assert.ok(clock.millisecondsUntilExpiry() > 0);
+
+  assert.deepEqual(clock.completeResponse(), { expiry: null, ok: true });
+  assert.equal(clock.snapshot().lastSpeechAt, now);
+  assert.equal(clock.snapshot().responseActive, false);
+
+  now += VOICE_SESSION_LIMITS.idleSessionLimitMs - 1;
+  assert.deepEqual(clock.check(), { expiry: null, ok: true });
+  now += 1;
+  assert.deepEqual(clock.check(), { expiry: "idle", ok: false });
+
+  now = 2_000_000;
+  const absoluteClock = createSessionClock({ now: () => now });
+  assert.deepEqual(absoluteClock.begin(), { expiry: null, ok: true });
+  assert.deepEqual(absoluteClock.beginResponse(), { expiry: null, ok: true });
+  now += VOICE_SESSION_LIMITS.maximumSessionMs;
+  assert.deepEqual(absoluteClock.check(), { expiry: "maximum", ok: false });
+  assert.deepEqual(absoluteClock.completeResponse(), {
+    expiry: "maximum",
+    ok: false,
+  });
+});
+
+test("finishTurn holds the idle clock through validated playback only", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function finishTurn(");
+  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const finish = bridge.slice(start, end);
+
+  const beginAt = finish.indexOf("beginSessionResponse(expectedEpoch)");
+  const liveDrainAt = finish.indexOf(
+    "await awaitValidatedPlaybackCompletion(\n          playback,\n          expectedEpoch,\n        )",
+  );
+  const liveCompleteAt = finish.indexOf(
+    "completeSessionResponse(expectedEpoch)",
+    liveDrainAt,
+  );
+  const httpDrainAt = finish.lastIndexOf(
+    "await awaitValidatedPlaybackCompletion(playback, expectedEpoch)",
+  );
+  const httpCompleteAt = finish.indexOf(
+    "completeSessionResponse(expectedEpoch)",
+    httpDrainAt,
+  );
+  const failureCleanupAt = finish.indexOf(
+    "if (responseClockActive)",
+    httpCompleteAt,
+  );
+
+  assert.ok(beginAt >= 0);
+  assert.ok(liveDrainAt > beginAt);
+  assert.ok(liveCompleteAt > liveDrainAt);
+  assert.ok(httpDrainAt > liveCompleteAt);
+  assert.ok(httpCompleteAt > httpDrainAt);
+  assert.ok(failureCleanupAt > httpCompleteAt);
+});
+
+test("expired speech cannot revive a session clock", () => {
+  let now = 5_000;
+  const clock = createSessionClock({ now: () => now });
+  assert.deepEqual(clock.begin(), { expiry: null, ok: true });
+  const initial = clock.snapshot();
+
+  now += VOICE_SESSION_LIMITS.idleSessionLimitMs;
+  assert.deepEqual(clock.markSpeech(), { expiry: "idle", ok: false });
+  assert.deepEqual(clock.check(), { expiry: "idle", ok: false });
+  assert.equal(clock.snapshot().lastSpeechAt, initial.lastSpeechAt);
+  assert.equal(clock.millisecondsUntilExpiry(), 0);
+});
+
+test("a stale session watchdog cannot stop a replacement session", () => {
+  let now = 10_000;
+  let nextTimer = 0;
+  const callbacks = new Map();
+  const expired = [];
+  const clock = createSessionClock({ now: () => now });
+  const watchdog = createSessionExpiryWatchdog({
+    check: () => clock.check(),
+    clearTimer: () => {},
+    expire: (reason) => expired.push(reason),
+    millisecondsUntilExpiry: () => clock.millisecondsUntilExpiry(),
+    setTimer: (callback) => {
+      nextTimer += 1;
+      callbacks.set(nextTimer, callback);
+      return nextTimer;
+    },
+  });
+
+  clock.begin();
+  assert.equal(watchdog.arm(), true);
+  const staleCallback = callbacks.get(1);
+  watchdog.disarm();
+  clock.reset();
+  now = 20_000;
+  clock.begin();
+  assert.equal(watchdog.arm(), true);
+
+  staleCallback();
+  assert.deepEqual(expired, []);
+
+  now += VOICE_SESSION_LIMITS.idleSessionLimitMs;
+  callbacks.get(2)();
+  assert.deepEqual(expired, ["idle"]);
+});
+
+test("a watchdog reports synchronous expiry instead of rearming a stopped session", () => {
+  const expired = [];
+  let timerCreated = false;
+  const watchdog = createSessionExpiryWatchdog({
+    check: () => ({ expiry: "maximum", ok: false }),
+    clearTimer: () => {},
+    expire: (reason) => expired.push(reason),
+    millisecondsUntilExpiry: () => 0,
+    setTimer: () => {
+      timerCreated = true;
+      return 1;
+    },
+  });
+
+  assert.equal(watchdog.arm(), false);
+  assert.deepEqual(expired, ["maximum"]);
+  assert.equal(timerCreated, false);
+});
+
+test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
+  assert.equal(VOICE_SESSION_LIMITS.endOfTurnSilenceMs, 1_200);
   const startedAt = 1_000;
   let state = createVadState(startedAt);
   const confirmationFrames =
@@ -1863,10 +3235,10 @@ test("VAD confirms 120 ms of voice then ends after 700 ms silence", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("VAD gives a reflective utterance 1.7 seconds to continue", () => {
+test("VAD gives a reflective utterance 2.2 seconds to continue", () => {
   assert.equal(
     VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
-    1_700,
+    2_200,
   );
   const startedAt = 5_000;
   let state = createVadState(startedAt);
@@ -2255,6 +3627,7 @@ test("candidate capture phase is finite and cannot regress after confirmation", 
 });
 
 test("candidate capture has a finite privacy deadline", () => {
+  assert.equal(VOICE_SESSION_LIMITS.candidateCaptureLimitMs, 200);
   const startedAt = 70_000;
   let state = advanceCandidateCapture(
     createCandidateCaptureState(),
@@ -2281,6 +3654,36 @@ test("candidate capture has a finite privacy deadline", () => {
     candidateStartedAt: null,
     phase: "armed",
   });
+});
+
+test("a late accumulated VAD confirmation cannot cross the privacy deadline", () => {
+  const startedAt = 80_000;
+  const candidate = advanceCandidateCapture(
+    createCandidateCaptureState(),
+    {
+      hasSpeech: false,
+      sampleVoiced: true,
+      voiceRunMs: VOICE_SESSION_LIMITS.vadIntervalMs,
+    },
+    startedAt,
+  );
+
+  assert.deepEqual(
+    advanceCandidateCapture(
+      candidate,
+      {
+        hasSpeech: true,
+        sampleVoiced: true,
+        voiceRunMs: VOICE_SESSION_LIMITS.minimumVoiceMs,
+      },
+      startedAt + VOICE_SESSION_LIMITS.candidateCaptureLimitMs,
+    ),
+    {
+      action: "discard",
+      candidateStartedAt: null,
+      phase: "armed",
+    },
+  );
 });
 
 test("manual stop latch accepts one reason and rejects duplicate POST paths", () => {
@@ -2311,7 +3714,7 @@ test("retryable initializer shares an attempt, retries a failure, and caches suc
   assert.equal(calls, 2);
 });
 
-test("gesture epoch, not session state, selects explicit versus ambient mode", () => {
+test("gesture epoch separates intentional authority from foreground response mode", () => {
   const resumedTurn = {
     sessionState: "opaque-encrypted-state",
     turnMode: turnModeForGestureEpoch(true),
@@ -2323,7 +3726,7 @@ test("gesture epoch, not session state, selects explicit versus ambient mode", (
     sessionState: resumedTurn.sessionState,
     turnMode: turnModeForGestureEpoch(false),
   };
-  assert.equal(automaticFollowUp.turnMode, "ambient");
+  assert.equal(automaticFollowUp.turnMode, "foreground");
   assert.equal(isValidTurnMode(automaticFollowUp.turnMode), true);
   assert.equal(isValidTurnMode("derived-from-session-state"), false);
   assert.throws(() => turnModeForGestureEpoch("first"), /gesture_epoch_invalid/);

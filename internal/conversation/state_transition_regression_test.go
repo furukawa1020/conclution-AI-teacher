@@ -63,7 +63,7 @@ func TestAgentUngroundedRespondentAwaitingCannotTrapOrdinaryConversation(
 	if second.AssistanceTarget == "respondent" ||
 		second.RespondentStage != "none" ||
 		strings.HasPrefix(second.Route, "respondent-awaiting-") ||
-		second.SpokenReply == respondentAwaitingSpokenReply {
+		second.SpokenReply == purposeCoachPrompt() {
 		t.Fatalf("ordinary continuation entered respondent loop: %#v", second)
 	}
 

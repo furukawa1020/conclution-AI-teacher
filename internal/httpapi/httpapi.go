@@ -59,6 +59,7 @@ type VoiceTurnMode string
 
 const (
 	VoiceTurnIntentional VoiceTurnMode = "intentional"
+	VoiceTurnForeground  VoiceTurnMode = "foreground"
 	VoiceTurnAmbient     VoiceTurnMode = "ambient"
 )
 
@@ -69,9 +70,20 @@ type VoiceTurnInput struct {
 	RequestID     string
 	TurnMode      VoiceTurnMode
 	Ambient       bool
+	Foreground    bool
 	Document      *VoiceDocument
 	STTLocale     string
 	SchemaVersion int
+	// ProcessingTimeout is server-authored. Live pipelines start this budget
+	// at the audio commit boundary so downstream agents can observe the same
+	// deadline that the transport enforces.
+	ProcessingTimeout time.Duration
+	// ProcessingDeadline carries the single server-authored absolute deadline
+	// published at live audio commit. It is never decoded from client input.
+	ProcessingDeadline <-chan time.Time
+	// ProcessingCommitted is a broadcast-only server signal. A closed channel
+	// means no new speculative model work may start.
+	ProcessingCommitted <-chan struct{}
 }
 
 type VoiceTurnResult struct {
@@ -81,6 +93,8 @@ type VoiceTurnResult struct {
 	DetectedDomain   string
 	AssistanceTarget string
 	RespondentStage  string
+	CoachPhase       string
+	CoachAction      string
 	ResearchStatus   string
 	ResearchRecords  []ResearchRecord
 	Route            string
@@ -340,6 +354,8 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"detectedDomain":   result.DetectedDomain,
 		"assistanceTarget": result.AssistanceTarget,
 		"respondentStage":  result.RespondentStage,
+		"coachPhase":       result.CoachPhase,
+		"coachAction":      result.CoachAction,
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
 		"route":            result.Route,
@@ -413,8 +429,12 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		return VoiceTurnInput{}, errors.New("invalid voice metadata")
 	}
 	ambient := false
+	foreground := false
 	switch request.TurnMode {
 	case VoiceTurnIntentional:
+	case VoiceTurnForeground:
+		ambient = true
+		foreground = true
 	case VoiceTurnAmbient:
 		ambient = true
 	default:
@@ -432,6 +452,7 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		StateToken:    request.SessionState,
 		TurnMode:      request.TurnMode,
 		Ambient:       ambient,
+		Foreground:    foreground,
 		STTLocale:     "ja-JP",
 		SchemaVersion: 1,
 	}
@@ -496,6 +517,11 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		(result.RespondentStage != "none" &&
 			result.RespondentStage != "awaiting_answer" &&
 			result.RespondentStage != "restructure") ||
+		!validCoachMetadata(
+			result.AssistanceTarget,
+			result.CoachPhase,
+			result.CoachAction,
+		) ||
 		(result.ResearchStatus != "none" &&
 			result.ResearchStatus != "needs_primary_evidence" &&
 			result.ResearchStatus != "unavailable") ||
@@ -528,6 +554,29 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		return errors.New("unsupported synthesized audio type")
 	}
 	return nil
+}
+
+func validCoachMetadata(assistanceTarget string, phase string, action string) bool {
+	if assistanceTarget == "assistant" {
+		return phase == "none" && action == "none"
+	}
+	if assistanceTarget != "respondent" {
+		return false
+	}
+	switch phase {
+	case "awaiting_answer":
+		return action == "elicit"
+	case "awaiting_restatement":
+		return action == "restate"
+	case "expanding":
+		return action == "expand"
+	case "complete":
+		return action == "complete"
+	case "blocked":
+		return action == "retry" || action == "release"
+	default:
+		return false
+	}
 }
 
 func isPreInferenceRecognitionRoute(route string) bool {

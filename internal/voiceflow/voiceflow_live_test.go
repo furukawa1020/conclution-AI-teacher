@@ -23,6 +23,10 @@ type fakeLiveTranscriptionSession struct {
 	closeCalls int
 	closed     chan struct{}
 	closeOnce  sync.Once
+	closeGate  <-chan struct{}
+	sendGate   <-chan struct{}
+	sendSeen   chan struct{}
+	sendOnce   sync.Once
 	eventGates map[int]<-chan struct{}
 }
 
@@ -37,6 +41,20 @@ func newFakeLiveTranscriptionSession(
 
 func (session *fakeLiveTranscriptionSession) SendPCM(audio []byte) error {
 	session.mu.Lock()
+	ctx := session.ctx
+	sendGate := session.sendGate
+	session.mu.Unlock()
+	if session.sendSeen != nil {
+		session.sendOnce.Do(func() { close(session.sendSeen) })
+	}
+	if sendGate != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-sendGate:
+		}
+	}
+	session.mu.Lock()
 	defer session.mu.Unlock()
 	if err := session.ctx.Err(); err != nil {
 		return err
@@ -48,7 +66,16 @@ func (session *fakeLiveTranscriptionSession) SendPCM(audio []byte) error {
 func (session *fakeLiveTranscriptionSession) CloseSend() error {
 	session.mu.Lock()
 	session.closeCalls++
+	closeGate := session.closeGate
+	ctx := session.ctx
 	session.mu.Unlock()
+	if closeGate != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-closeGate:
+		}
+	}
 	session.closeOnce.Do(func() { close(session.closed) })
 	return nil
 }
@@ -347,11 +374,255 @@ func TestPipelineLiveAggregatesOnlyFinalsAndIgnoresUncalibratedConfidence(t *tes
 	}
 }
 
+func TestPipelineLiveExposesPostCommitDeadlineToAgent(t *testing.T) {
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "deadline test",
+		},
+	)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			chunks: [][]byte{{1, 0}},
+		},
+		session: session,
+	}
+	agent := &fakeAgent{result: liveTestDecision("bounded reply", "state")}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	processingTimeout := conversation.VoiceResponseReserve +
+		500*time.Millisecond
+	parentTimeout := conversation.VoiceResponseReserve +
+		300*time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), parentTimeout)
+	defer cancel()
+	processingDeadline := make(chan time.Time, 1)
+	processingDeadline <- time.Now().Add(processingTimeout)
+	close(processingDeadline)
+
+	_, err = pipeline.ProcessLive(
+		ctx,
+		"uid-live-deadline",
+		httpapi.VoiceTurnInput{
+			ProcessingTimeout:  processingTimeout,
+			ProcessingDeadline: processingDeadline,
+		},
+		audio,
+		func([]byte) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("ProcessLive: %v", err)
+	}
+	if agent.processingBudget <= conversation.VoiceResponseReserve ||
+		agent.processingBudget > parentTimeout {
+		t.Fatalf(
+			"agent processing budget = %v; want (%v, %v]",
+			agent.processingBudget,
+			conversation.VoiceResponseReserve,
+			parentTimeout,
+		)
+	}
+}
+
+func TestPipelineLiveDoesNotStartSpeculationAfterCommit(t *testing.T) {
+	const utterance = "post commit final"
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.91,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			chunks: [][]byte{{1, 0}},
+		},
+		session: session,
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("must not run", "spec-state"),
+		normalResult:      liveTestDecision("normal reply", "normal-state"),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(300, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	processingTimeout := conversation.VoiceResponseReserve +
+		500*time.Millisecond
+	processingDeadline := make(chan time.Time, 1)
+	processingDeadline <- time.Now().Add(processingTimeout)
+	close(processingDeadline)
+	processingCommitted := make(chan struct{})
+	close(processingCommitted)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+
+	result, err := pipeline.ProcessLive(
+		context.Background(),
+		"uid-post-commit-speculation",
+		httpapi.VoiceTurnInput{
+			ProcessingTimeout:   processingTimeout,
+			ProcessingDeadline:  processingDeadline,
+			ProcessingCommitted: processingCommitted,
+		},
+		audio,
+		func([]byte) error { return nil },
+	)
+	if err != nil {
+		t.Fatalf("ProcessLive: %v", err)
+	}
+	turns := agent.recordedTurns()
+	if len(turns) != 1 ||
+		turns[0].Speculative ||
+		result.StateToken != "normal-state" ||
+		result.LiveTimings.SpecHit != 0 {
+		t.Fatalf("post-commit speculation escaped: turns=%+v result=%+v", turns, result)
+	}
+}
+
+func TestPipelineLiveStopsSTTBeforePostCommitResponseReserve(t *testing.T) {
+	gate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "must not reach the agent",
+		},
+	)
+	session.closeGate = gate
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{},
+		session:             session,
+	}
+	agent := &fakeAgent{}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	started := time.Now()
+
+	_, err = pipeline.ProcessLive(
+		context.Background(),
+		"uid-live-stt-budget",
+		httpapi.VoiceTurnInput{
+			ProcessingTimeout: conversation.VoiceResponseReserve +
+				75*time.Millisecond,
+		},
+		audio,
+		func([]byte) error { return nil },
+	)
+	stage, classified := httpapi.VoicePipelineStageOf(err)
+	if !classified ||
+		stage != httpapi.VoicePipelineStageTranscribe ||
+		agent.calls != 0 ||
+		time.Since(started) > 2*time.Second {
+		t.Fatalf(
+			"live STT reserve failure: err=%v stage=%q calls=%d elapsed=%v",
+			err,
+			stage,
+			agent.calls,
+			time.Since(started),
+		)
+	}
+}
+
+func TestPipelineLiveCommitDeadlineCancelsBlockedSendPCM(t *testing.T) {
+	sendGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession()
+	session.sendGate = sendGate
+	session.sendSeen = make(chan struct{})
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{},
+		session:             session,
+	}
+	agent := &fakeAgent{}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := make(chan []byte)
+	processingDeadline := make(chan time.Time, 1)
+	type pipelineOutcome struct {
+		err error
+	}
+	done := make(chan pipelineOutcome, 1)
+	go func() {
+		_, processErr := pipeline.ProcessLive(
+			context.Background(),
+			"uid-live-blocked-send",
+			httpapi.VoiceTurnInput{
+				ProcessingTimeout: conversation.VoiceResponseReserve +
+					75*time.Millisecond,
+				ProcessingDeadline: processingDeadline,
+			},
+			audio,
+			func([]byte) error { return nil },
+		)
+		done <- pipelineOutcome{err: processErr}
+	}()
+	select {
+	case audio <- []byte{1, 0}:
+	case <-time.After(time.Second):
+		t.Fatal("live pipeline did not accept PCM")
+	}
+	select {
+	case <-session.sendSeen:
+	case <-time.After(time.Second):
+		t.Fatal("streaming recognizer did not start blocked SendPCM")
+	}
+	deadline := time.Now().Add(
+		conversation.VoiceResponseReserve + 75*time.Millisecond,
+	)
+	processingDeadline <- deadline
+	close(processingDeadline)
+	close(audio)
+
+	select {
+	case outcome := <-done:
+		stage, classified := httpapi.VoicePipelineStageOf(outcome.err)
+		if !classified ||
+			stage != httpapi.VoicePipelineStageTranscribe ||
+			agent.calls != 0 {
+			t.Fatalf(
+				"blocked SendPCM reserve failure: err=%v stage=%q calls=%d",
+				outcome.err,
+				stage,
+				agent.calls,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("commit deadline did not cancel blocked SendPCM")
+	}
+}
+
 func TestPipelineLiveReusesNoSpeechClarificationAndAmbientSilence(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name       string
 		ambient    bool
+		foreground bool
 		wantRoute  string
 		wantStream int
 	}{
@@ -359,6 +630,12 @@ func TestPipelineLiveReusesNoSpeechClarificationAndAmbientSilence(t *testing.T) 
 			name:       "intentional",
 			wantRoute:  routeClarifyNoSpeech,
 			wantStream: 1,
+		},
+		{
+			name:       "foreground",
+			ambient:    true,
+			foreground: true,
+			wantRoute:  routeSilentNoSpeech,
 		},
 		{
 			name:      "ambient",
@@ -390,6 +667,7 @@ func TestPipelineLiveReusesNoSpeechClarificationAndAmbientSilence(t *testing.T) 
 				"uid",
 				httpapi.VoiceTurnInput{
 					Ambient:    test.ambient,
+					Foreground: test.foreground,
 					StateToken: "existing-state",
 				},
 				audio,
@@ -1812,20 +2090,32 @@ func TestPipelineLiveSpeculativeCancellationDoesNotLeak(t *testing.T) {
 	}
 }
 
-func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T) {
+func TestPipelineLiveSpeculationRequiresReplyExpectedDocumentFreeTurn(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
-		name     string
-		ambient  bool
-		document *httpapi.VoiceDocument
+		name       string
+		ambient    bool
+		foreground bool
+		document   *httpapi.VoiceDocument
+		wantSpec   bool
+		wantHit    int64
+		wantMiss   int64
 	}{
 		{name: "ambient", ambient: true},
+		{
+			name:       "foreground",
+			ambient:    true,
+			foreground: true,
+			wantSpec:   true,
+			wantHit:    1,
+		},
 		{
 			name: "document",
 			document: &httpapi.VoiceDocument{
 				MIMEType: "application/pdf",
 				Data:     []byte("pdf"),
 			},
+			wantMiss: 1,
 		},
 	} {
 		test := test
@@ -1878,8 +2168,9 @@ func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T
 				context.Background(),
 				"uid",
 				httpapi.VoiceTurnInput{
-					Ambient:  test.ambient,
-					Document: test.document,
+					Ambient:    test.ambient,
+					Foreground: test.foreground,
+					Document:   test.document,
 				},
 				audio,
 				func([]byte) error { return nil },
@@ -1888,15 +2179,13 @@ func TestPipelineLiveSpeculationRequiresIntentionalDocumentFreeTurn(t *testing.T
 				t.Fatal(err)
 			}
 			turns := agent.recordedTurns()
-			if len(turns) != 1 || turns[0].Speculative {
+			if len(turns) != 1 ||
+				turns[0].Speculative != test.wantSpec ||
+				turns[0].Foreground != test.foreground {
 				t.Fatalf("turns=%+v", turns)
 			}
-			wantMiss := int64(1)
-			if test.ambient {
-				wantMiss = 0
-			}
-			if result.LiveTimings.SpecHit != 0 ||
-				result.LiveTimings.SpecMiss != wantMiss ||
+			if result.LiveTimings.SpecHit != test.wantHit ||
+				result.LiveTimings.SpecMiss != test.wantMiss ||
 				result.LiveTimings.SpecCancel != 0 {
 				t.Fatalf("timings=%+v", result.LiveTimings)
 			}

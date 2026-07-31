@@ -8,6 +8,9 @@ import (
 )
 
 var (
+	nonPropositionalFillerPattern = regexp.MustCompile(
+		`(?i)^(?:えっ?と+|ええと+|えー+と+|あの+|あのー+|うー+ん|んー+|まあ+|その+|なんというか|um+|uh+|erm+)$`,
+	)
 	arabicNumberPattern = regexp.MustCompile(
 		`[0-9０-９]+([.．][0-9０-９]+)?(円|人|件|日|時間|分|秒|年|月|週|%|％|個|回|倍|GB|MB|KB|キロ|メートル|cm|mm)?`,
 	)
@@ -57,15 +60,22 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 	targetFilled := containsSlot(commitment.FilledSlots, targetSlot)
 	commitmentAnchored := commitment.PositionClass == PositionAbsent ||
 		containsNormalized(originalAnswer, commitment.FirstCommitment)
+	commitmentFronted := commitment.PositionClass == PositionFirst &&
+		startsWithCommitmentIgnoringFillers(
+			originalAnswer,
+			commitment.FirstCommitment,
+		)
 	targetSatisfied := targetFilled &&
 		commitment.FillsTarget &&
 		coverage == 1 &&
 		commitmentAnchored &&
-		commitment.PositionClass != PositionAbsent
+		commitmentFronted &&
+		commitment.Issue == IssueNone
 
 	meaningPreserved := preservesMeaning(
 		originalAnswer,
 		repair.ReconstructedAnswer,
+		commitment.FirstCommitment,
 		commitment.Calibration,
 		question.Operator,
 	)
@@ -85,7 +95,17 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 		meaningPreserved = false
 	}
 
-	repairAccepted := meaningPreserved &&
+	repairFront := repair.MinimalAnswer
+	if commitment.PositionClass == PositionLater ||
+		commitment.Issue == IssueBackgroundFirst {
+		repairFront = commitment.FirstCommitment
+	}
+	repairFronted := repair.RepairGain == 0 ||
+		startsWithNormalized(repair.ReconstructedAnswer, repairFront)
+	repairAccepted := coverage == 1 &&
+		!blockingIssue(commitment.Issue) &&
+		meaningPreserved &&
+		repairFronted &&
 		repair.MeaningPreservationConfidence >= MeaningPreservationThreshold
 	meaningScore := 0.0
 	if repairAccepted {
@@ -97,13 +117,20 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 		repairableIssue(commitment.Issue)
 	highGainRepair := repairWanted &&
 		repair.RepairGain >= RepairGainThreshold
-	shouldRestructure := !ambiguous && highGainRepair && repairAccepted
+	shouldRestructure := !ambiguous &&
+		coverage == 1 &&
+		highGainRepair &&
+		repairAccepted
 
 	outcome := OutcomeKeep
 	switch {
 	case ambiguous:
 		outcome = OutcomeClarify
 	case !commitmentAnchored:
+		outcome = OutcomeReject
+	case commitment.PositionClass == PositionFirst && !commitmentFronted:
+		outcome = OutcomeReject
+	case blockingIssue(commitment.Issue):
 		outcome = OutcomeReject
 	case shouldRestructure:
 		outcome = OutcomeRestructure
@@ -116,8 +143,6 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 		outcome = OutcomeReject
 	case !targetSatisfied:
 		outcome = OutcomeClarify
-	case blockingIssue(commitment.Issue):
-		outcome = OutcomeReject
 	}
 
 	return Assessment{
@@ -134,6 +159,45 @@ func Evaluate(contract Contract, originalAnswer string) (Assessment, error) {
 		RepairAccepted:      repairAccepted,
 		ReconstructedAnswer: repair.ReconstructedAnswer,
 	}, nil
+}
+
+func startsWithNormalized(container, value string) bool {
+	container = collapseSpace(container)
+	value = collapseSpace(value)
+	return value != "" && strings.HasPrefix(container, value)
+}
+
+// startsWithCommitmentIgnoringFillers permits only whole, fixed
+// non-propositional filler clauses before the answer. Reasons, conditions,
+// uncertainty, and mixed-content clauses remain substantive.
+func startsWithCommitmentIgnoringFillers(container, value string) bool {
+	if startsWithNormalized(container, value) {
+		return true
+	}
+	containerClauses := semanticClauses(container)
+	valueClauses := semanticClauses(value)
+	if len(containerClauses) == 0 || len(valueClauses) == 0 {
+		return false
+	}
+	firstSubstantive := 0
+	for firstSubstantive < len(containerClauses) &&
+		nonPropositionalFillerPattern.MatchString(containerClauses[firstSubstantive]) {
+		firstSubstantive++
+	}
+	if firstSubstantive == 0 ||
+		len(containerClauses)-firstSubstantive < len(valueClauses) {
+		return false
+	}
+	for index, clause := range valueClauses {
+		candidate := containerClauses[firstSubstantive+index]
+		if index == len(valueClauses)-1 {
+			return strings.HasPrefix(candidate, clause)
+		}
+		if candidate != clause {
+			return false
+		}
+	}
+	return false
 }
 
 func containsNormalized(container, value string) bool {
@@ -273,7 +337,8 @@ func hypothesisEntropy(hypotheses []Hypothesis) float64 {
 
 func preservesMeaning(
 	original,
-	reconstructed string,
+	reconstructed,
+	firstCommitment string,
 	calibration Calibration,
 	operator Operator,
 ) bool {
@@ -281,6 +346,18 @@ func preservesMeaning(
 	reconstructed = collapseSpace(reconstructed)
 	if reconstructed == "" {
 		return original == ""
+	}
+	// A repair may move exactly the clause containing A to the front while
+	// preserving the relative order of every other clause. Arbitrary
+	// permutations can change pronoun and discourse references even when the
+	// clause multiset is identical. No confidence score can override this
+	// deterministic floor.
+	if !stableCommitmentFrontMove(
+		original,
+		reconstructed,
+		firstCommitment,
+	) {
+		return false
 	}
 	if hasCondition(original) != hasCondition(reconstructed) {
 		return false
@@ -312,6 +389,78 @@ func preservesMeaning(
 		originalUncertainty = calibrationUncertainty(calibration)
 	}
 	return originalUncertainty == uncertaintyLevel(reconstructed)
+}
+
+func stableCommitmentFrontMove(original, reconstructed, commitment string) bool {
+	originalClauses := semanticClauses(original)
+	reconstructedClauses := semanticClauses(reconstructed)
+	commitmentClauses := semanticClauses(commitment)
+	if len(originalClauses) == 0 ||
+		len(commitmentClauses) == 0 ||
+		len(commitmentClauses) > len(originalClauses) ||
+		len(originalClauses) != len(reconstructedClauses) {
+		return false
+	}
+	commitmentStart := -1
+	for start := 0; start <= len(originalClauses)-len(commitmentClauses); start++ {
+		matches := true
+		for offset, clause := range commitmentClauses {
+			if originalClauses[start+offset] != clause {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			if commitmentStart >= 0 {
+				return false
+			}
+			commitmentStart = start
+		}
+	}
+	if commitmentStart < 0 {
+		return false
+	}
+	for offset, clause := range commitmentClauses {
+		if reconstructedClauses[offset] != clause {
+			return false
+		}
+	}
+	commitmentEnd := commitmentStart + len(commitmentClauses)
+	reconstructedIndex := len(commitmentClauses)
+	for originalIndex, clause := range originalClauses {
+		if originalIndex >= commitmentStart && originalIndex < commitmentEnd {
+			continue
+		}
+		if reconstructedClauses[reconstructedIndex] != clause {
+			return false
+		}
+		reconstructedIndex++
+	}
+	return true
+}
+
+func semanticClauses(value string) []string {
+	value = collapseSpace(value)
+	result := make([]string, 0, 4)
+	var current strings.Builder
+	flush := func() {
+		clause := collapseSpace(current.String())
+		current.Reset()
+		if clause != "" {
+			result = append(result, clause)
+		}
+	}
+	for _, currentRune := range value {
+		switch currentRune {
+		case '。', '、', '，', ',', '．', '.', '！', '!', '？', '?',
+			'；', ';', '\n', '\r':
+			flush()
+		default:
+			current.WriteRune(currentRune)
+		}
+	}
+	flush()
+	return result
 }
 
 func hasCausalClaim(value string) bool {

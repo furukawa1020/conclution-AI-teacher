@@ -9,6 +9,22 @@ export const VOICE_STREAM_LIMITS = Object.freeze({
   maximumResponseBytes: 24 * MEBIBYTE,
 });
 
+const OUTPUT_SAMPLE_RATE_HZ = 24_000;
+const PCM16_BYTES_PER_SAMPLE = 2;
+
+export const VOICE_PLAYBACK_LIMITS = Object.freeze({
+  drainGraceMs: 4_000,
+  // This is a local-device wait only. It covers every PCM byte accepted by
+  // the bounded response protocol without extending the independent network
+  // deadline.
+  maximumDrainMs:
+    Math.ceil(
+      (VOICE_STREAM_LIMITS.maximumAudioTotalBytes /
+        (OUTPUT_SAMPLE_RATE_HZ * PCM16_BYTES_PER_SAMPLE)) *
+        1_000,
+    ) + 4_000,
+});
+
 export const INTERRUPT_VAD_LIMITS = Object.freeze({
   candidateGapMs: 120,
   // Four 40 ms voiced frames confirm after 120 ms wall-clock from the first
@@ -17,9 +33,9 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   guardMs: 320,
   intervalMs: 40,
   maximumCaptureMs: 55_000,
-  reflectiveSilenceMs: 1_700,
-  reflectiveSpeechMs: 2_400,
-  trailingSilenceMs: 700,
+  reflectiveSilenceMs: 2_200,
+  reflectiveSpeechMs: 1_600,
+  trailingSilenceMs: 1_200,
 });
 
 export const VOICE_LIVE_LIMITS = Object.freeze({
@@ -29,7 +45,9 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
   maximumServerTextCharacters: 64 * 1024,
   maximumSocketBufferedBytes: 16 * 1024,
   outboundChunkBytes: 640,
-  confirmedSpeechLeadInMs: 100,
+  confirmedSpeechLeadInMs: 300,
+  workletCreditWindowFrames: 8,
+  workletSealTimeoutMs: 1_500,
   handoffReadyTimeoutMs: 450,
   readyTimeoutMs: 4_000,
   terminalCloseTimeoutMs: 1_500,
@@ -43,13 +61,22 @@ export const BARGE_PCM_LIMITS = Object.freeze({
   maximumFrames: 20,
 });
 
+export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
+  frameDurationMs: 20,
+  // 300 ms of requested lead-in plus 200 ms for bounded VAD confirmation
+  // jitter. These frames remain local and are erased unless speech confirms.
+  historyMs: 500,
+  maximumBytes: 16_000,
+  maximumFrames: 25,
+});
+
 function erasePcmFrame(frame) {
   if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
     new Uint8Array(frame).fill(0);
   }
 }
 
-export function createBargePcmRing() {
+function createBoundedPcmRing(limits) {
   let entries = [];
   let lastCapturedAt = null;
   let totalBytes = 0;
@@ -98,10 +125,10 @@ export function createBargePcmRing() {
       }
       while (
         entries.length > 0 &&
-        (entries.length >= BARGE_PCM_LIMITS.maximumFrames ||
-          totalBytes + pcm.byteLength > BARGE_PCM_LIMITS.maximumBytes ||
+        (entries.length >= limits.maximumFrames ||
+          totalBytes + pcm.byteLength > limits.maximumBytes ||
           entries[0].capturedAt <
-            capturedAt - BARGE_PCM_LIMITS.historyMs)
+            capturedAt - limits.historyMs)
       ) {
         removeOldest(true);
       }
@@ -128,11 +155,15 @@ export function createBargePcmRing() {
   });
 }
 
+export function createBargePcmRing() {
+  return createBoundedPcmRing(BARGE_PCM_LIMITS);
+}
+
 export function createConfirmedSpeechPcmGate(sendFrame) {
   if (typeof sendFrame !== "function") {
     throw new TypeError("voice_live_gate_sink_invalid");
   }
-  const ring = createBargePcmRing();
+  const ring = createBoundedPcmRing(CONFIRMED_SPEECH_PCM_LIMITS);
   let closed = false;
   let confirmed = false;
 
@@ -284,6 +315,34 @@ export function isCleanVoiceLiveTerminalClose(value) {
   );
 }
 
+export function validatedPlaybackDrainTimeoutMs(value) {
+  if (
+    !isPlainRecord(value) ||
+    !hasExactKeys(value, [
+      "currentContextTime",
+      "scheduledEndContextTime",
+    ]) ||
+    !Number.isFinite(value.currentContextTime) ||
+    value.currentContextTime < 0 ||
+    !Number.isFinite(value.scheduledEndContextTime) ||
+    value.scheduledEndContextTime < 0
+  ) {
+    throw new TypeError("voice_playback_deadline_invalid");
+  }
+  const maximumRemainingMs =
+    VOICE_PLAYBACK_LIMITS.maximumDrainMs -
+    VOICE_PLAYBACK_LIMITS.drainGraceMs;
+  const scheduledRemainingMs = Math.max(
+    0,
+    (value.scheduledEndContextTime - value.currentContextTime) *
+      1_000,
+  );
+  return Math.ceil(
+    Math.min(maximumRemainingMs, scheduledRemainingMs) +
+      VOICE_PLAYBACK_LIMITS.drainGraceMs,
+  );
+}
+
 export function estimateAudiblePerformanceTime({
   baseLatencySeconds,
   currentContextTime,
@@ -337,31 +396,90 @@ export function estimateAudiblePerformanceTime({
   );
 }
 
-export function safeLiveCaptureFrame(value) {
+function eraseLiveCaptureValue(value) {
   if (
+    value !== null &&
+    typeof value === "object" &&
+    value.pcm instanceof ArrayBuffer
+  ) {
+    erasePcmFrame(value.pcm);
+  }
+}
+
+export function safeLiveCaptureFrame(
+  value,
+  { cutoffContextFrame, generation, sequence } = {},
+) {
+  if (
+    !Number.isSafeInteger(cutoffContextFrame) ||
+    cutoffContextFrame < 0 ||
+    !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
+    !Number.isSafeInteger(sequence) ||
+    sequence < 0 ||
     !isPlainRecord(value) ||
     !hasExactKeys(value, [
+      "contextFrame",
+      "generation",
       "pcm",
-      "sampleRateHz",
+      "sequence",
       "type",
       "version",
     ]) ||
     value.type !== "frame" ||
     value.version !== 1 ||
-    value.sampleRateHz !== VOICE_LIVE_LIMITS.inputSampleRateHz ||
+    value.generation !== generation ||
+    value.sequence !== sequence ||
+    !Number.isSafeInteger(value.contextFrame) ||
+    value.contextFrame < cutoffContextFrame ||
     !(value.pcm instanceof ArrayBuffer) ||
     value.pcm.byteLength !== VOICE_LIVE_LIMITS.inputFrameBytes
   ) {
-    if (
-      value !== null &&
-      typeof value === "object" &&
-      value.pcm instanceof ArrayBuffer
-    ) {
-      erasePcmFrame(value.pcm);
-    }
+    eraseLiveCaptureValue(value);
     throw new Error("voice_live_frame_invalid");
   }
   return value.pcm;
+}
+
+export function safeLiveCaptureSignal(
+  value,
+  { generation, lastSequence, sealing } = {},
+) {
+  if (
+    !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
+    !Number.isSafeInteger(lastSequence) ||
+    lastSequence < -1 ||
+    typeof sealing !== "boolean" ||
+    !isPlainRecord(value) ||
+    value.version !== 1 ||
+    value.generation !== generation
+  ) {
+    eraseLiveCaptureValue(value);
+    throw new Error("voice_live_frame_invalid");
+  }
+  if (
+    value.type === "error" &&
+    hasExactKeys(value, ["code", "generation", "type", "version"]) &&
+    value.code === "capture_overflow"
+  ) {
+    return "capture_overflow";
+  }
+  if (
+    sealing &&
+    value.type === "sealed" &&
+    hasExactKeys(value, [
+      "generation",
+      "lastSequence",
+      "type",
+      "version",
+    ]) &&
+    value.lastSequence === lastSequence
+  ) {
+    return "sealed";
+  }
+  eraseLiveCaptureValue(value);
+  throw new Error("voice_live_frame_invalid");
 }
 
 export function createLivePcmQueue() {
@@ -429,7 +547,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     typeof startFrame.appCheckToken !== "string" ||
     startFrame.appCheckToken.length === 0 ||
     typeof startFrame.sessionState !== "string" ||
-    !["ambient", "intentional"].includes(startFrame.turnMode) ||
+    !["ambient", "foreground", "intentional"].includes(startFrame.turnMode) ||
     startFrame.sampleRateHz !== VOICE_LIVE_LIMITS.inputSampleRateHz
   ) {
     throw new TypeError("voice_live_start_invalid");
@@ -438,6 +556,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
   const queue = createLivePcmQueue();
   let pendingStart = Object.freeze({ ...startFrame });
   let state = "connecting";
+  let inputFrameCount = 0;
 
   function socketReady() {
     if (
@@ -498,6 +617,9 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     },
     commit() {
       if (state !== "ready") invalid();
+      if (inputFrameCount === 0) {
+        throw new Error("voice_api_unavailable");
+      }
       flush(true);
       if (queue.size() !== 0) {
         queue.clear();
@@ -528,9 +650,11 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       }
       if (state === "ready") {
         queue.push(frame);
+        inputFrameCount += 1;
         flush(false);
       } else if (state === "connecting" || state === "awaiting-ready") {
         queue.push(frame);
+        inputFrameCount += 1;
       } else {
         erasePcmFrame(frame);
         invalid();
@@ -538,6 +662,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     },
     snapshot() {
       return Object.freeze({
+        inputFrameCount,
         queuedFrames: queue.size(),
         state,
       });
@@ -553,6 +678,8 @@ const LIVE_SERVER_ERROR_CODES = Object.freeze([
   "voice_response_invalid",
   "voice_turn_invalid",
   "voice_turn_too_large",
+  "voice_turn_timeout",
+  "voice_turn_unavailable",
 ]);
 
 export function createVoiceLiveServerProtocol(validateFinalResult) {
@@ -603,9 +730,13 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
       state = "ready";
       return event;
     }
-    if (state === "ready" && value.type === "endpoint") {
+    if (
+      (state === "ready" || state === "committed") &&
+      value.type === "endpoint"
+    ) {
       if (
         endpointReceived ||
+        (state === "committed" && audioEventCount !== 0) ||
         !hasExactKeys(value, ["type", "version"]) ||
         value.version !== 1
       ) {
@@ -807,6 +938,16 @@ export function createVoiceStreamParser(validateFinalResult) {
       const event = safeReadyEvent(value);
       ready = true;
       return event;
+    }
+    if (value.type === "error") {
+      if (
+        !hasExactKeys(value, ["code", "type", "version"]) ||
+        value.version !== 1 ||
+        !LIVE_SERVER_ERROR_CODES.includes(value.code)
+      ) {
+        invalid();
+      }
+      throw new Error(value.code);
     }
     if (value.type === "audio") {
       const event = safeAudioEvent(

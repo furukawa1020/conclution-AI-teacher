@@ -140,7 +140,6 @@ func (codec *StateCodec) open(uid, token string) (conversationState, error) {
 	if state.Version != SchemaVersion ||
 		state.ExpiresAt-state.IssuedAt != int64(stateTokenTTL/time.Second) ||
 		state.IssuedAt > now+60 ||
-		now >= state.ExpiresAt ||
 		state.Turn < 1 ||
 		state.Turn > maxStateTurns {
 		return conversationState{}, ErrInvalidStateToken
@@ -148,6 +147,12 @@ func (codec *StateCodec) open(uid, token string) (conversationState, error) {
 	state, err = normalizeConversationState(state)
 	if err != nil {
 		return conversationState{}, ErrInvalidStateToken
+	}
+	if now >= state.ExpiresAt {
+		return conversationState{}, errors.Join(
+			ErrInvalidStateToken,
+			ErrExpiredStateToken,
+		)
 	}
 	return state, nil
 }

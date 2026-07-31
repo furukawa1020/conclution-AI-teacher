@@ -12,6 +12,111 @@ enum VoiceState {
     Error(&'static str),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoiceTurnMode {
+    Intentional,
+    Foreground,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CoachPhase {
+    None,
+    AwaitingAnswer,
+    AwaitingRestatement,
+    Expanding,
+    Complete,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CoachAction {
+    None,
+    Elicit,
+    Restate,
+    Expand,
+    Complete,
+    Retry,
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoachState {
+    phase: CoachPhase,
+    action: CoachAction,
+}
+
+impl CoachState {
+    const NONE: Self = Self {
+        phase: CoachPhase::None,
+        action: CoachAction::None,
+    };
+
+    const fn from_result(phase: CoachPhase, action: CoachAction) -> Self {
+        Self { phase, action }
+    }
+
+    const fn is_active(self) -> bool {
+        !matches!(self.phase, CoachPhase::None)
+    }
+
+    const fn status(self) -> &'static str {
+        match self.action {
+            CoachAction::Elicit => "ひとつだけ聞いています",
+            CoachAction::Restate => "少しだけ聞き直します",
+            CoachAction::Expand => "もう少し聞かせて",
+            CoachAction::Complete => "ちゃんと届きました",
+            CoachAction::Retry => "音をもう一度拾います",
+            CoachAction::Release => "そのまま続けられます",
+            CoachAction::None => match self.phase {
+                CoachPhase::None => "",
+                CoachPhase::AwaitingAnswer => "ひとつだけ聞いています",
+                CoachPhase::AwaitingRestatement => "少しだけ聞き直します",
+                CoachPhase::Expanding => "もう少し聞かせて",
+                CoachPhase::Complete => "ちゃんと届きました",
+                CoachPhase::Blocked => "そのままで大丈夫",
+            },
+        }
+    }
+
+    const fn heading(self) -> &'static str {
+        match (self.phase, self.action) {
+            (CoachPhase::Blocked, CoachAction::Release) => "そのまま話して大丈夫です",
+            (CoachPhase::None, _) => "まとまらないまま、話していい",
+            (CoachPhase::AwaitingAnswer, _) => "短いひと言だけでも大丈夫",
+            (CoachPhase::AwaitingRestatement, _) => "そこまで、ちゃんと聞こえています",
+            (CoachPhase::Expanding, _) => "もう少しだけ聞かせてください",
+            (CoachPhase::Complete, _) => "今の言い方で、ちゃんと伝わりました",
+            (CoachPhase::Blocked, _) => "急がなくて大丈夫です",
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match (self.phase, self.action) {
+            (CoachPhase::Blocked, CoachAction::Release) => "この続きでも、別の話でも大丈夫",
+            (CoachPhase::None, _) => "質問でも、ぼやきでも、短い声でも、そのままどうぞ",
+            (CoachPhase::AwaitingAnswer, _) => {
+                "わからない、まだ決めていない、でも会話は続けられます"
+            }
+            (CoachPhase::AwaitingRestatement, _) => "聞きたいところを一つだけ小さくしています",
+            (CoachPhase::Expanding, _) => "答えなくても大丈夫　話したい方へ続けられます",
+            (CoachPhase::Complete, _) => "今の言葉のまま　その話の中身を続けます",
+            (CoachPhase::Blocked, _) => "短くても大丈夫　拾えなければそのまま先へ進めます",
+        }
+    }
+}
+
+impl VoiceTurnMode {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Intentional => "intentional",
+            Self::Foreground => "foreground",
+        }
+    }
+}
+
 impl VoiceState {
     const fn label(self) -> &'static str {
         match self {
@@ -34,11 +139,13 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "相手の質問をあなたが言い直して　まとまらないまま自分の考えを話すだけ",
+            Self::Ready => "質問でも、ぼやきでも、「今日は話すだけ」でも　小さな声のままどうぞ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
-            Self::Thinking => "あなたの意味を変えず　聞かれた答えだけを前へ出す",
-            Self::Speaking => "返事のあと　そのまままた聴きはじめる",
+            Self::Thinking => {
+                "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
+            }
+            Self::Speaking => "返事を止めて訂正できる　マイクは端末内で割り込みだけを判定",
             Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
             Self::Error(_) => "丸いボタンか下の「もう一度接続する」からやり直せる",
         }
@@ -135,6 +242,8 @@ struct VoiceTurnResult {
     detected_domain: String,
     assistance_target: String,
     respondent_stage: String,
+    coach_phase: CoachPhase,
+    coach_action: CoachAction,
     route: String,
     needs_paper: bool,
     research_status: ResearchStatus,
@@ -200,7 +309,7 @@ enum FinishTurnError {
 mod cloud {
     use super::{
         BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
-        VoiceTurnResult,
+        VoiceTurnMode, VoiceTurnResult, session_stop_pauses, valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -249,6 +358,20 @@ mod cloud {
         }
     }
 
+    pub(super) struct VoiceSessionPausedListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Drop for VoiceSessionPausedListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-session-paused",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
     #[wasm_bindgen]
     extern "C" {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = getStatus)]
@@ -284,13 +407,11 @@ mod cloud {
         }
     }
 
-    pub async fn begin_turn(session_state: &str, intentional: bool) -> Result<(), &'static str> {
-        let turn_mode = if intentional {
-            "intentional"
-        } else {
-            "ambient"
-        };
-        begin_turn_js(session_state, turn_mode)
+    pub async fn begin_turn(
+        session_state: &str,
+        turn_mode: VoiceTurnMode,
+    ) -> Result<(), &'static str> {
+        begin_turn_js(session_state, turn_mode.as_str())
             .await
             .map(|_| ())
             .map_err(user_message)
@@ -305,14 +426,9 @@ mod cloud {
 
     pub async fn finish_turn(
         session_state: &str,
-        intentional: bool,
+        turn_mode: VoiceTurnMode,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
-        let turn_mode = if intentional {
-            "intentional"
-        } else {
-            "ambient"
-        };
-        let value = match finish_turn_js(session_state, turn_mode).await {
+        let value = match finish_turn_js(session_state, turn_mode.as_str()).await {
             Ok(value) => value,
             Err(error) if error_code(error.clone()).as_deref() == Some("voice_interrupted") => {
                 return Err(FinishTurnError::Interrupted);
@@ -385,6 +501,59 @@ mod cloud {
         Some(Rc::new(VoiceInterruptedListener { window, callback }))
     }
 
+    pub fn install_voice_session_paused_listener(
+        mut voice_state: Signal<VoiceState>,
+        mut generation: Signal<u64>,
+    ) -> Option<Rc<VoiceSessionPausedListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(reason) = js_sys::Reflect::get(&detail, &JsValue::from_str("reason")) else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(reason) = reason.as_string() else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            if !valid_voice_pause_metadata(&reason, version, keys.length()) {
+                return;
+            }
+
+            let current_state = *voice_state.peek();
+            if session_stop_pauses(current_state) {
+                if stop_session_js().is_err() {
+                    return;
+                }
+                let next = generation.peek().wrapping_add(1);
+                generation.set(next);
+                // The opaque encrypted conversation state is intentionally
+                // left untouched. Resume is a new explicit gesture and may
+                // reuse that state without reacquiring a microphone in the
+                // background.
+                voice_state.set(VoiceState::Paused);
+            }
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:voice-session-paused",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(VoiceSessionPausedListener { window, callback }))
+    }
+
     pub fn stop_session() {
         let _ = stop_session_js();
     }
@@ -395,6 +564,12 @@ mod cloud {
 
     fn user_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
+            Some("voice_turn_timeout") => {
+                "考えている途中で時間を使い切った　内容を変えずもう一度だけ話してみて"
+            }
+            Some("voice_turn_unavailable") => {
+                "音声の処理で止まった　接続はできている　もう一度だけ試してみて"
+            }
             Some("microphone_unsupported") => {
                 "このブラウザでは音声会話を使えない　最新版でためしてみて"
             }
@@ -402,7 +577,7 @@ mod cloud {
                 "マイクが許可されていない　ブラウザの権限を確認してみて"
             }
             Some("microphone_unavailable") => "使えるマイクが見つからない　接続を確認してみて",
-            Some("no_speech") => "声を拾えなかった　少し近づいてもう一度",
+            Some("no_speech") => "まだ声を拾えていない　小さな声のまま、短くひと言だけでもう一度",
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
@@ -429,7 +604,9 @@ mod cloud {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
-    use super::{CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnResult};
+    use super::{
+        CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnMode, VoiceTurnResult,
+    };
     use dioxus::prelude::Signal;
 
     #[derive(Clone)]
@@ -439,7 +616,10 @@ mod cloud {
         CloudState::Unavailable
     }
 
-    pub async fn begin_turn(_session_state: &str, _intentional: bool) -> Result<(), &'static str> {
+    pub async fn begin_turn(
+        _session_state: &str,
+        _turn_mode: VoiceTurnMode,
+    ) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -449,7 +629,7 @@ mod cloud {
 
     pub async fn finish_turn(
         _session_state: &str,
-        _intentional: bool,
+        _turn_mode: VoiceTurnMode,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
         Err(FinishTurnError::Message("WebAssembly版で使ってみて"))
     }
@@ -476,6 +656,13 @@ mod cloud {
         None
     }
 
+    pub fn install_voice_session_paused_listener(
+        _voice_state: Signal<VoiceState>,
+        _generation: Signal<u64>,
+    ) -> Option<DocumentClearListener> {
+        None
+    }
+
     pub fn stop_session() {}
 }
 
@@ -487,12 +674,13 @@ fn main() {
 fn arm_listening(
     operation: u64,
     announce_permission: bool,
-    intentional: bool,
+    turn_mode: VoiceTurnMode,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     session_state: Signal<String>,
     detected_domain: Signal<String>,
     route: Signal<String>,
+    coach_state: Signal<CoachState>,
     needs_paper: Signal<bool>,
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
@@ -505,7 +693,7 @@ fn arm_listening(
 
     spawn(async move {
         let state_snapshot = session_state.peek().clone();
-        if let Err(message) = cloud::begin_turn(&state_snapshot, intentional).await {
+        if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode).await {
             if *generation.peek() == operation {
                 cloud::stop_session();
                 document_info.set(None);
@@ -535,12 +723,13 @@ fn arm_listening(
             if has_speech {
                 submit_turn(
                     operation,
-                    intentional,
+                    turn_mode,
                     voice_state,
                     generation,
                     session_state,
                     detected_domain,
                     route,
+                    coach_state,
                     needs_paper,
                     research_status,
                     research_records,
@@ -548,17 +737,21 @@ fn arm_listening(
                     caption,
                 );
             } else {
-                // The explicit gesture authorizes only this finite recording
-                // window. Any automatically opened replacement is ambient.
+                // A silent bounded window carries no speech and consumes no
+                // conversational turn. Keep the explicitly opened session
+                // alive in foreground mode; the independent three-minute
+                // idle and thirty-minute absolute clocks remain terminal.
+                // Automatic windows never inherit intentional authority.
                 arm_listening(
                     operation,
                     false,
-                    intentional_for_gesture_epoch(false),
+                    VoiceTurnMode::Foreground,
                     voice_state,
                     generation,
                     session_state,
                     detected_domain,
                     route,
+                    coach_state,
                     needs_paper,
                     research_status,
                     research_records,
@@ -571,13 +764,14 @@ fn arm_listening(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resume_ambient_interruption(
+fn resume_foreground_interruption(
     operation: u64,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     session_state: Signal<String>,
     detected_domain: Signal<String>,
     route: Signal<String>,
+    coach_state: Signal<CoachState>,
     needs_paper: Signal<bool>,
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
@@ -600,16 +794,17 @@ fn resume_ambient_interruption(
             return;
         }
         if has_speech {
-            // Acoustic interruption is never a fresh user gesture. This also
-            // keeps replayed output outside intentional-turn authority.
+            // Acoustic interruption expects a conversational response but is
+            // never granted fresh-gesture authority.
             submit_turn(
                 operation,
-                false,
+                VoiceTurnMode::Foreground,
                 voice_state,
                 generation,
                 session_state,
                 detected_domain,
                 route,
+                coach_state,
                 needs_paper,
                 research_status,
                 research_records,
@@ -620,12 +815,13 @@ fn resume_ambient_interruption(
             arm_listening(
                 operation,
                 false,
-                false,
+                VoiceTurnMode::Foreground,
                 voice_state,
                 generation,
                 session_state,
                 detected_domain,
                 route,
+                coach_state,
                 needs_paper,
                 research_status,
                 research_records,
@@ -639,12 +835,13 @@ fn resume_ambient_interruption(
 #[allow(clippy::too_many_arguments)]
 fn submit_turn(
     operation: u64,
-    intentional: bool,
+    turn_mode: VoiceTurnMode,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     mut session_state: Signal<String>,
     mut detected_domain: Signal<String>,
     mut route: Signal<String>,
+    mut coach_state: Signal<CoachState>,
     mut needs_paper: Signal<bool>,
     mut research_status: Signal<ResearchStatus>,
     mut research_records: Signal<Vec<ResearchRecord>>,
@@ -662,7 +859,7 @@ fn submit_turn(
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
-        let result = cloud::finish_turn(&state_snapshot, intentional).await;
+        let result = cloud::finish_turn(&state_snapshot, turn_mode).await;
         if *generation.peek() != operation {
             return;
         }
@@ -673,13 +870,14 @@ fn submit_turn(
                 if consumed_document {
                     document_info.set(None);
                 }
-                resume_ambient_interruption(
+                resume_foreground_interruption(
                     operation,
                     voice_state,
                     generation,
                     session_state,
                     detected_domain,
                     route,
+                    coach_state,
                     needs_paper,
                     research_status,
                     research_records,
@@ -720,16 +918,44 @@ fn submit_turn(
         if consumed_document {
             document_info.set(None);
         }
+        if turn_mode == VoiceTurnMode::Foreground && silent_recognition_miss(&result.route) {
+            // A provider-authenticated STT miss is a no-op turn, not a reason
+            // to end the conversation. Continue in foreground mode without
+            // granting intentional authority; the independent idle,
+            // absolute-session, and rate limits keep retries bounded.
+            arm_listening(
+                operation,
+                false,
+                VoiceTurnMode::Foreground,
+                voice_state,
+                generation,
+                session_state,
+                detected_domain,
+                route,
+                coach_state,
+                needs_paper,
+                research_status,
+                research_records,
+                document_info,
+                caption,
+            );
+            return;
+        }
+        coach_state.set(CoachState::from_result(
+            result.coach_phase,
+            result.coach_action,
+        ));
         if result.interrupted {
             // The final frame reached a clean terminal EOF, so commit its
             // state before submitting the already-captured interruption.
-            resume_ambient_interruption(
+            resume_foreground_interruption(
                 operation,
                 voice_state,
                 generation,
                 session_state,
                 detected_domain,
                 route,
+                coach_state,
                 needs_paper,
                 research_status,
                 research_records,
@@ -749,12 +975,13 @@ fn submit_turn(
         arm_listening(
             operation,
             false,
-            intentional_for_gesture_epoch(false),
+            VoiceTurnMode::Foreground,
             voice_state,
             generation,
             session_state,
             detected_domain,
             route,
+            coach_state,
             needs_paper,
             research_status,
             research_records,
@@ -771,6 +998,7 @@ fn start_or_resume(
     session_state: Signal<String>,
     detected_domain: Signal<String>,
     route: Signal<String>,
+    coach_state: Signal<CoachState>,
     needs_paper: Signal<bool>,
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
@@ -782,12 +1010,13 @@ fn start_or_resume(
     arm_listening(
         operation,
         true,
-        intentional_for_gesture_epoch(true),
+        turn_mode_for_gesture_epoch(true),
         voice_state,
         generation,
         session_state,
         detected_domain,
         route,
+        coach_state,
         needs_paper,
         research_status,
         research_records,
@@ -804,8 +1033,30 @@ fn human_file_size(bytes: u64) -> String {
     }
 }
 
-const fn intentional_for_gesture_epoch(fresh_gesture: bool) -> bool {
-    fresh_gesture
+const fn turn_mode_for_gesture_epoch(fresh_gesture: bool) -> VoiceTurnMode {
+    if fresh_gesture {
+        VoiceTurnMode::Intentional
+    } else {
+        VoiceTurnMode::Foreground
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const fn session_stop_pauses(state: VoiceState) -> bool {
+    !matches!(state, VoiceState::Ready | VoiceState::Paused)
+}
+
+const fn valid_voice_pause_metadata(reason: &str, version: f64, field_count: u32) -> bool {
+    field_count == 2
+        && version == 1.0
+        && matches!(
+            reason.as_bytes(),
+            b"idle" | b"maximum" | b"hidden" | b"pagehide" | b"microphone_lost"
+        )
+}
+
+fn silent_recognition_miss(route: &str) -> bool {
+    matches!(route, "stt-silent-no-speech" | "stt-silent-low-confidence")
 }
 
 fn valid_streamed_audio_metadata(
@@ -823,6 +1074,7 @@ fn App() -> Element {
     let mut session_state = use_signal(String::new);
     let mut detected_domain = use_signal(String::new);
     let mut route = use_signal(String::new);
+    let mut coach_state = use_signal(|| CoachState::NONE);
     let mut needs_paper = use_signal(|| false);
     let mut research_status = use_signal(|| ResearchStatus::None);
     let mut research_records = use_signal(Vec::<ResearchRecord>::new);
@@ -835,9 +1087,12 @@ fn App() -> Element {
     let _first_audio_listener = use_hook(|| cloud::install_first_audio_listener(voice_state));
     let _voice_interrupted_listener =
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
+    let _voice_session_paused_listener =
+        use_hook(|| cloud::install_voice_session_paused_listener(voice_state, generation));
     let cloud_status = use_resource(|| async { cloud::status().await });
 
     let state_snapshot = *voice_state.read();
+    let coach_snapshot = *coach_state.read();
     let captions_are_visible = *captions_visible.read();
     let document_snapshot = document_info.read().clone();
     let research_status_snapshot = *research_status.read();
@@ -867,7 +1122,7 @@ fn App() -> Element {
                     span { class: "identity__mark", "K" }
                     span { class: "identity__type",
                         strong { "KOTAE" }
-                        small { "AMBIENT REASONING VOICE" }
+                        small { "話す / 考える / 伝わる" }
                     }
                 }
                 div { class: prepared_cloud_state.class_name(),
@@ -891,13 +1146,11 @@ fn App() -> Element {
                         } else {
                             span { class: "context-chip context-chip--quiet", "CONTEXT / AUTO" }
                         }
-                        if !route.read().is_empty() {
-                            if route.read().starts_with("respondent-") {
-                                span { class: "route-chip route-chip--answer-support",
-                                    "YOUR ANSWER / REFRAMED"
-                                }
-                            } else {
-                                span { class: "route-chip", {route.read().clone()} }
+                        if coach_snapshot.is_active() {
+                            span {
+                                class: "coach-chip",
+                                aria_label: "会話を支える次の一歩",
+                                {coach_snapshot.status()}
                             }
                         }
                         if research_status_snapshot == ResearchStatus::Unavailable {
@@ -932,6 +1185,7 @@ fn App() -> Element {
                                             session_state,
                                             detected_domain,
                                             route,
+                                            coach_state,
                                             needs_paper,
                                             research_status,
                                             research_records,
@@ -975,14 +1229,39 @@ fn App() -> Element {
                         }
                         h1 { id: "voice-heading",
                             if state_snapshot == VoiceState::Ready {
-                                "聞かれたことの答えを、"
+                                "まとまらないまま、"
                                 br {}
-                                "あなたの言葉のまま先へ"
-                            } else {
+                                "話していい"
+                            } else if matches!(
+                                state_snapshot,
+                                VoiceState::RequestingPermission
+                                    | VoiceState::Paused
+                                    | VoiceState::Error(_)
+                            ) {
                                 {state_snapshot.label()}
+                            } else {
+                                {coach_snapshot.heading()}
                             }
                         }
-                        p { class: "voice-status__hint", {state_snapshot.hint()} }
+                        p { class: "voice-status__hint",
+                            if matches!(
+                                state_snapshot,
+                                VoiceState::Ready
+                                    | VoiceState::RequestingPermission
+                                    | VoiceState::Paused
+                                    | VoiceState::Error(_)
+                            ) {
+                                {state_snapshot.hint()}
+                            } else {
+                                {coach_snapshot.hint()}
+                            }
+                        }
+                        if matches!(
+                            state_snapshot,
+                            VoiceState::Listening | VoiceState::Thinking | VoiceState::Speaking
+                        ) {
+                            p { class: "voice-status__transport", {state_snapshot.hint()} }
+                            }
                     }
 
                     section {
@@ -993,19 +1272,19 @@ fn App() -> Element {
                         },
                         aria_label: "できること",
                         div { class: "capability",
-                            span { "聞かれた" }
+                            span { "話す" }
                             i { aria_hidden: "true", "→" }
-                            strong { "あなたが言い直した質問を拾う" }
+                            strong { "短くても最後まで待つ" }
                         }
                         div { class: "capability",
-                            span { "まとまらない" }
+                            span { "会話" }
                             i { aria_hidden: "true", "→" }
-                            strong { "あなたの答えをそのまま受け取る" }
+                            strong { "まず話の中身に答える" }
                         }
                         div { class: "capability",
-                            span { "答える" }
+                            span { "伝わる" }
                             i { aria_hidden: "true", "→" }
-                            strong { "意味を変えずAだけ前へ" }
+                            strong { "必要な時だけ一問で支える" }
                         }
                     }
 
@@ -1030,6 +1309,7 @@ fn App() -> Element {
                                             session_state,
                                             detected_domain,
                                             route,
+                                            coach_state,
                                             needs_paper,
                                             research_status,
                                             research_records,
@@ -1061,6 +1341,7 @@ fn App() -> Element {
                                     session_state.set(String::new());
                                     detected_domain.set(String::new());
                                     route.set(String::new());
+                                    coach_state.set(CoachState::NONE);
                                     needs_paper.set(false);
                                     research_status.set(ResearchStatus::None);
                                     research_records.set(Vec::new());
@@ -1217,7 +1498,7 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "発話ごとにTLSで送り　アプリの履歴には残さない。ただし処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
+                                "発話ごとにTLSで送り　アプリの履歴には残さない。会話中は、考え中と返答再生中も訂正を受けるため端末内VADがマイクを使い、確認した割り込みだけを送ります。処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
                             }
                             p {
                                 strong { "PDF" }
@@ -1254,12 +1535,139 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{VoiceState, intentional_for_gesture_epoch, valid_streamed_audio_metadata};
+    use super::{
+        CoachAction, CoachPhase, CoachState, VoiceState, VoiceTurnMode, session_stop_pauses,
+        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
+        valid_voice_pause_metadata,
+    };
+    use serde::{Deserialize, de::IntoDeserializer};
+
+    fn deserialize_phase(value: &str) -> Result<CoachPhase, serde::de::value::Error> {
+        CoachPhase::deserialize(value.into_deserializer())
+    }
+
+    fn deserialize_action(value: &str) -> Result<CoachAction, serde::de::value::Error> {
+        CoachAction::deserialize(value.into_deserializer())
+    }
+
+    #[test]
+    fn coach_metadata_accepts_only_the_reviewed_wire_values() {
+        for value in [
+            "none",
+            "awaiting_answer",
+            "awaiting_restatement",
+            "expanding",
+            "complete",
+            "blocked",
+        ] {
+            assert!(deserialize_phase(value).is_ok(), "phase: {value}");
+        }
+        for value in [
+            "none", "elicit", "restate", "expand", "complete", "retry", "release",
+        ] {
+            assert!(deserialize_action(value).is_ok(), "action: {value}");
+        }
+
+        assert!(deserialize_phase("scored").is_err());
+        assert!(deserialize_phase("AwaitingAnswer").is_err());
+        assert!(deserialize_action("answer-for-user").is_err());
+        assert!(deserialize_action("Release").is_err());
+    }
+
+    #[test]
+    fn coach_copy_keeps_the_answer_with_the_user() {
+        let awaiting = CoachState::from_result(CoachPhase::AwaitingAnswer, CoachAction::Elicit);
+        let restating =
+            CoachState::from_result(CoachPhase::AwaitingRestatement, CoachAction::Restate);
+        let expanding = CoachState::from_result(CoachPhase::Expanding, CoachAction::Expand);
+        let complete = CoachState::from_result(CoachPhase::Complete, CoachAction::Complete);
+
+        assert_eq!(awaiting.status(), "ひとつだけ聞いています");
+        assert_eq!(restating.heading(), "そこまで、ちゃんと聞こえています");
+        assert_eq!(
+            expanding.hint(),
+            "答えなくても大丈夫　話したい方へ続けられます"
+        );
+        assert_eq!(complete.status(), "ちゃんと届きました");
+
+        for copy in [
+            awaiting.status(),
+            awaiting.heading(),
+            awaiting.hint(),
+            restating.status(),
+            restating.heading(),
+            restating.hint(),
+            expanding.status(),
+            expanding.heading(),
+            expanding.hint(),
+            complete.status(),
+            complete.heading(),
+            complete.hint(),
+        ] {
+            assert!(!copy.contains("採点"));
+            assert!(!copy.contains("正解"));
+            assert!(!copy.contains("不正解"));
+            assert!(!copy.contains("努力"));
+            assert!(!copy.contains("普通は"));
+            assert!(!copy.contains("やり直し"));
+        }
+    }
+
+    #[test]
+    fn blocked_retry_and_release_have_distinct_non_coercive_outcomes() {
+        let retry = CoachState::from_result(CoachPhase::Blocked, CoachAction::Retry);
+        let release = CoachState::from_result(CoachPhase::Blocked, CoachAction::Release);
+
+        assert_eq!(retry.status(), "音をもう一度拾います");
+        assert!(retry.hint().contains("そのまま先へ進めます"));
+        assert_eq!(release.status(), "そのまま続けられます");
+        assert_eq!(release.heading(), "そのまま話して大丈夫です");
+        assert_eq!(release.hint(), "この続きでも、別の話でも大丈夫");
+        assert_eq!(CoachState::NONE.phase, CoachPhase::None);
+        assert_eq!(CoachState::NONE.action, CoachAction::None);
+    }
 
     #[test]
     fn only_a_fresh_gesture_can_create_intentional_authority() {
-        assert!(intentional_for_gesture_epoch(true));
-        assert!(!intentional_for_gesture_epoch(false));
+        assert!(matches!(
+            turn_mode_for_gesture_epoch(true),
+            VoiceTurnMode::Intentional
+        ));
+        assert!(matches!(
+            turn_mode_for_gesture_epoch(false),
+            VoiceTurnMode::Foreground
+        ));
+    }
+
+    #[test]
+    fn external_session_stops_pause_active_states_but_never_replace_ready() {
+        assert!(!session_stop_pauses(VoiceState::Ready));
+        assert!(!session_stop_pauses(VoiceState::Paused));
+        assert!(session_stop_pauses(VoiceState::RequestingPermission));
+        assert!(session_stop_pauses(VoiceState::Listening));
+        assert!(session_stop_pauses(VoiceState::Thinking));
+        assert!(session_stop_pauses(VoiceState::Speaking));
+        assert!(session_stop_pauses(VoiceState::Error("temporary")));
+    }
+
+    #[test]
+    fn pause_notifications_accept_only_fixed_content_free_metadata() {
+        for reason in ["idle", "maximum", "hidden", "pagehide", "microphone_lost"] {
+            assert!(valid_voice_pause_metadata(reason, 1.0, 2), "{reason}");
+        }
+
+        assert!(!valid_voice_pause_metadata("request_cancelled", 1.0, 2));
+        assert!(!valid_voice_pause_metadata("idle", 2.0, 2));
+        assert!(!valid_voice_pause_metadata("idle", 1.0, 3));
+        assert!(!valid_voice_pause_metadata("", 1.0, 2));
+    }
+
+    #[test]
+    fn only_server_authenticated_silent_recognition_routes_trigger_no_op_rearm() {
+        assert!(silent_recognition_miss("stt-silent-no-speech"));
+        assert!(silent_recognition_miss("stt-silent-low-confidence"));
+        assert!(!silent_recognition_miss("stt-clarify-no-speech"));
+        assert!(!silent_recognition_miss("fast"));
     }
 
     #[test]

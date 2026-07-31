@@ -14,6 +14,27 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestNewCloudServiceRejectsNonConversationModelBeforeClientInitialization(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"", "short", "latest_short", "latest_long", "chirp_3"} {
+		model := model
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+			service, err := NewCloudService(
+				context.Background(),
+				"project",
+				"asia-northeast1",
+				model,
+				"ja-JP-Chirp3-HD-Kore",
+			)
+			if err == nil || service != nil {
+				t.Fatalf("service=%v err=%v; want local model rejection", service, err)
+			}
+		})
+	}
+}
+
 func TestRecognizedTextUsesOnlyTopAlternatives(t *testing.T) {
 	t.Parallel()
 
@@ -189,6 +210,37 @@ func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("recognition calls = %d; want 0", calls)
+	}
+}
+
+func TestTranscribeRejectsNonConversationModelBeforeProviderCall(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"", "short", "latest_short", "latest_long", "chirp_3"} {
+		model := model
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			service := &CloudService{
+				speechModel: model,
+				recognizeCall: func(
+					context.Context,
+					*speechpb.RecognizeRequest,
+				) (*speechpb.RecognizeResponse, error) {
+					calls++
+					return recognizedResponse("unexpected", 1), nil
+				},
+			}
+			if _, _, err := service.Transcribe(
+				context.Background(),
+				[]byte{1, 2},
+			); err == nil {
+				t.Fatal("unsupported model accepted")
+			}
+			if calls != 0 {
+				t.Fatalf("provider calls = %d; want 0", calls)
+			}
+		})
 	}
 }
 

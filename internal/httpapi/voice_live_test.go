@@ -219,13 +219,23 @@ func dialVoiceLive(
 
 func writeVoiceLiveStart(t *testing.T, ctx context.Context, conn *websocket.Conn) {
 	t.Helper()
+	writeVoiceLiveStartMode(t, ctx, conn, VoiceTurnIntentional)
+}
+
+func writeVoiceLiveStartMode(
+	t *testing.T,
+	ctx context.Context,
+	conn *websocket.Conn,
+	mode VoiceTurnMode,
+) {
+	t.Helper()
 	frame := voiceLiveStartFrame{
 		Type:          "start",
 		Version:       voiceLiveVersion,
 		IDToken:       liveTestIDToken,
 		AppCheckToken: liveTestAppCheckToken,
 		SessionState:  "",
-		TurnMode:      VoiceTurnIntentional,
+		TurnMode:      mode,
 		SampleRateHz:  voiceLiveSampleRateHz,
 	}
 	payload, err := json.Marshal(frame)
@@ -234,6 +244,72 @@ func writeVoiceLiveStart(t *testing.T, ctx context.Context, conn *websocket.Conn
 	}
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVoiceLiveForegroundKeepsAmbientAuthorityAndExpectsReply(t *testing.T) {
+	t.Parallel()
+	service := &liveTestVoiceService{
+		result: VoiceTurnResult{
+			StateToken:       "sealed-foreground-state",
+			DetectedDomain:   "daily",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "foreground-test",
+		},
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLiveStartMode(t, ctx, conn, VoiceTurnForeground)
+	ready := readVoiceLiveJSON(t, ctx, conn)
+	if ready["type"] != "ready" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(
+		ctx,
+		websocket.MessageBinary,
+		liveTestPCMFrame(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type:    "commit",
+		Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	final := readVoiceLiveJSON(t, ctx, conn)
+	if final["type"] != "final" {
+		t.Fatalf("final=%#v", final)
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.input.TurnMode != VoiceTurnForeground ||
+		!service.input.Ambient ||
+		!service.input.Foreground {
+		t.Fatalf("foreground authority mapping=%+v", service.input)
 	}
 }
 
@@ -268,6 +344,8 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "fast",
@@ -344,6 +422,8 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 		result["sessionState"] != "sealed-final-state" ||
 		result["audioMimeType"] != "audio/L16" ||
 		result["audioBase64"] != "" ||
+		result["coachPhase"] != "none" ||
+		result["coachAction"] != "none" ||
 		result["caption"] != "Aです。理由はBです。" {
 		t.Fatalf("final result=%#v", final["result"])
 	}
@@ -360,9 +440,23 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	publishedDeadline, hasDeadline :=
+		<-service.input.ProcessingDeadline
+	_, deadlineStillOpen := <-service.input.ProcessingDeadline
+	commitPublished := false
+	select {
+	case <-service.input.ProcessingCommitted:
+		commitPublished = true
+	default:
+	}
 	if len(service.audio) != 1 ||
 		string(service.audio[0]) != string(inputFrame) ||
-		service.input.RequestID == "" {
+		service.input.RequestID == "" ||
+		service.input.ProcessingTimeout != 2*time.Second ||
+		!hasDeadline ||
+		publishedDeadline.IsZero() ||
+		deadlineStillOpen ||
+		!commitPublished {
 		t.Fatalf("live service audio=%v input=%+v", service.audio, service.input)
 	}
 }
@@ -378,6 +472,8 @@ func TestVoiceLiveEndpointKeepsSingleReaderUntilExplicitCommit(t *testing.T) {
 				DetectedDomain:   "daily",
 				AssistanceTarget: "assistant",
 				RespondentStage:  "none",
+				CoachPhase:       "none",
+				CoachAction:      "none",
 				ResearchStatus:   "none",
 				ResearchRecords:  []ResearchRecord{},
 				Route:            "fast",
@@ -702,6 +798,8 @@ func TestVoiceLiveRequiresExactTwentyMillisecondPCMFrames(t *testing.T) {
 					DetectedDomain:   "daily",
 					AssistanceTarget: "assistant",
 					RespondentStage:  "none",
+					CoachPhase:       "none",
+					CoachAction:      "none",
 					ResearchStatus:   "none",
 					ResearchRecords:  []ResearchRecord{},
 					Route:            "silent-fast",
@@ -785,6 +883,8 @@ func TestVoiceLiveSilentFinalContainsNoBinaryAudio(t *testing.T) {
 			DetectedDomain:   "daily",
 			AssistanceTarget: "assistant",
 			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
 			ResearchStatus:   "none",
 			ResearchRecords:  []ResearchRecord{},
 			Route:            "ambient-silent-fast",

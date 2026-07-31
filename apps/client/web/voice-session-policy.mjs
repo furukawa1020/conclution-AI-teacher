@@ -1,13 +1,16 @@
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
-  endOfTurnSilenceMs: 700,
-  reflectiveEndOfTurnSilenceMs: 1_700,
-  reflectiveSpeechSpanMs: 2_400,
-  hybridEndpointSilenceMs: 440,
-  hybridReflectiveEndpointSilenceMs: 760,
-  hybridEndpointAgreementWindowMs: 1_200,
-  candidateCaptureLimitMs: 1_500,
+  endOfTurnSilenceMs: 1_200,
+  reflectiveEndOfTurnSilenceMs: 2_200,
+  reflectiveSpeechSpanMs: 1_600,
+  hybridEndpointSilenceMs: 1_200,
+  hybridReflectiveEndpointSilenceMs: 2_200,
+  hybridEndpointAgreementWindowMs: 2_000,
+  // A voice candidate must either reach the 120 ms confirmation threshold
+  // promptly or be discarded. This also bounds unconfirmed room audio before
+  // a fresh candidate and its isolated recorder are created.
+  candidateCaptureLimitMs: 200,
   silentCaptureLimitMs: 30_000,
   spokenCaptureLimitMs: 55_000,
   idleSessionLimitMs: 3 * 60_000,
@@ -192,6 +195,7 @@ export function createSessionClock({
 
   let startedAt = null;
   let lastSpeechAt = null;
+  let responseActive = false;
 
   function currentTime() {
     return finiteTimestamp(now(), "clock");
@@ -201,6 +205,7 @@ export function createSessionClock({
     if (startedAt === null) return null;
     if (timestamp - startedAt >= maximumLimitMs) return "maximum";
     if (
+      !responseActive &&
       lastSpeechAt !== null &&
       timestamp - lastSpeechAt >= idleLimitMs
     ) {
@@ -226,18 +231,145 @@ export function createSessionClock({
       return startedAt !== null;
     },
     markSpeech() {
-      if (startedAt !== null) {
-        lastSpeechAt = currentTime();
+      const timestamp = currentTime();
+      const expiry = expiryAt(timestamp);
+      if (expiry !== null) {
+        return Object.freeze({ expiry, ok: false });
       }
+      if (startedAt !== null) {
+        lastSpeechAt = timestamp;
+      }
+      return Object.freeze({ expiry: null, ok: true });
+    },
+    beginResponse() {
+      const timestamp = currentTime();
+      const expiry = expiryAt(timestamp);
+      if (startedAt === null || expiry !== null) {
+        return Object.freeze({ expiry: expiry ?? "maximum", ok: false });
+      }
+      responseActive = true;
+      return Object.freeze({ expiry: null, ok: true });
+    },
+    completeResponse() {
+      const timestamp = currentTime();
+      if (startedAt === null || !responseActive) {
+        return Object.freeze({ expiry: "maximum", ok: false });
+      }
+      if (timestamp - startedAt >= maximumLimitMs) {
+        responseActive = false;
+        return Object.freeze({ expiry: "maximum", ok: false });
+      }
+      responseActive = false;
+      lastSpeechAt = timestamp;
+      return Object.freeze({ expiry: null, ok: true });
+    },
+    check() {
+      const expiry = expiryAt(currentTime());
+      return Object.freeze({ expiry, ok: expiry === null });
+    },
+    millisecondsUntilExpiry() {
+      if (startedAt === null) return null;
+      const timestamp = currentTime();
+      const maximumRemaining = maximumLimitMs - (timestamp - startedAt);
+      const idleRemaining =
+        responseActive || lastSpeechAt === null
+          ? maximumRemaining
+          : idleLimitMs - (timestamp - lastSpeechAt);
+      return Math.max(0, Math.min(maximumRemaining, idleRemaining));
     },
     reset() {
       startedAt = null;
       lastSpeechAt = null;
+      responseActive = false;
     },
     snapshot() {
-      return Object.freeze({ lastSpeechAt, startedAt });
+      return Object.freeze({ lastSpeechAt, responseActive, startedAt });
     },
   });
+}
+
+export function createSessionExpiryWatchdog({
+  check,
+  clearTimer,
+  expire,
+  millisecondsUntilExpiry,
+  setTimer,
+} = {}) {
+  if (
+    typeof check !== "function" ||
+    typeof clearTimer !== "function" ||
+    typeof expire !== "function" ||
+    typeof millisecondsUntilExpiry !== "function" ||
+    typeof setTimer !== "function"
+  ) {
+    throw new TypeError("session_watchdog_invalid");
+  }
+
+  let generation = 0;
+  let timer;
+
+  function disarm() {
+    generation += 1;
+    if (timer !== undefined) {
+      clearTimer(timer);
+      timer = undefined;
+    }
+  }
+
+  function arm() {
+    disarm();
+    const status = check();
+    if (!status?.ok) {
+      expire(status?.expiry ?? "maximum");
+      return false;
+    }
+    const delay = millisecondsUntilExpiry();
+    if (delay === null) return true;
+    if (!Number.isFinite(delay) || delay < 0) {
+      expire("maximum");
+      return false;
+    }
+
+    const armedGeneration = generation;
+    timer = setTimer(() => {
+      if (armedGeneration !== generation) return;
+      timer = undefined;
+      const current = check();
+      if (!current?.ok) {
+        expire(current?.expiry ?? "maximum");
+        return;
+      }
+      arm();
+    }, Math.ceil(delay));
+    return true;
+  }
+
+  return Object.freeze({ arm, disarm });
+}
+
+// Only these fixed, content-free reasons may cross the JS/Rust boundary and
+// turn an active voice session into Paused. Unknown strings are deliberately
+// reduced to an ordinary cancellation so error text, transcripts, and device
+// labels can never become event metadata.
+export function classifyVoiceSessionStopReason(reason) {
+  switch (reason) {
+    case "idle":
+    case "maximum":
+      return Object.freeze({ pauseReason: reason, stopCode: "session_expired" });
+    case "hidden":
+    case "pagehide":
+      return Object.freeze({ pauseReason: reason, stopCode: "request_cancelled" });
+    case "microphone_lost":
+      return Object.freeze({
+        pauseReason: reason,
+        stopCode: "microphone_unavailable",
+      });
+    default:
+      return Object.freeze({
+        pauseReason: null,
+        stopCode: "request_cancelled",
+      });
+  }
 }
 
 export function shouldStopSessionForLifecycle(eventType, hidden, active) {
@@ -392,14 +524,18 @@ export function createCaptureBuffer({ maximumBytes } = {}) {
 }
 
 export function isValidTurnMode(turnMode) {
-  return turnMode === "intentional" || turnMode === "ambient";
+  return (
+    turnMode === "intentional" ||
+    turnMode === "foreground" ||
+    turnMode === "ambient"
+  );
 }
 
 export function turnModeForGestureEpoch(firstTurnAfterExplicitGesture) {
   if (typeof firstTurnAfterExplicitGesture !== "boolean") {
     throw new TypeError("gesture_epoch_invalid");
   }
-  return firstTurnAfterExplicitGesture ? "intentional" : "ambient";
+  return firstTurnAfterExplicitGesture ? "intentional" : "foreground";
 }
 
 export const CANDIDATE_CAPTURE_PHASES = Object.freeze({
@@ -477,13 +613,6 @@ export function advanceCandidateCapture(
         : CANDIDATE_CAPTURE_PHASES.candidate,
     });
   }
-  if (vadState.hasSpeech) {
-    return Object.freeze({
-      action: "confirm",
-      candidateStartedAt: previous.candidateStartedAt,
-      phase: CANDIDATE_CAPTURE_PHASES.confirmed,
-    });
-  }
   if (
     vadState.voiceRunMs === 0 ||
     timestamp - previous.candidateStartedAt >= candidateCaptureLimitMs
@@ -492,6 +621,13 @@ export function advanceCandidateCapture(
       action: "discard",
       candidateStartedAt: null,
       phase: CANDIDATE_CAPTURE_PHASES.armed,
+    });
+  }
+  if (vadState.hasSpeech) {
+    return Object.freeze({
+      action: "confirm",
+      candidateStartedAt: previous.candidateStartedAt,
+      phase: CANDIDATE_CAPTURE_PHASES.confirmed,
     });
   }
   return Object.freeze({

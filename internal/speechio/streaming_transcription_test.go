@@ -51,20 +51,43 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 	}
 }
 
-func TestStreamingRecognitionConfigUsesShortEndpointingOnlyForChirp3(t *testing.T) {
+func TestStreamingRecognitionConfigUsesReviewedLongModelWithoutUnsupportedEndpointing(t *testing.T) {
 	t.Parallel()
-	chirp := streamingRecognitionConfigRequest("recognizer", " chirp_3 ").
+	long := streamingRecognitionConfigRequest("recognizer", " long ").
 		GetStreamingConfig()
-	if chirp.Config.Model != "chirp_3" ||
-		chirp.StreamingFeatures.EndpointingSensitivity !=
-			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_SHORT {
-		t.Fatalf("chirp config=%+v", chirp)
+	if long.Config.Model != "long" ||
+		long.StreamingFeatures.EndpointingSensitivity !=
+			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {
+		t.Fatalf("long config=%+v", long)
 	}
-	long := streamingRecognitionConfigRequest("recognizer", "long").
-		GetStreamingConfig()
-	if long.StreamingFeatures.EndpointingSensitivity !=
-		speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {
-		t.Fatalf("long endpointing=%v", long.StreamingFeatures.EndpointingSensitivity)
+}
+
+func TestOpenStreamingTranscriptionRejectsNonConversationModelBeforeProviderCall(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"", "short", "latest_short", "latest_long", "chirp_3"} {
+		model := model
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			service := &CloudService{
+				speechModel: model,
+				streamRecognizeCall: func(
+					context.Context,
+				) (streamingRecognizeClient, error) {
+					calls++
+					return &fakeStreamingRecognizeClient{}, nil
+				},
+			}
+			if _, err := service.OpenStreamingTranscription(
+				context.Background(),
+			); err == nil {
+				t.Fatal("unsupported streaming model accepted")
+			}
+			if calls != 0 {
+				t.Fatalf("provider calls = %d; want 0", calls)
+			}
+		})
 	}
 }
 

@@ -89,8 +89,34 @@ func TestStateCodecRoundTripUIDBindingExpiryAndTamper(t *testing.T) {
 	}
 
 	codec.now = func() time.Time { return now.Add(stateTokenTTL) }
-	if _, err := codec.open("uid-a", token); !errors.Is(err, ErrInvalidStateToken) {
+	if _, err := codec.open("uid-a", token); !errors.Is(err, ErrInvalidStateToken) ||
+		!errors.Is(err, ErrExpiredStateToken) {
 		t.Fatalf("expired token: got %v", err)
+	}
+}
+
+func TestStateCodecDoesNotClassifyUnauthenticatedTokensAsExpired(t *testing.T) {
+	t.Parallel()
+
+	codec, err := NewStateCodec(bytes.Repeat([]byte{0x52}, 32))
+	if err != nil {
+		t.Fatalf("NewStateCodec: %v", err)
+	}
+	for name, token := range map[string]string{
+		"malformed": "v1.not-base64!",
+		"truncated": "v1." + base64.RawURLEncoding.EncodeToString(
+			bytes.Repeat([]byte{0x24}, 8),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, openErr := codec.open("uid-a", token)
+			if !errors.Is(openErr, ErrInvalidStateToken) {
+				t.Fatalf("error = %v; want invalid state", openErr)
+			}
+			if errors.Is(openErr, ErrExpiredStateToken) {
+				t.Fatalf("unauthenticated token classified as expired: %v", openErr)
+			}
+		})
 	}
 }
 

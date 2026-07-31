@@ -77,8 +77,8 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
 - raw audioをVertex AIへ送らず、STTで得た文字列と明示添付PDFだけを`global`のVertex AIへ送る。
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
-- WebSocket、Vertex Live、session resumption、full-duplex、barge-inを現在は使わない。
-- AI処理中と再生中はマイクを無効にし、タブ非表示、3分無発話、30分経過でsessionを止める。
+- 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
+- AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、3分無発話、30分経過でsessionを止める。
 - PDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。
 
 将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
@@ -266,6 +266,12 @@ draftモデル内のLACはadvisoryです。最終draftの後に、source utteran
 内部metricsは`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservation`です。これらはUIに採点文として並べるためではなく、A→Aのhard case、過剰修正、条件消失を回帰テストするために使います。
 
 現実装の意味保存guardは、日本語の条件・因果marker、boolean極性、数値と単位、Latin / 選択肢label / 引用anchor、不確実性の段階を比較する決定論的検査です。これは意味同値性を完全に判定する証明ではないため、閾値以上でも誤修復率を人手評価し、operator別・domain別に校正する必要があります。
+
+### 本人が答えるための有限コーチ
+
+`respondent`経路の目的は、KOTAEが整えた答えを代読することではありません。本人が話した内容に質問が求めるAがなければ一つに絞って尋ね、Aが理由や前置きの後ろにあれば「今の答えを先に、もう一度」と返します。本人がAを先に言えた時だけ、理由・根拠・条件・最初の一歩のいずれか一つを追加で尋ねます。その追加も本人が話した時点で完了し、同じ答えを二段、三段と無限に掘りません。
+
+「わからない」「まだ決めていない」も質問に対応した有効な回答です。認識できた実質的な回答への聞き直しは一度だけにし、次は通常会話へ戻します。考え中の短いフィラーは再質問せず待ちます。文法、方言、発話速度、フィラーの量は採点しません。評価するのは、本人が選んだ練習場面で質問に対応する最初の一文を本人自身が作れたかです。
 
 ## Think-Verbalize-Speak
 

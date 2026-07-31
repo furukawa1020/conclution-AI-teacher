@@ -73,6 +73,8 @@ type voiceLiveFinalResult struct {
 	DetectedDomain   string           `json:"detectedDomain"`
 	AssistanceTarget string           `json:"assistanceTarget"`
 	RespondentStage  string           `json:"respondentStage"`
+	CoachPhase       string           `json:"coachPhase"`
+	CoachAction      string           `json:"coachAction"`
 	ResearchStatus   string           `json:"researchStatus"`
 	ResearchRecords  []ResearchRecord `json:"researchRecords"`
 	Route            string           `json:"route"`
@@ -251,15 +253,28 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	readyAt := time.Now()
 	authReadyMS := readyAt.Sub(started).Milliseconds()
 	conn.SetReadLimit(voiceLiveMaxPCMFrameBytes)
+	processingDeadlineSignal := make(chan time.Time, 1)
+	processingCommittedSignal := make(chan struct{})
+	processingDeadlinePublished := false
+	defer func() {
+		if !processingDeadlinePublished {
+			close(processingDeadlineSignal)
+		}
+	}()
 
 	input := VoiceTurnInput{
-		MIMEType:      "audio/L16",
-		StateToken:    start.SessionState,
-		RequestID:     requestIDFromContext(liveCtx),
-		TurnMode:      start.TurnMode,
-		Ambient:       start.TurnMode == VoiceTurnAmbient,
-		STTLocale:     "ja-JP",
-		SchemaVersion: voiceLiveVersion,
+		MIMEType:   "audio/L16",
+		StateToken: start.SessionState,
+		RequestID:  requestIDFromContext(liveCtx),
+		TurnMode:   start.TurnMode,
+		Ambient: start.TurnMode == VoiceTurnAmbient ||
+			start.TurnMode == VoiceTurnForeground,
+		Foreground:          start.TurnMode == VoiceTurnForeground,
+		STTLocale:           "ja-JP",
+		SchemaVersion:       voiceLiveVersion,
+		ProcessingTimeout:   s.voice.RequestTimeout,
+		ProcessingDeadline:  processingDeadlineSignal,
+		ProcessingCommitted: processingCommittedSignal,
 	}
 	start.SessionState = ""
 
@@ -322,6 +337,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	inputBytes := 0
 	firstInputAt := time.Time{}
 	commitAt := time.Time{}
+	processingDeadline := time.Time{}
 	captureDeadline := readyAt.Add(voiceLiveMaxCaptureDuration)
 	captureCtx, cancelCapture := context.WithDeadline(liveCtx, captureDeadline)
 	readChannel := make(chan voiceLiveRead, 1)
@@ -525,7 +541,19 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					cancelLive()
 					return
 				}
+				// Close the broadcast before taking the shared deadline origin.
+				// Any speculative context that passes both commit checks was
+				// therefore created strictly before this timestamp.
+				close(processingCommittedSignal)
 				commitAt = time.Now()
+				processingDeadline = commitAt.Add(s.voice.RequestTimeout)
+				if liveDeadline, ok := liveCtx.Deadline(); ok &&
+					liveDeadline.Before(processingDeadline) {
+					processingDeadline = liveDeadline
+				}
+				processingDeadlineSignal <- processingDeadline
+				close(processingDeadlineSignal)
+				processingDeadlinePublished = true
 				outputMetrics.markCommitted()
 				if !acknowledgeRead(false) {
 					cancelLive()
@@ -555,7 +583,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	joinCaptureReader(false)
-	processingTimer := time.AfterFunc(s.voice.RequestTimeout, cancelLive)
+	processingTimer := time.AfterFunc(
+		time.Until(processingDeadline),
+		cancelLive,
+	)
 	defer processingTimer.Stop()
 	disconnectCtx := conn.CloseRead(liveCtx)
 
@@ -637,6 +668,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		DetectedDomain:   outcome.result.DetectedDomain,
 		AssistanceTarget: outcome.result.AssistanceTarget,
 		RespondentStage:  outcome.result.RespondentStage,
+		CoachPhase:       outcome.result.CoachPhase,
+		CoachAction:      outcome.result.CoachAction,
 		ResearchStatus:   outcome.result.ResearchStatus,
 		ResearchRecords:  outcome.result.ResearchRecords,
 		Route:            outcome.result.Route,
@@ -681,7 +714,7 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		return false
 	}
 	switch start.TurnMode {
-	case VoiceTurnIntentional, VoiceTurnAmbient:
+	case VoiceTurnIntentional, VoiceTurnForeground, VoiceTurnAmbient:
 		return true
 	default:
 		return false

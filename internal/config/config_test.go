@@ -45,8 +45,8 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.MaxVoiceBytes != 13*1024*1024 {
 		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)
 	}
-	if cfg.SpeechModel != "chirp_3" {
-		t.Fatalf("speech model = %q; want chirp_3", cfg.SpeechModel)
+	if cfg.SpeechModel != "long" {
+		t.Fatalf("speech model = %q; want long", cfg.SpeechModel)
 	}
 	if cfg.SpeechVoice != "ja-JP-Chirp3-HD-Kore" {
 		t.Fatalf(
@@ -88,7 +88,7 @@ func TestLoadRejectsMalformedPriorityFlag(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsAuditedSpeechFallback(t *testing.T) {
+func TestLoadAcceptsExplicitLongSpeechModel(t *testing.T) {
 	setTestEnvironment(t)
 	t.Setenv("KOTAE_SPEECH_MODEL", "long")
 
@@ -144,8 +144,11 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "voice app minute too high", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", value: "21"},
 		{name: "voice app day disabled", key: "KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", value: "0"},
 		{name: "request timeout collides with write deadline", key: "KOTAE_REQUEST_TIMEOUT", value: "51s"},
+		{name: "voice timeout leaves no speech reserve", key: "KOTAE_VOICE_TIMEOUT", value: "14s"},
 		{name: "voice timeout collides with write deadline", key: "KOTAE_VOICE_TIMEOUT", value: "51s"},
-		{name: "unreviewed speech primary", key: "KOTAE_SPEECH_MODEL", value: "short"},
+		{name: "single utterance speech primary", key: "KOTAE_SPEECH_MODEL", value: "short"},
+		{name: "unavailable speech primary", key: "KOTAE_SPEECH_MODEL", value: "chirp_3"},
+		{name: "unreviewed alias speech primary", key: "KOTAE_SPEECH_MODEL", value: "latest_long"},
 		{name: "unreviewed speech voice", key: "KOTAE_SPEECH_VOICE", value: "ja-JP-Neural2-B"},
 	}
 

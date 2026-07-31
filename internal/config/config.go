@@ -18,9 +18,9 @@ const (
 	defaultFastModel      = "vertexai/gemini-3.6-flash"
 	defaultPrecisionModel = "vertexai/gemini-3.1-pro-preview"
 	defaultSpeechLocation = "asia-northeast1"
-	defaultSpeechModel    = "chirp_3"
-	fallbackSpeechModel   = "long"
+	defaultSpeechModel    = "long"
 	defaultSpeechVoice    = "ja-JP-Chirp3-HD-Kore"
+	minVoiceTimeout       = 15 * time.Second
 )
 
 type Config struct {
@@ -161,13 +161,8 @@ func Load() (Config, error) {
 	if cfg.SpeechLocation != defaultSpeechLocation {
 		return Config{}, fmt.Errorf("KOTAE_SPEECH_LOCATION must be %s", defaultSpeechLocation)
 	}
-	if cfg.SpeechModel != defaultSpeechModel &&
-		cfg.SpeechModel != fallbackSpeechModel {
-		return Config{}, fmt.Errorf(
-			"KOTAE_SPEECH_MODEL must be %s or %s",
-			defaultSpeechModel,
-			fallbackSpeechModel,
-		)
+	if cfg.SpeechModel != defaultSpeechModel {
+		return Config{}, fmt.Errorf("KOTAE_SPEECH_MODEL must be %s", defaultSpeechModel)
 	}
 	if cfg.SpeechVoice != defaultSpeechVoice {
 		return Config{}, fmt.Errorf(
@@ -178,8 +173,11 @@ func Load() (Config, error) {
 	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 50*time.Second {
 		return Config{}, fmt.Errorf("KOTAE_REQUEST_TIMEOUT must be between 1s and 50s")
 	}
-	if cfg.VoiceTimeout < 5*time.Second || cfg.VoiceTimeout > 50*time.Second {
-		return Config{}, fmt.Errorf("KOTAE_VOICE_TIMEOUT must be between 5s and 50s")
+	if cfg.VoiceTimeout < minVoiceTimeout || cfg.VoiceTimeout > 50*time.Second {
+		return Config{}, fmt.Errorf(
+			"KOTAE_VOICE_TIMEOUT must be between %s and 50s",
+			minVoiceTimeout,
+		)
 	}
 	if cfg.MaxRequestBytes < 1024 || cfg.MaxRequestBytes > 1024*1024 {
 		return Config{}, fmt.Errorf("KOTAE_MAX_REQUEST_BYTES must be between 1 KiB and 1 MiB")

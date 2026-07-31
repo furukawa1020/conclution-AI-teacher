@@ -12,6 +12,15 @@ func TestVoiceTurnValidate(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid turn: %v", err)
 	}
+	foreground := VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "続きの質問",
+		Ambient:       true,
+		Foreground:    true,
+	}
+	if err := foreground.Validate(); err != nil {
+		t.Fatalf("valid foreground turn: %v", err)
+	}
 
 	tooLargePDF := append([]byte("%PDF-"), bytes.Repeat([]byte("x"), MaxInlinePDFBytes)...)
 	tests := []VoiceTurn{
@@ -19,6 +28,11 @@ func TestVoiceTurnValidate(t *testing.T) {
 		{SchemaVersion: SchemaVersion, Utterance: " \n "},
 		{SchemaVersion: SchemaVersion, Utterance: strings.Repeat("界", MaxUtteranceRunes+1)},
 		{SchemaVersion: SchemaVersion, Utterance: "質問", StateToken: " token "},
+		{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "質問",
+			Foreground:    true,
+		},
 		{
 			SchemaVersion: SchemaVersion,
 			Utterance:     "質問",

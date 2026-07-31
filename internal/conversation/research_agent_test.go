@@ -215,6 +215,48 @@ func TestAgentResearchUnavailableReturnsNoRecords(t *testing.T) {
 	}
 }
 
+func TestAgentResearchSkipsOutboundWorkWithoutSpeechReserve(t *testing.T) {
+	const topic = "response reserve"
+	verifier := &fakeResearchVerifier{}
+	agent := newTestAgent(t, &fakeGenerator{})
+	attachResearchVerifier(t, agent, verifier)
+	agent.now = func() time.Time {
+		return time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		voiceResponseReserve-time.Second,
+	)
+	defer cancel()
+
+	status, records, reply, err := agent.performResearch(
+		ctx,
+		"uid-research-budget",
+		"session-research-budget",
+		VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     japaneseRecentRequest(topic),
+			RequestID:     "0123456789abcdef01234567",
+		},
+		recentPapersPlan(topic),
+	)
+	if err != nil {
+		t.Fatalf("performResearch: %v", err)
+	}
+	if status != "unavailable" ||
+		len(records) != 0 ||
+		reply == "" ||
+		len(verifier.calls) != 0 {
+		t.Fatalf(
+			"research consumed speech reserve: status=%q records=%#v reply=%q calls=%#v",
+			status,
+			records,
+			reply,
+			verifier.calls,
+		)
+	}
+}
+
 func TestAgentResearchLeaseDeniedBeforeVerifierFailsSpeaking(t *testing.T) {
 	const (
 		topic       = "量子エラー訂正"
@@ -436,10 +478,11 @@ func TestAgentResearchRejectsMismatchedVerifierProvenance(t *testing.T) {
 
 func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 	tests := []struct {
-		name      string
-		utterance string
-		query     string
-		ambient   bool
+		name       string
+		utterance  string
+		query      string
+		ambient    bool
+		foreground bool
 	}{
 		{
 			name:      "not an exact utterance span",
@@ -562,6 +605,13 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 			ambient:   true,
 		},
 		{
+			name:       "foreground capture still has no outbound authority",
+			utterance:  japaneseRecentRequest("量子エラー訂正"),
+			query:      "量子エラー訂正",
+			ambient:    true,
+			foreground: true,
+		},
+		{
 			name:      "negated search request",
 			utterance: "量子エラー訂正の最新論文は検索しないで",
 			query:     "量子エラー訂正",
@@ -649,6 +699,7 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 				SchemaVersion: SchemaVersion,
 				Utterance:     test.utterance,
 				Ambient:       test.ambient,
+				Foreground:    test.foreground,
 			})
 			if err != nil {
 				t.Fatalf("Process: %v", err)
@@ -660,6 +711,7 @@ func TestAgentResearchQueryRejectedBeforeVerifier(t *testing.T) {
 				verifier,
 				result,
 				test.ambient,
+				test.foreground,
 				test.utterance,
 				test.query,
 				plan.SpokenReply,
@@ -701,6 +753,7 @@ func TestAgentRejectsRespondentResearchCombinationBeforeVerifier(t *testing.T) {
 		verifier,
 		result,
 		false,
+		false,
 		answerAttempt,
 		topic,
 		plan.SpokenReply,
@@ -739,6 +792,7 @@ func TestAgentDOILookupRequiresExplicitIntentBeforeVerifier(t *testing.T) {
 		generator,
 		verifier,
 		result,
+		false,
 		false,
 		utterance,
 		doi,
@@ -944,7 +998,7 @@ func TestAgentDOILookupBindsVerifierResultToRequestedDOI(t *testing.T) {
 	}
 }
 
-func TestAgentResearchPropagatesParentCancellation(t *testing.T) {
+func TestAgentCanceledTurnDoesNotReachResearch(t *testing.T) {
 	const topic = "量子エラー訂正"
 	plan := recentPapersPlan(topic)
 	generator := &fakeGenerator{generations: []fakeGeneration{
@@ -967,7 +1021,7 @@ func TestAgentResearchPropagatesParentCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Process error = %v; want context.Canceled", err)
 	}
-	if verifier.calls != 1 {
+	if verifier.calls != 0 {
 		t.Fatalf("verifier calls = %d", verifier.calls)
 	}
 }
@@ -979,17 +1033,13 @@ func assertResearchGuardPlannerFallback(
 	verifier *fakeResearchVerifier,
 	result VoiceTurnResult,
 	ambient bool,
+	foreground bool,
 	forbidden ...string,
 ) {
 	t.Helper()
 	wantRoute := "planner-unavailable"
 	wantSpokenReply := plannerUnavailableSpokenReply
 	wantClarification := true
-	if ambient {
-		wantRoute = "planner-unavailable-silent"
-		wantSpokenReply = ""
-		wantClarification = false
-	}
 	if result.Route != wantRoute ||
 		result.SpokenReply != wantSpokenReply ||
 		result.NeedsClarification != wantClarification ||

@@ -34,7 +34,7 @@ const (
 	DefaultFastModel      = "gemini-3.6-flash"
 	DefaultPrecisionModel = "gemini-3.1-pro-preview"
 
-	phaticLocalSpokenReply                 = "こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。"
+	phaticLocalSpokenReply                 = "こんにちは。今日はこっちから軽い話を振ります。好きなものは、理由をうまく説明できなくても会話の入口になります。最近、少し気になったものはありますか？ 動画でも、音でも、「特にない」でも大丈夫です。"
 	interpretationClarificationSpokenReply = "短い言葉のままでも大丈夫です。こちらからなら、最近気になったものの話か、ゲームや音楽のような軽い話を出せます。今の話を続けるのと、こちらから話すのなら、どちらが楽ですか？ 「わからない」でも大丈夫です。"
 	interpretationListenSpokenReply        = "短い言葉のままでも会話は続けられます。では軽い話題を一つ。音は、同じ曲でも朝と夜で印象が変わることがあります。思いつけば一言、聞くだけでも大丈夫です。"
 	plannerUnavailableSpokenReply          = "今の声は届いています。こちらの返事の準備だけ止まりました。言い直さなくて大丈夫です。続きでも別の話でも、そのままどうぞ。"
@@ -571,6 +571,9 @@ func (agent *vertexAgent) Process(
 			profile.QuestionCooldown = 1
 		}
 		state.Support = compactConversationSupport(profile)
+	}
+	if isProactiveTopicRequest(normalized) {
+		return agent.completeProactiveTopicLocal(uid, state, normalized)
 	}
 
 	plannerStarted := time.Now()
@@ -1655,22 +1658,7 @@ func isStandalonePhaticGreeting(
 		turn.PDF != nil {
 		return false
 	}
-	greeting := strings.ToLower(strings.TrimRightFunc(
-		turn.Utterance,
-		func(value rune) bool {
-			if unicode.IsSpace(value) {
-				return true
-			}
-			switch value {
-			case '。', '．', '.', '、', '，', ',',
-				'！', '!', '？', '?', '…',
-				'ー', '〜', '～', '~':
-				return true
-			default:
-				return false
-			}
-		},
-	))
+	greeting := normalizedLocalRequest(turn.Utterance)
 	switch greeting {
 	case "こんにちは",
 		"こんばんは",
@@ -1683,9 +1671,78 @@ func isStandalonePhaticGreeting(
 	}
 }
 
+func isProactiveTopicRequest(turn VoiceTurn) bool {
+	if passiveAmbientTurn(turn) || turn.PDF != nil {
+		return false
+	}
+	request := normalizedLocalRequest(turn.Utterance)
+	switch request {
+	case "話題を振って", "話題を振ってよ", "話題を振ってください",
+		"話題振って", "話題振ってよ", "話題振ってください",
+		"何か話して", "何か話してよ", "何か話してください",
+		"なんか話して", "なんか話してよ", "なんか話してください",
+		"何かしゃべって", "なんかしゃべって",
+		"そっちから話して", "そちらから話して", "aiから話して",
+		"話すことがない", "何を話せばいい", "何を話したらいい",
+		"話題がない", "話題をください", "話題ちょうだい", "会話を始めて":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedLocalRequest(value string) string {
+	return strings.ToLower(strings.TrimRightFunc(
+		strings.TrimSpace(value),
+		func(character rune) bool {
+			if unicode.IsSpace(character) {
+				return true
+			}
+			switch character {
+			case '。', '．', '.', '、', '，', ',',
+				'！', '!', '？', '?', '…',
+				'ー', '〜', '～', '~':
+				return true
+			default:
+				return false
+			}
+		},
+	))
+}
+
 func (agent *vertexAgent) completePhaticLocal(
 	uid string,
 	state conversationState,
+) (VoiceTurnResult, error) {
+	return agent.completeProactiveLocal(
+		uid,
+		state,
+		phaticLocalSpokenReply,
+		"phatic-local",
+		false,
+	)
+}
+
+func (agent *vertexAgent) completeProactiveTopicLocal(
+	uid string,
+	state conversationState,
+	turn VoiceTurn,
+) (VoiceTurnResult, error) {
+	return agent.completeProactiveLocal(
+		uid,
+		state,
+		proactiveTopicReply(state.Turn),
+		"topic-local",
+		turn.Ambient,
+	)
+}
+
+func (agent *vertexAgent) completeProactiveLocal(
+	uid string,
+	state conversationState,
+	spokenReply string,
+	route string,
+	isolateIntervention bool,
 ) (VoiceTurnResult, error) {
 	decision := ArbiterDecision{
 		Benefit:          0.9,
@@ -1694,6 +1751,13 @@ func (agent *vertexAgent) completePhaticLocal(
 		Confidence:       1,
 		Score:            0.85,
 		Act:              "reflect",
+	}
+	lastIntervention := decision
+	if isolateIntervention {
+		lastIntervention = isolatedStateIntervention(
+			state.LastIntervention,
+			true,
+		)
 	}
 	nextState := conversationState{
 		SessionID:           state.SessionID,
@@ -1704,7 +1768,7 @@ func (agent *vertexAgent) completePhaticLocal(
 		PendingAnswer:       emptyPendingAnswer(),
 		Support:             state.Support,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
-		LastIntervention:    decision,
+		LastIntervention:    lastIntervention,
 	}
 	stateToken, err := agent.sealState(uid, nextState)
 	if err != nil {
@@ -1722,18 +1786,31 @@ func (agent *vertexAgent) completePhaticLocal(
 		ResearchRecords:     []ResearchRecord{},
 		LatentQuestion:      "",
 		ArgumentStructure:   "direct_answer",
-		InterventionPolicy:  "coach",
-		SpokenReply:         phaticLocalSpokenReply,
+		InterventionPolicy:  "answer",
+		SpokenReply:         spokenReply,
 		Confidence:          1,
 		Intervention:        decision,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
 		AnswerContract: answercontract.Metrics{
 			CommitmentFrontPosition: answercontract.PositionAbsent,
 		},
-		Route:              "phatic-local",
+		Route:              route,
 		NeedsClarification: false,
 		StateToken:         stateToken,
 	}, nil
+}
+
+func proactiveTopicReply(turn int) string {
+	switch turn % 4 {
+	case 1:
+		return "今日は小さな選択の話にします。予定のない時間は、何もしないのも一つの過ごし方です。今なら、家でゆっくりするのと、短く外に出るのでは、どちらが楽ですか？ パスでも大丈夫です。"
+	case 2:
+		return "技術の話を一つ。便利な道具ほど、自分で考える余白とのバランスが気になります。今は、便利さと考える余白なら、どちらの話をしてみたいですか？ どちらでもなければパスで大丈夫です。"
+	case 3:
+		return "食べ物の話を一つ。いつもの味には、選ばなくていい気楽さがあります。最近、つい選びやすい食べ物や飲み物はありますか？ なければ『特にない』で大丈夫です。"
+	default:
+		return "じゃあ、私から軽い話を一つ。好きなものは、理由をうまく説明できなくても会話の入口になります。最近、少し気になったものはありますか？ 動画でも、音でも、『特にない』でも大丈夫です。"
+	}
 }
 
 func (agent *vertexAgent) completeCoachOptOutLocal(
@@ -5453,6 +5530,10 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - 質問だけで返して尋問にしない。短く受け取った後、情報、軽い話題、比較、小さな具体例のうち一つをAI側から足す。その後も会話に本当に必要な時だけ、答えの型が一つに決まる短い質問を一問まで返す。「ただ話したい」「直さなくていい」「パス」「別の話」には即座にassistantとして応じ、言い直しを求めない。
 - conversation_data.support_styleはサーバーが決めた短期の会話足場であり、人格や診断ではない。companionでは内容への応答と話題一つをAI側から出し、任意の質問は足さず、受け答え練習にしない。listenでは利用者の直接質問へAから答え、短い情報か話題を一つ足すが任意の質問は足さない。guidedでは内容か話題を一つ出してから、必要時だけ「はい／いいえ」「どちら」「一言なら」のような答えやすい一問にし、「まだ分からない」「どっちでも」「聞くだけ」も許す。lightでは短い自由回答の一問まで、naturalでは普通の会話として一問までにする。
 - KOTAEが通常会話で尋ねた一問への返答は、裏で言い直し課題へ変えない。答えが前置きの後に来ても内容へ普通に応答し、採点、講評、再回答要求をしない。
+- daily、general、creativeの通常会話で、利用者が話題を求めた、何を話せばよいか迷っている、短く相づちした、またはぼやいただけなら、KOTAE側から低開示の具体的な話題を一つ出す。明確な事実質問への直接回答は引き延ばさない。
+- KOTAEから話題を出す時は、短い観察や小話を先に一つ述べ、その話だけで意味が通る答えやすい質問を一問まで添える。選択肢は二つまでとし、「特にない」「分からない」「パス」も自然に選べるようにする。
+- 「はい」「それ」「うん」などの短答は不足や失敗として採点しない。previous_stateから参照先を確定できない短答へ、過去の質問や本人の意味を捏造しない。
+- 通常の雑談は原則二文から四文、七十文字から百四十文字程度で、内容への応答、関連する小話、必要なら質問一問の順にする。本人が聞くだけを望む時は質問を付けず、開示量や難易度を自動で上げない。
 - previous_stateのThoughtStateGraphへ追加すべきgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionの差分をthought_state_deltaにする。
 - conversation_summaryは会話の目的と現在地だけを短く抽象化する。
 - PDFが今回添付された場合だけ、その内容由来の短いdocument_summaryを返す。添付がなければ空文字にする。
@@ -5511,10 +5592,12 @@ Latent Answer Contract:
 - assistance_target=respondentのspoken_replyは本人の答えを引用、復唱、並べ替え、補完せず、答えの型だけを尋ねる短い構造案内にする。本人が言い直した時だけ次へ進む。成功後の音声もサーバー固定文へ置換されるため、本人の回答案、新しい事実、採点、サーバーがphase=expandingで示した一問以外の次の試験を入れない。
 - 明確な問いには、spoken_replyの冒頭で要求されたAを直接返す。問いの復唱、挨拶、自己紹介、前置きを先に置かない。
 - dailyの明確な問いは、必要な内容を落とさない範囲で簡潔にする。
-- 最初のターンが挨拶だけでも、挨拶を反復するだけで終えず、質問、考え途中、ぼやきもそのまま話せる旨を一言添え、spoken_reply全体を二文以内にする。
+- 最初のターンが挨拶だけでも、挨拶を反復するだけで終えず、KOTAE側から低開示の小話を一つ出し、質問、考え途中、ぼやき、パスもそのまま返せる形にする。spoken_reply全体は二文から四文にする。
 - Markdown、箇条書き、URL、SSML、コードブロックを含めない。
 - 利用者へ「努力して」「普通は」のような非難や強制を返さない。受け答え支援では本人の代わりに答えず、要求された型を一つだけ尋ねる。本人がAを先に言えたら、その時点で受け答え支援を閉じ、理由・具体例・最初の一歩を自動で追加質問しない。previous_state.pending_answer.phase=expandingの時だけ、本人が明示的に頼んだ一問として扱い、それ以上は広げない。
 - 「正解」「上手」「訓練」「採点」「やり直して」「結論から言って」を音声で押しつけない。聞き直しは一度だけ自然に小さくし、難しければ言い直しを解いて通常会話へ戻す。「分からない」「まだ決めていない」「話したくない」も有効な返答として扱う。
+- KOTAEは会話練習の道具であり、親友、恋人、治療者を名乗らない。「離れないで」「私だけに話して」のような独占、罪悪感、連続利用、現実の人間関係の代替を促さない。会話を終える、休む、パスする選択を常に尊重する。
+- 氏名、住所、連絡先、病名、資格情報などの機微情報を、利用者がその場で明示的に読み上げを求めない限りspoken_replyへ復唱しない。声量、間、声質、方言、吃音から心理状態や能力を推測しない。
 - research、technical、paper_checkでは不確実性と根拠の限界を明示し、PDFにない事実をPDF由来と断定しない。
 - health、legal、financeでは断定的な診断・法的判断・投資判断をしない。不確実性、最新情報を確認する必要、適切な専門家の境界を短く示す。
 - safetyとして会話へ割り込むのは、生命・身体・重大な権利や資産への緊急性が高い場合だけにする。`

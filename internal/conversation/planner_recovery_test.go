@@ -482,7 +482,7 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 		}
 		if result.Route != "verification-unavailable" ||
 			result.SpokenReply != verificationUnavailableSpokenReply ||
-			strings.Contains(result.SpokenReply, "回答の意味") ||
+			strings.Contains(result.SpokenReply, "意味") ||
 			strings.Contains(result.SpokenReply, "もう一度") ||
 			result.StateToken == "" ||
 			len(fake.calls) != 1 {

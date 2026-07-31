@@ -262,7 +262,7 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		t.Fatalf("welcome called model %d times, want zero", len(fake.calls))
 	}
 	if phaticLocalSpokenReply !=
-		"こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。" {
+		"こんにちは。今日はこっちから軽い話を振ります。好きなものは、理由をうまく説明できなくても会話の入口になります。最近、少し気になったものはありますか？ 動画でも、音でも、「特にない」でも大丈夫です。" {
 		t.Fatalf("unexpected local greeting copy: %q", phaticLocalSpokenReply)
 	}
 	if result.Route != "phatic-local" ||
@@ -272,8 +272,12 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		result.AssistanceTarget != "assistant" ||
 		result.RespondentStage != "none" ||
 		result.ResearchStatus != "none" ||
+		result.Intervention.Act != "reflect" ||
+		result.InterventionPolicy != "answer" ||
 		result.NeedsClarification ||
-		result.StateToken == "" {
+		result.StateToken == "" ||
+		countQuestions(result.SpokenReply) != 1 ||
+		!strings.Contains(result.SpokenReply, "特にない") {
 		t.Fatalf("unexpected welcome result: %#v", result)
 	}
 	for name, value := range map[string]float64{
@@ -310,6 +314,123 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		state.DocumentSummary != "" ||
 		state.PendingAnswer.Active {
 		t.Fatalf("welcome state is not minimal: %#v", state)
+	}
+}
+
+func TestAgentProactiveTopicRequestsUseLocalSafeRotation(t *testing.T) {
+	fake := &fakeGenerator{}
+	agent := newTestAgent(t, fake)
+	const uid = "uid-local-topic-rotation"
+	wantSupport := &conversationSupport{
+		FadingStage:          1,
+		VerifiedFirstAnswers: 1,
+		QuestionCooldown:     2,
+		CompanionOnly:        true,
+	}
+	token, err := agent.sealState(uid, conversationState{
+		Turn: 1,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer:    emptyPendingAnswer(),
+		Support:          wantSupport,
+		LastIntervention: ArbiterDecision{Act: "silent"},
+	})
+	if err != nil {
+		t.Fatalf("seal initial topic state: %v", err)
+	}
+
+	for turn := 0; turn < 4; turn++ {
+		voiceTurn := VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     "話題を振ってください。",
+			StateToken:    token,
+		}
+		if turn > 0 {
+			voiceTurn.Ambient = true
+			voiceTurn.Foreground = true
+		}
+		result, err := agent.Process(context.Background(), uid, voiceTurn)
+		if err != nil {
+			t.Fatalf("topic turn %d: %v", turn, err)
+		}
+		if result.Route != "topic-local" ||
+			result.SpokenReply != proactiveTopicReply(turn+1) ||
+			result.AssistanceTarget != "assistant" ||
+			result.RespondentStage != "none" ||
+			result.CoachPhase != "none" ||
+			result.CoachAction != "none" ||
+			result.Intervention.Act != "reflect" ||
+			result.InterventionPolicy != "answer" ||
+			result.NeedsClarification ||
+			countQuestions(result.SpokenReply) != 1 ||
+			(!strings.Contains(result.SpokenReply, "パス") &&
+				!strings.Contains(result.SpokenReply, "特にない")) {
+			t.Fatalf("unsafe or incomplete local topic turn %d: %#v", turn, result)
+		}
+		next, err := agent.codec.open(uid, result.StateToken)
+		if err != nil {
+			t.Fatalf("open topic state %d: %v", turn, err)
+		}
+		if next.Turn != turn+2 ||
+			next.PendingAnswer.Active ||
+			next.ConversationSummary != "" ||
+			next.DocumentSummary != "" ||
+			!reflect.DeepEqual(next.Support, wantSupport) {
+			t.Fatalf("topic route stored conversational prose: %#v", next)
+		}
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			t.Fatalf("marshal topic state %d: %v", turn, err)
+		}
+		for _, forbidden := range []string{voiceTurn.Utterance, result.SpokenReply} {
+			if bytes.Contains(encoded, []byte(forbidden)) {
+				t.Fatalf("topic prose entered state: %s", encoded)
+			}
+		}
+		token = result.StateToken
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("local topic route called a model %d times", len(fake.calls))
+	}
+}
+
+func TestProactiveTopicRequestEligibilityIsExactAndAuthorityBounded(t *testing.T) {
+	for _, turn := range []VoiceTurn{
+		{Utterance: "話題振ってよ！"},
+		{Utterance: "なんか話して"},
+		{Utterance: "なんか話してください。"},
+		{Utterance: "何かしゃべって"},
+		{Utterance: "なんかしゃべって。"},
+		{Utterance: "何を話せばいい？", Ambient: true, Foreground: true},
+		{Utterance: "AIから話して。", Ambient: true, Foreground: true},
+	} {
+		if !isProactiveTopicRequest(turn) {
+			t.Fatalf("expected local topic request: %#v", turn)
+		}
+	}
+	for _, turn := range []VoiceTurn{
+		{Utterance: "話題を振って", Ambient: true},
+		{Utterance: "この動画について何か話してください"},
+		{Utterance: "話題を変えないで"},
+		{
+			Utterance: "話題を振って",
+			PDF: &InlinePDF{
+				MIMEType: "application/pdf",
+				Data:     []byte("%PDF-1.7"),
+			},
+		},
+	} {
+		if isProactiveTopicRequest(turn) {
+			t.Fatalf("unsafe text matched local topic route: %#v", turn)
+		}
 	}
 }
 
@@ -982,11 +1103,34 @@ func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
 		"簡潔にする",
 		"最初のターンが挨拶だけでも",
 		"挨拶を反復するだけで終えず",
-		"質問、考え途中、ぼやきもそのまま話せる",
-		"spoken_reply全体を二文以内",
+		"KOTAE側から低開示の小話を一つ出し",
+		"質問、考え途中、ぼやき、パスもそのまま返せる",
+		"spoken_reply全体は二文から四文",
 	} {
 		if !strings.Contains(systemInstruction, required) {
 			t.Fatalf("system instruction is missing %q", required)
+		}
+	}
+}
+
+func TestSystemInstructionKeepsProactiveConversationLowPressureAndNonDependent(
+	t *testing.T,
+) {
+	for _, required := range []string{
+		"KOTAE側から低開示の具体的な話題を一つ出す",
+		"短い観察や小話を先に一つ述べ",
+		"選択肢は二つまで",
+		"「特にない」「分からない」「パス」",
+		"短答は不足や失敗として採点しない",
+		"過去の質問や本人の意味を捏造しない",
+		"開示量や難易度を自動で上げない",
+		"親友、恋人、治療者を名乗らない",
+		"独占、罪悪感、連続利用、現実の人間関係の代替を促さない",
+		"機微情報を、利用者がその場で明示的に読み上げを求めない限り",
+		"声量、間、声質、方言、吃音から心理状態や能力を推測しない",
+	} {
+		if !strings.Contains(systemInstruction, required) {
+			t.Fatalf("system instruction is missing proactive safety rule %q", required)
 		}
 	}
 }
@@ -1419,6 +1563,8 @@ func TestAgentCriticRetriesOnlyTransientLowRiskFailure(t *testing.T) {
 			t.Fatalf("Process: %v", err)
 		}
 		if result.Route != "verification-unavailable" ||
+			result.SpokenReply != verificationUnavailableSpokenReply ||
+			result.SpokenReply == plan.SpokenReply ||
 			len(fake.calls) != 3 ||
 			fake.calls[1].model != DefaultFastModel ||
 			fake.calls[2].model != DefaultFastModel ||
@@ -1477,6 +1623,8 @@ func TestAgentCriticRetriesOnlyTransientLowRiskFailure(t *testing.T) {
 		if result.Route != "fast" ||
 			result.SpokenReply != plan.SpokenReply ||
 			len(fake.calls) != 3 ||
+			fake.calls[1].model != DefaultFastModel ||
+			fake.calls[2].model != DefaultFastModel ||
 			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
 			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
 			fake.calls[1].prompt != fake.calls[2].prompt {
@@ -2792,7 +2940,9 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 			} else if result.SpokenReply != verificationUnavailableSpokenReply ||
 				result.Intervention.Act != "reflect" ||
 				result.NeedsClarification ||
-				countQuestions(result.SpokenReply) != 0 {
+				countQuestions(result.SpokenReply) != 0 ||
+				strings.Contains(result.SpokenReply, "もう一度") ||
+				strings.Contains(result.SpokenReply, "意味") {
 				t.Fatalf("intentional critic failure blamed the speaker: %#v", result)
 			}
 		})

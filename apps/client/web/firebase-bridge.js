@@ -2759,6 +2759,7 @@ function confirmBargeIn(
   expectedEpoch,
 ) {
   if (
+    playback.hasStreamedAudio?.() !== true ||
     playback.interrupted ||
     playback !== activePlayback ||
     recording.settled ||
@@ -3388,7 +3389,6 @@ async function finishTurn(serializedSessionState, turnMode) {
         fail(stoppedSessionCode(expectedEpoch));
       }
       playback = createStreamingPlayback(expectedEpoch);
-      startBargeInMonitoring(playback, expectedEpoch);
       try {
         return await awaitVoiceTurnResult(
           liveSession.commit(
@@ -3449,10 +3449,9 @@ async function finishTurn(serializedSessionState, turnMode) {
       fail(stoppedSessionCode(expectedEpoch));
     }
     playback = createStreamingPlayback(expectedEpoch);
-    // Retain corrections spoken while the model is thinking. The guard is
-    // restarted at the first response frame so playback echo cannot confirm
-    // an interruption.
-    startBargeInMonitoring(playback, expectedEpoch);
+    // Barge-in starts only when the first response audio frame is scheduled.
+    // Keeping the track disabled while the model is still thinking prevents
+    // a resumed phrase from aborting an answer that has not begun.
 
     const payload = {
       audioBase64,

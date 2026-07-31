@@ -31,7 +31,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			name: "boolean direct yes", question: "この案に賛成ですか？", answer: "はい、賛成です。",
 			operator: OperatorBoolean, required: slots(SlotPolarity), filled: slots(SlotPolarity),
 			hypotheses: []float64{0.99, 0.01}, position: PositionFirst,
-			calibration: CalibrationCommitted, issue: IssueNone, first: "賛成です",
+			calibration: CalibrationCommitted, issue: IssueNone, first: "はい、賛成です",
 			want: OutcomeKeep,
 		},
 		{
@@ -63,11 +63,11 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			want: OutcomeKeep,
 		},
 		{
-			name: "choice after background", question: "A案とB案ならどちらですか？", answer: "費用を考えると、A案です。",
+			name: "choice after background", question: "A案とB案ならどちらですか？", answer: "費用が低いです。A案です。",
 			operator: OperatorChoice, required: slots(SlotSelection), filled: slots(SlotSelection),
 			hypotheses: []float64{0.96, 0.04}, position: PositionLater,
 			calibration: CalibrationCommitted, issue: IssueBackgroundFirst, first: "A案です",
-			minimal: "A案です", reconstructed: "A案です。費用を考えるとそう判断します。",
+			minimal: "A案です", reconstructed: "A案です。費用が低いです。",
 			meaning: 0.96, gain: 0.28, want: OutcomeRestructure,
 		},
 		{
@@ -194,7 +194,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			position: PositionFirst, calibration: CalibrationCommitted,
 			issue: IssueConditionSeparated, first: "おすすめです",
 			minimal: "初心者ならおすすめです", reconstructed: "初心者ならおすすめです",
-			meaning: 0.97, gain: 0.30, want: OutcomeRestructure,
+			meaning: 0.97, gain: 0.30, want: OutcomeReject,
 		},
 		{
 			name: "one condition branch missing", question: "平日と休日の受付時間は？", answer: "平日は9時からです。",
@@ -248,7 +248,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			issue: IssueInsufficientEvidence, first: "一人には効いた可能性があります",
 			minimal:       "一人の事例",
 			reconstructed: "一人の事例では効いた可能性がありますが、一般化はできません",
-			meaning:       0.95, gain: 0.27, want: OutcomeRestructure,
+			meaning:       0.95, gain: 0.27, want: OutcomeReject,
 		},
 		{
 			name: "research causal claim cannot change certainty", question: "この介入は改善すると言えますか？", answer: "相関があったので改善します。",
@@ -265,7 +265,7 @@ func TestJapaneseAnswerToAnswerInvariantHardCases(t *testing.T) {
 			operator: OperatorEvidence, required: slots(SlotEvidence, SlotUncertainty),
 			filled: slots(SlotEvidence, SlotUncertainty), hypotheses: []float64{0.97, 0.03},
 			position: PositionFirst, calibration: CalibrationUncertain,
-			issue: IssueNone, first: "まだ有効とは断定できません",
+			issue: IssueNone, first: "平均は上がりましたが、まだ有効とは断定できません",
 			want: OutcomeKeep,
 		},
 		{

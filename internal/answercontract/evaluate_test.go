@@ -111,6 +111,189 @@ func TestEvaluateRejectsFabricatedFirstCommitment(t *testing.T) {
 	}
 }
 
+func TestEvaluateRejectsCommitmentReportedFirstWhenItAppearsAfterAPreface(t *testing.T) {
+	contract := validContract()
+	contract.QuestionFrame.Operator = OperatorState
+	contract.QuestionFrame.Subject = "日本の首都"
+	contract.QuestionFrame.RequiredSlots = []RequiredSlot{SlotState}
+	contract.CommitmentFront.FirstCommitment = "東京です"
+	contract.CommitmentFront.FilledSlots = []RequiredSlot{SlotState}
+	contract.CommitmentFront.PositionClass = PositionFirst
+	contract.CommitmentFront.Issue = IssueNone
+	contract.CounterfactualRepair.MinimalAnswer = "東京です"
+	contract.CounterfactualRepair.ReconstructedAnswer = "前置きです。東京です。"
+
+	assessment, err := Evaluate(contract, "前置きです。東京です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject || assessment.TargetSatisfied {
+		t.Fatalf("later commitment spoof passed: %+v", assessment)
+	}
+}
+
+func TestEvaluateNeverKeepsALaterAnswerWithoutAnAcceptedFrontRepair(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueBackgroundFirst
+	contract.CounterfactualRepair.RepairGain = 0
+
+	assessment, err := Evaluate(contract, "前置きです。賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome == OutcomeKeep || assessment.TargetSatisfied {
+		t.Fatalf("later answer was kept: %+v", assessment)
+	}
+}
+
+func TestEvaluateRejectsRepairThatDoesNotMoveAToTheFront(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueBackgroundFirst
+	contract.CounterfactualRepair.MinimalAnswer = "賛成です"
+	contract.CounterfactualRepair.ReconstructedAnswer = "前置きです。賛成です。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(contract, "前置きです。賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject || assessment.RepairAccepted {
+		t.Fatalf("non-fronting repair passed: %+v", assessment)
+	}
+}
+
+func TestEvaluateRejectsLaterRepairWhoseClaimedMinimumIsStillBackground(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueBackgroundFirst
+	contract.CounterfactualRepair.MinimalAnswer = "前置きです"
+	contract.CounterfactualRepair.ReconstructedAnswer = "前置きです。賛成です。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(contract, "前置きです。賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject || assessment.RepairAccepted {
+		t.Fatalf("background-first repair passed: %+v", assessment)
+	}
+}
+
+func TestEvaluateBlockingIssueOutranksOtherwiseAcceptedRepair(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueContradiction
+	contract.CounterfactualRepair.MinimalAnswer = "賛成です"
+	contract.CounterfactualRepair.ReconstructedAnswer = "賛成です。前置きです。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(contract, "前置きです。賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject {
+		t.Fatalf("blocking issue was repaired into publication: %+v", assessment)
+	}
+}
+
+func TestEvaluateCannotRestructureMissingRequiredSlots(t *testing.T) {
+	contract := validContract()
+	contract.QuestionFrame.RequiredSlots = []RequiredSlot{
+		SlotPolarity,
+		SlotCause,
+	}
+	contract.CommitmentFront.FilledSlots = []RequiredSlot{SlotPolarity}
+	contract.CommitmentFront.TargetCoverage = 0.5
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueMissingRequiredSlot
+	contract.CounterfactualRepair.MinimalAnswer = "賛成です"
+	contract.CounterfactualRepair.ReconstructedAnswer = "賛成です。前置きです。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(contract, "前置きです。賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome == OutcomeRestructure || assessment.TargetSatisfied {
+		t.Fatalf("missing slot was repaired by reordering: %+v", assessment)
+	}
+}
+
+func TestEvaluateRejectsRepairThatAddsAnUnprotectedJapaneseClaim(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueBackgroundFirst
+	contract.CounterfactualRepair.MinimalAnswer = "賛成です"
+	contract.CounterfactualRepair.ReconstructedAnswer = "賛成です。実績は十分です。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(contract, "費用を考えると、賛成です。")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject || assessment.RepairAccepted {
+		t.Fatalf("new Japanese claim passed preservation: %+v", assessment)
+	}
+}
+
+func TestEvaluateRejectsClausePermutationThatChangesReferenceOrder(t *testing.T) {
+	contract := validContract()
+	contract.CommitmentFront.FirstCommitment = "A案です"
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueBackgroundFirst
+	contract.CounterfactualRepair.MinimalAnswer = "A案です"
+	contract.CounterfactualRepair.ReconstructedAnswer =
+		"A案です。それが理由です。B案は高いです。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(
+		contract,
+		"B案は高いです。それが理由です。A案です。",
+	)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeReject || assessment.RepairAccepted {
+		t.Fatalf("reference-changing permutation passed: %+v", assessment)
+	}
+}
+
+func TestEvaluateAcceptsStableFrontMoveForMultiClauseCommitment(t *testing.T) {
+	contract := validContract()
+	contract.QuestionFrame.Operator = OperatorState
+	contract.QuestionFrame.Subject = "日本の首都"
+	contract.QuestionFrame.RequiredSlots = []RequiredSlot{SlotState}
+	contract.CommitmentFront.FirstCommitment = "答えは、東京です"
+	contract.CommitmentFront.FilledSlots = []RequiredSlot{SlotState}
+	contract.CommitmentFront.PositionClass = PositionLater
+	contract.CommitmentFront.Issue = IssueBackgroundFirst
+	contract.CounterfactualRepair.MinimalAnswer = "答えは、東京です"
+	contract.CounterfactualRepair.ReconstructedAnswer =
+		"答えは、東京です。背景です。補足です。"
+	contract.CounterfactualRepair.MeaningPreservationConfidence = 0.99
+	contract.CounterfactualRepair.RepairGain = 0.40
+
+	assessment, err := Evaluate(
+		contract,
+		"背景です。答えは、東京です。補足です。",
+	)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if assessment.Outcome != OutcomeRestructure ||
+		!assessment.RepairAccepted {
+		t.Fatalf("stable multi-clause front move was rejected: %+v", assessment)
+	}
+}
+
 func TestEvaluateNeverKeepsPartialRequiredSlotCoverage(t *testing.T) {
 	contract := validContract()
 	contract.QuestionFrame.RequiredSlots = []RequiredSlot{

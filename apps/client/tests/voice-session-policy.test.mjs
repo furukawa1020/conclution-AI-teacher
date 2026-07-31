@@ -187,28 +187,22 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
   assert.ok(encodeAt > joinedAt);
 });
 
-test("empty capture drops authority and bounds the foreground microphone", async () => {
+test("empty capture drops authority and keeps the bounded session alive", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
   );
-  const marker = client.indexOf(
-    "if turn_mode == VoiceTurnMode::Intentional {",
-  );
+  const marker = client.indexOf("A silent bounded window carries no speech");
   assert.notEqual(marker, -1);
-  const rollover = client.slice(marker, marker + 1_400);
+  const rollover = client.slice(marker, marker + 1_300);
 
   assert.match(
     rollover,
-    /turn_mode == VoiceTurnMode::Intentional[\s\S]*arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
-  );
-  assert.match(
-    rollover,
-    /\}\s*else\s*\{[\s\S]*cloud::stop_session\(\);[\s\S]*VoiceState::Ready/u,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,/u,
   );
   assert.doesNotMatch(
-    client,
-    /intentional_retry_available/u,
+    rollover,
+    /cloud::stop_session\(\)|VoiceState::Ready|VoiceTurnMode::Intentional/u,
   );
 });
 
@@ -282,7 +276,7 @@ test("automatic rearm is foreground and only a fresh gesture is intentional", as
   );
 });
 
-test("an authenticated silent foreground miss stops instead of looping", async () => {
+test("an authenticated silent foreground miss rearms without ending the session", async () => {
   const client = await readFile(
     new URL("../src/main.rs", import.meta.url),
     "utf8",
@@ -293,12 +287,17 @@ test("an authenticated silent foreground miss stops instead of looping", async (
   assert.notEqual(submitEnd, -1);
   const submit = client.slice(submitStart, submitEnd);
   const missAt = submit.indexOf("silent_recognition_miss(&result.route)");
-  const finalRearmAt = submit.lastIndexOf("arm_listening(");
+  const interruptedAt = submit.indexOf("if result.interrupted", missAt);
   assert.ok(missAt >= 0);
-  assert.ok(finalRearmAt > missAt);
+  assert.ok(interruptedAt > missAt);
+  const miss = submit.slice(missAt, interruptedAt);
   assert.match(
-    submit.slice(missAt, finalRearmAt),
-    /cloud::stop_session\(\);[\s\S]*VoiceState::Ready[\s\S]*return;/u,
+    miss,
+    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,[\s\S]*return;/u,
+  );
+  assert.doesNotMatch(
+    miss,
+    /cloud::stop_session\(\)|VoiceState::Ready/u,
   );
   assert.match(
     client,
@@ -928,10 +927,14 @@ test("normal live capture sends zero PCM before confirmation and preserves the s
   ) {
     gate.push(filledPcmFrame(timestamp / 20 + 1), timestamp);
   }
-  assert.equal(sent.length, 55);
+  const expectedFrameCount =
+    20 +
+    VOICE_SESSION_LIMITS.endOfTurnSilenceMs /
+      BARGE_PCM_LIMITS.frameDurationMs;
+  assert.equal(sent.length, expectedFrameCount);
   assert.deepEqual(
     sent.map((frame) => new Uint8Array(frame)[0]),
-    Array.from({ length: 55 }, (_, index) => index + 1),
+    Array.from({ length: expectedFrameCount }, (_, index) => index + 1),
     "the 300 ms lead-in and shortest valid speech turn must be sent once, in order",
   );
 });
@@ -1361,11 +1364,11 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     providerEndpointAt: 1_300,
   };
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 1_699 }),
+    shouldCommitHybridEndpoint({ ...short, now: 2_199 }),
     false,
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...short, now: 1_700 }),
+    shouldCommitHybridEndpoint({ ...short, now: 2_200 }),
     true,
   );
   assert.equal(
@@ -1392,14 +1395,14 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
-      now: 4_199,
+      now: 4_699,
     }),
     false,
   );
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
-      now: 4_200,
+      now: 4_700,
     }),
     true,
   );
@@ -1647,8 +1650,8 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
 });
 
 test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
-  assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 700);
-  assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 1_700);
+  assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 1_200);
+  assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 2_200);
   const startedAt = 20_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -1700,7 +1703,7 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
+test("interrupt VAD preserves 2.2 seconds for reflective speech", () => {
   const startedAt = 24_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -1739,13 +1742,17 @@ test("interrupt VAD preserves 1.7 seconds for reflective speech", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("barge-in covers model wait and preserves foreground response mode", async () => {
+test("barge-in starts with audible output and preserves foreground response mode", async () => {
   const [bridge, client] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
   ]);
   const confirmAt = bridge.indexOf("function confirmBargeIn(");
   const confirm = bridge.slice(confirmAt, confirmAt + 7_000);
+  assert.match(
+    confirm,
+    /playback\.hasStreamedAudio\?\.\(\) !== true/u,
+  );
   assert.match(
     confirm,
     /if \(!playback\.finalReceived && activeRequestController\)/u,
@@ -1799,9 +1806,9 @@ test("barge-in covers model wait and preserves foreground response mode", async 
   const finishAt = bridge.indexOf("async function finishTurn(");
   const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
   const finish = bridge.slice(finishAt, finishEnd);
-  assert.equal(
-    finish.match(/startBargeInMonitoring\(playback, expectedEpoch\)/gu)?.length,
-    2,
+  assert.doesNotMatch(
+    finish,
+    /startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
   assert.ok(
     finish.indexOf('stopCode === "session_expired"') <
@@ -2221,8 +2228,8 @@ test("a watchdog reports synchronous expiry instead of rearming a stopped sessio
   assert.equal(timerCreated, false);
 });
 
-test("VAD confirms 120 ms of voice then ends after 700 ms silence", () => {
-  assert.equal(VOICE_SESSION_LIMITS.endOfTurnSilenceMs, 700);
+test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
+  assert.equal(VOICE_SESSION_LIMITS.endOfTurnSilenceMs, 1_200);
   const startedAt = 1_000;
   let state = createVadState(startedAt);
   const confirmationFrames =
@@ -2268,10 +2275,10 @@ test("VAD confirms 120 ms of voice then ends after 700 ms silence", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("VAD gives a reflective utterance 1.7 seconds to continue", () => {
+test("VAD gives a reflective utterance 2.2 seconds to continue", () => {
   assert.equal(
     VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
-    1_700,
+    2_200,
   );
   const startedAt = 5_000;
   let state = createVadState(startedAt);

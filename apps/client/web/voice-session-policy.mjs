@@ -1,11 +1,11 @@
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
-  endOfTurnSilenceMs: 700,
-  reflectiveEndOfTurnSilenceMs: 1_700,
-  reflectiveSpeechSpanMs: 2_400,
-  hybridEndpointSilenceMs: 700,
-  hybridReflectiveEndpointSilenceMs: 1_700,
+  endOfTurnSilenceMs: 1_200,
+  reflectiveEndOfTurnSilenceMs: 2_200,
+  reflectiveSpeechSpanMs: 1_600,
+  hybridEndpointSilenceMs: 1_200,
+  hybridReflectiveEndpointSilenceMs: 2_200,
   hybridEndpointAgreementWindowMs: 2_000,
   // A voice candidate must either reach the 120 ms confirmation threshold
   // promptly or be discarded. This also bounds unconfirmed room audio before

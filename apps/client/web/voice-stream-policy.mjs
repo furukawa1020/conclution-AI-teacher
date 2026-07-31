@@ -17,9 +17,9 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   guardMs: 320,
   intervalMs: 40,
   maximumCaptureMs: 55_000,
-  reflectiveSilenceMs: 1_700,
-  reflectiveSpeechMs: 2_400,
-  trailingSilenceMs: 700,
+  reflectiveSilenceMs: 2_200,
+  reflectiveSpeechMs: 1_600,
+  trailingSilenceMs: 1_200,
 });
 
 export const VOICE_LIVE_LIMITS = Object.freeze({

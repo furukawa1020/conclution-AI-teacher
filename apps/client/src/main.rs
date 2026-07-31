@@ -54,7 +54,7 @@ impl VoiceState {
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
             Self::Thinking => {
-                "訂正を受けるためマイクは端末内で待機中　話せば今の処理を止める"
+                "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
             }
             Self::Speaking => {
                 "返事を止めて訂正できる　マイクは端末内で割り込みだけを判定"
@@ -572,32 +572,26 @@ fn arm_listening(
                     caption,
                 );
             } else {
-                if turn_mode == VoiceTurnMode::Intentional {
-                    // The explicit gesture authorizes only this finite
-                    // recording window. One bounded replacement may expect a
-                    // reply, but never inherits intentional-turn authority.
-                    arm_listening(
-                        operation,
-                        false,
-                        VoiceTurnMode::Foreground,
-                        voice_state,
-                        generation,
-                        session_state,
-                        detected_domain,
-                        route,
-                        needs_paper,
-                        research_status,
-                        research_records,
-                        document_info,
-                        caption,
-                    );
-                } else {
-                    // A second silent window ends the microphone session.
-                    // Noise must not keep a foreground capture alive forever.
-                    cloud::stop_session();
-                    document_info.set(None);
-                    voice_state.set(VoiceState::Ready);
-                }
+                // A silent bounded window carries no speech and consumes no
+                // conversational turn. Keep the explicitly opened session
+                // alive in foreground mode; the independent three-minute
+                // idle and thirty-minute absolute clocks remain terminal.
+                // Automatic windows never inherit intentional authority.
+                arm_listening(
+                    operation,
+                    false,
+                    VoiceTurnMode::Foreground,
+                    voice_state,
+                    generation,
+                    session_state,
+                    detected_domain,
+                    route,
+                    needs_paper,
+                    research_status,
+                    research_records,
+                    document_info,
+                    caption,
+                );
             }
         }
     });
@@ -756,12 +750,25 @@ fn submit_turn(
         if turn_mode == VoiceTurnMode::Foreground
             && silent_recognition_miss(&result.route)
         {
-            // A VAD false positive followed by an STT miss is terminal for
-            // this automatic window. Requiring a fresh gesture prevents a
-            // silent capture/upload loop while keeping recognized follow-ups
-            // conversational.
-            cloud::stop_session();
-            voice_state.set(VoiceState::Ready);
+            // A provider-authenticated STT miss is a no-op turn, not a reason
+            // to end the conversation. Continue in foreground mode without
+            // granting intentional authority; the independent idle,
+            // absolute-session, and rate limits keep retries bounded.
+            arm_listening(
+                operation,
+                false,
+                VoiceTurnMode::Foreground,
+                voice_state,
+                generation,
+                session_state,
+                detected_domain,
+                route,
+                needs_paper,
+                research_status,
+                research_records,
+                document_info,
+                caption,
+            );
             return;
         }
         if result.interrupted {
@@ -1327,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn only_server_authenticated_silent_recognition_routes_end_foreground_capture() {
+    fn only_server_authenticated_silent_recognition_routes_trigger_no_op_rearm() {
         assert!(silent_recognition_miss("stt-silent-no-speech"));
         assert!(silent_recognition_miss("stt-silent-low-confidence"));
         assert!(!silent_recognition_miss("stt-clarify-no-speech"));

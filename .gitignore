@@ -1,6 +1,7 @@
 # Local tools and generated artifacts
 .tools/
 .cache/
+.tmp/
 .gocache/
 .gocache-*/
 .tmp-go-cache-*/

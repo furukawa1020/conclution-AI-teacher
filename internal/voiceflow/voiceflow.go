@@ -805,8 +805,8 @@ func (p *Pipeline) processLive(
 			)
 		}
 		if !adoptedSpeculation {
-			// Chirp 3's confidence field is not a calibrated utterance score.
-			// Preserve the recognized text bounds and let the audited
+			// Streaming recognition may omit an utterance-level confidence
+			// score. Preserve the recognized text bounds and let the audited
 			// conversation agent handle semantic ambiguity instead of applying
 			// the buffered recognizer's fixed confidence gate.
 			conversationStarted := time.Now()

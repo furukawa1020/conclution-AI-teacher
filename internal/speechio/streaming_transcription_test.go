@@ -13,7 +13,7 @@ import (
 func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 	t.Parallel()
 	stream := &fakeStreamingRecognizeClient{}
-	service := streamingTestService(stream, "chirp_3")
+	service := streamingTestService(stream, "latest_long")
 	session, err := service.OpenStreamingTranscription(context.Background())
 	if err != nil || session == nil {
 		t.Fatalf("open: session=%v err=%v", session, err)
@@ -37,7 +37,7 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 		explicit.AudioChannelCount != StreamingInputChannelCount {
 		t.Fatalf("decoding=%+v", explicit)
 	}
-	if config.Config.Model != "chirp_3" ||
+	if config.Config.Model != "latest_long" ||
 		len(config.Config.LanguageCodes) != 1 ||
 		config.Config.LanguageCodes[0] != "ja-JP" ||
 		config.Config.Features == nil ||
@@ -46,7 +46,7 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 		!config.StreamingFeatures.InterimResults ||
 		!config.StreamingFeatures.EnableVoiceActivityEvents ||
 		config.StreamingFeatures.EndpointingSensitivity !=
-			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_SHORT {
+			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {
 		t.Fatalf("recognition config=%+v", config)
 	}
 }
@@ -60,7 +60,7 @@ func TestStreamingRecognitionConfigUsesShortEndpointingOnlyForChirp3(t *testing.
 			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_SHORT {
 		t.Fatalf("chirp config=%+v", chirp)
 	}
-	long := streamingRecognitionConfigRequest("recognizer", "long").
+	long := streamingRecognitionConfigRequest("recognizer", "latest_long").
 		GetStreamingConfig()
 	if long.StreamingFeatures.EndpointingSensitivity !=
 		speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {

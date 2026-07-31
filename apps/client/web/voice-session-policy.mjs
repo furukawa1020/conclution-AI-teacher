@@ -195,6 +195,7 @@ export function createSessionClock({
 
   let startedAt = null;
   let lastSpeechAt = null;
+  let responseActive = false;
 
   function currentTime() {
     return finiteTimestamp(now(), "clock");
@@ -204,6 +205,7 @@ export function createSessionClock({
     if (startedAt === null) return null;
     if (timestamp - startedAt >= maximumLimitMs) return "maximum";
     if (
+      !responseActive &&
       lastSpeechAt !== null &&
       timestamp - lastSpeechAt >= idleLimitMs
     ) {
@@ -239,6 +241,28 @@ export function createSessionClock({
       }
       return Object.freeze({ expiry: null, ok: true });
     },
+    beginResponse() {
+      const timestamp = currentTime();
+      const expiry = expiryAt(timestamp);
+      if (startedAt === null || expiry !== null) {
+        return Object.freeze({ expiry: expiry ?? "maximum", ok: false });
+      }
+      responseActive = true;
+      return Object.freeze({ expiry: null, ok: true });
+    },
+    completeResponse() {
+      const timestamp = currentTime();
+      if (startedAt === null || !responseActive) {
+        return Object.freeze({ expiry: "maximum", ok: false });
+      }
+      if (timestamp - startedAt >= maximumLimitMs) {
+        responseActive = false;
+        return Object.freeze({ expiry: "maximum", ok: false });
+      }
+      responseActive = false;
+      lastSpeechAt = timestamp;
+      return Object.freeze({ expiry: null, ok: true });
+    },
     check() {
       const expiry = expiryAt(currentTime());
       return Object.freeze({ expiry, ok: expiry === null });
@@ -248,7 +272,7 @@ export function createSessionClock({
       const timestamp = currentTime();
       const maximumRemaining = maximumLimitMs - (timestamp - startedAt);
       const idleRemaining =
-        lastSpeechAt === null
+        responseActive || lastSpeechAt === null
           ? maximumRemaining
           : idleLimitMs - (timestamp - lastSpeechAt);
       return Math.max(0, Math.min(maximumRemaining, idleRemaining));
@@ -256,9 +280,10 @@ export function createSessionClock({
     reset() {
       startedAt = null;
       lastSpeechAt = null;
+      responseActive = false;
     },
     snapshot() {
-      return Object.freeze({ lastSpeechAt, startedAt });
+      return Object.freeze({ lastSpeechAt, responseActive, startedAt });
     },
   });
 }

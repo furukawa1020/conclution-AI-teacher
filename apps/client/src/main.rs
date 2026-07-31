@@ -309,7 +309,7 @@ enum FinishTurnError {
 mod cloud {
     use super::{
         BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, session_stop_pauses,
+        VoiceTurnMode, VoiceTurnResult, session_stop_pauses, valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -506,9 +506,36 @@ mod cloud {
         mut generation: Signal<u64>,
     ) -> Option<Rc<VoiceSessionPausedListener>> {
         let window = web_sys::window()?;
-        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(reason) = js_sys::Reflect::get(&detail, &JsValue::from_str("reason")) else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(reason) = reason.as_string() else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            if !valid_voice_pause_metadata(&reason, version, keys.length()) {
+                return;
+            }
+
             let current_state = *voice_state.peek();
             if session_stop_pauses(current_state) {
+                if stop_session_js().is_err() {
+                    return;
+                }
                 let next = generation.peek().wrapping_add(1);
                 generation.set(next);
                 // The opaque encrypted conversation state is intentionally
@@ -1019,6 +1046,15 @@ const fn session_stop_pauses(state: VoiceState) -> bool {
     !matches!(state, VoiceState::Ready | VoiceState::Paused)
 }
 
+const fn valid_voice_pause_metadata(reason: &str, version: f64, field_count: u32) -> bool {
+    field_count == 2
+        && version == 1.0
+        && matches!(
+            reason.as_bytes(),
+            b"idle" | b"maximum" | b"hidden" | b"pagehide" | b"microphone_lost"
+        )
+}
+
 fn silent_recognition_miss(route: &str) -> bool {
     matches!(route, "stt-silent-no-speech" | "stt-silent-low-confidence")
 }
@@ -1502,6 +1538,7 @@ mod tests {
     use super::{
         CoachAction, CoachPhase, CoachState, VoiceState, VoiceTurnMode, session_stop_pauses,
         silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
+        valid_voice_pause_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -1611,6 +1648,18 @@ mod tests {
         assert!(session_stop_pauses(VoiceState::Thinking));
         assert!(session_stop_pauses(VoiceState::Speaking));
         assert!(session_stop_pauses(VoiceState::Error("temporary")));
+    }
+
+    #[test]
+    fn pause_notifications_accept_only_fixed_content_free_metadata() {
+        for reason in ["idle", "maximum", "hidden", "pagehide", "microphone_lost"] {
+            assert!(valid_voice_pause_metadata(reason, 1.0, 2), "{reason}");
+        }
+
+        assert!(!valid_voice_pause_metadata("request_cancelled", 1.0, 2));
+        assert!(!valid_voice_pause_metadata("idle", 2.0, 2));
+        assert!(!valid_voice_pause_metadata("idle", 1.0, 3));
+        assert!(!valid_voice_pause_metadata("", 1.0, 2));
     }
 
     #[test]

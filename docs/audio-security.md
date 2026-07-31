@@ -49,9 +49,9 @@ STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会�
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
 - AI処理中と合成音声の再生中も、利用者が開始した会話セッション内では訂正・割り込みを受けるためマイクトラックを有効にする。端末内VADが確認する前の音声は送信せず、確認した割り込みだけをForeground turnとして送る
 - 確認前PCMはAudioWorklet内だけに保持し、通常発話は最大25 frame、割り込みは最大20 frameに固定する。VAD確認後はAudioContextのsample-clock cutoff、session generation、連続sequenceを検証し、credit制御でMessagePortの未処理数も固定する。turn確定は全PCMの`sealed`確認後だけ許可する
-- 割り込み待機を含むセッション全体を3分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する
+- 割り込み待機を含むセッション全体を3分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。ただし検証済み応答の生成・再生中は3分のidle判定だけを保留し、30分の絶対上限は維持する
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
-- 無発話が3分続いた時、または開始から30分経過した時にセッションを終了する
+- 応答を最後まで再生した時点から次の3分を数え直す。ページ非表示、`pagehide`、マイク喪失は応答中でも直ちに停止する
 - 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、PDFは7 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする
 - 会話状態とPDFはJavaScript変数にだけ保持し、localStorageへ保存しない。Firebaseの匿名認証だけは`browserSessionPersistence`を使う
 
@@ -177,7 +177,7 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - draft自身のLACを偽装しても、独立監査と決定論的判定を迂回できない
 - PDF・高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
-- タブ非表示、pagehide、3分の無発話、30分の絶対上限、マイクtrack喪失で直ちにマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る
+- タブ非表示、pagehide、3分の無発話、30分の絶対上限、マイクtrack喪失でマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る。Rust側は固定reason・version以外の通知を拒否し、通知を受けても停止処理を冪等に再実行してからPausedを表示する
 - Pausedでは暗号化済みsession stateを消さず、明示的な再開操作だけがIntentionalとなる。Foreground再待受は既存のlive trackだけを再利用し、別マイクを自動取得しない
 - 30秒の空captureと認証済みSTT no-speechはForegroundで再待受し、Intentional権限を継承しない。確定発話の送信失敗を自動再送しない
 - 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待ち、1turnの55秒上限は維持する

@@ -467,6 +467,36 @@ function markSessionSpeech(expectedEpoch) {
   return ensureActiveSession(expectedEpoch);
 }
 
+function beginSessionResponse(expectedEpoch) {
+  if (!ensureActiveSession(expectedEpoch)) {
+    return false;
+  }
+  const status = sessionClock.beginResponse();
+  if (!status.ok) {
+    stopSession(status.expiry ?? "maximum");
+    return false;
+  }
+  if (!sessionExpiryWatchdog.arm()) {
+    return false;
+  }
+  return expectedEpoch === sessionEpoch && sessionClock.isStarted();
+}
+
+function completeSessionResponse(expectedEpoch) {
+  if (expectedEpoch !== sessionEpoch || !sessionClock.isStarted()) {
+    return false;
+  }
+  const status = sessionClock.completeResponse();
+  if (!status.ok) {
+    stopSession(status.expiry ?? "maximum");
+    return false;
+  }
+  if (!sessionExpiryWatchdog.arm()) {
+    return false;
+  }
+  return ensureActiveSession(expectedEpoch);
+}
+
 function hasLiveAudioTrack(stream) {
   return Boolean(
     stream &&
@@ -3413,6 +3443,7 @@ async function finishTurn(serializedSessionState, turnMode) {
   let liveSession;
   let playback;
   let requestController;
+  let responseClockActive = false;
   let turnTimedOut = false;
   const turnDeadlineAt =
     performance.now() + VOICE_TURN_CLIENT_TIMEOUT_MS;
@@ -3446,6 +3477,10 @@ async function finishTurn(serializedSessionState, turnMode) {
     if (capture.blob.size > AUDIO_MAX_BYTES) {
       fail("voice_turn_too_large");
     }
+    if (!beginSessionResponse(expectedEpoch)) {
+      fail(stoppedSessionCode(expectedEpoch));
+    }
+    responseClockActive = true;
 
     documentForTurn = pendingDocument;
     if (documentForTurn) {
@@ -3497,6 +3532,10 @@ async function finishTurn(serializedSessionState, turnMode) {
           expectedEpoch,
         );
         liveSession.recordCompletion();
+        if (!completeSessionResponse(expectedEpoch)) {
+          fail(stoppedSessionCode(expectedEpoch));
+        }
+        responseClockActive = false;
         return Object.freeze({
           ...completed.finalResult,
           interrupted: playback.interrupted,
@@ -3599,6 +3638,10 @@ async function finishTurn(serializedSessionState, turnMode) {
       () => requestController.abort(),
     );
     await awaitValidatedPlaybackCompletion(playback, expectedEpoch);
+    if (!completeSessionResponse(expectedEpoch)) {
+      fail(stoppedSessionCode(expectedEpoch));
+    }
+    responseClockActive = false;
     return Object.freeze({
       ...completed.finalResult,
       interrupted: playback.interrupted,
@@ -3627,6 +3670,11 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     throw error;
   } finally {
+    if (responseClockActive) {
+      // Provider/network failures must not leave idle expiry suspended. If
+      // the session was already stopped this is a harmless no-op.
+      completeSessionResponse(expectedEpoch);
+    }
     finishGate.release(finishToken);
     audioBase64 = "";
     if (activeRequestController === requestController) {

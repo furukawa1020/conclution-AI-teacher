@@ -1074,6 +1074,13 @@ test("finite lifecycle stops pause Rust while preserving opaque session state", 
   );
   const listenerEnd = client.indexOf("\n    pub fn stop_session()", listenerStart);
   const listener = client.slice(listenerStart, listenerEnd);
+  const metadataAt = listener.indexOf("valid_voice_pause_metadata(");
+  const cleanupAt = listener.indexOf("stop_session_js()");
+  const pausedAt = listener.indexOf("voice_state.set(VoiceState::Paused)");
+  assert.ok(metadataAt >= 0);
+  assert.ok(cleanupAt > metadataAt);
+  assert.ok(pausedAt > cleanupAt);
+  assert.match(listener, /keys\.length\(\)/u);
   assert.match(listener, /session_stop_pauses\(current_state\)/u);
   assert.match(listener, /generation\.set\(next\)/u);
   assert.match(listener, /voice_state\.set\(VoiceState::Paused\)/u);
@@ -3039,6 +3046,77 @@ test("idle and absolute session expiries are checked at their boundaries", () =>
     expiry: "maximum",
     ok: false,
   });
+});
+
+test("an active response defers only idle expiry until playback completes", () => {
+  let now = 20_000;
+  const clock = createSessionClock({ now: () => now });
+  assert.deepEqual(clock.begin(), { expiry: null, ok: true });
+  assert.deepEqual(clock.beginResponse(), { expiry: null, ok: true });
+
+  now += VOICE_SESSION_LIMITS.idleSessionLimitMs;
+  assert.deepEqual(clock.check(), { expiry: null, ok: true });
+  assert.equal(clock.snapshot().responseActive, true);
+  assert.ok(clock.millisecondsUntilExpiry() > 0);
+
+  assert.deepEqual(clock.completeResponse(), { expiry: null, ok: true });
+  assert.equal(clock.snapshot().lastSpeechAt, now);
+  assert.equal(clock.snapshot().responseActive, false);
+
+  now += VOICE_SESSION_LIMITS.idleSessionLimitMs - 1;
+  assert.deepEqual(clock.check(), { expiry: null, ok: true });
+  now += 1;
+  assert.deepEqual(clock.check(), { expiry: "idle", ok: false });
+
+  now = 2_000_000;
+  const absoluteClock = createSessionClock({ now: () => now });
+  assert.deepEqual(absoluteClock.begin(), { expiry: null, ok: true });
+  assert.deepEqual(absoluteClock.beginResponse(), { expiry: null, ok: true });
+  now += VOICE_SESSION_LIMITS.maximumSessionMs;
+  assert.deepEqual(absoluteClock.check(), { expiry: "maximum", ok: false });
+  assert.deepEqual(absoluteClock.completeResponse(), {
+    expiry: "maximum",
+    ok: false,
+  });
+});
+
+test("finishTurn holds the idle clock through validated playback only", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function finishTurn(");
+  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const finish = bridge.slice(start, end);
+
+  const beginAt = finish.indexOf("beginSessionResponse(expectedEpoch)");
+  const liveDrainAt = finish.indexOf(
+    "await awaitValidatedPlaybackCompletion(\n          playback,\n          expectedEpoch,\n        )",
+  );
+  const liveCompleteAt = finish.indexOf(
+    "completeSessionResponse(expectedEpoch)",
+    liveDrainAt,
+  );
+  const httpDrainAt = finish.lastIndexOf(
+    "await awaitValidatedPlaybackCompletion(playback, expectedEpoch)",
+  );
+  const httpCompleteAt = finish.indexOf(
+    "completeSessionResponse(expectedEpoch)",
+    httpDrainAt,
+  );
+  const failureCleanupAt = finish.indexOf(
+    "if (responseClockActive)",
+    httpCompleteAt,
+  );
+
+  assert.ok(beginAt >= 0);
+  assert.ok(liveDrainAt > beginAt);
+  assert.ok(liveCompleteAt > liveDrainAt);
+  assert.ok(httpDrainAt > liveCompleteAt);
+  assert.ok(httpCompleteAt > httpDrainAt);
+  assert.ok(failureCleanupAt > httpCompleteAt);
 });
 
 test("expired speech cannot revive a session clock", () => {

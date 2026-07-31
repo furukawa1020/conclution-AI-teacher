@@ -290,6 +290,88 @@ func TestAgentPendingCoachDirectQuestionEscapesToAssistant(t *testing.T) {
 	}
 }
 
+func TestAgentPendingCoachHonorsExplicitOptOutWithoutCallingAModel(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		utterance string
+		wantReply string
+	}{
+		{
+			name:      "does not want to talk",
+			utterance: "今日はもう話したくない",
+			wantReply: "わかりました。今は話さなくて大丈夫です。",
+		},
+		{
+			name:      "wants conversation without correction",
+			utterance: "今日は話すだけにしたい",
+			wantReply: "わかりました。言い直しは求めません。そのまま話してください。",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const uid = "uid-coach-explicit-opt-out"
+			fake := &fakeGenerator{}
+			agent := newTestAgent(t, fake)
+			token, err := agent.codec.seal(
+				uid,
+				coachState(
+					answercontract.OperatorPurpose,
+					respondent.CoachPhaseAwaitingAnswer,
+					0,
+				),
+			)
+			if err != nil {
+				t.Fatalf("seal pending state: %v", err)
+			}
+
+			result, err := agent.Process(context.Background(), uid, VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     test.utterance,
+				StateToken:    token,
+			})
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if len(fake.calls) != 0 ||
+				result.Route != "coach-opt-out-local" ||
+				result.AssistanceTarget != "assistant" ||
+				result.CoachPhase != "none" ||
+				result.CoachAction != "none" ||
+				result.SpokenReply != test.wantReply {
+				t.Fatalf("explicit opt-out was not honored locally: %#v", result)
+			}
+			next := openCoachState(t, agent, uid, result.StateToken)
+			if next.PendingAnswer.Active {
+				t.Fatalf("explicit opt-out retained coach state: %#v", next.PendingAnswer)
+			}
+		})
+	}
+}
+
+func TestCoachOptOutPassPhrasesDoNotMatchOrdinaryWords(t *testing.T) {
+	for _, utterance := range []string{
+		"パスタを食べました", "今はパスタを食べています",
+		"パスポートです", "今回はパスポートの話です", "パスワードを忘れました",
+		"今日は話さないといけないことがある", "話したくないわけじゃない",
+		"今日は話すだけでは足りない", "直さなくていいわけじゃない",
+	} {
+		if _, ok := coachOptOutReply(utterance); ok {
+			t.Fatalf("coachOptOutReply(%q) treated an ordinary word as an opt-out", utterance)
+		}
+		if shouldRecoverOutsideCoach(utterance) {
+			t.Fatalf("shouldRecoverOutsideCoach(%q) treated an ordinary word as an opt-out", utterance)
+		}
+	}
+
+	for _, utterance := range []string{"パス", "えっと、今回はパスします。", "今はパスしたい"} {
+		if _, ok := coachOptOutReply(utterance); !ok {
+			t.Fatalf("coachOptOutReply(%q) did not honor an explicit opt-out", utterance)
+		}
+		if !shouldRecoverOutsideCoach(utterance) {
+			t.Fatalf("shouldRecoverOutsideCoach(%q) did not recognize an explicit opt-out", utterance)
+		}
+	}
+}
+
 func TestAgentForegroundUserAudioCannotCreateRespondentScope(t *testing.T) {
 	const uid = "uid-foreground-cannot-create-coach"
 	fake := &fakeGenerator{generations: []fakeGeneration{{

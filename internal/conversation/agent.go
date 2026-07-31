@@ -426,6 +426,14 @@ func (agent *vertexAgent) Process(
 	if state.Turn >= maxStateTurns {
 		return VoiceTurnResult{}, ErrInvalidStateToken
 	}
+	if state.PendingAnswer.Active &&
+		normalized.PDF == nil &&
+		turnExpectsResponse(normalized) &&
+		!requiresFailClosedPrecision(normalized, modelPlan{ResearchAction: "none"}) {
+		if reply, ok := coachOptOutReply(normalized.Utterance); ok {
+			return agent.completeCoachOptOutLocal(uid, state, reply)
+		}
+	}
 	preTurnState := state
 	if isStandalonePhaticGreeting(normalized, state) {
 		return agent.completePhaticLocal(uid, state)
@@ -1325,6 +1333,58 @@ func (agent *vertexAgent) completePhaticLocal(
 			CommitmentFrontPosition: answercontract.PositionAbsent,
 		},
 		Route:              "phatic-local",
+		NeedsClarification: false,
+		StateToken:         stateToken,
+	}, nil
+}
+
+func (agent *vertexAgent) completeCoachOptOutLocal(
+	uid string,
+	state conversationState,
+	spokenReply string,
+) (VoiceTurnResult, error) {
+	decision := ArbiterDecision{
+		Benefit:          1,
+		InterruptionCost: 0,
+		Urgency:          0,
+		Confidence:       1,
+		Score:            1,
+		Act:              "reflect",
+	}
+	nextState := conversationState{
+		SessionID:           state.SessionID,
+		Turn:                state.Turn + 1,
+		Graph:               state.Graph,
+		ConversationSummary: "",
+		DocumentSummary:     "",
+		PendingAnswer:       emptyPendingAnswer(),
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		LastIntervention:    decision,
+	}
+	stateToken, err := agent.codec.seal(uid, nextState)
+	if err != nil {
+		return VoiceTurnResult{}, err
+	}
+	return VoiceTurnResult{
+		SchemaVersion:       SchemaVersion,
+		Domain:              "daily",
+		Intent:              "other",
+		AssistanceTarget:    "assistant",
+		RespondentStage:     "none",
+		CoachPhase:          string(respondent.CoachPhaseNone),
+		CoachAction:         string(respondent.CoachActionNone),
+		ResearchStatus:      "none",
+		ResearchRecords:     []ResearchRecord{},
+		ArgumentStructure:   "direct_answer",
+		InterventionPolicy:  "wait",
+		SpokenReply:         spokenReply,
+		Confidence:          1,
+		Intervention:        decision,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		AnswerContract: answercontract.Metrics{
+			CommitmentFrontPosition: answercontract.PositionAbsent,
+		},
+		Route:              "coach-opt-out-local",
 		NeedsClarification: false,
 		StateToken:         stateToken,
 	}, nil
@@ -3574,9 +3634,7 @@ func respondentModeAllowed(
 func shouldRecoverOutsideCoach(utterance string) bool {
 	lower := strings.ToLower(collapseSpace(utterance))
 	for _, signal := range []string{
-		"話題を変", "別の話", "別件", "雑談", "ただ話したい", "なんとなく話したい",
-		"なんとなく話したい", "直さなくて", "言い直さなくて", "パス",
-		"練習ではなく", "練習をやめ", "もうやめ", "中止して",
+		"話題を変", "別の話", "別件", "雑談",
 		"質問です", "質問があります", "教えて", "説明して", "どう思う", "どうですか", "何ですか",
 		"なぜですか", "どこですか", "いつですか", "誰ですか",
 		"どっちですか", "どちらですか", "できますか",
@@ -3584,6 +3642,91 @@ func shouldRecoverOutsideCoach(utterance string) bool {
 		"what do you think", "can you explain", "stop coaching",
 	} {
 		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	_, optOut := coachOptOutReply(utterance)
+	return optOut || hasExplicitCoachRecoveryEnding(utterance)
+}
+
+func hasExplicitCoachRecoveryEnding(utterance string) bool {
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	for _, ending := range []string{
+		"なんとなく話したい", "なんとなく話したいです",
+		"ただ話したい", "ただ話したいです",
+		"今日は話すだけ", "今日は話すだけです", "今日は話すだけにしたい", "今日は話すだけにしたいです",
+		"話したくない", "話したくないです", "話したくありません",
+		"聞くだけにしたい", "聞くだけにしたいです",
+		"直さなくていい", "直さなくていいです", "言い直さなくていい", "言い直さなくていいです",
+		"練習をやめたい", "練習をやめて",
+	} {
+		if strings.HasSuffix(phrase, ending) {
+			return true
+		}
+	}
+	return false
+}
+
+func coachOptOutReply(utterance string) (string, bool) {
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	for _, exact := range []string{
+		"話したくない", "話したくないです", "話したくありません",
+		"今日は話したくない", "今日は話したくないです", "今日はもう話したくない", "今日はもう話したくないです",
+		"今は話したくない", "今は話したくないです", "もう話したくない", "もう話したくないです",
+		"今日は話さない", "今日は話しません", "今は話さない", "今は話しません",
+		"黙っていたい", "黙っていたいです", "今は黙っていたい", "今は黙っていたいです",
+		"聞くだけにしたい", "聞くだけにしたいです", "今日は聞くだけにしたい", "今は聞くだけにしたい",
+		"i don't want to talk", "i do not want to talk", "i'd rather not talk",
+	} {
+		if phrase == exact {
+			return "わかりました。今は話さなくて大丈夫です。", true
+		}
+	}
+	for _, exact := range []string{
+		"今日は話すだけ", "今日は話すだけです", "今日は話すだけにしたい", "今日は話すだけにしたいです",
+		"話すだけにしたい", "話すだけにしたいです", "ただ話したい", "ただ話したいです",
+		"なんとなく話したい", "なんとなく話したいです",
+		"直さなくて", "直さなくていい", "直さなくていいです", "直さないで",
+		"言い直さなくて", "言い直さなくていい", "言い直さなくていいです", "言い直させないで",
+		"練習をやめて", "練習をやめたい", "もうやめて", "もうやめたい", "中止して",
+		"コーチをやめて", "コーチングをやめて",
+		"just listen", "just chat", "stop coaching", "don't correct me", "do not correct me",
+	} {
+		if phrase == exact {
+			return "わかりました。言い直しは求めません。そのまま話してください。", true
+		}
+	}
+	if isExplicitCoachPass(phrase) {
+		return "わかりました。言い直しは求めません。そのまま話してください。", true
+	}
+	return "", false
+}
+
+func normalizeExplicitCoachPhrase(utterance string) string {
+	phrase := strings.ToLower(collapseSpace(utterance))
+	phrase = strings.Trim(strings.TrimSpace(phrase), "。！？!?、,.")
+	for {
+		before := phrase
+		for _, filler := range []string{"えっと", "ええと", "あの", "その"} {
+			if strings.HasPrefix(phrase, filler) {
+				phrase = strings.TrimLeft(strings.TrimSpace(strings.TrimPrefix(phrase, filler)), "、,")
+				break
+			}
+		}
+		if phrase == before {
+			return phrase
+		}
+	}
+}
+
+func isExplicitCoachPass(phrase string) bool {
+	for _, exact := range []string{
+		"パス", "今回はパス", "今はパス", "ここはパス", "この質問はパス",
+		"パスします", "今回はパスします", "今はパスします", "ここはパスします", "この質問はパスします",
+		"パスしたい", "今回はパスしたい", "今はパスしたい",
+		"今回はパスでお願いします", "今はパスでお願いします",
+	} {
+		if phrase == exact {
 			return true
 		}
 	}

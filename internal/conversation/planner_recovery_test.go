@@ -215,6 +215,10 @@ func TestAgentPlannerUnavailablePreservesStateAndGivesAmbientNotice(t *testing.T
 	if err != nil {
 		t.Fatalf("seal initial state: %v", err)
 	}
+	initial, err = agent.codec.open("uid-planner-state", token)
+	if err != nil {
+		t.Fatalf("open normalized initial state: %v", err)
+	}
 
 	result, err := agent.Process(
 		context.Background(),
@@ -283,6 +287,10 @@ func TestAgentPlannerUnavailableForegroundGetsFixedNoticeAndIsolatesState(
 	token, err := agent.codec.seal("uid-foreground-planner", initial)
 	if err != nil {
 		t.Fatalf("seal initial state: %v", err)
+	}
+	initial, err = agent.codec.open("uid-foreground-planner", token)
+	if err != nil {
+		t.Fatalf("open normalized initial state: %v", err)
 	}
 	result, err := agent.Process(
 		context.Background(),
@@ -375,6 +383,10 @@ func TestAgentFailedPendingRecoveryPreservesPendingState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal initial state: %v", err)
 	}
+	initial, err = agent.codec.open("uid-pending-failed-closed", token)
+	if err != nil {
+		t.Fatalf("open normalized initial state: %v", err)
+	}
 
 	result, err := agent.Process(
 		context.Background(),
@@ -407,7 +419,8 @@ func TestAgentFailedPendingRecoveryPreservesPendingState(t *testing.T) {
 	if next.Turn != initial.Turn+1 ||
 		!reflect.DeepEqual(next.Graph, initial.Graph) ||
 		!reflect.DeepEqual(next.PendingAnswer, initial.PendingAnswer) ||
-		next.SelfCorrectionGrace != initial.SelfCorrectionGrace {
+		next.SelfCorrectionGrace != initial.SelfCorrectionGrace ||
+		next.LastIntervention.Act != "clarify" {
 		t.Fatalf("failed pending recovery changed state: got=%#v want=%#v", next, initial)
 	}
 }
@@ -503,7 +516,7 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 			"uid-pending-budget",
 			VoiceTurn{
 				SchemaVersion: SchemaVersion,
-				Utterance:     "my answer",
+				Utterance:     "just chat",
 				StateToken:    token,
 			},
 		)

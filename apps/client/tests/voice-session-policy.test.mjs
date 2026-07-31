@@ -2749,6 +2749,56 @@ test("network keeps one finite deadline while validated playback drains separate
   assert.doesNotMatch(consume, /await playback\.completion/u);
 });
 
+test("coach metadata accepts only authoritative phase and action pairs", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const validatorSource = executableBridgeFunction(
+    bridge,
+    "function hasValidCoachMetadata(",
+    "function clearPendingDocument(",
+  );
+  const validate = Function(
+    `"use strict"; ${validatorSource}; return hasValidCoachMetadata;`,
+  )();
+
+  for (const [target, phase, action] of [
+    ["assistant", "none", "none"],
+    ["respondent", "awaiting_answer", "elicit"],
+    ["respondent", "awaiting_restatement", "restate"],
+    ["respondent", "expanding", "expand"],
+    ["respondent", "complete", "complete"],
+    ["respondent", "blocked", "retry"],
+    ["respondent", "blocked", "release"],
+  ]) {
+    assert.equal(validate(target, phase, action), true);
+  }
+  for (const [target, phase, action] of [
+    ["assistant", "complete", "complete"],
+    ["respondent", "none", "none"],
+    ["respondent", "awaiting_answer", "complete"],
+    ["respondent", "blocked", "expand"],
+    ["unknown", "none", "none"],
+    ["respondent", "scored", "answer-for-user"],
+  ]) {
+    assert.equal(validate(target, phase, action), false);
+  }
+
+  const responseStart = bridge.indexOf("function safeVoiceResponse(");
+  const responseEnd = bridge.indexOf(
+    "\n}\n\nfunction mapVoiceResponseError",
+    responseStart,
+  );
+  const response = bridge.slice(responseStart, responseEnd);
+  assert.match(
+    response,
+    /hasValidCoachMetadata\(\s*payload\.assistanceTarget,\s*payload\.coachPhase,\s*payload\.coachAction,\s*\)/u,
+  );
+  assert.match(response, /coachPhase: payload\.coachPhase/u);
+  assert.match(response, /coachAction: payload\.coachAction/u);
+});
+
 test("stream bridge uses direct authenticated CORS with bounded PCM playback", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),

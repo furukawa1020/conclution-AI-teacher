@@ -13,11 +13,12 @@ import (
 
 func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *testing.T) {
 	const (
-		uid           = "uid-natural-one-shot-coach"
-		followUp      = "理由はあとで聞きます。まず、目的は何ですか？"
-		answer        = "目的は評価基準をそろえることです"
-		plannerDraft  = "サーバ側の構造案内へ置換します。"
-		questionTopic = "評価基準の導入目的"
+		uid                 = "uid-natural-one-shot-coach"
+		followUp            = "理由はあとで聞きます。まず、目的は何ですか？"
+		answer              = "目的は評価基準をそろえることです"
+		unauditedModelReply = "本人は評価基準に執着している、と断定します。"
+		fixedNaturalReply   = "なるほど、そこが大事なんですね。その続きも聞かせてください。"
+		questionTopic       = "評価基準の導入目的"
 	)
 	clarify := validModelPlan()
 	clarify.InterventionPolicy = "clarify"
@@ -30,7 +31,7 @@ func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *test
 		questionTopic,
 		answer,
 		answer,
-		plannerDraft,
+		unauditedModelReply,
 	)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, clarify)},
@@ -94,9 +95,10 @@ func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *test
 		second.RespondentStage != "restructure" ||
 		second.CoachPhase != "complete" ||
 		second.CoachAction != "complete" ||
-		strings.Contains(second.SpokenReply, plannerDraft) ||
-		strings.Contains(second.SpokenReply, answer) {
-		t.Fatalf("one-shot answer did not complete safely: %#v", second)
+		second.SpokenReply != fixedNaturalReply ||
+		strings.Contains(second.SpokenReply, answer) ||
+		strings.Contains(second.SpokenReply, unauditedModelReply) {
+		t.Fatalf("one-shot answer did not use the fixed natural backchannel: %#v", second)
 	}
 	completed, err := agent.codec.open(uid, second.StateToken)
 	if err != nil {
@@ -109,12 +111,14 @@ func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *test
 
 func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T) {
 	const (
-		uid          = "uid-explicit-coach-sequence"
-		questionText = "上司に、導入目的は何かと聞かれました"
-		lateAnswer   = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
-		coreAnswer   = "目的は評価基準をそろえることです。判断のばらつきを減らします"
-		reasonAnswer = "理由は判断のばらつきを減らせるからです"
-		proxyDraft   = "AIが本人の代わりに作った回答です。"
+		uid                 = "uid-explicit-coach-sequence"
+		questionText        = "上司に、導入目的は何かと聞かれました"
+		lateAnswer          = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
+		coreAnswer          = "目的は評価基準をそろえることです。判断のばらつきを減らします"
+		reasonAnswer        = "理由は判断のばらつきを減らせるからです"
+		proxyDraft          = "AIが本人の代わりに作った回答です。"
+		unauditedModelReply = "本人にはこの性格上の問題がある、と断定します。"
+		fixedNaturalReply   = "なるほど、そこが大事なんですね。その続きも聞かせてください。"
 	)
 	awaiting := respondentAwaitingPlan()
 	late := coachAttemptPlan(
@@ -139,7 +143,7 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 		"導入目的を支える理由",
 		reasonAnswer,
 		reasonAnswer,
-		proxyDraft,
+		unauditedModelReply,
 	)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, awaiting)},
@@ -215,14 +219,18 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 	if err != nil {
 		t.Fatalf("A first: %v", err)
 	}
-	assertCoachMetadata(t, third, "expanding", "expand")
-	expanding := openCoachState(t, agent, uid, third.StateToken)
-	if !expanding.PendingAnswer.Active ||
-		expanding.PendingAnswer.AssistantFollowUp ||
-		expanding.PendingAnswer.Phase != respondent.CoachPhaseExpanding ||
-		expanding.PendingAnswer.Operator != answercontract.OperatorPurpose ||
-		expanding.PendingAnswer.ExpansionOperator != answercontract.OperatorCause {
-		t.Fatalf("core answer did not enter the one bounded expansion: %#v", expanding.PendingAnswer)
+	assertCoachMetadata(t, third, "complete", "complete")
+	if strings.Contains(third.SpokenReply, proxyDraft) ||
+		strings.Contains(third.SpokenReply, coreAnswer) ||
+		!strings.HasSuffix(third.SpokenReply, "？") {
+		t.Fatalf("core completion was not a natural optional follow-up: %#v", third)
+	}
+	following := openCoachState(t, agent, uid, third.StateToken)
+	if !following.PendingAnswer.Active ||
+		!following.PendingAnswer.AssistantFollowUp ||
+		following.PendingAnswer.Phase != respondent.CoachPhaseAwaitingAnswer ||
+		following.PendingAnswer.Operator != answercontract.OperatorCause {
+		t.Fatalf("optional follow-up became an expansion test: %#v", following.PendingAnswer)
 	}
 
 	fourth, err := agent.Process(context.Background(), uid, VoiceTurn{
@@ -234,9 +242,10 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 		t.Fatalf("natural follow-up answer: %v", err)
 	}
 	assertCoachMetadata(t, fourth, "complete", "complete")
-	if strings.Contains(fourth.SpokenReply, proxyDraft) ||
-		strings.Contains(fourth.SpokenReply, reasonAnswer) {
-		t.Fatalf("proxy answer leaked at completion: %q", fourth.SpokenReply)
+	if fourth.SpokenReply != fixedNaturalReply ||
+		strings.Contains(fourth.SpokenReply, reasonAnswer) ||
+		strings.Contains(fourth.SpokenReply, unauditedModelReply) {
+		t.Fatalf("follow-up completion did not use the fixed natural backchannel: %q", fourth.SpokenReply)
 	}
 	completed := openCoachState(t, agent, uid, fourth.StateToken)
 	if completed.PendingAnswer.Active {
@@ -309,6 +318,40 @@ func TestAgentForegroundUserAudioCannotCreateRespondentScope(t *testing.T) {
 	}
 	if openCoachState(t, agent, uid, result.StateToken).PendingAnswer.Active {
 		t.Fatal("foreground user audio persisted a respondent frame")
+	}
+}
+
+func TestAgentCoachFillersDoNotConsumeGentleRetry(t *testing.T) {
+	const uid = "uid-coach-fillers-no-attempt"
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, respondentAwaitingPlan()),
+	}}}
+	agent := newTestAgent(t, fake)
+	initial := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	)
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "えっと……うーん。",
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("filler-only turn: %v", err)
+	}
+	assertCoachMetadata(t, result, "awaiting_answer", "elicit")
+	if result.SpokenReply != "" {
+		t.Fatalf("filler-only speech triggered another prompt: %q", result.SpokenReply)
+	}
+	state := openCoachState(t, agent, uid, result.StateToken)
+	if state.PendingAnswer.Attempts != 0 {
+		t.Fatalf("filler-only speech consumed the gentle retry: %#v", state.PendingAnswer)
 	}
 }
 

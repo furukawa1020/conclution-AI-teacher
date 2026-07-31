@@ -94,16 +94,12 @@ impl CoachState {
 
     const fn hint(self) -> &'static str {
         match (self.phase, self.action) {
-            (CoachPhase::Blocked, CoachAction::Release) => {
-                "言い直しは求めません　別の話でも、この続きでも大丈夫"
-            }
+            (CoachPhase::Blocked, CoachAction::Release) => "この続きでも、別の話でも大丈夫",
             (CoachPhase::None, _) => "質問でも、ぼやきでも、短い声でも、そのままどうぞ",
             (CoachPhase::AwaitingAnswer, _) => {
                 "わからない、まだ決めていない、でも会話は続けられます"
             }
-            (CoachPhase::AwaitingRestatement, _) => {
-                "やり直しではなく　聞きたいところを一つだけ小さくしました"
-            }
+            (CoachPhase::AwaitingRestatement, _) => "聞きたいところを一つだけ小さくしています",
             (CoachPhase::Expanding, _) => "答えなくても大丈夫　話したい方へ続けられます",
             (CoachPhase::Complete, _) => "今の言葉のまま　その話の中身を続けます",
             (CoachPhase::Blocked, _) => "短くても大丈夫　拾えなければそのまま先へ進めます",
@@ -143,7 +139,7 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "質問でも、考え途中でも、ぼやきでも　小さな声のまま話すだけ",
+            Self::Ready => "質問でも、ぼやきでも、「今日は話すだけ」でも　小さな声のままどうぞ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
             Self::Thinking => {
@@ -554,7 +550,7 @@ mod cloud {
                 "マイクが許可されていない　ブラウザの権限を確認してみて"
             }
             Some("microphone_unavailable") => "使えるマイクが見つからない　接続を確認してみて",
-            Some("no_speech") => "声を拾えなかった　少し近づいてもう一度",
+            Some("no_speech") => "まだ声を拾えていない　小さな声のまま、短くひと言だけでもう一度",
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
@@ -1090,7 +1086,7 @@ fn App() -> Element {
                     span { class: "identity__mark", "K" }
                     span { class: "identity__type",
                         strong { "KOTAE" }
-                        small { "ANSWER COACH / YOUR WORDS" }
+                        small { "話す / 考える / 伝わる" }
                     }
                 }
                 div { class: prepared_cloud_state.class_name(),
@@ -1117,7 +1113,7 @@ fn App() -> Element {
                         if coach_snapshot.is_active() {
                             span {
                                 class: "coach-chip",
-                                aria_label: "受け答えコーチの次の段階",
+                                aria_label: "会話を支える次の一歩",
                                 {coach_snapshot.status()}
                             }
                         }
@@ -1245,12 +1241,12 @@ fn App() -> Element {
                             strong { "短くても最後まで待つ" }
                         }
                         div { class: "capability",
-                            span { "返す" }
+                            span { "会話" }
                             i { aria_hidden: "true", "→" }
                             strong { "まず話の中身に答える" }
                         }
                         div { class: "capability",
-                            span { "身につく" }
+                            span { "伝わる" }
                             i { aria_hidden: "true", "→" }
                             strong { "必要な時だけ一問で支える" }
                         }
@@ -1576,6 +1572,7 @@ mod tests {
             assert!(!copy.contains("不正解"));
             assert!(!copy.contains("努力"));
             assert!(!copy.contains("普通は"));
+            assert!(!copy.contains("やり直し"));
         }
     }
 
@@ -1588,7 +1585,7 @@ mod tests {
         assert!(retry.hint().contains("そのまま先へ進めます"));
         assert_eq!(release.status(), "そのまま続けられます");
         assert_eq!(release.heading(), "そのまま話して大丈夫です");
-        assert!(release.hint().contains("言い直しは求めません"));
+        assert_eq!(release.hint(), "この続きでも、別の話でも大丈夫");
         assert_eq!(CoachState::NONE.phase, CoachPhase::None);
         assert_eq!(CoachState::NONE.action, CoachAction::None);
     }

@@ -29,8 +29,7 @@ func TestGuideAttemptRequiresPersonToSayTargetFirst(t *testing.T) {
 	)
 	if decision.Action != CoachActionRestate ||
 		decision.Phase != CoachPhaseAwaitingRestatement ||
-		!decision.KeepPending ||
-		decision.StartExpansion {
+		!decision.KeepPending {
 		t.Fatalf("late answer was not kept for restatement: %#v", decision)
 	}
 	if strings.Contains(decision.SpokenReply, "評価基準") {
@@ -77,7 +76,7 @@ func TestGuideAttemptUsesOperatorPromptForAmbiguousTarget(t *testing.T) {
 	}
 }
 
-func TestGuideAttemptStartsExactlyOneExpansionAfterValidCoreAnswer(t *testing.T) {
+func TestGuideAttemptCompletesAndOffersOneOptionalFollowUp(t *testing.T) {
 	gate := Gate(purposeInput(
 		"目的は評価基準をそろえることです。",
 		"",
@@ -92,13 +91,11 @@ func TestGuideAttemptStartsExactlyOneExpansionAfterValidCoreAnswer(t *testing.T)
 		false,
 		false,
 	)
-	if decision.Action != CoachActionExpand ||
-		decision.Phase != CoachPhaseExpanding ||
-		!decision.StartExpansion ||
-		!decision.KeepPending ||
-		decision.Attempts != 0 ||
+	if decision.Action != CoachActionComplete ||
+		decision.Phase != CoachPhaseComplete ||
+		decision.KeepPending ||
 		!strings.HasSuffix(decision.SpokenReply, "？") {
-		t.Fatalf("successful core answer did not start one bounded expansion: %#v", decision)
+		t.Fatalf("successful core answer did not return to natural conversation: %#v", decision)
 	}
 }
 
@@ -136,7 +133,7 @@ func TestGuideAttemptCompletesExpansionAndAbstention(t *testing.T) {
 	)
 	if abstained.Action != CoachActionComplete ||
 		abstained.KeepPending ||
-		!strings.Contains(abstained.SpokenReply, "まだ分からない") {
+		!strings.Contains(abstained.SpokenReply, "そのまま") {
 		t.Fatalf("abstention was not accepted as an answer: %#v", abstained)
 	}
 }
@@ -159,7 +156,9 @@ func TestGuideAttemptOneShotCompletesWithoutStartingExpansion(t *testing.T) {
 	if decision.Action != CoachActionComplete ||
 		decision.Phase != CoachPhaseComplete ||
 		decision.KeepPending ||
-		decision.StartExpansion {
+		decision.SpokenReply != "なるほど、そこが大事なんですね。その続きも聞かせてください。" ||
+		strings.Contains(decision.SpokenReply, "評価基準") ||
+		strings.HasSuffix(decision.SpokenReply, "？") {
 		t.Fatalf("one-shot answer started another coaching question: %#v", decision)
 	}
 }
@@ -182,7 +181,6 @@ func TestGuideAttemptNeverCompletesWithoutIndependentVerification(t *testing.T) 
 	if decision.Action != CoachActionRetry ||
 		decision.Phase != CoachPhaseBlocked ||
 		!decision.KeepPending ||
-		decision.StartExpansion ||
 		decision.Attempts != 1 {
 		t.Fatalf("unverified answer was treated as success: %#v", decision)
 	}
@@ -196,28 +194,35 @@ func TestGuideAttemptNeverCompletesWithoutIndependentVerification(t *testing.T) 
 		false,
 		false,
 	)
-	if second.Action != CoachActionRetry ||
-		!second.KeepPending ||
+	if second.Action != CoachActionRelease ||
+		second.KeepPending ||
 		second.Attempts != MaxCoachAttempts {
-		t.Fatalf("second unverified attempt did not use the final retry: %#v", second)
-	}
-	third := GuideAttempt(
-		OperatorPurpose,
-		CoachPhaseAwaitingRestatement,
-		second.Attempts,
-		gate,
-		successfulCritic(),
-		false,
-		false,
-		false,
-	)
-	if third.Action != CoachActionRelease || third.KeepPending ||
-		third.Attempts != MaxCoachAttempts {
-		t.Fatalf("unverified attempts exceeded the retry cap: %#v", third)
+		t.Fatalf("unverified attempts exceeded the retry cap: %#v", second)
 	}
 }
 
-func TestGuideAttemptReleasesAfterTwoBoundedRetries(t *testing.T) {
+func TestHoldForHesitationWaitsWithoutRepromptingOrCounting(t *testing.T) {
+	for _, test := range []struct {
+		phase  CoachPhase
+		action CoachAction
+	}{
+		{CoachPhaseAwaitingAnswer, CoachActionElicit},
+		{CoachPhaseAwaitingRestatement, CoachActionRestate},
+		{CoachPhaseExpanding, CoachActionExpand},
+		{CoachPhaseBlocked, CoachActionRetry},
+	} {
+		decision := HoldForHesitation(test.phase, 1)
+		if decision.Phase != test.phase ||
+			decision.Action != test.action ||
+			decision.SpokenReply != "" ||
+			decision.Attempts != 1 ||
+			!decision.KeepPending {
+			t.Fatalf("HoldForHesitation(%q): %#v", test.phase, decision)
+		}
+	}
+}
+
+func TestGuideAttemptReleasesAfterOneGentleRetry(t *testing.T) {
 	gate := Gate(Input{
 		Frame: QuestionFrame{
 			Operator:      OperatorPurpose,
@@ -255,28 +260,14 @@ func TestGuideAttemptReleasesAfterTwoBoundedRetries(t *testing.T) {
 		false,
 		false,
 	)
-	if second.Action != CoachActionElicit ||
-		!second.KeepPending ||
+	if second.Action != CoachActionRelease ||
+		second.KeepPending ||
 		second.Attempts != MaxCoachAttempts {
-		t.Fatalf("second miss did not use the final retry: %#v", second)
-	}
-	third := GuideAttempt(
-		OperatorPurpose,
-		second.Phase,
-		second.Attempts,
-		gate,
-		critic,
-		true,
-		false,
-		false,
-	)
-	if third.Action != CoachActionRelease || third.KeepPending ||
-		third.Attempts != MaxCoachAttempts {
-		t.Fatalf("third miss did not return to normal conversation: %#v", third)
+		t.Fatalf("second miss did not return to normal conversation: %#v", second)
 	}
 }
 
-func TestGuideAttemptKeepsExpansionUntilItIsAnswered(t *testing.T) {
+func TestGuideAttemptNeverTestsOptionalExpansion(t *testing.T) {
 	gate := Gate(Input{
 		Frame: QuestionFrame{
 			Operator:      OperatorCause,
@@ -306,40 +297,10 @@ func TestGuideAttemptKeepsExpansionUntilItIsAnswered(t *testing.T) {
 		false,
 		false,
 	)
-	if decision.Phase != CoachPhaseExpanding ||
-		decision.Action != CoachActionExpand ||
-		!decision.KeepPending ||
-		decision.Attempts != 1 {
-		t.Fatalf("incomplete expansion lost its bounded scope: %#v", decision)
-	}
-
-	completed := GuideAttempt(
-		OperatorCause,
-		decision.Phase,
-		decision.Attempts,
-		Gate(Input{
-			Frame: QuestionFrame{
-				Operator:      OperatorCause,
-				Subject:       "理由",
-				RequiredSlots: []Slot{SlotCause},
-			},
-			Attempt: AnswerAttempt{
-				Text: "理由は時間を減らせるからです。",
-				SlotEvidence: []SlotBinding{{
-					Slot: SlotCause,
-					Span: "理由は時間を減らせるからです",
-				}},
-			},
-		}),
-		successfulCritic(),
-		true,
-		false,
-		false,
-	)
-	if completed.Phase != CoachPhaseComplete ||
-		completed.Action != CoachActionComplete ||
-		completed.KeepPending || completed.StartExpansion {
-		t.Fatalf("valid expansion did not complete: %#v", completed)
+	if decision.Phase != CoachPhaseComplete ||
+		decision.Action != CoachActionComplete ||
+		decision.KeepPending {
+		t.Fatalf("optional expansion became a second test: %#v", decision)
 	}
 }
 
@@ -383,17 +344,14 @@ func TestGuideAwaitingPreservesRestatementScope(t *testing.T) {
 	}
 }
 
-func TestGuideAwaitingAllowsTwoRetriesBeforeRelease(t *testing.T) {
+func TestGuideAwaitingAllowsOneRetryBeforeRelease(t *testing.T) {
 	first := GuideAwaiting(OperatorPurpose, 0, true)
 	second := GuideAwaiting(OperatorPurpose, first.Attempts, true)
-	third := GuideAwaiting(OperatorPurpose, second.Attempts, true)
 
 	if first.Action != CoachActionElicit || first.Attempts != 1 ||
-		second.Action != CoachActionElicit || !second.KeepPending ||
-		second.Attempts != MaxCoachAttempts ||
-		third.Action != CoachActionRelease || third.KeepPending ||
-		third.Attempts != MaxCoachAttempts {
-		t.Fatalf("awaiting retry cap mismatch: first=%#v second=%#v third=%#v", first, second, third)
+		second.Action != CoachActionRelease || second.KeepPending ||
+		second.Attempts != MaxCoachAttempts {
+		t.Fatalf("awaiting retry cap mismatch: first=%#v second=%#v", first, second)
 	}
 }
 

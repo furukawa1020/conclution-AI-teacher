@@ -33,12 +33,11 @@ const (
 // CoachDecision contains fixed control values and fixed spoken guidance. It
 // never repeats or reconstructs the person's answer.
 type CoachDecision struct {
-	Phase          CoachPhase
-	Action         CoachAction
-	SpokenReply    string
-	Attempts       uint8
-	KeepPending    bool
-	StartExpansion bool
+	Phase       CoachPhase
+	Action      CoachAction
+	SpokenReply string
+	Attempts    uint8
+	KeepPending bool
 }
 
 // GuideAwaiting asks only for the answer type requested by the question.
@@ -56,8 +55,37 @@ func GuideAwaiting(
 	)
 }
 
-// GuideAwaitingInPhase preserves the already-authorized expansion scope when
-// a follow-up utterance does not yet contain an answer attempt.
+// HoldForHesitation leaves space after filler-only speech. It neither consumes
+// an attempt nor repeats the question, so thinking aloud cannot create a
+// coercive prompt loop.
+func HoldForHesitation(
+	phase CoachPhase,
+	attempts uint8,
+) CoachDecision {
+	action := CoachActionElicit
+	switch phase {
+	case CoachPhaseAwaitingRestatement:
+		action = CoachActionRestate
+	case CoachPhaseExpanding:
+		action = CoachActionExpand
+	case CoachPhaseBlocked:
+		action = CoachActionRetry
+	case CoachPhaseAwaitingAnswer:
+	default:
+		phase = CoachPhaseAwaitingAnswer
+	}
+	return CoachDecision{
+		Phase:       phase,
+		Action:      action,
+		Attempts:    attempts,
+		KeepPending: true,
+	}
+}
+
+// GuideAwaitingInPhase preserves an already-authorized scope when a follow-up
+// utterance does not yet contain an answer attempt. A counted miss may produce
+// one gentle retry; the second counted miss always returns to ordinary
+// conversation.
 func GuideAwaitingInPhase(
 	operator Operator,
 	phase CoachPhase,
@@ -66,8 +94,8 @@ func GuideAwaitingInPhase(
 ) CoachDecision {
 	nextAttempts := attempts
 	if countAttempt {
-		if attempts >= MaxCoachAttempts {
-			return releaseDecision(attempts)
+		if attempts >= MaxCoachAttempts-1 {
+			return releaseDecision(MaxCoachAttempts)
 		}
 		nextAttempts++
 	}
@@ -100,7 +128,7 @@ func GuideAwaitingInPhase(
 
 // GuideAttempt decides whether the person—not an AI reconstruction—has put
 // the requested answer first. Both the exact-span respondent gate and the
-// independent LAC critic must agree before a turn can complete or expand.
+// independent LAC critic must agree before a turn can complete.
 func GuideAttempt(
 	operator Operator,
 	phase CoachPhase,
@@ -112,8 +140,8 @@ func GuideAttempt(
 	oneShot bool,
 ) CoachDecision {
 	if !verificationAvailable {
-		if attempts >= MaxCoachAttempts {
-			return releaseDecision(attempts)
+		if attempts >= MaxCoachAttempts-1 {
+			return releaseDecision(MaxCoachAttempts)
 		}
 		return CoachDecision{
 			Phase:       CoachPhaseBlocked,
@@ -133,7 +161,16 @@ func GuideAttempt(
 		critic.Metrics.CommitmentFrontPosition == answercontract.PositionFirst &&
 		critic.Metrics.TargetSlotCoverage == 1
 	if succeeded {
-		if phase == CoachPhaseExpanding || abstained || oneShot {
+		if oneShot {
+			return CoachDecision{
+				Phase:       CoachPhaseComplete,
+				Action:      CoachActionComplete,
+				SpokenReply: naturalContinuationReply(operator, abstained),
+				Attempts:    attempts,
+				KeepPending: false,
+			}
+		}
+		if phase == CoachPhaseExpanding || abstained {
 			return CoachDecision{
 				Phase:       CoachPhaseComplete,
 				Action:      CoachActionComplete,
@@ -143,23 +180,36 @@ func GuideAttempt(
 			}
 		}
 		return CoachDecision{
-			Phase:          CoachPhaseExpanding,
-			Action:         CoachActionExpand,
-			SpokenReply:    expansionPrompt(expansionOperator(operator)),
-			Attempts:       0,
-			KeepPending:    true,
-			StartExpansion: true,
+			Phase:       CoachPhaseComplete,
+			Action:      CoachActionComplete,
+			SpokenReply: completionWithOptionalFollowUp(operator),
+			Attempts:    attempts,
+			KeepPending: false,
 		}
 	}
 
-	if attempts >= MaxCoachAttempts {
-		return releaseDecision(attempts)
+	// Expansion existed in older state tokens. It is an optional continuation,
+	// never a second answer-first test: once both deterministic checks found
+	// substantive target content, close it regardless of clause order.
+	if phase == CoachPhaseExpanding &&
+		gate.OriginalTargetCoverage == 1 &&
+		critic.Metrics.TargetSlotCoverage == 1 {
+		return CoachDecision{
+			Phase:       CoachPhaseComplete,
+			Action:      CoachActionComplete,
+			SpokenReply: completionReply(abstained),
+			Attempts:    attempts,
+			KeepPending: false,
+		}
 	}
+
 	nextAttempts := attempts + 1
+	if nextAttempts >= MaxCoachAttempts {
+		return releaseDecision(MaxCoachAttempts)
+	}
 	if phase == CoachPhaseExpanding {
-		// Expansion is a single bounded follow-up. Keep that scope while the
-		// person retries, rather than silently returning to the original
-		// question after one incomplete reason or example.
+		// A legacy expansion with no target content gets at most one gentle
+		// prompt before the coach releases it.
 		reply := expansionPrompt(operator)
 		if gate.OriginalCommitmentPosition == PositionLater ||
 			critic.Metrics.CommitmentFrontPosition == answercontract.PositionLater {
@@ -269,9 +319,48 @@ func expansionPrompt(operator Operator) string {
 
 func completionReply(abstained bool) string {
 	if abstained {
-		return "「まだ分からない」でも大丈夫です。今の言い方で、ちゃんと伝わっています。"
+		return "うん、そのままで大丈夫です。"
 	}
-	return "うん、今の言い方なら、すっと伝わりました。"
+	return "うん、なるほど。"
+}
+
+// naturalContinuationReply is operator-conditioned but contains no model text,
+// answer text, or inferred personal trait. It keeps a successful one-shot
+// exchange conversational without opening a second test or an unaudited TTS
+// path.
+func naturalContinuationReply(operator Operator, abstained bool) string {
+	if abstained {
+		return "うん、そのままで大丈夫です。話したいところから続けてください。"
+	}
+	switch operator {
+	case OperatorBoolean, OperatorChoice:
+		return "うん、そちらなんですね。その続きも聞かせてください。"
+	case OperatorQuantity:
+		return "なるほど、そのくらいなんですね。その続きも聞かせてください。"
+	case OperatorState:
+		return "なるほど、今はそうなんですね。その続きも聞かせてください。"
+	case OperatorCause, OperatorPurpose:
+		return "なるほど、そこが大事なんですね。その続きも聞かせてください。"
+	case OperatorProcedure:
+		return "なるほど、そこから始めるんですね。その続きも聞かせてください。"
+	case OperatorDefinition:
+		return "なるほど、そう捉えているんですね。その続きも聞かせてください。"
+	case OperatorComparison, OperatorEvidence:
+		return "なるほど、そこが判断の軸なんですね。その続きも聞かせてください。"
+	default:
+		return "うん、なるほど。その続きも聞かせてください。"
+	}
+}
+
+func completionWithOptionalFollowUp(operator Operator) string {
+	switch expansionOperator(operator) {
+	case OperatorEvidence:
+		return completionReply(false) + "そう言える根拠を一つ挙げるなら？"
+	case OperatorState:
+		return completionReply(false) + "まず何をしますか？"
+	default:
+		return completionReply(false) + "そう考えた理由を一つ挙げるなら？"
+	}
 }
 
 func releaseDecision(attempts uint8) CoachDecision {

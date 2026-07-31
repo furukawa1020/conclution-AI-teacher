@@ -994,13 +994,20 @@ func (agent *vertexAgent) Process(
 		operator := authoritativeCoachOperator(coachFrame)
 		switch finalPlan.RespondentStage {
 		case "awaiting_answer":
-			coachDecision = respondent.GuideAwaitingInPhase(
-				operator,
-				coachFrame.Phase,
-				coachFrame.Attempts,
-				state.PendingAnswer.Active &&
-					substantiveCoachAttempt(normalized.Utterance),
-			)
+			if state.PendingAnswer.Active &&
+				!substantiveCoachAttempt(normalized.Utterance) {
+				coachDecision = respondent.HoldForHesitation(
+					coachFrame.Phase,
+					coachFrame.Attempts,
+				)
+			} else {
+				coachDecision = respondent.GuideAwaitingInPhase(
+					operator,
+					coachFrame.Phase,
+					coachFrame.Attempts,
+					state.PendingAnswer.Active,
+				)
+			}
 		case "restructure":
 			gate := respondent.Gate(respondentGateInput(
 				finalPlan,
@@ -1129,8 +1136,9 @@ func (agent *vertexAgent) Process(
 		nextSelfCorrectionGrace = finalPlan.SelfCorrectionGrace
 		nextLastIntervention = decision
 	}
-	canUpdateCoachControl := !normalized.Ambient ||
-		(normalized.Foreground && preTurnState.PendingAnswer.Active)
+	canUpdateCoachControl := normalized.PDF == nil &&
+		(!normalized.Ambient ||
+			(normalized.Foreground && preTurnState.PendingAnswer.Active))
 	switch {
 	case coachTurn && canUpdateCoachControl:
 		if coachDecision.KeepPending {
@@ -1158,12 +1166,13 @@ func (agent *vertexAgent) Process(
 			}
 		}
 	case finalPlan.AssistanceTarget == "assistant" &&
-		(!normalized.Ambient || normalized.Foreground):
+		(!normalized.Ambient || normalized.Foreground) &&
+		normalized.PDF == nil:
 		// An explicit topic change exits coaching. Passive background speech
-		// cannot erase the person's in-progress exercise.
+		// and untrusted PDF content cannot erase the person's in-progress
+		// exercise.
 		pendingAnswer = emptyPendingAnswer()
 		if !passiveAmbientTurn(normalized) &&
-			normalized.PDF == nil &&
 			!verificationUnavailable &&
 			!urgentSafety &&
 			researchStatus == "none" &&
@@ -1335,11 +1344,12 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		Score:            0.4,
 	}
 	lastIntervention := decision
-	if turn.Ambient {
-		// An ambient turn cannot author cross-turn semantic state. A planner
-		// failure still gets a fixed, content-independent spoken notice so the
-		// live session never presents infrastructure failure as intentional
-		// silence. Foreground inherits the same ambient authority boundary.
+	if turn.Ambient || turn.PDF != nil {
+		// Ambient audio and untrusted PDF content cannot author cross-turn
+		// semantic state. A planner failure still gets a fixed,
+		// content-independent spoken notice so the live session never presents
+		// infrastructure failure as intentional silence. Foreground inherits
+		// the same ambient authority boundary.
 		lastIntervention = isolatedStateIntervention(
 			state.LastIntervention,
 			true,
@@ -2271,10 +2281,17 @@ func (agent *vertexAgent) infer(
 	preliminary *modelPlan,
 	onCandidate func(modelPlan),
 ) (modelPlan, error) {
+	promptPendingAnswer := state.PendingAnswer
+	if turn.PDF != nil {
+		// A PDF is untrusted active content. It can shape only this turn's
+		// assistant answer and must not see, create, advance, complete, or erase
+		// a cross-turn coaching capability.
+		promptPendingAnswer = emptyPendingAnswer()
+	}
 	respondentAllowed := respondentModeAllowed(
 		turn.Utterance,
-		state.PendingAnswer.Active,
-		!turn.Ambient,
+		promptPendingAnswer.Active,
+		!turn.Ambient && turn.PDF == nil,
 	)
 	payload := inferencePayload{
 		Ambient:               turn.Ambient,
@@ -2284,7 +2301,7 @@ func (agent *vertexAgent) infer(
 		PreviousState: promptState{
 			Turn:                state.Turn,
 			ThoughtStateGraph:   state.Graph,
-			PendingAnswer:       state.PendingAnswer,
+			PendingAnswer:       promptPendingAnswer,
 			ConversationSummary: state.ConversationSummary,
 			DocumentSummary:     state.DocumentSummary,
 			SelfCorrectionGrace: state.SelfCorrectionGrace,
@@ -2870,6 +2887,10 @@ func (agent *vertexAgent) auditAnswer(
 		// evidence.
 		auditedReply = candidatePlan.AnswerAttempt
 	}
+	promptPendingAnswer := state.PendingAnswer
+	if turn.PDF != nil {
+		promptPendingAnswer = emptyPendingAnswer()
+	}
 	payload := criticPayload{
 		Ambient:              turn.Ambient,
 		Foreground:           turn.Foreground,
@@ -2881,7 +2902,7 @@ func (agent *vertexAgent) auditAnswer(
 		PreviousState: promptState{
 			Turn:                state.Turn,
 			ThoughtStateGraph:   state.Graph,
-			PendingAnswer:       state.PendingAnswer,
+			PendingAnswer:       promptPendingAnswer,
 			ConversationSummary: state.ConversationSummary,
 			DocumentSummary:     state.DocumentSummary,
 			SelfCorrectionGrace: state.SelfCorrectionGrace,
@@ -4078,12 +4099,12 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - 通常の質問へKOTAE自身が答える時はassistance_target=assistant、respondent_stage=none、answer_attempt=""にする。
 - 「こう聞かれたが答えられない」「質問に対して自分はこう言いたい」「結局何をやりたいのと聞かれた」のように、他者の質問へ本人が自分の言葉で答える練習ならassistance_target=respondentにする。AIが本人の代わりに答えを作るモードではない。
 - previous_state.pending_answer.active=trueなら、今の発話をその保留質問への本人の回答試行としてまず検討する。ただし明確に話題を変えた時はassistantへ戻す。pending_answer.phase=expandingならoperatorにはexpansion_operatorを使い、required_slotsはそのtarget slotだけにする。それ以外は保存済みoperatorとrequired_slotsを一字も変えず使う。
-- previous_state.pending_answer.assistant_follow_up=trueは、KOTAEが直前の通常会話で尋ねた短い一問である。本人が答えたら一度で通常会話へ戻し、理由や根拠をさらに試験しない。本人が別の話を始めた時もassistantへ戻す。
+- previous_state.pending_answer.assistant_follow_up=trueは、KOTAEが直前の通常会話で尋ねた短い一問である。本人が答えたら一度で通常会話へ戻し、理由や根拠をさらに試験しない。本人が別の話を始めた時もassistantへ戻す。成功後の短い相づちはサーバー固定文へ置換される。
 - confidenceは知識の確実性ではなく、今回の問い・意図・assistance_targetを一意に解釈できる確信度にする。曖昧なら低くする。
 - pending_answerがactiveでも、KOTAE自身への直接質問、単独の挨拶、明示的な話題変更はassistance_target=assistant、respondent_stage=noneへ戻す。
 - 他者の質問は分かるが本人の回答内容がまだない時はrespondent_stage=awaiting_answerにし、answer_attempt=""、clarifyを選ぶ。spoken_replyはサーバが固定の構造質問へ置換するため、本人の答えを推測・引用しない短い案内だけにする。
 - 本人の回答内容が今の発話にある時だけrespondent_stage=restructureにする。answer_attemptは今のutteranceに実際に連続して含まれる本人の回答部分を一字も創作せず抜き出す。
-- restructureのspoken_replyにも本人のanswer_attemptや並べ替えた回答を入れない。サーバが本人の実際の語順を別監査し、固定の構造質問へ置換する。AIが整えた文を成功証拠にしない。
+- restructureのspoken_replyにも本人のanswer_attemptや並べ替えた回答を入れない。サーバが本人の実際の語順を別監査し、固定の構造質問または固定の相づちへ置換する。AIが整えた文を成功証拠や音声出力にしない。
 - respondent_slot_evidenceは、required_slotsを満たすanswer_attempt内の連続した一つの意味節をslotごとに正確に抜き出す。推論で補えるが発話にはないslotを埋めない。
 - respondent_protected_spansには、表層規則だけでは守りにくい日本語の人名、組織名、製品名、研究名などがanswer_attemptにある時だけ、その完全一致spanを入れる。
 - assistantまたはawaiting_answerではrespondent_slot_evidenceとrespondent_protected_spansを空配列にする。
@@ -4121,7 +4142,7 @@ Latent Answer Contract:
 
 音声出力:
 - spoken_replyは自然で簡潔な日本語の話し言葉にする。
-- assistance_target=respondentのspoken_replyは本人の答えを引用、復唱、並べ替え、補完せず、答えの型だけを尋ねる短い構造案内にする。本人が言い直した時だけ次へ進む。
+- assistance_target=respondentのspoken_replyは本人の答えを引用、復唱、並べ替え、補完せず、答えの型だけを尋ねる短い構造案内にする。本人が言い直した時だけ次へ進む。成功後の音声もサーバー固定文へ置換されるため、本人の回答案、新しい事実、採点、次の試験を入れない。
 - 明確な問いには、spoken_replyの冒頭で要求されたAを直接返す。問いの復唱、挨拶、自己紹介、前置きを先に置かない。
 - dailyの明確な問いは、必要な内容を落とさない範囲で簡潔にする。
 - 最初のターンが挨拶だけでも、挨拶を反復するだけで終えず、質問、考え途中、ぼやきもそのまま話せる旨を一言添え、spoken_reply全体を二文以内にする。

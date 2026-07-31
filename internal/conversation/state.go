@@ -31,17 +31,18 @@ type StateCodec struct {
 }
 
 type conversationState struct {
-	Version             int                `json:"v"`
-	IssuedAt            int64              `json:"iat"`
-	ExpiresAt           int64              `json:"exp"`
-	SessionID           string             `json:"sid,omitempty"`
-	Turn                int                `json:"turn"`
-	Graph               ThoughtStateGraph  `json:"thought_state_graph"`
-	ConversationSummary string             `json:"conversation_summary,omitempty"`
-	DocumentSummary     string             `json:"document_summary,omitempty"`
-	PendingAnswer       PendingAnswerFrame `json:"pending_answer"`
-	SelfCorrectionGrace bool               `json:"self_correction_grace"`
-	LastIntervention    ArbiterDecision    `json:"last_intervention"`
+	Version             int                  `json:"v"`
+	IssuedAt            int64                `json:"iat"`
+	ExpiresAt           int64                `json:"exp"`
+	SessionID           string               `json:"sid,omitempty"`
+	Turn                int                  `json:"turn"`
+	Graph               ThoughtStateGraph    `json:"thought_state_graph"`
+	ConversationSummary string               `json:"conversation_summary,omitempty"`
+	DocumentSummary     string               `json:"document_summary,omitempty"`
+	PendingAnswer       PendingAnswerFrame   `json:"pending_answer"`
+	Support             *conversationSupport `json:"support,omitempty"`
+	SelfCorrectionGrace bool                 `json:"self_correction_grace"`
+	LastIntervention    ArbiterDecision      `json:"last_intervention"`
 }
 
 func NewStateCodec(key []byte) (*StateCodec, error) {
@@ -210,6 +211,15 @@ func normalizeConversationState(state conversationState) (conversationState, err
 	}
 	state.PendingAnswer, err = normalizePendingAnswer(state.PendingAnswer)
 	if err != nil {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	state.Support, err = normalizeConversationSupport(state.Support)
+	if err != nil {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	if state.Support != nil &&
+		state.Support.CompanionOnly &&
+		state.PendingAnswer.Active {
 		return conversationState{}, ErrInvalidStateToken
 	}
 	if err := validateArbiter(state.LastIntervention); err != nil {

@@ -7,7 +7,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 )
 
-func TestGuideAttemptRequiresPersonToSayTargetFirst(t *testing.T) {
+func TestGuideAttemptAcceptsLateTargetWithoutCompulsoryRestatement(t *testing.T) {
 	gate := Gate(purposeInput(
 		"判断のばらつきを減らします。目的は評価基準をそろえることです。",
 		"",
@@ -27,10 +27,13 @@ func TestGuideAttemptRequiresPersonToSayTargetFirst(t *testing.T) {
 		false,
 		false,
 	)
-	if decision.Action != CoachActionRestate ||
-		decision.Phase != CoachPhaseAwaitingRestatement ||
-		!decision.KeepPending {
-		t.Fatalf("late answer was not kept for restatement: %#v", decision)
+	if decision.Action != CoachActionComplete ||
+		decision.Phase != CoachPhaseComplete ||
+		decision.KeepPending ||
+		decision.VerifiedFirst ||
+		!strings.Contains(decision.SpokenReply, "最初に置く") ||
+		strings.HasSuffix(decision.SpokenReply, "？") {
+		t.Fatalf("late answer became a compulsory restatement: %#v", decision)
 	}
 	if strings.Contains(decision.SpokenReply, "評価基準") {
 		t.Fatalf("coach repeated the person's answer: %q", decision.SpokenReply)
@@ -76,7 +79,7 @@ func TestGuideAttemptUsesOperatorPromptForAmbiguousTarget(t *testing.T) {
 	}
 }
 
-func TestGuideAttemptCompletesAndOffersOneOptionalFollowUp(t *testing.T) {
+func TestGuideAttemptCompletesWithoutOpeningAnotherQuestion(t *testing.T) {
 	gate := Gate(purposeInput(
 		"目的は評価基準をそろえることです。",
 		"",
@@ -94,7 +97,8 @@ func TestGuideAttemptCompletesAndOffersOneOptionalFollowUp(t *testing.T) {
 	if decision.Action != CoachActionComplete ||
 		decision.Phase != CoachPhaseComplete ||
 		decision.KeepPending ||
-		!strings.HasSuffix(decision.SpokenReply, "？") {
+		!decision.VerifiedFirst ||
+		strings.HasSuffix(decision.SpokenReply, "？") {
 		t.Fatalf("successful core answer did not return to natural conversation: %#v", decision)
 	}
 }
@@ -117,7 +121,8 @@ func TestGuideAttemptCompletesExpansionAndAbstention(t *testing.T) {
 	)
 	if expanded.Action != CoachActionComplete ||
 		expanded.Phase != CoachPhaseComplete ||
-		expanded.KeepPending {
+		expanded.KeepPending ||
+		expanded.VerifiedFirst {
 		t.Fatalf("expanded answer did not complete: %#v", expanded)
 	}
 
@@ -133,7 +138,8 @@ func TestGuideAttemptCompletesExpansionAndAbstention(t *testing.T) {
 	)
 	if abstained.Action != CoachActionComplete ||
 		abstained.KeepPending ||
-		!strings.Contains(abstained.SpokenReply, "そのまま") {
+		!abstained.VerifiedFirst ||
+		!strings.Contains(abstained.SpokenReply, "大丈夫") {
 		t.Fatalf("abstention was not accepted as an answer: %#v", abstained)
 	}
 }
@@ -156,7 +162,8 @@ func TestGuideAttemptOneShotCompletesWithoutStartingExpansion(t *testing.T) {
 	if decision.Action != CoachActionComplete ||
 		decision.Phase != CoachPhaseComplete ||
 		decision.KeepPending ||
-		decision.SpokenReply != "なるほど、そこが大事なんですね。その続きも聞かせてください。" ||
+		!decision.VerifiedFirst ||
+		decision.SpokenReply != "なるほど、そう考えているんですね。" ||
 		strings.Contains(decision.SpokenReply, "評価基準") ||
 		strings.HasSuffix(decision.SpokenReply, "？") {
 		t.Fatalf("one-shot answer started another coaching question: %#v", decision)

@@ -437,6 +437,9 @@ func (p *Pipeline) processLive(
 	// race the agent's mandatory document wipe.
 	speculationEligible := responseExpected && input.Document == nil
 	finalFragments := make([]string, 0, 4)
+	finalConfidence := float32(0)
+	finalConfidenceObserved := false
+	finalConfidenceInvalid := false
 	latestInterim := ""
 	candidateTracker := speculativeCandidateTracker{}
 	speculationAttempted := false
@@ -505,6 +508,16 @@ func (p *Pipeline) processLive(
 		case speechio.StreamingTranscriptionFinal:
 		default:
 			continue
+		}
+		if math.IsNaN(float64(event.Confidence)) ||
+			math.IsInf(float64(event.Confidence), 0) ||
+			event.Confidence < 0 || event.Confidence > 1 {
+			finalConfidenceInvalid = true
+		} else if event.Confidence > 0 &&
+			(!finalConfidenceObserved ||
+				event.Confidence < finalConfidence) {
+			finalConfidence = event.Confidence
+			finalConfidenceObserved = true
 		}
 
 		if firstFinalMS < 0 {
@@ -622,6 +635,9 @@ func (p *Pipeline) processLive(
 	ctx = processingCtx
 
 	finalTranscript := strings.TrimSpace(strings.Join(finalFragments, " "))
+	if finalConfidenceInvalid {
+		finalConfidence = float32(math.NaN())
+	}
 	slog.InfoContext(ctx, "voice pipeline stage completed",
 		"request_id", input.RequestID,
 		"stage", "transcribe_stream",
@@ -699,7 +715,15 @@ func (p *Pipeline) processLive(
 		}
 	} else {
 		adoptedSpeculation := false
-		if responseExpected {
+		if transcriptConfidenceTooLow(finalConfidence) {
+			if responseExpected {
+				specMiss = 1
+				if speculation != nil {
+					cancelSpeculation()
+					specCancel = 1
+				}
+			}
+		} else if responseExpected {
 			if speculation == nil {
 				specMiss = 1
 			} else if speculationTextsMatch(
@@ -805,17 +829,16 @@ func (p *Pipeline) processLive(
 			)
 		}
 		if !adoptedSpeculation {
-			// Streaming recognition may omit an utterance-level confidence
-			// score. Preserve the recognized text bounds and let the audited
-			// conversation agent handle semantic ambiguity instead of applying
-			// the buffered recognizer's fixed confidence gate.
+			// Zero means the provider omitted confidence. Otherwise the minimum
+			// positive confidence across final fragments follows the same audited
+			// fail-closed boundary as buffered recognition.
 			conversationStarted := time.Now()
 			result, spokenReply, err = p.prepareRecognizedTurn(
 				ctx,
 				uid,
 				input,
 				finalTranscript,
-				0,
+				finalConfidence,
 			)
 			conversationMS = time.Since(conversationStarted).Milliseconds()
 		}

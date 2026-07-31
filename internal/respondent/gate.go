@@ -26,6 +26,9 @@ var (
 	nonPropositionalFillerPattern = regexp.MustCompile(
 		`(?i)^(?:えっ?と+|ええと+|えー+と+|あの+|あのー+|うー+ん|んー+|まあ+|その+|なんというか|um+|uh+|erm+)$`,
 	)
+	leadingNonPropositionalFillerPattern = regexp.MustCompile(
+		`(?i)^(?:(?:(?:えっ?と+|ええと+|えー+と+|あのー*|うー+ん|んー+|まあ+|その+|なんというか)[、,\s]*)|(?:(?:um+|uh+|erm+)[,\s]+))+`,
+	)
 )
 
 var negationMarkers = []string{
@@ -123,10 +126,12 @@ func Gate(input Input) Assessment {
 	assessment.OriginalCommitmentPosition = commitmentPosition(
 		originalText,
 		evidence[targetSlot],
+		input.RequireTargetAtUtteranceFront,
 	)
 	assessment.CommitmentPosition = commitmentPosition(
 		effectiveText,
 		evidence[targetSlot],
+		input.RequireTargetAtUtteranceFront,
 	)
 	assessment.MeaningPreserved = candidateText == ""
 
@@ -293,7 +298,11 @@ func slotCoverage(required []Slot, evidence map[Slot]string, text string) float6
 	return float64(filled) / float64(len(required))
 }
 
-func commitmentPosition(text, targetEvidence string) CommitmentPosition {
+func commitmentPosition(
+	text string,
+	targetEvidence string,
+	requireTargetAtUtteranceFront bool,
+) CommitmentPosition {
 	if targetEvidence == "" {
 		return PositionAbsent
 	}
@@ -306,7 +315,9 @@ func commitmentPosition(text, targetEvidence string) CommitmentPosition {
 			continue
 		}
 		if strings.Contains(clause, targetEvidence) {
-			if semanticIndex == 0 {
+			if semanticIndex == 0 &&
+				(!requireTargetAtUtteranceFront ||
+					startsWithTargetEvidenceIgnoringFillers(clause, targetEvidence)) {
 				return PositionFirst
 			}
 			return PositionLater
@@ -314,6 +325,21 @@ func commitmentPosition(text, targetEvidence string) CommitmentPosition {
 		semanticIndex++
 	}
 	return PositionAbsent
+}
+
+func startsWithTargetEvidenceIgnoringFillers(text, targetEvidence string) bool {
+	text = collapseSpace(text)
+	targetEvidence = collapseSpace(targetEvidence)
+	if text == "" || targetEvidence == "" {
+		return false
+	}
+	if strings.HasPrefix(text, targetEvidence) {
+		return true
+	}
+	withoutFillers := strings.TrimSpace(
+		leadingNonPropositionalFillerPattern.ReplaceAllString(text, ""),
+	)
+	return strings.HasPrefix(withoutFillers, targetEvidence)
 }
 
 func preservationIssues(original, candidate string, protected []string) []Issue {

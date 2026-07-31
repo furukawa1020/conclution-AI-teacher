@@ -38,6 +38,12 @@ type CoachDecision struct {
 	SpokenReply string
 	Attempts    uint8
 	KeepPending bool
+	// VerifiedFirst is internal evidence that both the deterministic gate and
+	// the independent critic found the person's own target answer first. A
+	// completed exchange is not automatically a verified success: an answer
+	// that arrived later is accepted without another task but must not advance
+	// adaptive fading.
+	VerifiedFirst bool
 }
 
 // GuideAwaiting asks only for the answer type requested by the question.
@@ -128,7 +134,9 @@ func GuideAwaitingInPhase(
 
 // GuideAttempt decides whether the person—not an AI reconstruction—has put
 // the requested answer first. Both the exact-span respondent gate and the
-// independent LAC critic must agree before a turn can complete.
+// independent LAC critic must agree before adaptive state records a verified
+// first answer. Target content that arrived later may close without a retry,
+// but it never advances that verified-success state.
 func GuideAttempt(
 	operator Operator,
 	phase CoachPhase,
@@ -161,30 +169,34 @@ func GuideAttempt(
 		critic.Metrics.CommitmentFrontPosition == answercontract.PositionFirst &&
 		critic.Metrics.TargetSlotCoverage == 1
 	if succeeded {
+		verifiedFirst := phase != CoachPhaseExpanding
 		if oneShot {
 			return CoachDecision{
-				Phase:       CoachPhaseComplete,
-				Action:      CoachActionComplete,
-				SpokenReply: naturalContinuationReply(operator, abstained),
-				Attempts:    attempts,
-				KeepPending: false,
+				Phase:         CoachPhaseComplete,
+				Action:        CoachActionComplete,
+				SpokenReply:   naturalContinuationReply(operator, abstained),
+				Attempts:      attempts,
+				KeepPending:   false,
+				VerifiedFirst: verifiedFirst,
 			}
 		}
 		if phase == CoachPhaseExpanding || abstained {
 			return CoachDecision{
-				Phase:       CoachPhaseComplete,
-				Action:      CoachActionComplete,
-				SpokenReply: completionReply(abstained),
-				Attempts:    attempts,
-				KeepPending: false,
+				Phase:         CoachPhaseComplete,
+				Action:        CoachActionComplete,
+				SpokenReply:   completionReply(abstained),
+				Attempts:      attempts,
+				KeepPending:   false,
+				VerifiedFirst: verifiedFirst,
 			}
 		}
 		return CoachDecision{
-			Phase:       CoachPhaseComplete,
-			Action:      CoachActionComplete,
-			SpokenReply: completionWithOptionalFollowUp(operator),
-			Attempts:    attempts,
-			KeepPending: false,
+			Phase:         CoachPhaseComplete,
+			Action:        CoachActionComplete,
+			SpokenReply:   naturalContinuationReply(operator, abstained),
+			Attempts:      attempts,
+			KeepPending:   false,
+			VerifiedFirst: verifiedFirst,
 		}
 	}
 
@@ -223,14 +235,20 @@ func GuideAttempt(
 			KeepPending: true,
 		}
 	}
-	if gate.OriginalCommitmentPosition == PositionLater ||
-		critic.Metrics.CommitmentFrontPosition == answercontract.PositionLater {
+	// If both independent checks found the target content but it arrived later,
+	// give one fixed, optional micro-tip and close. The person already answered;
+	// making them restate it would turn a voluntary conversation into a task.
+	if gate.OriginalTargetCoverage == 1 &&
+		critic.Metrics.TargetSlotCoverage == 1 &&
+		!critic.Ambiguous &&
+		(gate.OriginalCommitmentPosition == PositionLater ||
+			critic.Metrics.CommitmentFrontPosition == answercontract.PositionLater) {
 		return CoachDecision{
-			Phase:       CoachPhaseAwaitingRestatement,
-			Action:      CoachActionRestate,
-			SpokenReply: gentleReaskPrompt(operator),
-			Attempts:    nextAttempts,
-			KeepPending: true,
+			Phase:       CoachPhaseComplete,
+			Action:      CoachActionComplete,
+			SpokenReply: lateAnswerContinuationReply(),
+			Attempts:    attempts,
+			KeepPending: false,
 		}
 	}
 	if gate.OriginalTargetCoverage < 1 ||
@@ -330,37 +348,30 @@ func completionReply(abstained bool) string {
 // path.
 func naturalContinuationReply(operator Operator, abstained bool) string {
 	if abstained {
-		return "うん、そのままで大丈夫です。話したいところから続けてください。"
+		return "うん、まだ決めていなくても大丈夫です。"
 	}
 	switch operator {
 	case OperatorBoolean, OperatorChoice:
-		return "うん、そちらなんですね。その続きも聞かせてください。"
+		return "うん、そちらなんですね。"
 	case OperatorQuantity:
-		return "なるほど、そのくらいなんですね。その続きも聞かせてください。"
+		return "なるほど、そのくらいなんですね。"
 	case OperatorState:
-		return "なるほど、今はそうなんですね。その続きも聞かせてください。"
+		return "なるほど、今はそうなんですね。"
 	case OperatorCause, OperatorPurpose:
-		return "なるほど、そこが大事なんですね。その続きも聞かせてください。"
+		return "なるほど、そう考えているんですね。"
 	case OperatorProcedure:
-		return "なるほど、そこから始めるんですね。その続きも聞かせてください。"
+		return "なるほど、そこから始めるんですね。"
 	case OperatorDefinition:
-		return "なるほど、そう捉えているんですね。その続きも聞かせてください。"
+		return "なるほど、そう捉えているんですね。"
 	case OperatorComparison, OperatorEvidence:
-		return "なるほど、そこが判断の軸なんですね。その続きも聞かせてください。"
+		return "なるほど、そこが判断の軸なんですね。"
 	default:
-		return "うん、なるほど。その続きも聞かせてください。"
+		return "うん、なるほど。"
 	}
 }
 
-func completionWithOptionalFollowUp(operator Operator) string {
-	switch expansionOperator(operator) {
-	case OperatorEvidence:
-		return completionReply(false) + "そう言える根拠を一つ挙げるなら？"
-	case OperatorState:
-		return completionReply(false) + "まず何をしますか？"
-	default:
-		return completionReply(false) + "そう考えた理由を一つ挙げるなら？"
-	}
+func lateAnswerContinuationReply() string {
+	return "うん、答えは聞こえました。次は今の答えを最初に置くと、もっと伝わりやすいです。そのままで大丈夫です。"
 }
 
 func releaseDecision(attempts uint8) CoachDecision {

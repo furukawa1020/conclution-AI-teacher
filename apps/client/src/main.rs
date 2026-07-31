@@ -1,6 +1,11 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
+const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
+const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
+const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手な場面を勝手に練習させません。頼んだ練習の後は、会話内容を含まない短期の目印だけで通常会話の質問量を調整し、点数は表示しません。";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoiceState {
     Ready,
@@ -139,7 +144,7 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "質問でも、ぼやきでも、「今日は話すだけ」でも　小さな声のままどうぞ",
+            Self::Ready => "質問でも、ぼやきでも、まとまらなくても、小さな声のままどうぞ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
             Self::Thinking => {
@@ -1274,17 +1279,17 @@ fn App() -> Element {
                         div { class: "capability",
                             span { "話す" }
                             i { aria_hidden: "true", "→" }
-                            strong { "短くても最後まで待つ" }
+                            strong { {ORDINARY_CHAT_COPY} }
                         }
                         div { class: "capability",
-                            span { "会話" }
+                            span { "支援" }
                             i { aria_hidden: "true", "→" }
-                            strong { "まず話の中身に答える" }
+                            strong { {ANSWER_SUPPORT_COPY} }
                         }
                         div { class: "capability",
-                            span { "伝わる" }
+                            span { "戻る" }
                             i { aria_hidden: "true", "→" }
-                            strong { "必要な時だけ一問で支える" }
+                            strong { {TALK_ONLY_COPY} }
                         }
                     }
 
@@ -1509,6 +1514,10 @@ fn App() -> Element {
                                 "匿名セッションと正規アプリからのリクエストか毎回たしかめる"
                             }
                             p {
+                                strong { "会話支援" }
+                                {SUPPORT_BOUNDARY_COPY}
+                            }
+                            p {
                                 strong { "話者" }
                                 "話者本人の認証・識別はしていません。周囲を聴かせ続けず、相手の質問はあなた自身が言い直してから答えてください。"
                             }
@@ -1536,7 +1545,8 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        CoachAction, CoachPhase, CoachState, VoiceState, VoiceTurnMode, session_stop_pauses,
+        ANSWER_SUPPORT_COPY, CoachAction, CoachPhase, CoachState, ORDINARY_CHAT_COPY,
+        SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState, VoiceTurnMode, session_stop_pauses,
         silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
         valid_voice_pause_metadata,
     };
@@ -1611,6 +1621,28 @@ mod tests {
             assert!(!copy.contains("普通は"));
             assert!(!copy.contains("やり直し"));
         }
+    }
+
+    #[test]
+    fn visible_copy_keeps_answer_support_optional_unscored_and_non_clinical() {
+        let ready_hint = VoiceState::Ready.hint();
+
+        assert!(ready_hint.contains("まとまらなくても"));
+        assert!(ready_hint.contains("小さな声"));
+        assert_eq!(ORDINARY_CHAT_COPY, "そのままなら普通の雑談");
+        assert_eq!(ANSWER_SUPPORT_COPY, "「答え方を一問だけ手伝って」");
+        assert_eq!(TALK_ONLY_COPY, "「今日は話すだけ」");
+
+        for boundary in [
+            "診断や治療ではなく",
+            "苦手な場面を勝手に練習させません",
+            "会話内容を含まない短期の目印",
+            "通常会話の質問量を調整",
+            "点数は表示しません",
+        ] {
+            assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
+        }
+        assert!(!SUPPORT_BOUNDARY_COPY.contains("曝露"));
     }
 
     #[test]

@@ -35,6 +35,11 @@ func TestStateCodecRoundTripUIDBindingExpiryAndTamper(t *testing.T) {
 		},
 		ConversationSummary: "応募案の検証方法を整理中",
 		DocumentSummary:     "論文は小規模な比較実験を報告",
+		Support: &conversationSupport{
+			FadingStage:          1,
+			VerifiedFirstAnswers: 1,
+			QuestionCooldown:     2,
+		},
 		SelfCorrectionGrace: true,
 		LastIntervention: ArbiterDecision{
 			Benefit: 0.8, InterruptionCost: 0.2, Urgency: 0.1,
@@ -57,6 +62,8 @@ func TestStateCodecRoundTripUIDBindingExpiryAndTamper(t *testing.T) {
 	if opened.Turn != 1 ||
 		opened.ConversationSummary != state.ConversationSummary ||
 		opened.Graph.Claims[0] != state.Graph.Claims[0] ||
+		opened.Support == nil ||
+		*opened.Support != *state.Support ||
 		!validSessionID(opened.SessionID) {
 		t.Fatalf("unexpected round trip state: %#v", opened)
 	}

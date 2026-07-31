@@ -36,7 +36,8 @@ const (
 
 	phaticLocalSpokenReply                 = "こんにちは、質問でも、考え途中でも、ぼやきでも、そのまま話してください。まず答えを返し、必要なら問いそのものから一緒に組み直します。"
 	interpretationClarificationSpokenReply = "何をいちばん知りたいか、もう少し具体的に教えてもらえますか？"
-	plannerUnavailableSpokenReply          = "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。"
+	plannerUnavailableSpokenReply          = "今の声は届いています。こちらの返事の準備だけ止まりました。言い直さなくて大丈夫です。続きでも別の話でも、そのままどうぞ。"
+	verificationUnavailableSpokenReply     = "今の声は届いています。こちらの安全確認だけ間に合いませんでした。言い直さなくて大丈夫です。この続きでも、別の話でも、そのままどうぞ。"
 
 	PrecisionConfidenceThreshold         = 0.78
 	AmbientEVIThreshold                  = 0.35
@@ -972,6 +973,7 @@ func (agent *vertexAgent) Process(
 			)
 			var assessment answercontract.Assessment
 			var criticErr error
+			criticRetried := false
 			if criticOverlapped {
 				assessment, criticErr = awaitSpeculativeAudit(ctx, earlyAudit)
 			} else {
@@ -979,6 +981,39 @@ func (agent *vertexAgent) Process(
 					earlyAudit.cancel()
 					earlyAudit = nil
 				}
+				assessment, criticErr = agent.auditAnswer(
+					ctx,
+					agent.fastModel,
+					criticPolicy.thinkingLevel,
+					criticPolicy.timeout,
+					normalized,
+					state,
+					finalPlan,
+				)
+			}
+			if criticErr != nil &&
+				criticPolicy.thinkingLevel == genai.ThinkingLevelLow &&
+				retryableCriticFailure(criticErr) &&
+				ctx.Err() == nil &&
+				contextHasTimeBudget(
+					ctx,
+					criticPolicy.timeout+voiceResponseReserve,
+				) {
+				// Retry only transient ordinary-conversation failures. The retry
+				// uses the same isolated prompt, model, thinking policy, and strict
+				// output contract. Safety/policy blocks and malformed contracts are
+				// never retried, and no draft is published before this succeeds.
+				slog.WarnContext(
+					ctx,
+					"answer verification retrying",
+					"failure_class",
+					criticFailureClass(criticErr),
+					"failure_stage",
+					criticFailureStage(criticErr),
+					"critic_model_role",
+					"fast",
+				)
+				criticRetried = true
 				assessment, criticErr = agent.auditAnswer(
 					ctx,
 					agent.fastModel,
@@ -998,6 +1033,8 @@ func (agent *vertexAgent) Process(
 				time.Since(criticStarted).Milliseconds(),
 				"overlapped",
 				criticOverlapped,
+				"retried",
+				criticRetried,
 			)
 			if criticErr != nil {
 				if ctx.Err() != nil {
@@ -1025,7 +1062,7 @@ func (agent *vertexAgent) Process(
 		Phase:  respondent.CoachPhaseNone,
 		Action: respondent.CoachActionNone,
 	}
-	if coachTurn {
+	if coachTurn && !verificationUnavailable {
 		operator := authoritativeCoachOperator(coachFrame)
 		switch finalPlan.RespondentStage {
 		case "awaiting_answer":
@@ -1124,18 +1161,18 @@ func (agent *vertexAgent) Process(
 		decision.Act = "silent"
 		spokenReply = ""
 		interventionPolicy = "wait"
-	} else if coachTurn {
-		decision.Act = coachDecisionAct(coachDecision.Action)
-		spokenReply = coachDecision.SpokenReply
-		interventionPolicy = "coach"
 	} else if verificationUnavailable && passiveAmbientTurn(normalized) {
 		decision.Act = "silent"
 		spokenReply = ""
 		interventionPolicy = "wait"
 	} else if verificationUnavailable {
 		decision.Act = "clarify"
-		spokenReply = "回答の意味を安全に確認できませんでした。もう一度試してもらえますか？"
+		spokenReply = verificationUnavailableSpokenReply
 		interventionPolicy = "clarify"
+	} else if coachTurn {
+		decision.Act = coachDecisionAct(coachDecision.Action)
+		spokenReply = coachDecision.SpokenReply
+		interventionPolicy = "coach"
 	} else if researchAuditBlocked {
 		decision.Act = "reflect"
 		spokenReply = "取得した論文候補は画面に出します。内容や主張は、まだ一次資料で検証していません。"
@@ -1203,6 +1240,11 @@ func (agent *vertexAgent) Process(
 		// the clause that was originally bound. Resume from the exact
 		// pre-safety frame after the urgent response.
 		pendingAnswer = preTurnState.PendingAnswer
+	case verificationUnavailable:
+		// An infrastructure failure is not a failed answer attempt. Preserve the
+		// exact authenticated coaching frame, including its attempt counter and
+		// restatement bindings, while publishing no unverified model text.
+		pendingAnswer = preTurnState.PendingAnswer
 	case coachTurn && canUpdateCoachControl:
 		if coachDecision.KeepPending {
 			storedPhase := coachDecision.Phase
@@ -1262,7 +1304,7 @@ func (agent *vertexAgent) Process(
 		// exercise.
 		pendingAnswer = emptyPendingAnswer()
 	}
-	if finalPlan.AssistanceTarget == "respondent" {
+	if finalPlan.AssistanceTarget == "respondent" && !verificationUnavailable {
 		route = coachRoutePrefix(
 			coachDecision.Action,
 			spokenReply == "",
@@ -1290,12 +1332,25 @@ func (agent *vertexAgent) Process(
 	}
 	responseAssistanceTarget := finalPlan.AssistanceTarget
 	responseRespondentStage := finalPlan.RespondentStage
+	responseCoachPhase := string(coachDecision.Phase)
+	responseCoachAction := string(coachDecision.Action)
 	if passiveRespondentObservation {
 		// Passive background speech is not an active coaching exchange and
 		// must not expose a respondent phase that the UI could mistake for
 		// progress.
 		responseAssistanceTarget = "assistant"
 		responseRespondentStage = "none"
+		responseCoachPhase = string(respondent.CoachPhaseNone)
+		responseCoachAction = string(respondent.CoachActionNone)
+	}
+	if verificationUnavailable && coachTurn {
+		// The current response is a content-free infrastructure bridge, not a
+		// coaching prompt. Keep the private frame for the next verified turn but
+		// do not make the UI present this outage as a retry requested of the user.
+		responseAssistanceTarget = "assistant"
+		responseRespondentStage = "none"
+		responseCoachPhase = string(respondent.CoachPhaseNone)
+		responseCoachAction = string(respondent.CoachActionNone)
 	}
 
 	return VoiceTurnResult{
@@ -1304,8 +1359,8 @@ func (agent *vertexAgent) Process(
 		Intent:              finalPlan.Intent,
 		AssistanceTarget:    responseAssistanceTarget,
 		RespondentStage:     responseRespondentStage,
-		CoachPhase:          string(coachDecision.Phase),
-		CoachAction:         string(coachDecision.Action),
+		CoachPhase:          responseCoachPhase,
+		CoachAction:         responseCoachAction,
 		ResearchStatus:      researchStatus,
 		ResearchRecords:     researchRecords,
 		LatentQuestion:      finalPlan.LatentQuestion,
@@ -1368,7 +1423,7 @@ func (agent *vertexAgent) completePhaticLocal(
 		Urgency:          0,
 		Confidence:       1,
 		Score:            0.85,
-		Act:              "reflect",
+		Act:              "clarify",
 	}
 	nextState := conversationState{
 		SessionID:           state.SessionID,
@@ -1447,8 +1502,8 @@ func (agent *vertexAgent) completeCoachOptOutLocal(
 		CoachAction:         string(respondent.CoachActionNone),
 		ResearchStatus:      "none",
 		ResearchRecords:     []ResearchRecord{},
-		ArgumentStructure:   "direct_answer",
-		InterventionPolicy:  "wait",
+		ArgumentStructure:   "clarifying_question",
+		InterventionPolicy:  "clarify",
 		SpokenReply:         spokenReply,
 		Confidence:          1,
 		Intervention:        decision,
@@ -1472,7 +1527,7 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		InterruptionCost: 0.1,
 		Urgency:          0,
 		Confidence:       1,
-		Act:              "clarify",
+		Act:              "reflect",
 		Score:            0.4,
 	}
 	lastIntervention := decision
@@ -1511,8 +1566,8 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		CoachAction:         string(respondent.CoachActionNone),
 		ResearchStatus:      "none",
 		ResearchRecords:     []ResearchRecord{},
-		ArgumentStructure:   "clarifying_question",
-		InterventionPolicy:  "clarify",
+		ArgumentStructure:   "direct_answer",
+		InterventionPolicy:  "wait",
 		SpokenReply:         plannerUnavailableSpokenReply,
 		Confidence:          0,
 		Intervention:        decision,
@@ -3411,6 +3466,12 @@ func criticFailureStage(err error) string {
 	default:
 		return "internal"
 	}
+}
+
+func retryableCriticFailure(err error) bool {
+	return err != nil &&
+		errors.Is(err, errProviderTransient) &&
+		!errors.Is(err, errCriticCanceled)
 }
 
 func normalizeAndValidatePlan(

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -962,6 +963,78 @@ func TestAgentCoachFillersDoNotConsumeGentleRetry(t *testing.T) {
 	state := openCoachState(t, agent, uid, result.StateToken)
 	if state.PendingAnswer.Attempts != 0 {
 		t.Fatalf("filler-only speech consumed the gentle retry: %#v", state.PendingAnswer)
+	}
+}
+
+func TestAgentCoachVerificationOutagePreservesExactPendingFrame(t *testing.T) {
+	const (
+		uid          = "uid-coach-verification-outage"
+		answer       = "目的は評価基準をそろえることです"
+		plannerDraft = "この未監査の代理回答は読み上げない。"
+	)
+	plan := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		answer,
+		answer,
+		plannerDraft,
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{err: errors.New("critic provider detail must stay private")},
+		{body: encodePlan(t, plan)},
+		{err: errors.New("critic provider detail must stay private again")},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingRestatement,
+		1,
+	)
+	// A valid-sized opaque tag exercises preservation of the authenticated
+	// restatement capability without putting the underlying answer in state.
+	initial.PendingAnswer.RestatementTag = "AAAAAAAAAAAAAAAAAAAAAA"
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+	expected := openCoachState(t, agent, uid, token).PendingAnswer
+
+	for turn := 0; turn < 2; turn++ {
+		result, processErr := agent.Process(context.Background(), uid, VoiceTurn{
+			SchemaVersion: SchemaVersion,
+			Utterance:     answer,
+			StateToken:    token,
+		})
+		if processErr != nil {
+			t.Fatalf("verification outage %d: %v", turn+1, processErr)
+		}
+		if result.Route != "verification-unavailable" ||
+			result.AssistanceTarget != "assistant" ||
+			result.RespondentStage != "none" ||
+			result.CoachPhase != "none" ||
+			result.CoachAction != "none" ||
+			result.SpokenReply != verificationUnavailableSpokenReply ||
+			strings.Contains(result.SpokenReply, answer) ||
+			strings.Contains(result.SpokenReply, plannerDraft) ||
+			strings.Contains(result.SpokenReply, "意味") ||
+			strings.Contains(result.SpokenReply, "もう一度") {
+			t.Fatalf("verification outage escaped the safe bridge: %#v", result)
+		}
+		next := openCoachState(t, agent, uid, result.StateToken)
+		if !reflect.DeepEqual(next.PendingAnswer, expected) {
+			t.Fatalf(
+				"verification outage %d mutated the pending frame: got=%#v want=%#v",
+				turn+1,
+				next.PendingAnswer,
+				expected,
+			)
+		}
+		token = result.StateToken
+	}
+	if len(fake.calls) != 4 {
+		t.Fatalf("high-risk coach verification retried or model-hopped: %#v", fake.calls)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,39 +12,28 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 )
 
-func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *testing.T) {
+func TestAgentAssistantFollowUpRemainsOrdinaryConversation(t *testing.T) {
 	const (
-		uid                 = "uid-natural-one-shot-coach"
-		followUp            = "理由はあとで聞きます。まず、目的は何ですか？"
-		answer              = "目的は評価基準をそろえることです"
-		unauditedModelReply = "本人は評価基準に執着している、と断定します。"
-		fixedNaturalReply   = "なるほど、そこが大事なんですね。その続きも聞かせてください。"
-		questionTopic       = "評価基準の導入目的"
+		uid           = "uid-natural-assistant-follow-up"
+		followUp      = "理由はあとで聞きます。まず、目的は何ですか？"
+		answer        = "目的は評価基準をそろえることです"
+		ordinaryReply = "評価基準をそろえたいんですね。今はどこまで決まっていますか？"
 	)
 	clarify := validModelPlan()
 	clarify.InterventionPolicy = "clarify"
 	clarify.Intervention.Act = "clarify"
 	clarify.SpokenReply = followUp
 	clarify.AnswerContract = validCriticContract(followUp)
-	attempt := coachAttemptPlan(
-		answercontract.OperatorPurpose,
-		answercontract.SlotPurpose,
-		questionTopic,
-		answer,
-		answer,
-		unauditedModelReply,
-	)
+	ordinary := validModelPlan()
+	ordinary.InterventionPolicy = "clarify"
+	ordinary.Intervention.Act = "clarify"
+	ordinary.SpokenReply = ordinaryReply
+	ordinary.AnswerContract = validCriticContract(ordinaryReply)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, clarify)},
 		{body: encodeContract(t, validCriticContract(followUp))},
-		{body: encodePlan(t, attempt)},
-		{body: encodeContract(t, coachCriticContract(
-			answercontract.OperatorPurpose,
-			answercontract.SlotPurpose,
-			answer,
-			answer,
-			answercontract.PositionFirst,
-		))},
+		{body: encodePlan(t, ordinary)},
+		{body: encodeContract(t, validCriticContract(ordinaryReply))},
 	}}
 	agent := newTestAgent(t, fake)
 
@@ -62,23 +52,19 @@ func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *test
 		first.SpokenReply != followUp {
 		t.Fatalf("assistant follow-up metadata: %#v", first)
 	}
-	armed, err := agent.codec.open(uid, first.StateToken)
+	afterQuestion, err := agent.codec.open(uid, first.StateToken)
 	if err != nil {
-		t.Fatalf("open armed state: %v", err)
+		t.Fatalf("open state after assistant question: %v", err)
 	}
-	if !armed.PendingAnswer.Active ||
-		!armed.PendingAnswer.AssistantFollowUp ||
-		armed.PendingAnswer.Operator != answercontract.OperatorPurpose ||
-		armed.PendingAnswer.Subject != assistantFollowUpSubject {
-		t.Fatalf("validated follow-up did not arm one-shot frame: %#v", armed.PendingAnswer)
+	if afterQuestion.PendingAnswer.Active {
+		t.Fatalf("assistant-authored question became a graded scope: %#v", afterQuestion.PendingAnswer)
 	}
-	armedJSON, err := json.Marshal(armed)
+	stateJSON, err := json.Marshal(afterQuestion)
 	if err != nil {
-		t.Fatalf("marshal armed state: %v", err)
+		t.Fatalf("marshal state: %v", err)
 	}
-	if bytes.Contains(armedJSON, []byte(followUp)) ||
-		bytes.Contains(armedJSON, []byte(questionTopic)) {
-		t.Fatalf("assistant question prose entered state: %s", armedJSON)
+	if bytes.Contains(stateJSON, []byte(followUp)) {
+		t.Fatalf("assistant question prose entered state: %s", stateJSON)
 	}
 
 	second, err := agent.Process(context.Background(), uid, VoiceTurn{
@@ -91,34 +77,30 @@ func TestAgentNaturalForegroundAnswerCompletesValidatedAssistantFollowUp(t *test
 	if err != nil {
 		t.Fatalf("natural foreground answer: %v", err)
 	}
-	if second.AssistanceTarget != "respondent" ||
-		second.RespondentStage != "restructure" ||
-		second.CoachPhase != "complete" ||
-		second.CoachAction != "complete" ||
-		second.SpokenReply != fixedNaturalReply ||
-		strings.Contains(second.SpokenReply, answer) ||
-		strings.Contains(second.SpokenReply, unauditedModelReply) {
-		t.Fatalf("one-shot answer did not use the fixed natural backchannel: %#v", second)
+	if second.AssistanceTarget != "assistant" ||
+		second.RespondentStage != "none" ||
+		second.CoachPhase != "none" ||
+		second.CoachAction != "none" ||
+		second.SpokenReply != ordinaryReply {
+		t.Fatalf("ordinary follow-up answer entered coaching: %#v", second)
 	}
 	completed, err := agent.codec.open(uid, second.StateToken)
 	if err != nil {
-		t.Fatalf("open completed state: %v", err)
+		t.Fatalf("open ordinary continuation state: %v", err)
 	}
 	if completed.PendingAnswer.Active {
-		t.Fatalf("one-shot frame survived completion: %#v", completed.PendingAnswer)
+		t.Fatalf("ordinary continuation created a coach frame: %#v", completed.PendingAnswer)
 	}
 }
 
 func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T) {
 	const (
-		uid                 = "uid-explicit-coach-sequence"
-		questionText        = "上司に、導入目的は何かと聞かれました"
-		lateAnswer          = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
-		coreAnswer          = "目的は評価基準をそろえることです。判断のばらつきを減らします"
-		reasonAnswer        = "理由は判断のばらつきを減らせるからです"
-		proxyDraft          = "AIが本人の代わりに作った回答です。"
-		unauditedModelReply = "本人にはこの性格上の問題がある、と断定します。"
-		fixedNaturalReply   = "なるほど、そこが大事なんですね。その続きも聞かせてください。"
+		uid          = "uid-explicit-coach-sequence"
+		questionText = "上司に、導入目的は何かと聞かれました"
+		lateAnswer   = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
+		coreAnswer   = "目的は評価基準をそろえることです。判断のばらつきを減らします"
+		proxyDraft   = "AIが本人の代わりに作った回答です。"
+		naturalReply = "なるほど、そこが大事なんですね。その続きも聞かせてください。"
 	)
 	awaiting := respondentAwaitingPlan()
 	late := coachAttemptPlan(
@@ -137,14 +119,6 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 		"目的は評価基準をそろえることです",
 		proxyDraft,
 	)
-	reason := coachAttemptPlan(
-		answercontract.OperatorCause,
-		answercontract.SlotCause,
-		"導入目的を支える理由",
-		reasonAnswer,
-		reasonAnswer,
-		unauditedModelReply,
-	)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, awaiting)},
 		{body: encodePlan(t, late)},
@@ -161,14 +135,6 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 			answercontract.SlotPurpose,
 			coreAnswer,
 			"目的は評価基準をそろえることです",
-			answercontract.PositionFirst,
-		))},
-		{body: encodePlan(t, reason)},
-		{body: encodeContract(t, coachCriticContract(
-			answercontract.OperatorCause,
-			answercontract.SlotCause,
-			reasonAnswer,
-			reasonAnswer,
 			answercontract.PositionFirst,
 		))},
 	}}
@@ -210,6 +176,22 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 	if strings.Contains(second.SpokenReply, proxyDraft) || strings.Contains(second.SpokenReply, lateAnswer) {
 		t.Fatalf("proxy answer leaked into restatement guidance: %q", second.SpokenReply)
 	}
+	bound := openCoachState(t, agent, uid, second.StateToken)
+	if !validCoachRestatementTag(bound.PendingAnswer.RestatementTag) {
+		t.Fatalf("restatement target was not bound: %#v", bound.PendingAnswer)
+	}
+	boundJSON, err := json.Marshal(bound)
+	if err != nil {
+		t.Fatalf("marshal bound state: %v", err)
+	}
+	for _, forbidden := range []string{
+		lateAnswer,
+		"目的は評価基準をそろえることです",
+	} {
+		if bytes.Contains(boundJSON, []byte(forbidden)) {
+			t.Fatalf("answer evidence entered encrypted state plaintext: %s", boundJSON)
+		}
+	}
 
 	third, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -222,34 +204,580 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 	assertCoachMetadata(t, third, "complete", "complete")
 	if strings.Contains(third.SpokenReply, proxyDraft) ||
 		strings.Contains(third.SpokenReply, coreAnswer) ||
-		!strings.HasSuffix(third.SpokenReply, "？") {
-		t.Fatalf("core completion was not a natural optional follow-up: %#v", third)
+		third.SpokenReply != naturalReply ||
+		strings.HasSuffix(third.SpokenReply, "？") {
+		t.Fatalf("core completion opened an unremembered question: %#v", third)
 	}
 	following := openCoachState(t, agent, uid, third.StateToken)
-	if !following.PendingAnswer.Active ||
-		!following.PendingAnswer.AssistantFollowUp ||
-		following.PendingAnswer.Phase != respondent.CoachPhaseAwaitingAnswer ||
-		following.PendingAnswer.Operator != answercontract.OperatorCause {
-		t.Fatalf("optional follow-up became an expansion test: %#v", following.PendingAnswer)
+	if following.PendingAnswer.Active {
+		t.Fatalf("optional assistant follow-up became a hidden graded scope: %#v", following.PendingAnswer)
+	}
+	for _, call := range fake.calls[3:] {
+		if strings.Contains(call.prompt, bound.PendingAnswer.RestatementTag) {
+			t.Fatal("server-only restatement verifier entered a model prompt")
+		}
+	}
+}
+
+func TestAgentRestatementCannotReplaceBoundAnswer(t *testing.T) {
+	const (
+		uid               = "uid-restatement-answer-binding"
+		lateAnswer        = "背景を説明すると長いです。目的は評価基準をそろえることです"
+		selectedEvidence  = "目的"
+		replacementAnswer = "目的は運動習慣を作ることです"
+		releaseReply      = "大丈夫です。言い直さなくても、今のままで話を続けられます。"
+	)
+	late := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		lateAnswer,
+		selectedEvidence,
+		"モデルの下書きは使いません。",
+	)
+	replacement := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"別の目的",
+		replacementAnswer,
+		selectedEvidence,
+		"別の答えへ置き換えます。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, late)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			lateAnswer,
+			selectedEvidence,
+			answercontract.PositionLater,
+		))},
+		{body: encodePlan(t, replacement)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			replacementAnswer,
+			selectedEvidence,
+			answercontract.PositionFirst,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	initial := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	)
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
 	}
 
-	fourth, err := agent.Process(context.Background(), uid, VoiceTurn{
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
-		Utterance:     reasonAnswer,
-		StateToken:    third.StateToken,
+		Utterance:     lateAnswer,
+		StateToken:    token,
 	})
 	if err != nil {
-		t.Fatalf("natural follow-up answer: %v", err)
+		t.Fatalf("bind late answer: %v", err)
 	}
-	assertCoachMetadata(t, fourth, "complete", "complete")
-	if fourth.SpokenReply != fixedNaturalReply ||
-		strings.Contains(fourth.SpokenReply, reasonAnswer) ||
-		strings.Contains(fourth.SpokenReply, unauditedModelReply) {
-		t.Fatalf("follow-up completion did not use the fixed natural backchannel: %q", fourth.SpokenReply)
+	assertCoachMetadata(t, first, "awaiting_restatement", "restate")
+	bound := openCoachState(t, agent, uid, first.StateToken)
+	tag := bound.PendingAnswer.RestatementTag
+	if !validCoachRestatementTag(tag) {
+		t.Fatalf("invalid restatement tag: %#v", bound.PendingAnswer)
 	}
-	completed := openCoachState(t, agent, uid, fourth.StateToken)
-	if completed.PendingAnswer.Active {
-		t.Fatalf("completed sequence retained frame: %#v", completed.PendingAnswer)
+	// The compatibility revision does not issue tags, but it must still verify
+	// tagged tokens if traffic rolls back after activation.
+	agent.coachRestatementBinding = false
+
+	second, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     replacementAnswer,
+		StateToken:    first.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("reject replacement answer: %v", err)
+	}
+	assertCoachMetadata(t, second, "blocked", "release")
+	if second.SpokenReply != releaseReply {
+		t.Fatalf("replacement answer was not released naturally: %q", second.SpokenReply)
+	}
+	if openCoachState(t, agent, uid, second.StateToken).PendingAnswer.Active {
+		t.Fatal("replacement answer retained the coaching scope")
+	}
+	for _, call := range fake.calls[2:] {
+		if strings.Contains(call.prompt, tag) {
+			t.Fatal("server-only restatement verifier entered a model prompt")
+		}
+	}
+}
+
+func TestAgentUrgentSafetyPreservesRestatementBinding(t *testing.T) {
+	const (
+		uid               = "uid-restatement-safety-binding"
+		lateAnswer        = "背景を説明すると長いです。目的は評価基準をそろえることです"
+		originalEvidence  = "目的は評価基準をそろえることです"
+		safetyUtterance   = "いま火事で危険です。すぐに避難します"
+		safetyEvidence    = "すぐに避難します"
+		safetyReply       = "今は安全を優先して、すぐに避難し緊急窓口へ連絡してください。"
+		replacementAnswer = "目的は運動習慣を作ることです"
+	)
+
+	for _, assistanceTarget := range []string{"respondent", "assistant"} {
+		t.Run(assistanceTarget, func(t *testing.T) {
+			late := coachAttemptPlan(
+				answercontract.OperatorPurpose,
+				answercontract.SlotPurpose,
+				"導入目的",
+				lateAnswer,
+				originalEvidence,
+				"モデルの下書きは使いません。",
+			)
+			safety := validModelPlan()
+			safetyCritic := validCriticContract(safetyReply)
+			if assistanceTarget == "respondent" {
+				safety = coachAttemptPlan(
+					answercontract.OperatorPurpose,
+					answercontract.SlotPurpose,
+					"導入目的",
+					safetyUtterance,
+					safetyEvidence,
+					safetyReply,
+				)
+				safetyCritic = coachCriticContract(
+					answercontract.OperatorPurpose,
+					answercontract.SlotPurpose,
+					safetyUtterance,
+					safetyEvidence,
+					answercontract.PositionFirst,
+				)
+			}
+			safety.InterventionPolicy = "safety"
+			safety.SpokenReply = safetyReply
+			safety.Intervention = modelArbiter{
+				Benefit: 0, InterruptionCost: 1, Urgency: 0.95,
+				Confidence: 1, Act: "reflect",
+			}
+			replacement := coachAttemptPlan(
+				answercontract.OperatorPurpose,
+				answercontract.SlotPurpose,
+				"導入目的",
+				replacementAnswer,
+				"目的",
+				"別の答えへ置き換えます。",
+			)
+			fake := &fakeGenerator{generations: []fakeGeneration{
+				{body: encodePlan(t, late)},
+				{body: encodeContract(t, coachCriticContract(
+					answercontract.OperatorPurpose,
+					answercontract.SlotPurpose,
+					lateAnswer,
+					originalEvidence,
+					answercontract.PositionLater,
+				))},
+				{body: encodePlan(t, safety)},
+				{body: encodeContract(t, safetyCritic)},
+				{body: encodePlan(t, replacement)},
+				{body: encodeContract(t, coachCriticContract(
+					answercontract.OperatorPurpose,
+					answercontract.SlotPurpose,
+					replacementAnswer,
+					"目的",
+					answercontract.PositionFirst,
+				))},
+			}}
+			agent := newTestAgent(t, fake)
+			token, err := agent.codec.seal(
+				uid,
+				coachState(
+					answercontract.OperatorPurpose,
+					respondent.CoachPhaseAwaitingAnswer,
+					0,
+				),
+			)
+			if err != nil {
+				t.Fatalf("seal initial state: %v", err)
+			}
+
+			first, err := agent.Process(context.Background(), uid, VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     lateAnswer,
+				StateToken:    token,
+			})
+			if err != nil {
+				t.Fatalf("bind late answer: %v", err)
+			}
+			bound := openCoachState(t, agent, uid, first.StateToken)
+			if !validCoachRestatementTag(bound.PendingAnswer.RestatementTag) {
+				t.Fatalf("invalid tag before safety turn: %#v", bound.PendingAnswer)
+			}
+
+			safetyResult, err := agent.Process(context.Background(), uid, VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     safetyUtterance,
+				StateToken:    first.StateToken,
+			})
+			if err != nil {
+				t.Fatalf("urgent safety: %v", err)
+			}
+			if safetyResult.InterventionPolicy != "safety" ||
+				safetyResult.SpokenReply == "" ||
+				safetyResult.CoachAction == "complete" {
+				t.Fatalf("urgent safety response was suppressed: %#v", safetyResult)
+			}
+			afterSafety := openCoachState(t, agent, uid, safetyResult.StateToken)
+			if !reflect.DeepEqual(afterSafety.PendingAnswer, bound.PendingAnswer) {
+				t.Fatalf(
+					"safety turn changed the bound frame: before=%#v after=%#v",
+					bound.PendingAnswer,
+					afterSafety.PendingAnswer,
+				)
+			}
+
+			result, err := agent.Process(context.Background(), uid, VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     replacementAnswer,
+				StateToken:    safetyResult.StateToken,
+			})
+			if err != nil {
+				t.Fatalf("reject replacement after safety: %v", err)
+			}
+			assertCoachMetadata(t, result, "blocked", "release")
+			if openCoachState(t, agent, uid, result.StateToken).PendingAnswer.Active {
+				t.Fatal("replacement answer retained the coaching scope after safety")
+			}
+			if len(fake.calls) != 6 {
+				t.Fatalf("model calls = %d, want three isolated planner/critic pairs", len(fake.calls))
+			}
+			for _, call := range fake.calls[2:] {
+				if strings.Contains(call.prompt, bound.PendingAnswer.RestatementTag) {
+					t.Fatal("server-only restatement verifier entered a model prompt after safety")
+				}
+			}
+		})
+	}
+}
+
+func TestAgentRestatementRejectsQuotedRetractedAnswer(t *testing.T) {
+	const (
+		uid              = "uid-restatement-quoted-retraction"
+		lateAnswer       = "背景です。目的は評価基準をそろえることです"
+		originalEvidence = "目的は評価基準をそろえることです"
+		attackUtterance  = "前の「目的は評価基準をそろえることです」は違います。本当は目的は運動習慣を作ることです"
+	)
+	late := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		lateAnswer,
+		originalEvidence,
+		"モデルの下書きは使いません。",
+	)
+	selectedOldAnswer := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		originalEvidence,
+		originalEvidence,
+		"撤回を無視します。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, late)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			lateAnswer,
+			originalEvidence,
+			answercontract.PositionLater,
+		))},
+		{body: encodePlan(t, selectedOldAnswer)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			originalEvidence,
+			originalEvidence,
+			answercontract.PositionFirst,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	token, err := agent.codec.seal(
+		uid,
+		coachState(
+			answercontract.OperatorPurpose,
+			respondent.CoachPhaseAwaitingAnswer,
+			0,
+		),
+	)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     lateAnswer,
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("bind original answer: %v", err)
+	}
+	assertCoachMetadata(t, first, "awaiting_restatement", "restate")
+
+	second, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     attackUtterance,
+		StateToken:    first.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("reject quoted retraction: %v", err)
+	}
+	assertCoachMetadata(t, second, "blocked", "release")
+	if openCoachState(t, agent, uid, second.StateToken).PendingAnswer.Active {
+		t.Fatal("quoted retraction retained the coaching scope")
+	}
+}
+
+func TestAgentRestatementTagSurvivesHesitationTurn(t *testing.T) {
+	const (
+		uid        = "uid-restatement-hesitation"
+		lateAnswer = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
+		coreAnswer = "目的は評価基準をそろえることです。判断のばらつきを減らします"
+		evidence   = "目的は評価基準をそろえることです"
+	)
+	late := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		lateAnswer,
+		evidence,
+		"モデルの下書きは使いません。",
+	)
+	core := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		coreAnswer,
+		evidence,
+		"モデルの下書きは使いません。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, late)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			lateAnswer,
+			evidence,
+			answercontract.PositionLater,
+		))},
+		{body: encodePlan(t, respondentAwaitingPlan())},
+		{body: encodePlan(t, core)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			coreAnswer,
+			evidence,
+			answercontract.PositionFirst,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	token, err := agent.codec.seal(
+		uid,
+		coachState(
+			answercontract.OperatorPurpose,
+			respondent.CoachPhaseAwaitingAnswer,
+			0,
+		),
+	)
+	if err != nil {
+		t.Fatalf("seal initial state: %v", err)
+	}
+
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     lateAnswer,
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("bind late answer: %v", err)
+	}
+	bound := openCoachState(t, agent, uid, first.StateToken)
+	tag := bound.PendingAnswer.RestatementTag
+	if !validCoachRestatementTag(tag) {
+		t.Fatalf("invalid tag before hesitation: %#v", bound.PendingAnswer)
+	}
+
+	hesitation, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "えっと……",
+		StateToken:    first.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("hesitation: %v", err)
+	}
+	held := openCoachState(t, agent, uid, hesitation.StateToken)
+	if hesitation.SpokenReply != "" ||
+		held.PendingAnswer.RestatementTag != tag ||
+		held.PendingAnswer.Attempts != bound.PendingAnswer.Attempts {
+		t.Fatalf("hesitation changed the bound scope: result=%#v state=%#v", hesitation, held.PendingAnswer)
+	}
+
+	completed, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     coreAnswer,
+		StateToken:    hesitation.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("complete after hesitation: %v", err)
+	}
+	assertCoachMetadata(t, completed, "complete", "complete")
+}
+
+func TestAgentClearsLegacyAssistantFollowUpBeforeInference(t *testing.T) {
+	const (
+		uid      = "uid-legacy-assistant-follow-up"
+		answer   = "目的は評価基準をそろえることです"
+		response = "評価基準をそろえたいんですね。話したいところから続けてください。"
+	)
+	assistant := validModelPlan()
+	assistant.SpokenReply = response
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, assistant)},
+		{body: encodeContract(t, validCriticContract(response))},
+	}}
+	agent := newTestAgent(t, fake)
+	legacy := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	)
+	legacy.PendingAnswer.Subject = assistantFollowUpSubject
+	legacy.PendingAnswer.AssistantFollowUp = true
+	token, err := agent.codec.seal(uid, legacy)
+	if err != nil {
+		t.Fatalf("seal legacy follow-up: %v", err)
+	}
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     answer,
+		StateToken:    token,
+		Ambient:       true,
+		Foreground:    true,
+	})
+	if err != nil {
+		t.Fatalf("legacy follow-up continuation: %v", err)
+	}
+	if result.AssistanceTarget != "assistant" ||
+		result.CoachPhase != "none" ||
+		result.CoachAction != "none" ||
+		result.SpokenReply != response {
+		t.Fatalf("legacy follow-up retained grading authority: %#v", result)
+	}
+	if openCoachState(t, agent, uid, result.StateToken).PendingAnswer.Active {
+		t.Fatal("legacy follow-up survived ordinary continuation")
+	}
+	if len(fake.calls) == 0 || strings.Contains(fake.calls[0].prompt, `"assistant_follow_up":true`) {
+		t.Fatal("legacy follow-up authority entered the planner prompt")
+	}
+}
+
+func TestAgentCompatibilityModeAcceptsButDoesNotIssueRestatementTag(t *testing.T) {
+	const (
+		uid        = "uid-restatement-compatibility-mode"
+		lateAnswer = "背景から話します。目的は評価基準をそろえることです"
+		evidence   = "目的は評価基準をそろえることです"
+	)
+	late := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		lateAnswer,
+		evidence,
+		"モデルの下書きは使いません。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, late)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			lateAnswer,
+			evidence,
+			answercontract.PositionLater,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	agent.coachRestatementBinding = false
+	token, err := agent.codec.seal(
+		uid,
+		coachState(
+			answercontract.OperatorPurpose,
+			respondent.CoachPhaseAwaitingAnswer,
+			0,
+		),
+	)
+	if err != nil {
+		t.Fatalf("seal compatibility state: %v", err)
+	}
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     lateAnswer,
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("compatibility restatement: %v", err)
+	}
+	assertCoachMetadata(t, result, "awaiting_restatement", "restate")
+	state := openCoachState(t, agent, uid, result.StateToken)
+	if state.PendingAnswer.RestatementTag != "" {
+		t.Fatalf("compatibility revision issued a new tag: %#v", state.PendingAnswer)
+	}
+}
+
+func TestAgentActivationClearsUnboundLegacyRestatementBeforeInference(t *testing.T) {
+	const (
+		uid      = "uid-restatement-activation-migration"
+		answer   = "目的は評価基準をそろえることです"
+		response = "評価基準をそろえたいんですね。そのまま話を続けてください。"
+	)
+	assistant := validModelPlan()
+	assistant.SpokenReply = response
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, assistant)},
+		{body: encodeContract(t, validCriticContract(response))},
+	}}
+	agent := newTestAgent(t, fake)
+	legacy := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingRestatement,
+		1,
+	)
+	token, err := agent.codec.seal(uid, legacy)
+	if err != nil {
+		t.Fatalf("seal unbound legacy restatement: %v", err)
+	}
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     answer,
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("activation migration: %v", err)
+	}
+	if result.AssistanceTarget != "assistant" ||
+		result.CoachPhase != "none" ||
+		result.CoachAction != "none" ||
+		result.SpokenReply != response {
+		t.Fatalf("unbound legacy scope retained grading authority: %#v", result)
+	}
+	if openCoachState(t, agent, uid, result.StateToken).PendingAnswer.Active {
+		t.Fatal("activation renewed an unbound legacy restatement")
+	}
+	if len(fake.calls) == 0 || strings.Contains(
+		fake.calls[0].prompt,
+		`"pending_answer":{"active":true`,
+	) {
+		t.Fatal("unbound legacy restatement entered the planner prompt")
 	}
 }
 
@@ -466,45 +994,7 @@ func TestAgentCoachReleasesAfterBoundedRetries(t *testing.T) {
 	}
 }
 
-func TestBoundedFollowUpClassifierUsesOnlyFinalQuestion(t *testing.T) {
-	tests := []struct {
-		name string
-		text string
-		want answercontract.Operator
-		ok   bool
-	}{
-		{
-			name: "declarative reason does not override purpose question",
-			text: "理由はあとで聞きます。目的は何ですか？",
-			want: answercontract.OperatorPurpose,
-			ok:   true,
-		},
-		{
-			name: "status precedes generic definition surface",
-			text: "現在の状況は何ですか？",
-			want: answercontract.OperatorState,
-			ok:   true,
-		},
-		{
-			name: "broad current marker is not status",
-			text: "今は何をしたいですか？",
-			want: answercontract.OperatorOpen,
-			ok:   true,
-		},
-		{
-			name: "two questions are not persisted",
-			text: "目的は何ですか？理由は何ですか？",
-			ok:   false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, ok := boundedFollowUpOperator(test.text)
-			if got != test.want || ok != test.ok {
-				t.Fatalf("boundedFollowUpOperator(%q)=(%q,%v), want (%q,%v)", test.text, got, ok, test.want, test.ok)
-			}
-		})
-	}
+func TestCoachRecoveryDoesNotMistakeNazenaraForTopicChange(t *testing.T) {
 	if shouldRecoverOutsideCoach("なぜなら、判断のばらつきを減らせるからです") {
 		t.Fatal("answer beginning with なぜなら was treated as a direct AI question")
 	}

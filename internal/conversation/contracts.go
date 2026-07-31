@@ -145,7 +145,10 @@ type ThoughtStateDelta struct {
 // PendingAnswerFrame is the minimum cross-turn state needed to help a person
 // answer someone else's question. It intentionally stores no transcript,
 // question span, answer attempt, evidence span, hypothesis prose, reconstructed
-// reply, or model-written prompt.
+// reply, or model-written prompt. RestatementTag is a truncated HMAC of the
+// normalized semantic clause containing the person's target answer evidence.
+// It binds a requested restatement without retaining that clause and is never
+// included in a model prompt.
 type PendingAnswerFrame struct {
 	Active            bool                          `json:"active"`
 	Operator          answercontract.Operator       `json:"operator,omitempty"`
@@ -155,6 +158,7 @@ type PendingAnswerFrame struct {
 	Phase             respondent.CoachPhase         `json:"phase,omitempty"`
 	Attempts          uint8                         `json:"attempts,omitempty"`
 	AssistantFollowUp bool                          `json:"assistant_follow_up,omitempty"`
+	RestatementTag    string                        `json:"restatement_tag,omitempty"`
 }
 
 func (turn VoiceTurn) Validate() error {
@@ -265,6 +269,9 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		containsSensitiveStateText(frame.Subject) ||
 		(frame.AssistantFollowUp && frame.Subject != assistantFollowUpSubject) ||
 		(frame.AssistantFollowUp && frame.Phase == respondent.CoachPhaseExpanding) ||
+		(frame.RestatementTag != "" &&
+			(frame.Phase != respondent.CoachPhaseAwaitingRestatement ||
+				!validCoachRestatementTag(frame.RestatementTag))) ||
 		len(frame.RequiredSlots) == 0 ||
 		len(frame.RequiredSlots) > answercontract.MaxRequiredSlots {
 		return PendingAnswerFrame{}, ErrInvalidStateToken

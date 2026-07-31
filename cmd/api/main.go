@@ -123,6 +123,7 @@ func main() {
 			cfg.PrecisionModel,
 			cfg.StateKey,
 			cfg.VertexPriority,
+			cfg.CoachRestatementBinding,
 		)
 		if err != nil {
 			logger.Error("initialize conversation agent", "error", err)

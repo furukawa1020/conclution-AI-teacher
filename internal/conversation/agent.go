@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -157,13 +158,15 @@ type StreamingContentGenerator interface {
 }
 
 type vertexAgent struct {
-	generator      ContentGenerator
-	codec          *StateCodec
-	fastModel      string
-	precisionModel string
-	research       *securityflow.CrossrefExecutor
-	security       *securityflow.Guard
-	now            func() time.Time
+	generator               ContentGenerator
+	codec                   *StateCodec
+	fastModel               string
+	precisionModel          string
+	coachRestatementBinding bool
+	coachRestatementKey     []byte
+	research                *securityflow.CrossrefExecutor
+	security                *securityflow.Guard
+	now                     func() time.Time
 }
 
 type modelPlan struct {
@@ -260,6 +263,7 @@ func NewVertexAgent(
 	precisionModel string,
 	stateKey []byte,
 	priority bool,
+	coachRestatementBinding bool,
 ) (Agent, error) {
 	if ctx == nil || strings.TrimSpace(project) == "" {
 		return nil, errors.New("conversation: Vertex AI project is required")
@@ -297,6 +301,7 @@ func NewVertexAgent(
 		precisionModel,
 		stateKey,
 		verifier,
+		coachRestatementBinding,
 	)
 }
 
@@ -317,7 +322,7 @@ func NewAgent(
 	precisionModel string,
 	stateKey []byte,
 ) (Agent, error) {
-	return newAgent(generator, fastModel, precisionModel, stateKey, nil)
+	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true)
 }
 
 func newAgent(
@@ -326,6 +331,7 @@ func newAgent(
 	precisionModel string,
 	stateKey []byte,
 	researchVerifier research.Verifier,
+	coachRestatementBinding bool,
 ) (Agent, error) {
 	if generator == nil {
 		return nil, errors.New("conversation: content generator is required")
@@ -343,6 +349,7 @@ func newAgent(
 		return nil, err
 	}
 	securityKey := deriveSecurityflowKey(stateKey)
+	coachRestatementKey := deriveCoachRestatementKey(stateKey)
 	securityGuard, err := securityflow.NewGuard(securityflow.Config{
 		Key:         securityKey,
 		Policy:      securityflowPolicy,
@@ -351,17 +358,21 @@ func newAgent(
 	})
 	wipe(securityKey)
 	if err != nil {
+		wipe(coachRestatementKey)
 		return nil, errors.New("conversation: initialize capability guard")
 	}
 	agent := &vertexAgent{
-		generator:      generator,
-		codec:          codec,
-		fastModel:      fastModel,
-		precisionModel: precisionModel,
-		security:       securityGuard,
-		now:            time.Now,
+		generator:               generator,
+		codec:                   codec,
+		fastModel:               fastModel,
+		precisionModel:          precisionModel,
+		coachRestatementBinding: coachRestatementBinding,
+		coachRestatementKey:     coachRestatementKey,
+		security:                securityGuard,
+		now:                     time.Now,
 	}
 	if err := agent.setResearchVerifier(researchVerifier); err != nil {
+		wipe(agent.coachRestatementKey)
 		return nil, err
 	}
 	return agent, nil
@@ -432,6 +443,22 @@ func (agent *vertexAgent) Process(
 		!requiresFailClosedPrecision(normalized, modelPlan{ResearchAction: "none"}) {
 		if reply, ok := coachOptOutReply(normalized.Utterance); ok {
 			return agent.completeCoachOptOutLocal(uid, state, reply)
+		}
+	}
+	if state.PendingAnswer.Active {
+		switch {
+		case state.PendingAnswer.AssistantFollowUp:
+			// Older revisions turned a KOTAE-authored conversational question
+			// into a hidden one-shot grading scope. Accept the authenticated
+			// token, but remove that authority before inference.
+			state.PendingAnswer = emptyPendingAnswer()
+		case agent.coachRestatementBinding &&
+			state.PendingAnswer.Phase == respondent.CoachPhaseAwaitingRestatement &&
+			state.PendingAnswer.RestatementTag == "":
+			// Compatibility revisions can decode the new field without issuing
+			// it. Once issuance is enabled, never renew an unbound legacy
+			// restatement scope; return the utterance to ordinary conversation.
+			state.PendingAnswer = emptyPendingAnswer()
 		}
 	}
 	preTurnState := state
@@ -1022,6 +1049,27 @@ func (agent *vertexAgent) Process(
 				coachFrame,
 				finalPlan.answerAssessment.Ambiguous,
 			))
+			if !coachRestatementMatches(
+				agent.coachRestatementKey,
+				state.SessionID,
+				agent.coachRestatementBinding,
+				coachFrame,
+				finalPlan,
+				normalized.Utterance,
+			) {
+				// A restatement may move the original target clause, but it may
+				// not silently replace that clause with a different answer. This
+				// check is independent of both model calls and logs no user text.
+				slog.WarnContext(
+					ctx,
+					"coach restatement continuity mismatch",
+					"failure_class",
+					"response_invalid",
+					"failure_stage",
+					"respondent_continuity",
+				)
+				gate = failedCoachContinuityAssessment()
+			}
 			coachDecision = respondent.GuideAttempt(
 				operator,
 				coachFrame.Phase,
@@ -1148,6 +1196,13 @@ func (agent *vertexAgent) Process(
 		(!normalized.Ambient ||
 			(normalized.Foreground && preTurnState.PendingAnswer.Active))
 	switch {
+	case urgentSafety:
+		// A safety intervention pauses coaching. It must neither create a new
+		// scope nor mutate an existing one: in particular, changing the phase
+		// would discard a restatement verifier and let a later answer replace
+		// the clause that was originally bound. Resume from the exact
+		// pre-safety frame after the urgent response.
+		pendingAnswer = preTurnState.PendingAnswer
 	case coachTurn && canUpdateCoachControl:
 		if coachDecision.KeepPending {
 			storedPhase := coachDecision.Phase
@@ -1157,21 +1212,47 @@ func (agent *vertexAgent) Process(
 					storedPhase = preTurnState.PendingAnswer.Phase
 				}
 			}
+			storedFrame := coachFrame
+			if agent.coachRestatementBinding &&
+				storedPhase == respondent.CoachPhaseAwaitingRestatement &&
+				storedFrame.RestatementTag == "" {
+				fingerprint, ok := coachRestatementFingerprint(
+					finalPlan,
+					storedFrame,
+					normalized.Utterance,
+				)
+				if ok {
+					storedFrame.RestatementTag, ok = coachRestatementTag(
+						agent.coachRestatementKey,
+						state.SessionID,
+						fingerprint,
+					)
+				}
+				if !ok {
+					// A new restatement scope must never be issued without its
+					// server-verifiable binding. Release this optional exercise
+					// instead of persisting an unverifiable capability.
+					pendingAnswer = emptyPendingAnswer()
+					coachDecision = respondent.CoachDecision{
+						Phase:       respondent.CoachPhaseBlocked,
+						Action:      respondent.CoachActionRelease,
+						SpokenReply: "大丈夫です。言い直さなくても、今のままで話を続けられます。",
+						Attempts:    respondent.MaxCoachAttempts,
+						KeepPending: false,
+					}
+					decision.Act = coachDecisionAct(coachDecision.Action)
+					spokenReply = coachDecision.SpokenReply
+					interventionPolicy = "coach"
+					break
+				}
+			}
 			pendingAnswer = pendingAnswerWithControl(
-				coachFrame,
+				storedFrame,
 				storedPhase,
 				coachDecision.Attempts,
 			)
 		} else {
 			pendingAnswer = emptyPendingAnswer()
-			if coachDecision.Action == respondent.CoachActionComplete &&
-				!coachFrame.AssistantFollowUp {
-				if followUp, ok := pendingAnswerFromAssistantFollowUp(
-					spokenReply,
-				); ok {
-					pendingAnswer = followUp
-				}
-			}
 		}
 	case finalPlan.AssistanceTarget == "assistant" &&
 		(!normalized.Ambient || normalized.Foreground) &&
@@ -1180,15 +1261,6 @@ func (agent *vertexAgent) Process(
 		// and untrusted PDF content cannot erase the person's in-progress
 		// exercise.
 		pendingAnswer = emptyPendingAnswer()
-		if !passiveAmbientTurn(normalized) &&
-			!verificationUnavailable &&
-			!urgentSafety &&
-			researchStatus == "none" &&
-			decision.Act == "clarify" {
-			if followUp, ok := pendingAnswerFromAssistantFollowUp(spokenReply); ok {
-				pendingAnswer = followUp
-			}
-		}
 	}
 	if finalPlan.AssistanceTarget == "respondent" {
 		route = coachRoutePrefix(
@@ -1691,6 +1763,197 @@ func respondentGateInput(
 	}
 }
 
+func failedCoachContinuityAssessment() respondent.Assessment {
+	return respondent.Assessment{
+		Outcome:                    respondent.OutcomeClarify,
+		OriginalCommitmentPosition: respondent.PositionAbsent,
+		CommitmentPosition:         respondent.PositionAbsent,
+		Issues:                     []respondent.Issue{respondent.IssueContentChanged},
+	}
+}
+
+// coachRestatementFingerprint extracts the complete normalized semantic clause
+// containing the target slot that the person already supplied. The fingerprint
+// is used transiently as HMAC input and is never stored, logged, spoken, or sent
+// to either model.
+func coachRestatementFingerprint(
+	plan modelPlan,
+	frame PendingAnswerFrame,
+	utterance string,
+) (string, bool) {
+	if !frame.Active || plan.RespondentStage != "restructure" {
+		return "", false
+	}
+	target, ok := answercontract.TargetSlot(
+		authoritativeCoachQuestion(frame).Operator,
+	)
+	if !ok {
+		return "", false
+	}
+	evidenceSpan := ""
+	for _, evidence := range plan.RespondentEvidence {
+		if evidence.Slot != target {
+			continue
+		}
+		if evidenceSpan != "" {
+			return "", false
+		}
+		evidenceSpan = normalizeRestatementText(evidence.Span)
+	}
+	if evidenceSpan == "" ||
+		!utf8.ValidString(evidenceSpan) ||
+		utf8.RuneCountInString(evidenceSpan) > answercontract.MaxFirstCommitmentRunes ||
+		strings.Count(normalizeRestatementText(utterance), evidenceSpan) != 1 {
+		return "", false
+	}
+	clauses, ok := canonicalRestatementClauses(utterance)
+	if !ok {
+		return "", false
+	}
+	targetClause := ""
+	for _, clause := range clauses {
+		if !strings.Contains(clause, evidenceSpan) {
+			continue
+		}
+		if targetClause != "" {
+			return "", false
+		}
+		targetClause = clause
+	}
+	if targetClause == "" {
+		return "", false
+	}
+	if restatementHasCorrectionSignal(clauses, targetClause) {
+		return "", false
+	}
+
+	var fingerprint strings.Builder
+	writeRestatementField(&fingerprint, string(frame.Operator))
+	writeRestatementField(&fingerprint, string(target))
+	writeRestatementField(&fingerprint, targetClause)
+	return fingerprint.String(), true
+}
+
+func normalizeRestatementText(value string) string {
+	value = strings.ToLower(collapseSpace(norm.NFKC.String(value)))
+	return strings.Trim(value, " \t\r\n。．.!！?？、,")
+}
+
+func canonicalRestatementClauses(value string) ([]string, bool) {
+	const (
+		maxClauses = 16
+		maxRunes   = 2_000
+	)
+	value = strings.ToLower(collapseSpace(norm.NFKC.String(value)))
+	clauses := make([]string, 0, 4)
+	totalRunes := 0
+	var current strings.Builder
+	flush := func() bool {
+		clause := normalizeRestatementText(current.String())
+		current.Reset()
+		if clause == "" || coachFillerOnlyPattern.MatchString(clause) {
+			return true
+		}
+		totalRunes += utf8.RuneCountInString(clause)
+		if len(clauses) >= maxClauses || totalRunes > maxRunes {
+			return false
+		}
+		clauses = append(clauses, clause)
+		return true
+	}
+	for _, currentRune := range value {
+		switch currentRune {
+		case '。', '、', '，', ',', '．', '.', '！', '!', '？', '?',
+			'；', ';', '\n', '\r':
+			if !flush() {
+				return nil, false
+			}
+		default:
+			current.WriteRune(currentRune)
+		}
+	}
+	if !flush() || len(clauses) == 0 {
+		return nil, false
+	}
+	return clauses, true
+}
+
+func restatementHasCorrectionSignal(clauses []string, targetClause string) bool {
+	for _, clause := range clauses {
+		if clause == targetClause {
+			continue
+		}
+		switch clause {
+		case "いや", "違います", "違う", "訂正します", "撤回します":
+			return true
+		}
+		if strings.HasPrefix(clause, "いや違") {
+			return true
+		}
+		for _, signal := range []string{
+			"ではなく", "じゃなく", "本当は", "訂正", "撤回",
+			"やっぱり", "正しくは", "というより",
+		} {
+			if strings.Contains(clause, signal) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func writeRestatementField(builder *strings.Builder, value string) {
+	builder.WriteString(strconv.Itoa(len(value)))
+	builder.WriteByte(':')
+	builder.WriteString(value)
+}
+
+func coachRestatementTag(
+	key []byte,
+	sessionID string,
+	fingerprint string,
+) (string, bool) {
+	if len(key) != sha256.Size ||
+		!validSessionID(sessionID) ||
+		fingerprint == "" {
+		return "", false
+	}
+
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("kotae-coach-restatement-tag-v1\x00"))
+	_, _ = mac.Write([]byte(sessionID))
+	_, _ = mac.Write([]byte{'\x00'})
+	_, _ = mac.Write([]byte(fingerprint))
+	sum := mac.Sum(nil)
+	tag := base64.RawURLEncoding.EncodeToString(
+		sum[:coachRestatementTagBytes],
+	)
+	wipe(sum)
+	return tag, true
+}
+
+func coachRestatementMatches(
+	key []byte,
+	sessionID string,
+	requireTag bool,
+	frame PendingAnswerFrame,
+	plan modelPlan,
+	utterance string,
+) bool {
+	if frame.Phase != respondent.CoachPhaseAwaitingRestatement {
+		return true
+	}
+	if frame.RestatementTag == "" {
+		return !requireTag
+	}
+	fingerprint, ok := coachRestatementFingerprint(plan, frame, utterance)
+	if !ok {
+		return false
+	}
+	tag, ok := coachRestatementTag(key, sessionID, fingerprint)
+	return ok && hmac.Equal([]byte(frame.RestatementTag), []byte(tag))
+}
+
 func pendingAnswerFromPlan(plan modelPlan, utterance string) PendingAnswerFrame {
 	question := plan.AnswerContract.QuestionFrame
 	frame := PendingAnswerFrame{
@@ -1720,103 +1983,17 @@ func pendingAnswerWithControl(
 	frame.Active = true
 	frame.Phase = phase
 	frame.Attempts = attempts
+	if phase != respondent.CoachPhaseAwaitingRestatement {
+		frame.RestatementTag = ""
+	}
 	return frame
 }
 
-func pendingAnswerFromAssistantFollowUp(
-	spokenReply string,
-) (PendingAnswerFrame, bool) {
-	operator, ok := boundedFollowUpOperator(spokenReply)
-	if !ok {
-		return emptyPendingAnswer(), false
-	}
-	target, ok := answercontract.TargetSlot(operator)
-	if !ok {
-		return emptyPendingAnswer(), false
-	}
-	frame, err := normalizePendingAnswer(PendingAnswerFrame{
-		Active:        true,
-		Operator:      operator,
-		Subject:       assistantFollowUpSubject,
-		RequiredSlots: []answercontract.RequiredSlot{target},
-		ExpansionOperator: answercontract.Operator(respondent.ExpansionOperator(
-			respondent.Operator(operator),
-		)),
-		Phase:             respondent.CoachPhaseAwaitingAnswer,
-		Attempts:          0,
-		AssistantFollowUp: true,
-	})
-	if err != nil {
-		return emptyPendingAnswer(), false
-	}
-	return frame, true
-}
-
-// boundedFollowUpOperator derives only a finite answer shape. The question
-// itself is current-turn data and is never returned or persisted.
-func boundedFollowUpOperator(question string) (answercontract.Operator, bool) {
-	question = strings.ToLower(collapseSpace(question))
-	if question == "" ||
-		strings.Count(question, "?")+strings.Count(question, "？") != 1 ||
-		(!strings.HasSuffix(question, "?") && !strings.HasSuffix(question, "？")) {
-		return "", false
-	}
-	questionSpan := question
-	lastBoundary := -1
-	boundaryWidth := 0
-	for _, boundary := range []string{"。", "！", "!"} {
-		if index := strings.LastIndex(question, boundary); index > lastBoundary {
-			lastBoundary = index
-			boundaryWidth = len(boundary)
-		}
-	}
-	if lastBoundary >= 0 {
-		questionSpan = strings.TrimSpace(question[lastBoundary+boundaryWidth:])
-	}
-	if questionSpan == "" {
-		return "", false
-	}
-	for _, operational := range []string{
-		"もう一度", "試して", "聞き取", "接続", "準備中", "安全に確認",
-	} {
-		if strings.Contains(questionSpan, operational) {
-			return "", false
-		}
-	}
-	containsAny := func(signals ...string) bool {
-		for _, signal := range signals {
-			if strings.Contains(questionSpan, signal) {
-				return true
-			}
-		}
-		return false
-	}
-	switch {
-	case containsAny("どちら", "どっち", "どれ", "どの案", "which"):
-		return answercontract.OperatorChoice, true
-	case containsAny("いくつ", "何個", "何人", "何件", "何回", "何日", "何時間", "どのくらい", "どれくらい", "how many", "how much"):
-		return answercontract.OperatorQuantity, true
-	case containsAny("何のため", "目的", "what for"):
-		return answercontract.OperatorPurpose, true
-	case containsAny("なぜ", "どうして", "理由", "原因", "why"):
-		return answercontract.OperatorCause, true
-	case containsAny("どうやって", "どのように", "手順", "進め方", "how do", "how should"):
-		return answercontract.OperatorProcedure, true
-	case containsAny("違い", "比べ", "比較", "difference", "compare"):
-		return answercontract.OperatorComparison, true
-	case containsAny("根拠", "証拠", "エビデンス", "evidence"):
-		return answercontract.OperatorEvidence, true
-	case containsAny("どうなって", "どんな状態", "状況", "状態は", "現在の状態", "現在の状況"):
-		return answercontract.OperatorState, true
-	case containsAny("とは", "定義", "何ですか", "what is"):
-		return answercontract.OperatorDefinition, true
-	case containsAny("何を", "何が", "誰", "いつ", "どこ", "どう考え", "どう思", "教えて", "what", "who", "when", "where"):
-		return answercontract.OperatorOpen, true
-	case containsAny("できますか", "ありますか", "しますか", "でしょうか", "ですか", "can you", "do you", "is it", "are you"):
-		return answercontract.OperatorBoolean, true
-	default:
-		return "", false
-	}
+func pendingAnswerForPrompt(frame PendingAnswerFrame) PendingAnswerFrame {
+	// RestatementTag is a server-side capability verifier. Models need the
+	// bounded operator/phase only and must never receive the verifier.
+	frame.RestatementTag = ""
+	return frame
 }
 
 func authoritativeCoachQuestion(
@@ -2157,6 +2334,12 @@ func deriveSecurityflowKey(rootKey []byte) []byte {
 	return mac.Sum(nil)
 }
 
+func deriveCoachRestatementKey(rootKey []byte) []byte {
+	mac := hmac.New(sha256.New, rootKey)
+	_, _ = mac.Write([]byte("kotae-coach-restatement-key-v1\x00"))
+	return mac.Sum(nil)
+}
+
 func crossrefDiscoverySource() research.SourceDescriptor {
 	return research.SourceDescriptor{
 		ID:        research.SourceCrossref,
@@ -2341,7 +2524,7 @@ func (agent *vertexAgent) infer(
 	preliminary *modelPlan,
 	onCandidate func(modelPlan),
 ) (modelPlan, error) {
-	promptPendingAnswer := state.PendingAnswer
+	promptPendingAnswer := pendingAnswerForPrompt(state.PendingAnswer)
 	if turn.PDF != nil {
 		// A PDF is untrusted active content. It can shape only this turn's
 		// assistant answer and must not see, create, advance, complete, or erase
@@ -2947,7 +3130,7 @@ func (agent *vertexAgent) auditAnswer(
 		// evidence.
 		auditedReply = candidatePlan.AnswerAttempt
 	}
-	promptPendingAnswer := state.PendingAnswer
+	promptPendingAnswer := pendingAnswerForPrompt(state.PendingAnswer)
 	if turn.PDF != nil {
 		promptPendingAnswer = emptyPendingAnswer()
 	}
@@ -4242,7 +4425,6 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - 通常の質問へKOTAE自身が答える時はassistance_target=assistant、respondent_stage=none、answer_attempt=""にする。
 - 「こう聞かれたが答えられない」「質問に対して自分はこう言いたい」「結局何をやりたいのと聞かれた」のように、他者の質問へ本人が自分の言葉で答える練習ならassistance_target=respondentにする。AIが本人の代わりに答えを作るモードではない。
 - previous_state.pending_answer.active=trueなら、今の発話をその保留質問への本人の回答試行としてまず検討する。ただし明確に話題を変えた時はassistantへ戻す。pending_answer.phase=expandingならoperatorにはexpansion_operatorを使い、required_slotsはそのtarget slotだけにする。それ以外は保存済みoperatorとrequired_slotsを一字も変えず使う。
-- previous_state.pending_answer.assistant_follow_up=trueは、KOTAEが直前の通常会話で尋ねた短い一問である。本人が答えたら一度で通常会話へ戻し、理由や根拠をさらに試験しない。本人が別の話を始めた時もassistantへ戻す。成功後の短い相づちはサーバー固定文へ置換される。
 - confidenceは知識の確実性ではなく、今回の問い・意図・assistance_targetを一意に解釈できる確信度にする。曖昧なら低くする。
 - pending_answerがactiveでも、KOTAE自身への直接質問、単独の挨拶、明示的な話題変更はassistance_target=assistant、respondent_stage=noneへ戻す。
 - 他者の質問は分かるが本人の回答内容がまだない時はrespondent_stage=awaiting_answerにし、answer_attempt=""、clarifyを選ぶ。spoken_replyはサーバが固定の構造質問へ置換するため、本人の答えを推測・引用しない短い案内だけにする。

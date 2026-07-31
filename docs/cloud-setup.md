@@ -128,6 +128,7 @@ KOTAE_ALLOWED_APP_IDS=<Firebase Web App ID>
 KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash
 KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview
 KOTAE_VERTEX_PRIORITY=false
+KOTAE_COACH_RESTATEMENT_BINDING=true
 KOTAE_SPEECH_LOCATION=asia-northeast1
 KOTAE_SPEECH_MODEL=long
 KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore
@@ -165,11 +166,17 @@ gcloud run deploy kotae-api `
   --max-instances=3 `
   --timeout=120 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL" `
-  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200" `
+  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200" `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:latest"
 ```
 
 `--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い120秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
+
+`KOTAE_COACH_RESTATEMENT_BINDING`は状態tokenのrolling migration用flagです。新fieldを読めるrevisionをまず`false`で100% trafficへ移し、そのrevisionが安定してから同じcodeを`true`にした次revisionへ切り替えます。`true`のrevisionが発行したtokenを旧codeはstrict JSON decodeで拒否するため、rollback先は直前の`false`互換revisionに固定します。`false`revisionも既存tagは検証しますが、新しいtagは発行しません。`true`revisionはtagなしの旧`awaiting_restatement` scopeを推論前に消し、その発話を通常会話として扱うため、tagなしscopeをtoken更新で延命できません。
+
+上の長期運用例はmigration完了後の`true`です。このfieldを初めて追加する一回だけ、最初のcandidate deployでは同じ引数の`KOTAE_COACH_RESTATEMENT_BINDING=true`を`false`へ置き換えます。互換revisionへ100%切替・検証後、同じimageから`true` revisionを作り、candidate検証後に100%へ切り替えます。以後の通常deployは`true`を維持します。
+
+互換revisionのcandidate tag URLは、0% trafficへ移した時点で外します。`true`revision側はそこから発行されたtagなしscopeも採点へ使いませんが、不要な別endpointを残さないためです。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 

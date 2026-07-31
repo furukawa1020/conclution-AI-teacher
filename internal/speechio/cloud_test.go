@@ -88,19 +88,19 @@ func TestRecognizedTextHandlesEmptyResponse(t *testing.T) {
 	}
 }
 
-func TestTranscribeUsesOnlyConfiguredLongModel(t *testing.T) {
+func TestTranscribeUsesOnlyConfiguredChirp3Model(t *testing.T) {
 	t.Parallel()
 
 	var calls int
 	service := &CloudService{
-		speechModel: "long",
+		speechModel: "chirp_3",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			if request.Config.Model != "long" {
-				t.Fatalf("model = %q; want long", request.Config.Model)
+			if request.Config.Model != "chirp_3" {
+				t.Fatalf("model = %q; want chirp_3", request.Config.Model)
 			}
 			if len(request.Config.LanguageCodes) != 1 ||
 				request.Config.LanguageCodes[0] != "ja-JP" {
@@ -139,14 +139,14 @@ func TestTranscribeReturnsProviderErrorWithoutRetry(t *testing.T) {
 
 	var calls int
 	service := &CloudService{
-		speechModel: "long",
+		speechModel: "chirp_3",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			if request.Config.Model != "long" {
-				t.Fatalf("model = %q; want long", request.Config.Model)
+			if request.Config.Model != "chirp_3" {
+				t.Fatalf("model = %q; want chirp_3", request.Config.Model)
 			}
 			return nil, status.Error(
 				codes.PermissionDenied,
@@ -173,7 +173,7 @@ func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 
 	var calls int
 	service := &CloudService{
-		speechModel: "long",
+		speechModel: "chirp_3",
 		recognizeCall: func(
 			_ context.Context,
 			_ *speechpb.RecognizeRequest,

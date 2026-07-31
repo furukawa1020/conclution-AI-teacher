@@ -38,24 +38,21 @@ const (
 	respondentAwaitingSpokenReply          = "まとまっていなくていいので、今の答えをそのまま話してもらえますか？"
 	plannerUnavailableSpokenReply          = "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。"
 
-	PrecisionConfidenceThreshold      = 0.78
-	AmbientEVIThreshold               = 0.35
-	maxModelResponseBytes             = 64 * 1024
-	maxRespondentEvidence             = 8
-	maxRespondentProtected            = 16
-	maxRespondentProtectedRunes       = 160
-	maxResearchQueryRunes             = research.MaxTopicRunes
-	researchDiscoveryTimeout          = 7 * time.Second
-	researchAuthorityGrantTTL         = 3 * time.Second
-	researchCapabilityLeaseTTL        = 2 * time.Second
-	researchAuthorityIssuanceTTL      = time.Minute
-	fastInferenceSequenceTimeout      = 8 * time.Second
-	plannerPrecisionRecoveryTimeout   = 6 * time.Second
-	precisionInferenceSequenceTimeout = 10 * time.Second
-	criticTimeout                     = 12 * time.Second
-	criticRecoveryTimeout             = 18 * time.Second
-	ordinaryCriticSequenceTimeout     = 8 * time.Second
-	highRiskCriticSequenceTimeout     = 24 * time.Second
+	PrecisionConfidenceThreshold         = 0.78
+	AmbientEVIThreshold                  = 0.35
+	maxModelResponseBytes                = 64 * 1024
+	maxRespondentEvidence                = 8
+	maxRespondentProtected               = 16
+	maxRespondentProtectedRunes          = 160
+	maxResearchQueryRunes                = research.MaxTopicRunes
+	researchDiscoveryTimeout             = 7 * time.Second
+	researchAuthorityGrantTTL            = 3 * time.Second
+	researchCapabilityLeaseTTL           = 2 * time.Second
+	researchAuthorityIssuanceTTL         = time.Minute
+	fastInferenceSequenceTimeout         = 8 * time.Second
+	voicePrecisionInferenceTimeout       = 3500 * time.Millisecond
+	voiceCriticTimeout                   = 3500 * time.Millisecond
+	criticMaxOutputTokens          int32 = 2_048
 	// VoiceResponseReserve is the minimum time every upstream voice stage must
 	// leave for the final regional synthesis and transport commit.
 	VoiceResponseReserve = 5 * time.Second
@@ -89,6 +86,8 @@ var (
 	errInferenceSpeechActuator  = errors.New("conversation: inference speech actuator guard")
 	errInferenceAnswerContract  = errors.New("conversation: inference answer contract")
 	errInferenceStateDelta      = errors.New("conversation: inference state delta")
+	errProviderPermanent        = errors.New("conversation: provider permanent failure")
+	errProviderTransient        = errors.New("conversation: provider transient failure")
 	errResearchCapabilityDenied = errors.New("conversation: research capability denied")
 
 	explicitJapaneseRecentResearchPattern = regexp.MustCompile(
@@ -236,9 +235,8 @@ type criticPayload struct {
 }
 
 type criticPolicy struct {
-	thinkingLevel         genai.ThinkingLevel
-	recoveryThinkingLevel genai.ThinkingLevel
-	sequenceTimeout       time.Duration
+	thinkingLevel genai.ThinkingLevel
+	timeout       time.Duration
 }
 
 type speculativeAuditResult struct {
@@ -537,7 +535,7 @@ func (agent *vertexAgent) Process(
 	plannerRecoveredWithPrecision := false
 	if err != nil {
 		if ctx.Err() != nil {
-			return VoiceTurnResult{}, err
+			return VoiceTurnResult{}, ctx.Err()
 		}
 		if fastContextErr != nil || !precisionPlannerRecoveryAllowed(err) {
 			slog.WarnContext(
@@ -557,8 +555,8 @@ func (agent *vertexAgent) Process(
 		}
 		if !contextHasTimeBudget(
 			ctx,
-			plannerPrecisionRecoveryTimeout+
-				ordinaryCriticSequenceTimeout+
+			voicePrecisionInferenceTimeout+
+				voiceCriticTimeout+
 				voiceResponseReserve,
 		) {
 			slog.WarnContext(
@@ -589,7 +587,7 @@ func (agent *vertexAgent) Process(
 		)
 		recoveryCtx, cancelRecovery := context.WithTimeout(
 			ctx,
-			plannerPrecisionRecoveryTimeout,
+			voicePrecisionInferenceTimeout,
 		)
 		recoveredPlan, recoveryErr := agent.infer(
 			recoveryCtx,
@@ -604,9 +602,6 @@ func (agent *vertexAgent) Process(
 		cancelRecovery()
 		if recoveryErr != nil || recoveryContextErr != nil {
 			if ctx.Err() != nil {
-				if recoveryErr != nil {
-					return VoiceTurnResult{}, recoveryErr
-				}
 				return VoiceTurnResult{}, ctx.Err()
 			}
 			if recoveryErr == nil {
@@ -710,6 +705,7 @@ func (agent *vertexAgent) Process(
 			normalized,
 			recoveryState,
 			nil,
+			true,
 		)
 		pendingRecoveryContextErr := pendingRecoveryCtx.Err()
 		cancelPendingRecovery()
@@ -763,12 +759,25 @@ func (agent *vertexAgent) Process(
 		fastPlan.AssistanceTarget == "respondent" &&
 			fastPlan.RespondentStage == "awaiting_answer" &&
 			!failClosedPrecision
+	skipOptionalForegroundPrecision :=
+		eligibleForForegroundTechnicalFastPath(normalized, fastPlan, route)
+	if skipOptionalForegroundPrecision {
+		slog.InfoContext(
+			ctx,
+			"optional precision preview skipped for foreground latency",
+			"turn_mode",
+			"foreground",
+			"domain",
+			"technical",
+		)
+	}
 	if !plannerRecoveredWithPrecision &&
+		!skipOptionalForegroundPrecision &&
 		(needsPrecision(fastPlan) || failClosedPrecision) &&
 		!awaitingAnswerWithoutPublishableDraft {
 		precisionBudget, hasPrecisionBudget := timeoutBudgetWithReserve(
 			ctx,
-			precisionInferenceSequenceTimeout,
+			voicePrecisionInferenceTimeout,
 			voiceResponseReserve,
 		)
 		if !hasPrecisionBudget {
@@ -794,17 +803,21 @@ func (agent *vertexAgent) Process(
 				ctx,
 				precisionBudget,
 			)
-			precisionPlan, precisionErr := agent.inferWithRetry(
+			precisionPlan, precisionErr := agent.infer(
 				precisionCtx,
 				agent.precisionModel,
-				"precision",
 				genai.ThinkingLevelHigh,
 				normalized,
 				state,
 				&fastPlan,
+				nil,
 			)
+			precisionContextErr := precisionCtx.Err()
 			cancelPrecision()
-			if precisionErr != nil {
+			if ctx.Err() != nil {
+				return VoiceTurnResult{}, ctx.Err()
+			}
+			if precisionErr != nil || precisionContextErr != nil {
 				if failClosedPrecision {
 					route = "precision-unavailable"
 					precisionUnavailable = true
@@ -860,7 +873,7 @@ func (agent *vertexAgent) Process(
 		criticPolicy := criticPolicyFor(normalized, finalPlan, route)
 		if !contextHasTimeBudget(
 			ctx,
-			criticPolicy.sequenceTimeout+voiceResponseReserve,
+			criticPolicy.timeout+voiceResponseReserve,
 		) {
 			if ctx.Err() != nil {
 				return VoiceTurnResult{}, ctx.Err()
@@ -899,10 +912,11 @@ func (agent *vertexAgent) Process(
 					earlyAudit.cancel()
 					earlyAudit = nil
 				}
-				assessment, criticErr = agent.auditAnswerWithRetry(
+				assessment, criticErr = agent.auditAnswer(
 					ctx,
 					agent.fastModel,
-					criticPolicy,
+					criticPolicy.thinkingLevel,
+					criticPolicy.timeout,
 					normalized,
 					state,
 					finalPlan,
@@ -1790,27 +1804,28 @@ func (agent *vertexAgent) startSpeculativeAudit(
 	state conversationState,
 	candidate modelPlan,
 ) *speculativeAudit {
-	// Only the ordinary assistant path can consume this result. PDF, ambient
-	// audio, and respondent reconstruction require the full high-risk policy.
-	// Starting no audit is preferable to speculating across those boundaries.
+	policy := criticPolicyFor(turn, candidate, "fast")
+	// Only the ordinary assistant path can consume this result. PDF, passive
+	// ambient audio, technical/high-risk answers, and respondent reconstruction
+	// require a different policy. Starting no audit is preferable to speculating
+	// across those boundaries.
 	if ctx == nil ||
-		turn.Ambient ||
+		passiveAmbientTurn(turn) ||
 		turn.PDF != nil ||
 		candidate.AssistanceTarget != "assistant" ||
-		candidate.RespondentStage != "none" {
+		candidate.RespondentStage != "none" ||
+		policy.thinkingLevel != genai.ThinkingLevelLow ||
+		policy.timeout != voiceCriticTimeout {
 		return nil
 	}
 	auditCtx, cancel := context.WithCancel(ctx)
 	result := make(chan speculativeAuditResult, 1)
 	go func() {
-		assessment, err := agent.auditAnswerWithRetry(
+		assessment, err := agent.auditAnswer(
 			auditCtx,
 			agent.fastModel,
-			criticPolicy{
-				thinkingLevel:         genai.ThinkingLevelLow,
-				recoveryThinkingLevel: genai.ThinkingLevelMedium,
-				sequenceTimeout:       ordinaryCriticSequenceTimeout,
-			},
+			policy.thinkingLevel,
+			policy.timeout,
 			turn,
 			state,
 			candidate,
@@ -1835,10 +1850,11 @@ func canConsumeSpeculativeAudit(
 	policy criticPolicy,
 ) bool {
 	return audit != nil &&
-		!turn.Ambient &&
+		!passiveAmbientTurn(turn) &&
 		turn.PDF == nil &&
 		route == "fast" &&
-		policy.sequenceTimeout == ordinaryCriticSequenceTimeout &&
+		policy.thinkingLevel == genai.ThinkingLevelLow &&
+		policy.timeout == voiceCriticTimeout &&
 		plan.ResearchAction == "none" &&
 		plan.AssistanceTarget == "assistant" &&
 		plan.RespondentStage == "none" &&
@@ -1865,94 +1881,6 @@ func awaitSpeculativeAudit(
 	}
 }
 
-func (agent *vertexAgent) auditAnswerWithRetry(
-	ctx context.Context,
-	model string,
-	policy criticPolicy,
-	turn VoiceTurn,
-	state conversationState,
-	candidatePlan modelPlan,
-) (answercontract.Assessment, error) {
-	criticCtx, cancel := context.WithTimeout(ctx, policy.sequenceTimeout)
-	defer cancel()
-	assessment, err := agent.auditAnswer(
-		criticCtx,
-		model,
-		policy.thinkingLevel,
-		criticTimeout,
-		turn,
-		state,
-		candidatePlan,
-	)
-	if err == nil || criticCtx.Err() != nil {
-		return assessment, err
-	}
-	primaryErr := err
-	if retryableCriticFailure(err) {
-		slog.WarnContext(
-			ctx,
-			"answer verification retrying",
-			"failure_class",
-			criticFailureClass(err),
-			"failure_stage",
-			criticFailureStage(err),
-			"critic_model_role",
-			"fast",
-		)
-		retryAssessment, retryErr := agent.auditAnswer(
-			criticCtx,
-			model,
-			policy.thinkingLevel,
-			criticTimeout,
-			turn,
-			state,
-			candidatePlan,
-		)
-		if retryErr == nil {
-			return retryAssessment, nil
-		}
-		primaryErr = errors.Join(err, retryErr)
-	}
-	if criticCtx.Err() != nil ||
-		model == agent.precisionModel ||
-		!recoverableCriticFailure(primaryErr) {
-		return answercontract.Assessment{}, primaryErr
-	}
-	slog.WarnContext(
-		ctx,
-		"answer verification using precision recovery",
-		"failure_class",
-		criticFailureClass(primaryErr),
-		"failure_stage",
-		criticFailureStage(primaryErr),
-		"primary_model_role",
-		"fast",
-		"recovery_model_role",
-		"precision",
-	)
-	recoveryAssessment, recoveryErr := agent.auditAnswer(
-		criticCtx,
-		agent.precisionModel,
-		policy.recoveryThinkingLevel,
-		criticRecoveryTimeout,
-		turn,
-		state,
-		candidatePlan,
-	)
-	if recoveryErr != nil {
-		return answercontract.Assessment{}, errors.Join(primaryErr, recoveryErr)
-	}
-	slog.InfoContext(
-		ctx,
-		"answer verification recovered",
-		"primary_model_role",
-		"fast",
-		"recovery_model_role",
-		"precision",
-	)
-	return recoveryAssessment, nil
-}
-
 func criticPolicyFor(
 	turn VoiceTurn,
 	plan modelPlan,
@@ -1967,15 +1895,13 @@ func criticPolicyFor(
 			plan.RespondentStage == "restructure")
 	if highRisk {
 		return criticPolicy{
-			thinkingLevel:         genai.ThinkingLevelHigh,
-			recoveryThinkingLevel: genai.ThinkingLevelHigh,
-			sequenceTimeout:       highRiskCriticSequenceTimeout,
+			thinkingLevel: genai.ThinkingLevelHigh,
+			timeout:       voiceCriticTimeout,
 		}
 	}
 	return criticPolicy{
-		thinkingLevel:         genai.ThinkingLevelLow,
-		recoveryThinkingLevel: genai.ThinkingLevelMedium,
-		sequenceTimeout:       ordinaryCriticSequenceTimeout,
+		thinkingLevel: genai.ThinkingLevelLow,
+		timeout:       voiceCriticTimeout,
 	}
 }
 
@@ -2071,7 +1997,7 @@ func (agent *vertexAgent) infer(
 		if errors.Is(err, ErrModelOutputInvalid) {
 			return modelPlan{}, err
 		}
-		return modelPlan{}, ErrModelUnavailable
+		return modelPlan{}, classifiedProviderFailure(err)
 	}
 	defer wipe(raw)
 
@@ -2262,7 +2188,7 @@ func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
 	}
 
 	var candidate modelPlan
-	seen := make(map[string]bool, 4)
+	seen := make(map[string]bool, 7)
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		if err != nil {
@@ -2274,6 +2200,10 @@ func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
 		}
 		seen[key] = true
 		switch key {
+		case "domain":
+			if err := decoder.Decode(&candidate.Domain); err != nil {
+				return modelPlan{}, false
+			}
 		case "assistance_target":
 			if err := decoder.Decode(&candidate.AssistanceTarget); err != nil {
 				return modelPlan{}, false
@@ -2286,6 +2216,14 @@ func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
 			if err := decoder.Decode(&candidate.AnswerAttempt); err != nil {
 				return modelPlan{}, false
 			}
+		case "research_action":
+			if err := decoder.Decode(&candidate.ResearchAction); err != nil {
+				return modelPlan{}, false
+			}
+		case "intervention_policy":
+			if err := decoder.Decode(&candidate.InterventionPolicy); err != nil {
+				return modelPlan{}, false
+			}
 		case "spoken_reply":
 			if err := decoder.Decode(&candidate.SpokenReply); err != nil {
 				return modelPlan{}, false
@@ -2296,9 +2234,12 @@ func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
 				return modelPlan{}, false
 			}
 		}
-		if seen["assistance_target"] &&
+		if seen["domain"] &&
+			seen["assistance_target"] &&
 			seen["respondent_stage"] &&
 			seen["answer_attempt"] &&
+			seen["research_action"] &&
+			seen["intervention_policy"] &&
 			seen["spoken_reply"] {
 			if !validEarlyCandidate(candidate) {
 				return modelPlan{}, false
@@ -2310,7 +2251,10 @@ func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
 }
 
 func validEarlyCandidate(candidate modelPlan) bool {
-	if candidate.SpokenReply == "" ||
+	if !allowedDomain(candidate.Domain) ||
+		!allowedResearchAction(candidate.ResearchAction) ||
+		!allowedInterventionPolicy(candidate.InterventionPolicy) ||
+		candidate.SpokenReply == "" ||
 		!utf8.ValidString(candidate.SpokenReply) ||
 		utf8.RuneCountInString(candidate.SpokenReply) > MaxSpokenReplyRunes ||
 		unsafeSpeechActuatorText(candidate.SpokenReply) ||
@@ -2338,6 +2282,7 @@ func (agent *vertexAgent) inferWithRetry(
 	turn VoiceTurn,
 	state conversationState,
 	preliminary *modelPlan,
+	retryModelUnavailable bool,
 ) (modelPlan, error) {
 	plan, err := agent.infer(
 		ctx,
@@ -2348,7 +2293,10 @@ func (agent *vertexAgent) inferWithRetry(
 		preliminary,
 		nil,
 	)
-	if err == nil || ctx.Err() != nil || !retryableInferenceFailure(err) {
+	if err == nil ||
+		ctx.Err() != nil ||
+		(!retryModelUnavailable && errors.Is(err, ErrModelUnavailable)) ||
+		!retryableInferenceFailure(err) {
 		return plan, err
 	}
 	slog.WarnContext(
@@ -2417,8 +2365,53 @@ func inferenceUnaryFinishFailure(
 	return nil
 }
 
+func classifiedProviderFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	code, hasCode := providerStatusCode(err)
+	if !hasCode {
+		// Transport failures do not carry an HTTP status. They are the only
+		// unknown provider failures eligible for the bounded primary-planner
+		// retry. Never retain the raw error because it may contain response
+		// details or request metadata.
+		return errors.Join(ErrModelUnavailable, errProviderTransient)
+	}
+	if transientProviderStatus(code) {
+		return errors.Join(ErrModelUnavailable, errProviderTransient)
+	}
+	return errors.Join(ErrModelUnavailable, errProviderPermanent)
+}
+
+func providerStatusCode(err error) (int, bool) {
+	var apiError genai.APIError
+	if errors.As(err, &apiError) {
+		return apiError.Code, apiError.Code > 0
+	}
+	var apiErrorPointer *genai.APIError
+	if errors.As(err, &apiErrorPointer) &&
+		apiErrorPointer != nil {
+		return apiErrorPointer.Code, apiErrorPointer.Code > 0
+	}
+	return 0, false
+}
+
+func transientProviderStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return code >= 500 && code <= 599
+	}
+}
+
 func retryableInferenceFailure(err error) bool {
-	return errors.Is(err, ErrModelUnavailable) ||
+	return errors.Is(err, errProviderTransient) ||
 		precisionPlannerRecoveryAllowed(err)
 }
 
@@ -2553,7 +2546,7 @@ func (agent *vertexAgent) auditAnswer(
 		&genai.GenerateContentConfig{
 			SystemInstruction:  genai.NewContentFromText(lacCriticSystemInstruction, genai.RoleUser),
 			CandidateCount:     1,
-			MaxOutputTokens:    1_536,
+			MaxOutputTokens:    criticMaxOutputTokens,
 			ResponseMIMEType:   "application/json",
 			ResponseJsonSchema: answerContractResponseSchema(),
 			ThinkingConfig: &genai.ThinkingConfig{
@@ -2566,15 +2559,31 @@ func (agent *vertexAgent) auditAnswer(
 			if errors.Is(criticContextErr, context.DeadlineExceeded) {
 				return answercontract.Assessment{}, errors.Join(
 					ErrModelUnavailable,
+					errProviderTransient,
 					errCriticDeadline,
 				)
 			}
 			return answercontract.Assessment{}, errors.Join(
 				ErrModelUnavailable,
+				errProviderTransient,
 				errCriticCanceled,
 			)
 		}
-		return answercontract.Assessment{}, ErrModelUnavailable
+		return answercontract.Assessment{}, classifiedProviderFailure(err)
+	}
+	if criticContextErr := criticCtx.Err(); criticContextErr != nil {
+		if errors.Is(criticContextErr, context.DeadlineExceeded) {
+			return answercontract.Assessment{}, errors.Join(
+				ErrModelUnavailable,
+				errProviderTransient,
+				errCriticDeadline,
+			)
+		}
+		return answercontract.Assessment{}, errors.Join(
+			ErrModelUnavailable,
+			errProviderTransient,
+			errCriticCanceled,
+		)
 	}
 	if finishErr := criticUnaryFinishFailure(response); finishErr != nil {
 		return answercontract.Assessment{}, finishErr
@@ -2722,34 +2731,6 @@ func canonicalizeAnswerContractDerivedFields(contract *answercontract.Contract) 
 			commitment.Issue == answercontract.IssueMissingRequiredSlot):
 		commitment.Issue = answercontract.IssueNone
 	}
-}
-
-func retryableCriticFailure(err error) bool {
-	if errors.Is(err, errCriticDeadline) ||
-		errors.Is(err, errCriticCanceled) ||
-		errors.Is(err, errCriticPromptBlocked) ||
-		errors.Is(err, errCriticFinishSafety) ||
-		errors.Is(err, errCriticFinishLimit) ||
-		errors.Is(err, errCriticFinishPolicy) {
-		return false
-	}
-	return errors.Is(err, ErrModelUnavailable) ||
-		errors.Is(err, errCriticJSON) ||
-		errors.Is(err, errCriticContract) ||
-		errors.Is(err, errCriticRepairBounds)
-}
-
-func recoverableCriticFailure(err error) bool {
-	if errors.Is(err, errCriticDeadline) ||
-		errors.Is(err, errCriticCanceled) ||
-		errors.Is(err, errCriticPromptBlocked) ||
-		errors.Is(err, errCriticFinishSafety) ||
-		errors.Is(err, errCriticFinishLimit) ||
-		errors.Is(err, errCriticFinishPolicy) {
-		return false
-	}
-	return errors.Is(err, ErrModelUnavailable) ||
-		errors.Is(err, ErrModelOutputInvalid)
 }
 
 func criticFailureClass(err error) string {
@@ -3153,6 +3134,22 @@ func needsPrecision(plan modelPlan) bool {
 		plan.Domain == "finance"
 }
 
+func eligibleForForegroundTechnicalFastPath(
+	turn VoiceTurn,
+	plan modelPlan,
+	route string,
+) bool {
+	return route == "fast" &&
+		turn.Foreground &&
+		plan.Domain == "technical" &&
+		plan.ResearchAction == "none" &&
+		plan.AssistanceTarget == "assistant" &&
+		plan.RespondentStage == "none" &&
+		plan.InterventionPolicy != "safety" &&
+		plan.InterventionPolicy != "paper_check" &&
+		!requiresFailClosedPrecision(turn, plan)
+}
+
 func respondentModeAllowed(utterance string, pendingAnswer bool) bool {
 	if pendingAnswer {
 		return true
@@ -3508,11 +3505,12 @@ func modelResponseSchema(respondentAllowed bool) map[string]any {
 		"type":                 "object",
 		"additionalProperties": false,
 		"propertyOrdering": []string{
-			"assistance_target", "respondent_stage", "answer_attempt",
-			"spoken_reply", "domain", "intent", "respondent_slot_evidence",
-			"respondent_protected_spans", "research_action", "research_query",
+			"domain", "assistance_target", "respondent_stage", "answer_attempt",
+			"research_action", "intervention_policy", "spoken_reply",
+			"intent", "respondent_slot_evidence",
+			"respondent_protected_spans", "research_query",
 			"latent_question", "argument_structure",
-			"intervention_policy", "confidence",
+			"confidence",
 			"conversation_summary", "document_summary", "thought_state_delta",
 			"self_correction_grace", "intervention", "answer_contract",
 		},

@@ -44,7 +44,7 @@ func TestAgentRecoversRepeatedStructuralPlannerFailureWithPrecision(t *testing.T
 		fake.calls[2].model != DefaultPrecisionModel ||
 		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
 		fake.calls[2].deadline <= 0 ||
-		fake.calls[2].deadline > plannerPrecisionRecoveryTimeout ||
+		fake.calls[2].deadline > voicePrecisionInferenceTimeout ||
 		strings.Contains(fake.calls[2].prompt, `"preliminary_plan"`) ||
 		strings.Contains(fake.calls[2].prompt, `"unexpected"`) ||
 		fake.calls[3].model != DefaultFastModel ||

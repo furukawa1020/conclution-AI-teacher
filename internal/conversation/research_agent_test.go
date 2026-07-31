@@ -998,7 +998,7 @@ func TestAgentDOILookupBindsVerifierResultToRequestedDOI(t *testing.T) {
 	}
 }
 
-func TestAgentResearchPropagatesParentCancellation(t *testing.T) {
+func TestAgentCanceledTurnDoesNotReachResearch(t *testing.T) {
 	const topic = "量子エラー訂正"
 	plan := recentPapersPlan(topic)
 	generator := &fakeGenerator{generations: []fakeGeneration{
@@ -1021,7 +1021,7 @@ func TestAgentResearchPropagatesParentCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Process error = %v; want context.Canceled", err)
 	}
-	if verifier.calls != 1 {
+	if verifier.calls != 0 {
 		t.Fatalf("verifier calls = %d", verifier.calls)
 	}
 }

@@ -77,8 +77,8 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
 - raw audioをVertex AIへ送らず、STTで得た文字列と明示添付PDFだけを`global`のVertex AIへ送る。
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
-- WebSocket、Vertex Live、session resumption、full-duplex、barge-inを現在は使わない。
-- AI処理中と再生中はマイクを無効にし、タブ非表示、3分無発話、30分経過でsessionを止める。
+- 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
+- AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、3分無発話、30分経過でsessionを止める。
 - PDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。
 
 将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。

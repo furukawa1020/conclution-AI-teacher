@@ -107,15 +107,16 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 		name       string
 		ambient    bool
 		foreground bool
-		passive    bool
+		silent     bool
 	}{
 		{name: "intentional"},
 		{
 			name:       "foreground",
 			ambient:    true,
 			foreground: true,
+			silent:     true,
 		},
-		{name: "ambient", ambient: true, passive: true},
+		{name: "ambient", ambient: true, silent: true},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -150,12 +151,12 @@ func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
 				len(result.ResearchRecords) != 0 {
 				t.Fatalf("recognition fallback metadata = %+v", result)
 			}
-			if test.passive {
+			if test.silent {
 				if result.Route != routeSilentLowConfidence ||
 					len(result.Audio) != 0 ||
 					result.Caption != "" ||
 					speech.synthesizeCalls != 0 {
-					t.Fatalf("ambient low-confidence turn spoke: %+v", result)
+					t.Fatalf("automatic low-confidence turn spoke: %+v", result)
 				}
 				return
 			}
@@ -188,15 +189,16 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 			name       string
 			ambient    bool
 			foreground bool
-			passive    bool
+			silent     bool
 		}{
 			{name: "intentional"},
 			{
 				name:       "foreground",
 				ambient:    true,
 				foreground: true,
+				silent:     true,
 			},
-			{name: "ambient", ambient: true, passive: true},
+			{name: "ambient", ambient: true, silent: true},
 		} {
 			mode := mode
 			t.Run(noSpeech.name+"/"+mode.name, func(t *testing.T) {
@@ -216,7 +218,7 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 						StateToken: "existing-state",
 					},
 				)
-				if mode.passive {
+				if mode.silent {
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -227,7 +229,7 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 						len(result.ResearchRecords) != 0 ||
 						len(result.Audio) != 0 ||
 						result.Caption != "" {
-						t.Fatalf("ambient no-speech result = %+v", result)
+						t.Fatalf("automatic no-speech result = %+v", result)
 					}
 				} else {
 					if err != nil {
@@ -244,7 +246,7 @@ func TestPipelineRecoversNoSpeechWithoutEndingAnIntentionalSession(t *testing.T)
 					t.Fatalf("no-speech turn reached the model: %d", agent.calls)
 				}
 				wantSynthesisCalls := 1
-				if mode.passive {
+				if mode.silent {
 					wantSynthesisCalls = 0
 				}
 				if speech.synthesizeCalls != wantSynthesisCalls {
@@ -294,6 +296,49 @@ func TestPipelineStopsBufferedSTTBeforeSpeechResponseReserve(t *testing.T) {
 			"buffered STT consumed response reserve: result=%+v budget=%v agent_calls=%d synth_calls=%d parent_err=%v",
 			result,
 			speech.transcriptionBudget,
+			agent.calls,
+			speech.synthesizeCalls,
+			ctx.Err(),
+		)
+	}
+}
+
+func TestPipelineSilencesForegroundBufferedSTTBudgetMiss(t *testing.T) {
+	speech := &deadlineBlockingSpeech{}
+	agent := &fakeAgent{}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		conversation.VoiceResponseReserve+75*time.Millisecond,
+	)
+	defer cancel()
+
+	result, err := pipeline.Process(
+		ctx,
+		"uid-foreground-stt-budget",
+		httpapi.VoiceTurnInput{
+			Audio:      []byte("audio"),
+			Ambient:    true,
+			Foreground: true,
+			StateToken: "existing-state",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if ctx.Err() != nil ||
+		agent.calls != 0 ||
+		speech.synthesizeCalls != 0 ||
+		result.Route != routeSilentNoSpeech ||
+		result.StateToken != "existing-state" ||
+		result.Caption != "" ||
+		len(result.Audio) != 0 {
+		t.Fatalf(
+			"foreground STT budget miss spoke or mutated state: result=%+v agent_calls=%d synth_calls=%d parent_err=%v",
+			result,
 			agent.calls,
 			speech.synthesizeCalls,
 			ctx.Err(),

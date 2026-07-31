@@ -29,7 +29,9 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
   maximumServerTextCharacters: 64 * 1024,
   maximumSocketBufferedBytes: 16 * 1024,
   outboundChunkBytes: 640,
-  confirmedSpeechLeadInMs: 100,
+  confirmedSpeechLeadInMs: 300,
+  workletCreditWindowFrames: 8,
+  workletSealTimeoutMs: 1_500,
   handoffReadyTimeoutMs: 450,
   readyTimeoutMs: 4_000,
   terminalCloseTimeoutMs: 1_500,
@@ -43,13 +45,22 @@ export const BARGE_PCM_LIMITS = Object.freeze({
   maximumFrames: 20,
 });
 
+export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
+  frameDurationMs: 20,
+  // 300 ms of requested lead-in plus 200 ms for bounded VAD confirmation
+  // jitter. These frames remain local and are erased unless speech confirms.
+  historyMs: 500,
+  maximumBytes: 16_000,
+  maximumFrames: 25,
+});
+
 function erasePcmFrame(frame) {
   if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
     new Uint8Array(frame).fill(0);
   }
 }
 
-export function createBargePcmRing() {
+function createBoundedPcmRing(limits) {
   let entries = [];
   let lastCapturedAt = null;
   let totalBytes = 0;
@@ -98,10 +109,10 @@ export function createBargePcmRing() {
       }
       while (
         entries.length > 0 &&
-        (entries.length >= BARGE_PCM_LIMITS.maximumFrames ||
-          totalBytes + pcm.byteLength > BARGE_PCM_LIMITS.maximumBytes ||
+        (entries.length >= limits.maximumFrames ||
+          totalBytes + pcm.byteLength > limits.maximumBytes ||
           entries[0].capturedAt <
-            capturedAt - BARGE_PCM_LIMITS.historyMs)
+            capturedAt - limits.historyMs)
       ) {
         removeOldest(true);
       }
@@ -128,11 +139,15 @@ export function createBargePcmRing() {
   });
 }
 
+export function createBargePcmRing() {
+  return createBoundedPcmRing(BARGE_PCM_LIMITS);
+}
+
 export function createConfirmedSpeechPcmGate(sendFrame) {
   if (typeof sendFrame !== "function") {
     throw new TypeError("voice_live_gate_sink_invalid");
   }
-  const ring = createBargePcmRing();
+  const ring = createBoundedPcmRing(CONFIRMED_SPEECH_PCM_LIMITS);
   let closed = false;
   let confirmed = false;
 
@@ -337,31 +352,90 @@ export function estimateAudiblePerformanceTime({
   );
 }
 
-export function safeLiveCaptureFrame(value) {
+function eraseLiveCaptureValue(value) {
   if (
+    value !== null &&
+    typeof value === "object" &&
+    value.pcm instanceof ArrayBuffer
+  ) {
+    erasePcmFrame(value.pcm);
+  }
+}
+
+export function safeLiveCaptureFrame(
+  value,
+  { cutoffContextFrame, generation, sequence } = {},
+) {
+  if (
+    !Number.isSafeInteger(cutoffContextFrame) ||
+    cutoffContextFrame < 0 ||
+    !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
+    !Number.isSafeInteger(sequence) ||
+    sequence < 0 ||
     !isPlainRecord(value) ||
     !hasExactKeys(value, [
+      "contextFrame",
+      "generation",
       "pcm",
-      "sampleRateHz",
+      "sequence",
       "type",
       "version",
     ]) ||
     value.type !== "frame" ||
     value.version !== 1 ||
-    value.sampleRateHz !== VOICE_LIVE_LIMITS.inputSampleRateHz ||
+    value.generation !== generation ||
+    value.sequence !== sequence ||
+    !Number.isSafeInteger(value.contextFrame) ||
+    value.contextFrame < cutoffContextFrame ||
     !(value.pcm instanceof ArrayBuffer) ||
     value.pcm.byteLength !== VOICE_LIVE_LIMITS.inputFrameBytes
   ) {
-    if (
-      value !== null &&
-      typeof value === "object" &&
-      value.pcm instanceof ArrayBuffer
-    ) {
-      erasePcmFrame(value.pcm);
-    }
+    eraseLiveCaptureValue(value);
     throw new Error("voice_live_frame_invalid");
   }
   return value.pcm;
+}
+
+export function safeLiveCaptureSignal(
+  value,
+  { generation, lastSequence, sealing } = {},
+) {
+  if (
+    !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
+    !Number.isSafeInteger(lastSequence) ||
+    lastSequence < -1 ||
+    typeof sealing !== "boolean" ||
+    !isPlainRecord(value) ||
+    value.version !== 1 ||
+    value.generation !== generation
+  ) {
+    eraseLiveCaptureValue(value);
+    throw new Error("voice_live_frame_invalid");
+  }
+  if (
+    value.type === "error" &&
+    hasExactKeys(value, ["code", "generation", "type", "version"]) &&
+    value.code === "capture_overflow"
+  ) {
+    return "capture_overflow";
+  }
+  if (
+    sealing &&
+    value.type === "sealed" &&
+    hasExactKeys(value, [
+      "generation",
+      "lastSequence",
+      "type",
+      "version",
+    ]) &&
+    value.lastSequence === lastSequence
+  ) {
+    return "sealed";
+  }
+  eraseLiveCaptureValue(value);
+  throw new Error("voice_live_frame_invalid");
 }
 
 export function createLivePcmQueue() {

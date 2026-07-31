@@ -40,14 +40,16 @@ Cloud Run kotae-api（asia-northeast1）
 
 STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
 
-STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。`short`は数秒の単発発話向けで、固定の合成日本語による確認でも自然な会話を冒頭だけで確定したため、自動fallbackには使いません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
+STTは`asia-northeast1`・`ja-JP`の`chirp_3`だけを使います。streamingでは短い発話向けのendpointing感度を使いますが、端末側VADとの一致をcommit条件にし、providerの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 
 ## マイクとセッション制御
 
 - 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
-- 各requestは`turnMode: intentional | ambient`を必須とし、状態tokenの有無からambientを推測しない
+- 各requestは`turnMode: intentional | foreground | ambient`を必須とし、状態tokenの有無から権限を推測しない。foregroundは返答を期待するが、外部作用や状態更新についてはambientと同じ制限を保つ
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
-- AI処理中と合成音声の再生中はマイクトラックを無効にする
+- AI処理中と合成音声の再生中も、利用者が開始した会話セッション内では訂正・割り込みを受けるためマイクトラックを有効にする。端末内VADが確認する前の音声は送信せず、確認した割り込みだけをForeground turnとして送る
+- 確認前PCMはAudioWorklet内だけに保持し、通常発話は最大25 frame、割り込みは最大20 frameに固定する。VAD確認後はAudioContextのsample-clock cutoff、session generation、連続sequenceを検証し、credit制御でMessagePortの未処理数も固定する。turn確定は全PCMの`sealed`確認後だけ許可する
+- 割り込み待機を含むセッション全体を3分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
 - 無発話が3分続いた時、または開始から30分経過した時にセッションを終了する
 - 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、PDFは7 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする
@@ -114,7 +116,8 @@ PDFは利用者が選択した後の一つの音声ターンにだけ添付し�
 
 - PDF本文は推論のためVertex AI `global`へ送られる
 - PDF turnは高速draftのdomain判定に依存せず必ず精密経路と独立LAC監査を通す
-- 精密経路または独立監査が使えない場合、実質回答を高速draftへfallbackせず、intentionalなら短い確認一問、ambientなら沈黙にする
+- 音声turnの精密推論と独立LAC監査は、それぞれ3.5秒のone-shotとする。高リスクでは精密modelと`HIGH` thinkingを維持するが、同期criticの再試行や別modelへの回復は行わず、期限内に完了しなければ固定確認へfail-closedする
+- 精密経路または独立監査が使えない場合、実質回答を高速draftへfallbackせず、intentionalとforegroundなら短い固定確認、受動ambientなら沈黙にする
 - 資料本文と資料要約は暗号化状態tokenへ残さない
 - JavaScript、Go runtime、管理されたGoogle Cloudサービス内部の一時コピーまで物理消去を証明するものではない
 
@@ -142,7 +145,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はプロジェクト独自の実�
 - 自己修正の兆候がある時は、AIの訂正より本人の言い直しを優先する
 - 日常のぼやきや感情表現を、常に論理誤りとして矯正しない
 - PDF、医療、法律、金融、研究根拠は高リスク経路として扱い、精密経路が使えない時は実質回答を読み上げない
-- STTが0より大きく0.65未満のconfidenceを返した場合、文字起こしをモデルへ渡さず、intentionalなら固定文で聞き返し、ambientなら沈黙する。confidence 0はAPIが値を提供しなかった状態として扱い、低信頼判定とは区別する
+- STTが0より大きく0.65未満のconfidenceを返した場合、文字起こしをモデルへ渡さず、intentionalなら固定文で一度だけ聞き返し、foregroundと受動ambientは沈黙してマイクを閉じる。confidence 0はAPIが値を提供しなかった状態として扱い、低信頼判定とは区別する
 
 `0.65`は未校正の補助境界であり、誤認識をゼロにする保証ではありません。Google Cloudが返す値を真の確率とはみなさず、実利用条件の音声でROC、聞き返し率、取りこぼし率を測って校正する必要があります。
 
@@ -164,7 +167,7 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 ## 最低限の検証
 
 - ID token、App Check、Originのどれかが不正ならモデルを呼ばない
-- missing / unknown `turnMode`を拒否し、intentionalとambientを状態tokenから推測しない
+- missing / unknown `turnMode`を拒否し、intentional・foreground・ambientを状態tokenから推測しない
 - 不正本文でも認証後はUID枠とApp枠が先に消費される
 - 未知field、不正MIME、過大音声、過大PDF、PDF magic不正を拒否する
 - 測定されたSTT confidenceが低い時に文字起こしがモデルへ届かない

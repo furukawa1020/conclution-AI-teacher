@@ -53,8 +53,12 @@ impl VoiceState {
             Self::Ready => "相手の質問をあなたが言い直して　まとまらないまま自分の考えを話すだけ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
-            Self::Thinking => "あなたの意味を変えず　聞かれた答えだけを前へ出す",
-            Self::Speaking => "返事のあと　そのまままた聴きはじめる",
+            Self::Thinking => {
+                "訂正を受けるためマイクは端末内で待機中　話せば今の処理を止める"
+            }
+            Self::Speaking => {
+                "返事を止めて訂正できる　マイクは端末内で割り込みだけを判定"
+            }
             Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
             Self::Error(_) => "丸いボタンか下の「もう一度接続する」からやり直せる",
         }
@@ -508,7 +512,6 @@ fn arm_listening(
     operation: u64,
     announce_permission: bool,
     turn_mode: VoiceTurnMode,
-    intentional_retry_available: bool,
     mut voice_state: Signal<VoiceState>,
     generation: Signal<u64>,
     session_state: Signal<String>,
@@ -569,31 +572,32 @@ fn arm_listening(
                     caption,
                 );
             } else {
-                // A transport/capture miss does not consume the explicit
-                // gesture. Preserve it for one bounded replacement window;
-                // later automatic listening remains foreground-only.
-                let replacement_mode =
-                    if turn_mode == VoiceTurnMode::Intentional && intentional_retry_available {
-                        VoiceTurnMode::Intentional
-                    } else {
-                        VoiceTurnMode::Foreground
-                    };
-                arm_listening(
-                    operation,
-                    false,
-                    replacement_mode,
-                    false,
-                    voice_state,
-                    generation,
-                    session_state,
-                    detected_domain,
-                    route,
-                    needs_paper,
-                    research_status,
-                    research_records,
-                    document_info,
-                    caption,
-                );
+                if turn_mode == VoiceTurnMode::Intentional {
+                    // The explicit gesture authorizes only this finite
+                    // recording window. One bounded replacement may expect a
+                    // reply, but never inherits intentional-turn authority.
+                    arm_listening(
+                        operation,
+                        false,
+                        VoiceTurnMode::Foreground,
+                        voice_state,
+                        generation,
+                        session_state,
+                        detected_domain,
+                        route,
+                        needs_paper,
+                        research_status,
+                        research_records,
+                        document_info,
+                        caption,
+                    );
+                } else {
+                    // A second silent window ends the microphone session.
+                    // Noise must not keep a foreground capture alive forever.
+                    cloud::stop_session();
+                    document_info.set(None);
+                    voice_state.set(VoiceState::Ready);
+                }
             }
         }
     });
@@ -650,7 +654,6 @@ fn resume_foreground_interruption(
                 operation,
                 false,
                 VoiceTurnMode::Foreground,
-                false,
                 voice_state,
                 generation,
                 session_state,
@@ -750,6 +753,17 @@ fn submit_turn(
         if consumed_document {
             document_info.set(None);
         }
+        if turn_mode == VoiceTurnMode::Foreground
+            && silent_recognition_miss(&result.route)
+        {
+            // A VAD false positive followed by an STT miss is terminal for
+            // this automatic window. Requiring a fresh gesture prevents a
+            // silent capture/upload loop while keeping recognized follow-ups
+            // conversational.
+            cloud::stop_session();
+            voice_state.set(VoiceState::Ready);
+            return;
+        }
         if result.interrupted {
             // The final frame reached a clean terminal EOF, so commit its
             // state before submitting the already-captured interruption.
@@ -780,7 +794,6 @@ fn submit_turn(
             operation,
             false,
             VoiceTurnMode::Foreground,
-            false,
             voice_state,
             generation,
             session_state,
@@ -814,7 +827,6 @@ fn start_or_resume(
         operation,
         true,
         turn_mode_for_gesture_epoch(true),
-        true,
         voice_state,
         generation,
         session_state,
@@ -842,6 +854,13 @@ const fn turn_mode_for_gesture_epoch(fresh_gesture: bool) -> VoiceTurnMode {
     } else {
         VoiceTurnMode::Foreground
     }
+}
+
+fn silent_recognition_miss(route: &str) -> bool {
+    matches!(
+        route,
+        "stt-silent-no-speech" | "stt-silent-low-confidence"
+    )
 }
 
 fn valid_streamed_audio_metadata(
@@ -1253,7 +1272,7 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "発話ごとにTLSで送り　アプリの履歴には残さない。ただし処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
+                                "発話ごとにTLSで送り　アプリの履歴には残さない。会話中は、考え中と返答再生中も訂正を受けるため端末内VADがマイクを使い、確認した割り込みだけを送ります。処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
                             }
                             p {
                                 strong { "PDF" }
@@ -1291,7 +1310,8 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        VoiceState, VoiceTurnMode, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
+        VoiceState, VoiceTurnMode, silent_recognition_miss, turn_mode_for_gesture_epoch,
+        valid_streamed_audio_metadata,
     };
 
     #[test]
@@ -1304,6 +1324,14 @@ mod tests {
             turn_mode_for_gesture_epoch(false),
             VoiceTurnMode::Foreground
         ));
+    }
+
+    #[test]
+    fn only_server_authenticated_silent_recognition_routes_end_foreground_capture() {
+        assert!(silent_recognition_miss("stt-silent-no-speech"));
+        assert!(silent_recognition_miss("stt-silent-low-confidence"));
+        assert!(!silent_recognition_miss("stt-clarify-no-speech"));
+        assert!(!silent_recognition_miss("fast"));
     }
 
     #[test]

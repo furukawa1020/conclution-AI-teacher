@@ -691,12 +691,10 @@ func (p *Pipeline) processLive(
 				specCancel = 1
 			}
 		}
-		route := routeClarifyNoSpeech
-		if passiveAmbientVoiceInput(input) {
-			route = routeSilentNoSpeech
-		}
+		route := routeSilentNoSpeech
 		result = silentRecognitionResult(input.StateToken, route)
-		if responseExpected {
+		if promptOnRecognitionMiss(input) {
+			result.Route = routeClarifyNoSpeech
 			spokenReply = lowConfidencePrompt
 		}
 	} else {
@@ -879,6 +877,14 @@ func (p *Pipeline) currentTime() time.Time {
 
 func voiceResponseExpected(input httpapi.VoiceTurnInput) bool {
 	return !input.Ambient || input.Foreground
+}
+
+func promptOnRecognitionMiss(input httpapi.VoiceTurnInput) bool {
+	// Only the finite capture window opened by a fresh user gesture may ask
+	// the user to repeat a recognition miss. Automatic foreground listening
+	// stays conversational when speech is recognized, but it must remain
+	// silent on a miss so synthesis cannot feed another VAD cycle.
+	return !input.Ambient
 }
 
 func passiveAmbientVoiceInput(input httpapi.VoiceTurnInput) bool {
@@ -1376,7 +1382,7 @@ func (p *Pipeline) prepareTurn(
 			"failure_stage",
 			"transcribe_budget",
 		)
-		if passiveAmbientVoiceInput(input) {
+		if !promptOnRecognitionMiss(input) {
 			return silentRecognitionResult(
 				input.StateToken,
 				routeSilentNoSpeech,
@@ -1395,7 +1401,7 @@ func (p *Pipeline) prepareTurn(
 			"recognized", false,
 		)
 		if errors.Is(err, speechio.ErrNoSpeech) {
-			if passiveAmbientVoiceInput(input) {
+			if !promptOnRecognitionMiss(input) {
 				return silentRecognitionResult(
 					input.StateToken,
 					routeSilentNoSpeech,
@@ -1446,7 +1452,7 @@ func (p *Pipeline) prepareRecognizedTurn(
 	confidence float32,
 ) (httpapi.VoiceTurnResult, string, error) {
 	if transcriptConfidenceTooLow(confidence) {
-		if passiveAmbientVoiceInput(input) {
+		if !promptOnRecognitionMiss(input) {
 			return silentRecognitionResult(
 				input.StateToken,
 				routeSilentLowConfidence,

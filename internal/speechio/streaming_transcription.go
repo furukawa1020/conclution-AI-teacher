@@ -138,10 +138,9 @@ func streamingRecognitionConfigRequest(
 		EnableVoiceActivityEvents: true,
 		InterimResults:            true,
 	}
-	// Endpointing sensitivity is currently a Chirp 3 feature. Activating it
-	// only for that configured production model preserves compatibility with
-	// the existing "long" model and takes effect automatically after the
-	// planned environment switch.
+	// Endpointing sensitivity is currently a Chirp 3 feature. Keep it scoped
+	// to the reviewed production model so other model identifiers cannot
+	// silently inherit an unsupported streaming option.
 	if strings.EqualFold(strings.TrimSpace(model), "chirp_3") {
 		streamingFeatures.EndpointingSensitivity =
 			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_SHORT

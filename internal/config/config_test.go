@@ -45,8 +45,8 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.MaxVoiceBytes != 13*1024*1024 {
 		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)
 	}
-	if cfg.SpeechModel != "long" {
-		t.Fatalf("speech model = %q; want long", cfg.SpeechModel)
+	if cfg.SpeechModel != "chirp_3" {
+		t.Fatalf("speech model = %q; want chirp_3", cfg.SpeechModel)
 	}
 	if cfg.SpeechVoice != "ja-JP-Chirp3-HD-Kore" {
 		t.Fatalf(
@@ -133,6 +133,7 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "request timeout collides with write deadline", key: "KOTAE_REQUEST_TIMEOUT", value: "51s"},
 		{name: "voice timeout leaves no speech reserve", key: "KOTAE_VOICE_TIMEOUT", value: "14s"},
 		{name: "voice timeout collides with write deadline", key: "KOTAE_VOICE_TIMEOUT", value: "51s"},
+		{name: "legacy speech primary", key: "KOTAE_SPEECH_MODEL", value: "long"},
 		{name: "unreviewed speech primary", key: "KOTAE_SPEECH_MODEL", value: "short"},
 		{name: "unreviewed speech voice", key: "KOTAE_SPEECH_VOICE", value: "ja-JP-Neural2-B"},
 	}

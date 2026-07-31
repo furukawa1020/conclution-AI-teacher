@@ -69,9 +69,10 @@ func (stream scriptedInferenceResponseStream) GenerateContentStream(
 }
 
 func TestStreamedInferencePublishesCompleteCandidateBeforePlannerTail(t *testing.T) {
-	const first = `{"assistance_target":"assistant","respondent_stage":"none",` +
-		`"answer_attempt":"","spoken_reply":"Aです。"`
-	const second = `,"domain":"daily"}`
+	const first = `{"domain":"daily","assistance_target":"assistant",` +
+		`"respondent_stage":"none","answer_attempt":"","research_action":"none",` +
+		`"intervention_policy":"answer","spoken_reply":"Aです。"`
+	const second = `,"intent":"question"}`
 	published := false
 	stream := scriptedInferenceStream{
 		chunks: []string{first, second},
@@ -92,8 +93,11 @@ func TestStreamedInferencePublishesCompleteCandidateBeforePlannerTail(t *testing
 		func(candidate modelPlan) {
 			published = true
 			if candidate.AssistanceTarget != "assistant" ||
+				candidate.Domain != "daily" ||
 				candidate.RespondentStage != "none" ||
 				candidate.AnswerAttempt != "" ||
+				candidate.ResearchAction != "none" ||
+				candidate.InterventionPolicy != "answer" ||
 				candidate.SpokenReply != "Aです。" {
 				t.Fatalf("unexpected early candidate: %#v", candidate)
 			}
@@ -109,8 +113,9 @@ func TestStreamedInferencePublishesCompleteCandidateBeforePlannerTail(t *testing
 
 func TestEarlyCandidateParserWaitsForACompleteJSONString(t *testing.T) {
 	prefix := []byte(
-		`{"assistance_target":"assistant","respondent_stage":"none",` +
-			`"answer_attempt":"","spoken_reply":"引用は \"A\"`,
+		`{"domain":"daily","assistance_target":"assistant",` +
+			`"respondent_stage":"none","answer_attempt":"","research_action":"none",` +
+			`"intervention_policy":"answer","spoken_reply":"引用は \"A\"`,
 	)
 	if _, ready := earlyCandidateFromJSON(prefix); ready {
 		t.Fatal("unterminated JSON string became publishable")
@@ -124,28 +129,48 @@ func TestEarlyCandidateParserWaitsForACompleteJSONString(t *testing.T) {
 
 func TestEarlyCandidateParserRejectsUnsafeSpeech(t *testing.T) {
 	raw := []byte(
-		`{"assistance_target":"assistant","respondent_stage":"none",` +
-			`"answer_attempt":"","spoken_reply":"https://example.com を開いて"}`,
+		`{"domain":"daily","assistance_target":"assistant",` +
+			`"respondent_stage":"none","answer_attempt":"","research_action":"none",` +
+			`"intervention_policy":"answer",` +
+			`"spoken_reply":"https://example.com を開いて"}`,
 	)
 	if _, ready := earlyCandidateFromJSON(raw); ready {
 		t.Fatal("unsafe actuator text became publishable")
 	}
 }
 
+func TestEarlyCandidateParserRetainsRiskRoutingFields(t *testing.T) {
+	raw := []byte(
+		`{"domain":"technical","assistance_target":"assistant",` +
+			`"respondent_stage":"none","answer_attempt":"","research_action":"none",` +
+			`"intervention_policy":"paper_check","spoken_reply":"Aです。"}`,
+	)
+	candidate, ready := earlyCandidateFromJSON(raw)
+	if !ready ||
+		candidate.Domain != "technical" ||
+		candidate.ResearchAction != "none" ||
+		candidate.InterventionPolicy != "paper_check" {
+		t.Fatalf("risk routing fields were not retained: candidate=%#v ready=%v", candidate, ready)
+	}
+}
+
 func TestPlannerSchemaOrdersAuditableCandidateBeforePlannerTail(t *testing.T) {
 	schema := modelResponseSchema(false)
 	order, ok := schema["propertyOrdering"].([]string)
-	if !ok || len(order) < 4 {
+	if !ok || len(order) < 7 {
 		t.Fatalf("propertyOrdering=%#v", schema["propertyOrdering"])
 	}
 	want := []string{
+		"domain",
 		"assistance_target",
 		"respondent_stage",
 		"answer_attempt",
+		"research_action",
+		"intervention_policy",
 		"spoken_reply",
 	}
-	if strings.Join(order[:4], ",") != strings.Join(want, ",") {
-		t.Fatalf("first properties=%v, want %v", order[:4], want)
+	if strings.Join(order[:7], ",") != strings.Join(want, ",") {
+		t.Fatalf("first properties=%v, want %v", order[:7], want)
 	}
 }
 

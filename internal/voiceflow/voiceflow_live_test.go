@@ -635,8 +635,7 @@ func TestPipelineLiveReusesNoSpeechClarificationAndAmbientSilence(t *testing.T) 
 			name:       "foreground",
 			ambient:    true,
 			foreground: true,
-			wantRoute:  routeClarifyNoSpeech,
-			wantStream: 1,
+			wantRoute:  routeSilentNoSpeech,
 		},
 		{
 			name:      "ambient",

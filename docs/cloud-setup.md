@@ -10,7 +10,7 @@
 - Firestore: `(default)`、`asia-northeast1`、削除保護、TTL
 - Cloud Run: `kotae-api`、`asia-northeast1`
 - Cloud Run実行ID: `kotae-api-runtime@kotae-ai-u22-2026.iam.gserviceaccount.com`
-- Cloud Speech-to-Text V2: `asia-northeast1`、`latest_long`単独、`ja-JP`
+- Cloud Speech-to-Text V2: `asia-northeast1`、自然会話向け`long`単独、`ja-JP`
 - Cloud Text-to-Speech: `asia-northeast1`、`ja-JP-Chirp3-HD-Kore`
 - Vertex AI: `global`、高速`gemini-3.6-flash`、精密`gemini-3.1-pro-preview`
 - Secret Manager: `kotae-conversation-state`
@@ -129,7 +129,7 @@ KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash
 KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview
 KOTAE_VERTEX_PRIORITY=false
 KOTAE_SPEECH_LOCATION=asia-northeast1
-KOTAE_SPEECH_MODEL=latest_long
+KOTAE_SPEECH_MODEL=long
 KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore
 KOTAE_REQUEST_TIMEOUT=25s
 KOTAE_VOICE_TIMEOUT=50s
@@ -161,11 +161,11 @@ gcloud run deploy kotae-api `
   --cpu=1 `
   --memory=1Gi `
   --concurrency=4 `
-  --min-instances=0 `
+  --min-instances=1 `
   --max-instances=3 `
   --timeout=120 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL" `
-  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=latest_long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200" `
+  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200" `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:latest"
 ```
 

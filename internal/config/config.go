@@ -18,7 +18,7 @@ const (
 	defaultFastModel      = "vertexai/gemini-3.6-flash"
 	defaultPrecisionModel = "vertexai/gemini-3.1-pro-preview"
 	defaultSpeechLocation = "asia-northeast1"
-	defaultSpeechModel    = "latest_long"
+	defaultSpeechModel    = "long"
 	defaultSpeechVoice    = "ja-JP-Chirp3-HD-Kore"
 	minVoiceTimeout       = 15 * time.Second
 )

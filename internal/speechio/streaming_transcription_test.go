@@ -13,7 +13,7 @@ import (
 func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 	t.Parallel()
 	stream := &fakeStreamingRecognizeClient{}
-	service := streamingTestService(stream, "latest_long")
+	service := streamingTestService(stream, "long")
 	session, err := service.OpenStreamingTranscription(context.Background())
 	if err != nil || session == nil {
 		t.Fatalf("open: session=%v err=%v", session, err)
@@ -37,7 +37,7 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 		explicit.AudioChannelCount != StreamingInputChannelCount {
 		t.Fatalf("decoding=%+v", explicit)
 	}
-	if config.Config.Model != "latest_long" ||
+	if config.Config.Model != "long" ||
 		len(config.Config.LanguageCodes) != 1 ||
 		config.Config.LanguageCodes[0] != "ja-JP" ||
 		config.Config.Features == nil ||
@@ -51,20 +51,43 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 	}
 }
 
-func TestStreamingRecognitionConfigUsesShortEndpointingOnlyForChirp3(t *testing.T) {
+func TestStreamingRecognitionConfigUsesReviewedLongModelWithoutUnsupportedEndpointing(t *testing.T) {
 	t.Parallel()
-	chirp := streamingRecognitionConfigRequest("recognizer", " chirp_3 ").
+	long := streamingRecognitionConfigRequest("recognizer", " long ").
 		GetStreamingConfig()
-	if chirp.Config.Model != "chirp_3" ||
-		chirp.StreamingFeatures.EndpointingSensitivity !=
-			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_SHORT {
-		t.Fatalf("chirp config=%+v", chirp)
+	if long.Config.Model != "long" ||
+		long.StreamingFeatures.EndpointingSensitivity !=
+			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {
+		t.Fatalf("long config=%+v", long)
 	}
-	long := streamingRecognitionConfigRequest("recognizer", "latest_long").
-		GetStreamingConfig()
-	if long.StreamingFeatures.EndpointingSensitivity !=
-		speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {
-		t.Fatalf("long endpointing=%v", long.StreamingFeatures.EndpointingSensitivity)
+}
+
+func TestOpenStreamingTranscriptionRejectsNonConversationModelBeforeProviderCall(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"", "short", "latest_short", "latest_long", "chirp_3"} {
+		model := model
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			service := &CloudService{
+				speechModel: model,
+				streamRecognizeCall: func(
+					context.Context,
+				) (streamingRecognizeClient, error) {
+					calls++
+					return &fakeStreamingRecognizeClient{}, nil
+				},
+			}
+			if _, err := service.OpenStreamingTranscription(
+				context.Background(),
+			); err == nil {
+				t.Fatal("unsupported streaming model accepted")
+			}
+			if calls != 0 {
+				t.Fatalf("provider calls = %d; want 0", calls)
+			}
+		})
 	}
 }
 
@@ -226,7 +249,7 @@ func TestStreamingTranscriptionCancellationAndTransportFailures(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	stream := &fakeStreamingRecognizeClient{}
-	session, err := streamingTestService(stream, "chirp_3").
+	session, err := streamingTestService(stream, "long").
 		OpenStreamingTranscription(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +263,7 @@ func TestStreamingTranscriptionCancellationAndTransportFailures(t *testing.T) {
 	}
 
 	startErr := errors.New("start failed")
-	service := streamingTestService(nil, "chirp_3")
+	service := streamingTestService(nil, "long")
 	service.streamRecognizeCall = func(context.Context) (streamingRecognizeClient, error) {
 		return nil, startErr
 	}
@@ -318,7 +341,7 @@ func openStreamingTestSession(
 	stream streamingRecognizeClient,
 ) StreamingTranscriptionSession {
 	t.Helper()
-	session, err := streamingTestService(stream, "chirp_3").
+	session, err := streamingTestService(stream, "long").
 		OpenStreamingTranscription(context.Background())
 	if err != nil {
 		t.Fatal(err)

@@ -1352,8 +1352,8 @@ func TestNormalizeAndValidatePlanAcceptsGreetingContractAfterCanonicalization(
 	}
 }
 
-func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
-	t.Run("provider failure fails closed without retry or model hop", func(t *testing.T) {
+func TestAgentCriticRetriesOnlyTransientOrdinaryFailures(t *testing.T) {
+	t.Run("two provider failures retry once then fail closed", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1371,10 +1371,15 @@ func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
 			t.Fatalf("Process: %v", err)
 		}
 		if result.Route != "verification-unavailable" ||
-			len(fake.calls) != 2 ||
+			result.SpokenReply != verificationUnavailableSpokenReply ||
+			result.SpokenReply == plan.SpokenReply ||
+			len(fake.calls) != 3 ||
 			fake.calls[1].model != DefaultFastModel ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
-			t.Fatalf("critic retried or model-hopped: result=%#v calls=%#v", result, fake.calls)
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[1].prompt != fake.calls[2].prompt {
+			t.Fatalf("critic retry was not bounded and identical: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
@@ -1407,7 +1412,7 @@ func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
 		}
 	})
 
-	t.Run("provider unavailable is not retried", func(t *testing.T) {
+	t.Run("provider unavailable is retried once with the same policy", func(t *testing.T) {
 		plan := validModelPlan()
 		fake := &fakeGenerator{generations: []fakeGeneration{
 			{body: encodePlan(t, plan)},
@@ -1423,10 +1428,15 @@ func TestAgentCriticIsAlwaysOneShot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Process: %v", err)
 		}
-		if result.Route != "verification-unavailable" ||
-			len(fake.calls) != 2 ||
-			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow {
-			t.Fatalf("provider critic was retried: result=%#v calls=%#v", result, fake.calls)
+		if result.Route != "fast" ||
+			result.SpokenReply != plan.SpokenReply ||
+			len(fake.calls) != 3 ||
+			fake.calls[1].model != DefaultFastModel ||
+			fake.calls[2].model != DefaultFastModel ||
+			fake.calls[1].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[2].thinkingLevel != genai.ThinkingLevelLow ||
+			fake.calls[1].prompt != fake.calls[2].prompt {
+			t.Fatalf("provider critic retry changed policy or failed to recover: result=%#v calls=%#v", result, fake.calls)
 		}
 	})
 
@@ -2700,10 +2710,12 @@ func TestAgentCriticUnavailableNeverPublishesUnauditedDraft(t *testing.T) {
 				if result.SpokenReply != "" || result.Intervention.Act != "silent" {
 					t.Fatalf("ambient critic failure spoke: %#v", result)
 				}
-			} else if result.SpokenReply == "" ||
+			} else if result.SpokenReply != verificationUnavailableSpokenReply ||
 				result.Intervention.Act != "clarify" ||
-				countQuestions(result.SpokenReply) != 1 {
-				t.Fatalf("intentional critic failure did not ask one question: %#v", result)
+				countQuestions(result.SpokenReply) != 0 ||
+				strings.Contains(result.SpokenReply, "もう一度") ||
+				strings.Contains(result.SpokenReply, "意味") {
+				t.Fatalf("intentional critic failure did not use the safe bridge: %#v", result)
 			}
 		})
 	}

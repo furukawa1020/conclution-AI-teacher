@@ -1166,9 +1166,9 @@ func (agent *vertexAgent) Process(
 		spokenReply = ""
 		interventionPolicy = "wait"
 	} else if verificationUnavailable {
-		decision.Act = "reflect"
+		decision.Act = "clarify"
 		spokenReply = verificationUnavailableSpokenReply
-		interventionPolicy = "wait"
+		interventionPolicy = "clarify"
 	} else if coachTurn {
 		decision.Act = coachDecisionAct(coachDecision.Action)
 		spokenReply = coachDecision.SpokenReply
@@ -1423,7 +1423,7 @@ func (agent *vertexAgent) completePhaticLocal(
 		Urgency:          0,
 		Confidence:       1,
 		Score:            0.85,
-		Act:              "reflect",
+		Act:              "clarify",
 	}
 	nextState := conversationState{
 		SessionID:           state.SessionID,
@@ -1502,8 +1502,8 @@ func (agent *vertexAgent) completeCoachOptOutLocal(
 		CoachAction:         string(respondent.CoachActionNone),
 		ResearchStatus:      "none",
 		ResearchRecords:     []ResearchRecord{},
-		ArgumentStructure:   "direct_answer",
-		InterventionPolicy:  "wait",
+		ArgumentStructure:   "clarifying_question",
+		InterventionPolicy:  "clarify",
 		SpokenReply:         spokenReply,
 		Confidence:          1,
 		Intervention:        decision,
@@ -1573,7 +1573,7 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		Intervention:        decision,
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
 		Route:               "planner-unavailable",
-		NeedsClarification:  false,
+		NeedsClarification:  true,
 		StateToken:          stateToken,
 	}, nil
 }

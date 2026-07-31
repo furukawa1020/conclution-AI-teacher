@@ -481,8 +481,9 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 			t.Fatalf("Process: %v", err)
 		}
 		if result.Route != "verification-unavailable" ||
-			result.SpokenReply !=
-				"回答の意味を安全に確認できませんでした。もう一度試してもらえますか？" ||
+			result.SpokenReply != verificationUnavailableSpokenReply ||
+			strings.Contains(result.SpokenReply, "意味") ||
+			strings.Contains(result.SpokenReply, "もう一度") ||
 			result.StateToken == "" ||
 			len(fake.calls) != 1 {
 			t.Fatalf(

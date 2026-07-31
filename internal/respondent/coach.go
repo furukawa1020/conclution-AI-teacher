@@ -182,7 +182,7 @@ func GuideAttempt(
 		return CoachDecision{
 			Phase:       CoachPhaseComplete,
 			Action:      CoachActionComplete,
-			SpokenReply: completionWithOptionalFollowUp(operator),
+			SpokenReply: naturalContinuationReply(operator, abstained),
 			Attempts:    attempts,
 			KeepPending: false,
 		}
@@ -258,7 +258,8 @@ func GuideAttempt(
 }
 
 func gentleReaskPrompt(operator Operator) string {
-	return "そこまでちゃんと聞こえています。" + corePrompt(operator)
+	_ = operator
+	return "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から、もう一度だけ話してみますか？"
 }
 
 // ExpansionOperator chooses one bounded follow-up question. It is structural,
@@ -325,9 +326,9 @@ func completionReply(abstained bool) string {
 }
 
 // naturalContinuationReply is operator-conditioned but contains no model text,
-// answer text, or inferred personal trait. It keeps a successful one-shot
-// exchange conversational without opening a second test or an unaudited TTS
-// path.
+// answer text, inferred personal trait, or specific question the next turn
+// would need to remember. It keeps a successful exchange conversational
+// without opening a second test or an unaudited TTS path.
 func naturalContinuationReply(operator Operator, abstained bool) string {
 	if abstained {
 		return "うん、そのままで大丈夫です。話したいところから続けてください。"
@@ -349,17 +350,6 @@ func naturalContinuationReply(operator Operator, abstained bool) string {
 		return "なるほど、そこが判断の軸なんですね。その続きも聞かせてください。"
 	default:
 		return "うん、なるほど。その続きも聞かせてください。"
-	}
-}
-
-func completionWithOptionalFollowUp(operator Operator) string {
-	switch expansionOperator(operator) {
-	case OperatorEvidence:
-		return completionReply(false) + "そう言える根拠を一つ挙げるなら？"
-	case OperatorState:
-		return completionReply(false) + "まず何をしますか？"
-	default:
-		return completionReply(false) + "そう考えた理由を一つ挙げるなら？"
 	}
 }
 

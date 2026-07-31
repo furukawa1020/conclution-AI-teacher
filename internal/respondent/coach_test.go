@@ -76,7 +76,7 @@ func TestGuideAttemptUsesOperatorPromptForAmbiguousTarget(t *testing.T) {
 	}
 }
 
-func TestGuideAttemptCompletesAndOffersOneOptionalFollowUp(t *testing.T) {
+func TestGuideAttemptCompletesWithNonQuestionContinuation(t *testing.T) {
 	gate := Gate(purposeInput(
 		"目的は評価基準をそろえることです。",
 		"",
@@ -94,7 +94,8 @@ func TestGuideAttemptCompletesAndOffersOneOptionalFollowUp(t *testing.T) {
 	if decision.Action != CoachActionComplete ||
 		decision.Phase != CoachPhaseComplete ||
 		decision.KeepPending ||
-		!strings.HasSuffix(decision.SpokenReply, "？") {
+		decision.SpokenReply != "なるほど、そこが大事なんですね。その続きも聞かせてください。" ||
+		strings.HasSuffix(decision.SpokenReply, "？") {
 		t.Fatalf("successful core answer did not return to natural conversation: %#v", decision)
 	}
 }

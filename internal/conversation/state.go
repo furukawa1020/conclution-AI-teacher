@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	stateTokenPrefix = "v1."
-	stateTokenTTL    = 15 * time.Minute
-	sessionIDBytes   = 16
-	maxStateTurns    = 10_000
-	maxUIDBytes      = 256
+	stateTokenPrefix         = "v1."
+	stateTokenTTL            = 15 * time.Minute
+	sessionIDBytes           = 16
+	coachRestatementTagBytes = 16
+	maxStateTurns            = 10_000
+	maxUIDBytes              = 256
 )
 
 var stateAADPrefix = []byte("kotae-conversation-state-v1\x00")
@@ -227,6 +228,17 @@ func validSessionID(value string) bool {
 		return false
 	}
 	valid := len(raw) == sessionIDBytes &&
+		base64.RawURLEncoding.EncodeToString(raw) == value
+	wipe(raw)
+	return valid
+}
+
+func validCoachRestatementTag(value string) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return false
+	}
+	valid := len(raw) == coachRestatementTagBytes &&
 		base64.RawURLEncoding.EncodeToString(raw) == value
 	wipe(raw)
 	return valid

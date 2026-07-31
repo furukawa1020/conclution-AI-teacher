@@ -105,8 +105,14 @@ PDFは`application/pdf`、サイズ上限、`%PDF-` magicを確認します。PD
 - 暗号鍵は32 byteで、Cloud RunへSecret Managerから注入
 - tokenへ逐語録、会話・資料の自由文要約、PDF本文、モデルのchain-of-thoughtを入れない
 - graph nodeはemail、電話番号、長い数列、credentialらしいtokenを含む場合、または現在発話との4-gram重複が高い場合にnodeごと破棄する
+- 本人へ一度だけ言い直しを頼んだ場合は、target evidenceを含む正規化意味節本文ではなく、状態暗号鍵から用途分離して導出した秘密鍵によるHMAC-SHA-256の128 bit tagだけをtokenへ入れる。MAC inputを暗号化session IDへも束縛する。tagは`awaiting_restatement`以外では拒否し、planner、critic、TTS、response metadata、ログへ渡さない
+- 次のtarget evidenceがtagと一致しなければ、plannerとcriticが成功を申告しても完了扱いにしない。再回答を強制せず、保留scopeを消して通常会話へ戻す
+- tag発行を有効化したrevisionは、互換revision由来のtagなし`awaiting_restatement` scopeを推論前に消す。tokenを繰り返し更新して未束縛scopeを延命できない
+- KOTAE自身が生成した任意質問は新しい採点scopeを作らない。以前の15分tokenにあるlegacy fieldはstrict decode後、model inferenceより前にscopeごと消し、新規には発行しない
 
 tokenにはフィルタ済みでも会話由来の意味nodeが含まれ得るため、秘密でないデータとは扱いません。また、Cloud RunはSecret Managerの鍵を使って復号できるためE2EEではありません。秘密へのアクセスはCloud Runの実行サービスIDだけに限定します。
+
+HMAC tagも会話由来のpseudonymous control dataであり、完全なPII除去とは呼びません。現在のtagは言い直し前後でtarget evidenceを含む意味節が変わっていないことだけを保守的に検査します。質問topicとの意味関係、同義な言い換え、話者本人性は証明しません。target意味節が変わった場合は正しい言い換えでも完了creditを与えないことがありますが、その場合も再試験ではなく通常会話へ解放します。
 
 ## PDFの「今回だけ」
 
@@ -175,6 +181,8 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - 曖昧な潜在問いで断定的な再構成をしない
 - 条件、不確実性、留保を変える再構成を拒否する
 - draft自身のLACを偽装しても、独立監査と決定論的判定を迂回できない
+- plannerとcriticが別のAを成功と申告しても、言い直し前のserver-only HMAC tagと不一致なら完了できない。tag自体が両model promptへ入らない
+- AI自身の任意質問から、利用者が頼んでいない採点scopeを作らない
 - PDF・高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
 - タブ非表示、pagehide、3分の無発話、30分の絶対上限、マイクtrack喪失でマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る。Rust側は固定reason・version以外の通知を拒否し、通知を受けても停止処理を冪等に再実行してからPausedを表示する

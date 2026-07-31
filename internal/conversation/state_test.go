@@ -11,7 +11,131 @@ import (
 	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 )
+
+func TestPendingAnswerRestatementTagIsBoundedAndPhaseScoped(t *testing.T) {
+	validTag := base64.RawURLEncoding.EncodeToString(
+		bytes.Repeat([]byte{0x64}, coachRestatementTagBytes),
+	)
+	base := PendingAnswerFrame{
+		Active:            true,
+		Operator:          answercontract.OperatorPurpose,
+		Subject:           pendingSubjectForOperator(answercontract.OperatorPurpose),
+		RequiredSlots:     []answercontract.RequiredSlot{answercontract.SlotPurpose},
+		ExpansionOperator: answercontract.OperatorCause,
+		Phase:             respondent.CoachPhaseAwaitingRestatement,
+		Attempts:          1,
+		RestatementTag:    validTag,
+	}
+	if _, err := normalizePendingAnswer(base); err != nil {
+		t.Fatalf("valid restatement tag rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*PendingAnswerFrame){
+		"malformed": func(frame *PendingAnswerFrame) {
+			frame.RestatementTag = "not-base64!"
+		},
+		"wrong length": func(frame *PendingAnswerFrame) {
+			frame.RestatementTag = base64.RawURLEncoding.EncodeToString([]byte{1})
+		},
+		"wrong phase": func(frame *PendingAnswerFrame) {
+			frame.Phase = respondent.CoachPhaseAwaitingAnswer
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			if _, err := normalizePendingAnswer(candidate); !errors.Is(err, ErrInvalidStateToken) {
+				t.Fatalf("invalid tag state error = %v", err)
+			}
+		})
+	}
+}
+
+func TestCoachRestatementTagBindsSession(t *testing.T) {
+	key := deriveCoachRestatementKey(bytes.Repeat([]byte{0x32}, 32))
+	defer wipe(key)
+	sessionA := base64.RawURLEncoding.EncodeToString(
+		bytes.Repeat([]byte{0x41}, sessionIDBytes),
+	)
+	sessionB := base64.RawURLEncoding.EncodeToString(
+		bytes.Repeat([]byte{0x42}, sessionIDBytes),
+	)
+	const fingerprint = "purpose\x00purpose\x00目的は評価基準をそろえることです"
+
+	tag, ok := coachRestatementTag(key, sessionA, fingerprint)
+	if !ok || !validCoachRestatementTag(tag) {
+		t.Fatalf("valid tag = %q, ok = %v", tag, ok)
+	}
+	repeated, ok := coachRestatementTag(key, sessionA, fingerprint)
+	if !ok || repeated != tag {
+		t.Fatalf("same scope was not deterministic: %q != %q", repeated, tag)
+	}
+	otherSession, ok := coachRestatementTag(key, sessionB, fingerprint)
+	if !ok || otherSession == tag {
+		t.Fatal("tag was not bound to the encrypted session")
+	}
+	if _, ok := coachRestatementTag(key[:8], sessionA, fingerprint); ok {
+		t.Fatal("short HMAC key was accepted")
+	}
+}
+
+func TestRestatementCorrectionGuardDoesNotMatchOrdinaryWords(t *testing.T) {
+	target := "目的は相談相手への思いやりを広げることです"
+	clauses := []string{
+		target,
+		"間違う人を減らすのではなく支えます",
+	}
+	// Contrast in a supporting clause is conservatively rejected, but ordinary
+	// substrings such as 思いやり and 間違う must not match いや / 違う alone.
+	if restatementHasCorrectionSignal([]string{target, "思いやりを大切にします"}, target) {
+		t.Fatal("ordinary 思いやり was treated as a correction")
+	}
+	if restatementHasCorrectionSignal([]string{target, "間違う人を責めません"}, target) {
+		t.Fatal("ordinary 間違う was treated as a correction")
+	}
+	if !restatementHasCorrectionSignal(clauses, target) {
+		t.Fatal("explicit contrast in a non-target clause was not rejected")
+	}
+}
+
+func TestCoachRestatementFingerprintNormalizesWidthAndSpace(t *testing.T) {
+	frame := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingRestatement,
+		1,
+	).PendingAnswer
+	leftPlan := modelPlan{
+		RespondentStage: "restructure",
+		RespondentEvidence: []modelSlotEvidence{{
+			Slot: answercontract.SlotPurpose,
+			Span: "目的はＡ案　です",
+		}},
+	}
+	rightPlan := modelPlan{
+		RespondentStage: "restructure",
+		RespondentEvidence: []modelSlotEvidence{{
+			Slot: answercontract.SlotPurpose,
+			Span: "目的はA案 です",
+		}},
+	}
+	left, ok := coachRestatementFingerprint(
+		leftPlan,
+		frame,
+		"背景です。目的はＡ案　です。",
+	)
+	if !ok {
+		t.Fatal("full-width target clause was not fingerprinted")
+	}
+	right, ok := coachRestatementFingerprint(
+		rightPlan,
+		frame,
+		"目的はA案 です。別の説明です。",
+	)
+	if !ok || right != left {
+		t.Fatalf("normalized target clause changed: %q != %q", right, left)
+	}
+}
 
 func TestStateCodecRoundTripUIDBindingExpiryAndTamper(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, 32)

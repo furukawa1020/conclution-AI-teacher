@@ -21,6 +21,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
 	t.Setenv("KOTAE_VERTEX_PRIORITY", "")
+	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "")
 }
 
 func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
@@ -56,6 +57,28 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.VertexPriority {
 		t.Fatal("Vertex priority must remain opt-in")
+	}
+	if cfg.CoachRestatementBinding {
+		t.Fatal("restatement tag issuance must remain opt-in for staged rollout")
+	}
+}
+
+func TestLoadParsesCoachRestatementBindingStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CoachRestatementBinding {
+		t.Fatal("restatement binding was not enabled")
+	}
+
+	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_COACH_RESTATEMENT_BINDING") {
+		t.Fatalf("malformed restatement binding error = %v", err)
 	}
 }
 

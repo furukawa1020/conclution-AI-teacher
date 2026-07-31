@@ -115,7 +115,7 @@ func TestAgentPendingRespondentFrameUsesCorrectivePlannerForFreeConversation(
 		"uid-pending-free-conversation",
 		VoiceTurn{
 			SchemaVersion: SchemaVersion,
-			Utterance:     "上司に導入目的を聞かれたけど、答えがまとまりません",
+			Utterance:     "上司に導入目的を聞かれたけど、答えがまとまりません。答え方を一問だけ手伝ってください",
 		},
 	)
 	if err != nil {
@@ -196,7 +196,7 @@ func TestAgentStandaloneGreetingClearsPendingRespondentFrameLocally(
 		"uid-greeting-reset",
 		VoiceTurn{
 			SchemaVersion: SchemaVersion,
-			Utterance:     "上司に導入目的を聞かれたけど、答えがまとまりません",
+			Utterance:     "上司に導入目的を聞かれたけど、答えがまとまりません。答え方を一問だけ手伝ってください",
 		},
 	)
 	if err != nil {
@@ -255,7 +255,7 @@ func TestAgentDirectAssistantQuestionClearsPendingRespondentFrame(
 		"uid-direct-question-reset",
 		VoiceTurn{
 			SchemaVersion: SchemaVersion,
-			Utterance:     "面接で目的を聞かれたけど、答えがまとまりません",
+			Utterance:     "面接で目的を聞かれたけど、答えがまとまりません。答え方を一問だけ手伝ってください",
 		},
 	)
 	if err != nil {

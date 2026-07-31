@@ -1,3 +1,5 @@
+import { VOICE_SESSION_LIMITS } from "./voice-session-policy.mjs";
+
 const MEBIBYTE = 1024 * 1024;
 
 export const VOICE_STREAM_LIMITS = Object.freeze({
@@ -26,6 +28,9 @@ export const VOICE_PLAYBACK_LIMITS = Object.freeze({
 });
 
 export const INTERRUPT_VAD_LIMITS = Object.freeze({
+  // Four required voiced frames may each be separated by at most two 40 ms
+  // gaps. Keep the recorder watchdog finite while allowing that full path.
+  candidateCaptureLimitMs: 400,
   candidateGapMs: 120,
   // Four 40 ms voiced frames confirm after 120 ms wall-clock from the first
   // detected frame while still requiring 160 ms of sampled speech.
@@ -55,19 +60,25 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
 
 export const BARGE_PCM_LIMITS = Object.freeze({
   frameDurationMs: 20,
-  historyMs: 400,
+  // The slowest valid gapped confirmation arrives 360 ms after onset. Keep
+  // that complete candidate plus the requested 100 ms pre-roll in a fixed
+  // 23-frame (14,720 byte) local ring.
+  historyMs: 460,
   leadInMs: 100,
-  maximumBytes: 12_800,
-  maximumFrames: 20,
+  maximumBytes: 14_720,
+  maximumFrames: 23,
 });
 
 export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
   frameDurationMs: 20,
-  // 300 ms of requested lead-in plus 200 ms for bounded VAD confirmation
-  // jitter. These frames remain local and are erased unless speech confirms.
-  historyMs: 500,
-  maximumBytes: 16_000,
-  maximumFrames: 25,
+  // The ring covers the complete finite quiet-speech candidate window plus
+  // the requested 300 ms lead-in. At 16 kHz PCM16 this remains a fixed 48 KB;
+  // unconfirmed frames stay local and are zeroized on eviction or discard.
+  historyMs:
+    VOICE_LIVE_LIMITS.confirmedSpeechLeadInMs +
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+  maximumBytes: 48_000,
+  maximumFrames: 75,
 });
 
 function erasePcmFrame(frame) {
@@ -1104,6 +1115,32 @@ export function advanceInterruptVad(
     voiceRunMs,
   } = state;
   let action = null;
+
+  // The MediaRecorder watchdog and this deterministic VAD boundary share the
+  // same candidate onset. Whichever browser task runs first after a stalled
+  // main thread must discard the candidate: otherwise the watchdog can detach
+  // the recorder while this state later advances to `confirmed`, leaving
+  // playback permanently ducked with no interruption audio owner.
+  if (
+    phase === "candidate" &&
+    now - candidateStartedAt >=
+      INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs
+  ) {
+    return Object.freeze({
+      action: "discard",
+      candidateSilenceMs: 0,
+      candidateStartedAt: null,
+      firstVoiceAt: null,
+      lastVoiceAt: null,
+      noiseFloor,
+      phase:
+        now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs
+          ? "guard"
+          : "armed",
+      startedAt: state.startedAt,
+      voiceRunMs: 0,
+    });
+  }
 
   if (now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs) {
     const guardVoiced =

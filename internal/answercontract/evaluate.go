@@ -229,6 +229,10 @@ func validateAndNormalize(contract Contract) (Contract, float64, error) {
 	if !containsSlot(required, targetSlot) {
 		return Contract{}, 0, ErrInvalidContract
 	}
+	if question.Operator == OperatorQuantity &&
+		!containsSlot(required, SlotUnit) {
+		return Contract{}, 0, ErrInvalidContract
+	}
 
 	if len(question.Hypotheses) == 0 || len(question.Hypotheses) > MaxHypotheses {
 		return Contract{}, 0, ErrInvalidContract

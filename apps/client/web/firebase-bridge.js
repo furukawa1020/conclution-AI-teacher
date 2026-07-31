@@ -497,6 +497,21 @@ function completeSessionResponse(expectedEpoch) {
   return ensureActiveSession(expectedEpoch);
 }
 
+function cancelSessionResponse(expectedEpoch) {
+  if (expectedEpoch !== sessionEpoch || !sessionClock.isStarted()) {
+    return false;
+  }
+  const status = sessionClock.cancelResponse();
+  if (!status.ok) {
+    stopSession(status.expiry ?? "maximum");
+    return false;
+  }
+  if (!sessionExpiryWatchdog.arm()) {
+    return false;
+  }
+  return ensureActiveSession(expectedEpoch);
+}
+
 function hasLiveAudioTrack(stream) {
   return Boolean(
     stream &&
@@ -653,7 +668,63 @@ function candidateEventIsCurrent(recording, candidate) {
   );
 }
 
+function clearCandidateDeadline(candidate) {
+  if (candidate.deadlineTimer !== undefined) {
+    clearTimeout(candidate.deadlineTimer);
+    candidate.deadlineTimer = undefined;
+  }
+}
+
+function armCandidateDeadline(recording, candidate, captureLimitMs) {
+  const maximumCaptureLimitMs = Math.max(
+    VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+    INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
+  );
+  if (
+    candidate.confirmed ||
+    !Number.isFinite(candidate.startedAt) ||
+    candidate.startedAt < 0 ||
+    !Number.isFinite(captureLimitMs) ||
+    captureLimitMs <= 0 ||
+    captureLimitMs > maximumCaptureLimitMs
+  ) {
+    return candidate.confirmed;
+  }
+  if (
+    Number.isFinite(candidate.captureLimitMs) &&
+    captureLimitMs <= candidate.captureLimitMs
+  ) {
+    return true;
+  }
+
+  clearCandidateDeadline(candidate);
+  candidate.captureLimitMs = captureLimitMs;
+  const remainingMs = Math.max(
+    0,
+    candidate.startedAt + captureLimitMs - performance.now(),
+  );
+  // This is an independent best-effort wall-clock stop for the local
+  // MediaRecorder. Browser tasks cannot execute while the main thread is
+  // stalled. The AudioWorklet separately enforces a hard fixed-memory and
+  // pre-confirm cloud-egress boundary for raw PCM; it cannot make the local
+  // MediaRecorder callback deadline hard.
+  candidate.deadlineTimer = setTimeout(() => {
+    candidate.deadlineTimer = undefined;
+    if (
+      !candidateEventIsCurrent(recording, candidate) ||
+      candidate.confirmed
+    ) {
+      return;
+    }
+    if (!discardCurrentCandidate(recording, "candidate-deadline")) {
+      rejectRecording(recording, "voice_turn_invalid");
+    }
+  }, remainingMs);
+  return true;
+}
+
 function stopDetachedCandidate(candidate) {
+  clearCandidateDeadline(candidate);
   candidate.discarded = true;
   if (candidate.recorder.state === "inactive") {
     return true;
@@ -787,12 +858,19 @@ function startCandidateRecorder(
   recording,
   confirmed,
   candidateContextFrame,
+  candidateStartedAt,
+  captureLimitMs,
 ) {
   if (
     recording.candidate ||
     recording.settled ||
     recording.discard ||
-    recording.stopLatch.isRequested()
+    recording.stopLatch.isRequested() ||
+    (!confirmed &&
+      (!Number.isFinite(candidateStartedAt) ||
+        candidateStartedAt < 0 ||
+        !Number.isFinite(captureLimitMs) ||
+        captureLimitMs <= 0))
   ) {
     rejectRecording(recording, "voice_turn_invalid");
     return false;
@@ -812,9 +890,12 @@ function startCandidateRecorder(
         ? candidateContextFrame
         : null,
     captureBuffer: createCaptureBuffer({ maximumBytes: AUDIO_MAX_BYTES }),
+    captureLimitMs: undefined,
     confirmed,
+    deadlineTimer: undefined,
     discarded: false,
     recorder,
+    startedAt: confirmed ? null : candidateStartedAt,
     stopReason: "",
   };
   recording.totalBytes = 0;
@@ -873,6 +954,13 @@ function startCandidateRecorder(
 
   try {
     recorder.start(250);
+    if (
+      !candidate.confirmed &&
+      !armCandidateDeadline(recording, candidate, captureLimitMs)
+    ) {
+      rejectRecording(recording, "voice_turn_invalid");
+      return false;
+    }
     return true;
   } catch {
     if (recording.candidate === candidate) {
@@ -928,6 +1016,7 @@ function maybeCommitHybridEndpoint(recording, now) {
       lastVoiceAt: recording.lastVoiceAt,
       now,
       providerEndpointAt: recording.providerEndpointAt,
+      softVoiceConfirmed: recording.softVoiceConfirmed,
     })
   ) {
     return false;
@@ -965,8 +1054,22 @@ function armVad(recording) {
     vadState = advanceVad(vadState, { now, peak, rms });
     recording.firstVoiceAt = vadState.firstVoiceAt;
     recording.vadHasSpeech = vadState.hasSpeech;
+    recording.softVoiceConfirmed = vadState.softVoiceConfirmed;
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
+    }
+    if (
+      vadState.softVoiceCandidate &&
+      recording.candidate &&
+      !recording.candidate.confirmed &&
+      !armCandidateDeadline(
+        recording,
+        recording.candidate,
+        VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
+      )
+    ) {
+      rejectRecording(recording, "voice_turn_invalid");
+      return;
     }
     if (maybeCommitHybridEndpoint(recording, now)) {
       return;
@@ -985,6 +1088,8 @@ function armVad(recording) {
           recording,
           candidateCapture.phase === "confirmed",
           currentAudioContextFrame(),
+          candidateCapture.candidateStartedAt,
+          candidateCapture.captureLimitMs,
         )
       ) {
         return;
@@ -1007,6 +1112,7 @@ function armVad(recording) {
         rejectRecording(recording, "voice_turn_invalid");
         return;
       }
+      clearCandidateDeadline(candidate);
       candidate.confirmed = true;
       if (
         !confirmLiveSpeech(
@@ -1058,6 +1164,7 @@ function createRecordingState(stream) {
     stopLatch: createStopLatch(),
     stopReason: "",
     stream,
+    softVoiceConfirmed: false,
     totalBytes: 0,
     vadHasSpeech: false,
     vadPcm: undefined,
@@ -2891,6 +2998,7 @@ function confirmBargeIn(
       playback.bargePcmMonitor = undefined;
     }
   }
+  clearCandidateDeadline(candidate);
   candidate.confirmed = true;
   playback.interruptedBeforeFinal =
     shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
@@ -3070,6 +3178,8 @@ function startBargeInMonitoring(playback, expectedEpoch) {
           recording,
           false,
           currentAudioContextFrame(),
+          vadState.candidateStartedAt,
+          INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
         )
       ) {
         return;
@@ -3671,9 +3781,10 @@ async function finishTurn(serializedSessionState, turnMode) {
     throw error;
   } finally {
     if (responseClockActive) {
-      // Provider/network failures must not leave idle expiry suspended. If
-      // the session was already stopped this is a harmless no-op.
-      completeSessionResponse(expectedEpoch);
+      // Provider/network failures must not leave idle expiry suspended or
+      // grant a fresh idle lease. Only validated playback completes a
+      // response and refreshes the conversation clock.
+      cancelSessionResponse(expectedEpoch);
     }
     finishGate.release(finishToken);
     audioBase64 = "";

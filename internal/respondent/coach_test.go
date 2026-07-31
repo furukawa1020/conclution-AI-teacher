@@ -7,7 +7,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
 )
 
-func TestGuideAttemptRequiresPersonToSayTargetFirst(t *testing.T) {
+func TestGuideAttemptAcceptsLateTargetWithoutCompulsoryRestatement(t *testing.T) {
 	gate := Gate(purposeInput(
 		"判断のばらつきを減らします。目的は評価基準をそろえることです。",
 		"",
@@ -27,10 +27,13 @@ func TestGuideAttemptRequiresPersonToSayTargetFirst(t *testing.T) {
 		false,
 		false,
 	)
-	if decision.Action != CoachActionRestate ||
-		decision.Phase != CoachPhaseAwaitingRestatement ||
-		!decision.KeepPending {
-		t.Fatalf("late answer was not kept for restatement: %#v", decision)
+	if decision.Action != CoachActionComplete ||
+		decision.Phase != CoachPhaseComplete ||
+		decision.KeepPending ||
+		decision.VerifiedFirst ||
+		!strings.Contains(decision.SpokenReply, "最初に置く") ||
+		strings.HasSuffix(decision.SpokenReply, "？") {
+		t.Fatalf("late answer became a compulsory restatement: %#v", decision)
 	}
 	if strings.Contains(decision.SpokenReply, "評価基準") {
 		t.Fatalf("coach repeated the person's answer: %q", decision.SpokenReply)
@@ -76,7 +79,7 @@ func TestGuideAttemptUsesOperatorPromptForAmbiguousTarget(t *testing.T) {
 	}
 }
 
-func TestGuideAttemptCompletesWithNonQuestionContinuation(t *testing.T) {
+func TestGuideAttemptCompletesWithoutOpeningAnotherQuestion(t *testing.T) {
 	gate := Gate(purposeInput(
 		"目的は評価基準をそろえることです。",
 		"",
@@ -94,7 +97,7 @@ func TestGuideAttemptCompletesWithNonQuestionContinuation(t *testing.T) {
 	if decision.Action != CoachActionComplete ||
 		decision.Phase != CoachPhaseComplete ||
 		decision.KeepPending ||
-		decision.SpokenReply != "なるほど、そこが大事なんですね。その続きも聞かせてください。" ||
+		!decision.VerifiedFirst ||
 		strings.HasSuffix(decision.SpokenReply, "？") {
 		t.Fatalf("successful core answer did not return to natural conversation: %#v", decision)
 	}
@@ -118,7 +121,8 @@ func TestGuideAttemptCompletesExpansionAndAbstention(t *testing.T) {
 	)
 	if expanded.Action != CoachActionComplete ||
 		expanded.Phase != CoachPhaseComplete ||
-		expanded.KeepPending {
+		expanded.KeepPending ||
+		expanded.VerifiedFirst {
 		t.Fatalf("expanded answer did not complete: %#v", expanded)
 	}
 
@@ -134,7 +138,8 @@ func TestGuideAttemptCompletesExpansionAndAbstention(t *testing.T) {
 	)
 	if abstained.Action != CoachActionComplete ||
 		abstained.KeepPending ||
-		!strings.Contains(abstained.SpokenReply, "そのまま") {
+		!abstained.VerifiedFirst ||
+		!strings.Contains(abstained.SpokenReply, "大丈夫") {
 		t.Fatalf("abstention was not accepted as an answer: %#v", abstained)
 	}
 }
@@ -157,48 +162,39 @@ func TestGuideAttemptOneShotCompletesWithoutStartingExpansion(t *testing.T) {
 	if decision.Action != CoachActionComplete ||
 		decision.Phase != CoachPhaseComplete ||
 		decision.KeepPending ||
-		decision.SpokenReply != "なるほど、そこが大事なんですね。その続きも聞かせてください。" ||
+		!decision.VerifiedFirst ||
+		decision.SpokenReply != "なるほど、そう考えているんですね。" ||
 		strings.Contains(decision.SpokenReply, "評価基準") ||
 		strings.HasSuffix(decision.SpokenReply, "？") {
 		t.Fatalf("one-shot answer started another coaching question: %#v", decision)
 	}
 }
 
-func TestGuideAttemptNeverCompletesWithoutIndependentVerification(t *testing.T) {
+func TestGuideAttemptVerificationFailureDoesNotCountAsAnAttempt(t *testing.T) {
 	gate := Gate(purposeInput(
 		"目的は評価基準をそろえることです。",
 		"",
 	))
-	decision := GuideAttempt(
-		OperatorPurpose,
-		CoachPhaseAwaitingRestatement,
-		0,
-		gate,
-		successfulCritic(),
-		false,
-		false,
-		false,
-	)
-	if decision.Action != CoachActionRetry ||
-		decision.Phase != CoachPhaseBlocked ||
-		!decision.KeepPending ||
-		decision.Attempts != 1 {
-		t.Fatalf("unverified answer was treated as success: %#v", decision)
-	}
-	second := GuideAttempt(
-		OperatorPurpose,
-		CoachPhaseAwaitingRestatement,
-		decision.Attempts,
-		gate,
-		successfulCritic(),
-		false,
-		false,
-		false,
-	)
-	if second.Action != CoachActionRelease ||
-		second.KeepPending ||
-		second.Attempts != MaxCoachAttempts {
-		t.Fatalf("unverified attempts exceeded the retry cap: %#v", second)
+	for _, attempts := range []uint8{0, MaxCoachAttempts - 1} {
+		decision := GuideAttempt(
+			OperatorPurpose,
+			CoachPhaseAwaitingRestatement,
+			attempts,
+			gate,
+			successfulCritic(),
+			false,
+			false,
+			false,
+		)
+		if decision.Action != CoachActionRetry ||
+			decision.Phase != CoachPhaseBlocked ||
+			!decision.KeepPending ||
+			decision.Attempts != attempts ||
+			decision.VerifiedFirst ||
+			!strings.Contains(decision.SpokenReply, "あなたの言い方の問題ではありません") ||
+			strings.HasSuffix(decision.SpokenReply, "？") {
+			t.Fatalf("verification failure was counted or blamed on the speaker: %#v", decision)
+		}
 	}
 }
 
@@ -370,6 +366,27 @@ func TestExpansionOperatorIsBounded(t *testing.T) {
 		if got := ExpansionOperator(input); got != want {
 			t.Fatalf("ExpansionOperator(%q)=%q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestExplicitExpansionStartsOnceAndClosesWithoutSecondSuccess(t *testing.T) {
+	started := BeginExpansion(OperatorCause)
+	if started.Phase != CoachPhaseExpanding ||
+		started.Action != CoachActionExpand ||
+		!started.KeepPending ||
+		!started.VerifiedFirst ||
+		started.Attempts != 0 ||
+		!strings.Contains(started.SpokenReply, "『その理由は』") {
+		t.Fatalf("explicit expansion did not start with one bounded prompt: %#v", started)
+	}
+
+	completed := CompleteExpansion(false)
+	if completed.Phase != CoachPhaseComplete ||
+		completed.Action != CoachActionComplete ||
+		completed.KeepPending ||
+		completed.VerifiedFirst ||
+		strings.HasSuffix(completed.SpokenReply, "？") {
+		t.Fatalf("expansion became a recursive test: %#v", completed)
 	}
 }
 

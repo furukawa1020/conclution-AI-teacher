@@ -1,6 +1,11 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
+const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
+const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
+const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手な場面を勝手に練習させません。頼んだ練習の後は、会話内容を含まない短期の目印だけで通常会話の質問量を調整し、点数は表示しません。";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoiceState {
     Ready,
@@ -139,7 +144,7 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "質問でも、ぼやきでも、「今日は話すだけ」でも　小さな声のままどうぞ",
+            Self::Ready => "質問でも、ぼやきでも、まとまらなくても、小さな声のままどうぞ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終えて約一秒　そのまま自動で返す",
             Self::Thinking => {
@@ -302,14 +307,42 @@ struct TurnEnd {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 enum FinishTurnError {
     Interrupted,
+    Recoverable(&'static str),
     Message(&'static str),
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+enum WaitTurnError {
+    Recoverable(&'static str),
+    Terminal(&'static str),
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn recoverable_wait_turn_code(code: Option<&str>) -> bool {
+    matches!(code, Some("voice_turn_too_large"))
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some(
+            "no_speech"
+                | "rate_limited"
+                | "voice_api_unavailable"
+                | "voice_turn_too_large"
+                | "voice_turn_timeout"
+                | "voice_turn_unavailable"
+        )
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
         BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, session_stop_pauses, valid_voice_pause_metadata,
+        VoiceTurnMode, VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code,
+        recoverable_wait_turn_code, session_stop_pauses, valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -417,11 +450,21 @@ mod cloud {
             .map_err(user_message)
     }
 
-    pub async fn wait_for_turn_end() -> Result<bool, &'static str> {
-        let value = wait_for_turn_end_js().await.map_err(user_message)?;
+    pub async fn wait_for_turn_end() -> Result<bool, WaitTurnError> {
+        let value = match wait_for_turn_end_js().await {
+            Ok(value) => value,
+            Err(error) => {
+                let code = error_code(error.clone());
+                let message = user_message(error);
+                if recoverable_wait_turn_code(code.as_deref()) {
+                    return Err(WaitTurnError::Recoverable(message));
+                }
+                return Err(WaitTurnError::Terminal(message));
+            }
+        };
         serde_wasm_bindgen::from_value::<TurnEnd>(value)
             .map(|result| result.has_speech)
-            .map_err(|_| "マイクの状態を確認できない")
+            .map_err(|_| WaitTurnError::Terminal("マイクの状態を確認できない"))
     }
 
     pub async fn finish_turn(
@@ -433,7 +476,14 @@ mod cloud {
             Err(error) if error_code(error.clone()).as_deref() == Some("voice_interrupted") => {
                 return Err(FinishTurnError::Interrupted);
             }
-            Err(error) => return Err(FinishTurnError::Message(user_message(error))),
+            Err(error) => {
+                let code = error_code(error.clone());
+                let message = user_message(error);
+                if recoverable_finish_turn_code(code.as_deref()) {
+                    return Err(FinishTurnError::Recoverable(message));
+                }
+                return Err(FinishTurnError::Message(message));
+            }
         };
         serde_wasm_bindgen::from_value(value)
             .map_err(|_| FinishTurnError::Message("音声応答を確認できない　もう一度ためしてみて"))
@@ -565,10 +615,10 @@ mod cloud {
     fn user_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
             Some("voice_turn_timeout") => {
-                "考えている途中で時間を使い切った　内容を変えずもう一度だけ話してみて"
+                "今の声は届いています　こちらの返事だけ間に合いませんでした　言い直さなくて大丈夫です"
             }
             Some("voice_turn_unavailable") => {
-                "音声の処理で止まった　接続はできている　もう一度だけ試してみて"
+                "今の声は届いています　こちらの処理だけ止まりました　言い直さずそのまま続けられます"
             }
             Some("microphone_unsupported") => {
                 "このブラウザでは音声会話を使えない　最新版でためしてみて"
@@ -577,16 +627,22 @@ mod cloud {
                 "マイクが許可されていない　ブラウザの権限を確認してみて"
             }
             Some("microphone_unavailable") => "使えるマイクが見つからない　接続を確認してみて",
-            Some("no_speech") => "まだ声を拾えていない　小さな声のまま、短くひと言だけでもう一度",
+            Some("no_speech") => {
+                "声を待っています　言い直そうとせず　続きや別のひと言をそのままどうぞ"
+            }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
             Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
-            Some("rate_limited") => "いま少し混み合ってる　少し待って再開してみて",
+            Some("rate_limited") => {
+                "いま少し混み合っています　会話は開いたままです　そのまま続けられます"
+            }
             Some("request_cancelled") => "会話を一時停止した",
             Some("session_expired") => "安全のためマイクを閉じた　もう一度すぐ始められる",
             Some("audio_playback_blocked") => "声を再生できない　端末の消音設定を確認してみて",
-            Some("voice_api_unavailable") => "音声エージェントを準備中　少し待ってためしてみて",
+            Some("voice_api_unavailable") => {
+                "こちらの返事の準備だけ止まりました　会話は開いたままです　言い直さなくて大丈夫です"
+            }
             _ => "音声エージェントにつながらない　もう一度ためしてみて",
         }
     }
@@ -606,6 +662,7 @@ mod cloud {
 mod cloud {
     use super::{
         CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnMode, VoiceTurnResult,
+        WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -623,8 +680,8 @@ mod cloud {
         Err("WebAssembly版で使ってみて")
     }
 
-    pub async fn wait_for_turn_end() -> Result<bool, &'static str> {
-        Err("WebAssembly版で使ってみて")
+    pub async fn wait_for_turn_end() -> Result<bool, WaitTurnError> {
+        Err(WaitTurnError::Terminal("WebAssembly版で使ってみて"))
     }
 
     pub async fn finish_turn(
@@ -685,7 +742,7 @@ fn arm_listening(
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
-    caption: Signal<Option<String>>,
+    mut caption: Signal<Option<String>>,
 ) {
     if announce_permission {
         voice_state.set(VoiceState::RequestingPermission);
@@ -709,7 +766,32 @@ fn arm_listening(
         voice_state.set(VoiceState::Listening);
         let has_speech = match cloud::wait_for_turn_end().await {
             Ok(has_speech) => has_speech,
-            Err(message) => {
+            Err(WaitTurnError::Recoverable(message)) => {
+                if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
+                    // The failed encoded capture has already been discarded.
+                    // Keep the opaque session and wait for a fresh foreground
+                    // utterance; never resend bytes from the oversized turn.
+                    caption.set(Some(message.to_string()));
+                    arm_listening(
+                        operation,
+                        false,
+                        VoiceTurnMode::Foreground,
+                        voice_state,
+                        generation,
+                        session_state,
+                        detected_domain,
+                        route,
+                        coach_state,
+                        needs_paper,
+                        research_status,
+                        research_records,
+                        document_info,
+                        caption,
+                    );
+                }
+                return;
+            }
+            Err(WaitTurnError::Terminal(message)) => {
                 if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
                     cloud::stop_session();
                     document_info.set(None);
@@ -776,13 +858,35 @@ fn resume_foreground_interruption(
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
     document_info: Signal<Option<DocumentInfo>>,
-    caption: Signal<Option<String>>,
+    mut caption: Signal<Option<String>>,
 ) {
     voice_state.set(VoiceState::Listening);
     spawn(async move {
         let has_speech = match cloud::wait_for_turn_end().await {
             Ok(has_speech) => has_speech,
-            Err(message) => {
+            Err(WaitTurnError::Recoverable(message)) => {
+                if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
+                    caption.set(Some(message.to_string()));
+                    arm_listening(
+                        operation,
+                        false,
+                        VoiceTurnMode::Foreground,
+                        voice_state,
+                        generation,
+                        session_state,
+                        detected_domain,
+                        route,
+                        coach_state,
+                        needs_paper,
+                        research_status,
+                        research_records,
+                        document_info,
+                        caption,
+                    );
+                }
+                return;
+            }
+            Err(WaitTurnError::Terminal(message)) => {
                 if *generation.peek() == operation {
                     cloud::stop_session();
                     voice_state.set(VoiceState::Error(message));
@@ -872,6 +976,35 @@ fn submit_turn(
                 }
                 resume_foreground_interruption(
                     operation,
+                    voice_state,
+                    generation,
+                    session_state,
+                    detected_domain,
+                    route,
+                    coach_state,
+                    needs_paper,
+                    research_status,
+                    research_records,
+                    document_info,
+                    caption,
+                );
+                return;
+            }
+            Err(FinishTurnError::Recoverable(message)) => {
+                if consumed_document {
+                    document_info.set(None);
+                }
+                // The captured turn was consumed and must never be resent. A
+                // transient provider or network failure also must not revoke
+                // the user's foreground microphone gesture: keep the opaque
+                // pre-turn state, leave the session open, and listen for a new
+                // utterance. The notice is optional caption text only; it does
+                // not make the user repeat the failed turn.
+                caption.set(Some(message.to_string()));
+                arm_listening(
+                    operation,
+                    false,
+                    VoiceTurnMode::Foreground,
                     voice_state,
                     generation,
                     session_state,
@@ -1274,17 +1407,17 @@ fn App() -> Element {
                         div { class: "capability",
                             span { "話す" }
                             i { aria_hidden: "true", "→" }
-                            strong { "短くても最後まで待つ" }
+                            strong { {ORDINARY_CHAT_COPY} }
                         }
                         div { class: "capability",
-                            span { "会話" }
+                            span { "支援" }
                             i { aria_hidden: "true", "→" }
-                            strong { "まず話の中身に答える" }
+                            strong { {ANSWER_SUPPORT_COPY} }
                         }
                         div { class: "capability",
-                            span { "伝わる" }
+                            span { "戻る" }
                             i { aria_hidden: "true", "→" }
-                            strong { "必要な時だけ一問で支える" }
+                            strong { {TALK_ONLY_COPY} }
                         }
                     }
 
@@ -1509,6 +1642,10 @@ fn App() -> Element {
                                 "匿名セッションと正規アプリからのリクエストか毎回たしかめる"
                             }
                             p {
+                                strong { "会話支援" }
+                                {SUPPORT_BOUNDARY_COPY}
+                            }
+                            p {
                                 strong { "話者" }
                                 "話者本人の認証・識別はしていません。周囲を聴かせ続けず、相手の質問はあなた自身が言い直してから答えてください。"
                             }
@@ -1536,9 +1673,10 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        CoachAction, CoachPhase, CoachState, VoiceState, VoiceTurnMode, session_stop_pauses,
-        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
-        valid_voice_pause_metadata,
+        ANSWER_SUPPORT_COPY, CoachAction, CoachPhase, CoachState, ORDINARY_CHAT_COPY,
+        SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState, VoiceTurnMode,
+        recoverable_wait_turn_code, session_stop_pauses, silent_recognition_miss,
+        turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -1611,6 +1749,28 @@ mod tests {
             assert!(!copy.contains("普通は"));
             assert!(!copy.contains("やり直し"));
         }
+    }
+
+    #[test]
+    fn visible_copy_keeps_answer_support_optional_unscored_and_non_clinical() {
+        let ready_hint = VoiceState::Ready.hint();
+
+        assert!(ready_hint.contains("まとまらなくても"));
+        assert!(ready_hint.contains("小さな声"));
+        assert_eq!(ORDINARY_CHAT_COPY, "そのままなら普通の雑談");
+        assert_eq!(ANSWER_SUPPORT_COPY, "「答え方を一問だけ手伝って」");
+        assert_eq!(TALK_ONLY_COPY, "「今日は話すだけ」");
+
+        for boundary in [
+            "診断や治療ではなく",
+            "苦手な場面を勝手に練習させません",
+            "会話内容を含まない短期の目印",
+            "通常会話の質問量を調整",
+            "点数は表示しません",
+        ] {
+            assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
+        }
+        assert!(!SUPPORT_BOUNDARY_COPY.contains("曝露"));
     }
 
     #[test]
@@ -1700,5 +1860,20 @@ mod tests {
         assert_eq!(VoiceState::Paused.session_control_label(), "再開");
         assert!(!VoiceState::Listening.session_control_reconnects());
         assert_eq!(VoiceState::Listening.session_control_label(), "一時停止");
+    }
+
+    #[test]
+    fn only_an_oversized_local_capture_is_recoverable_while_waiting() {
+        assert!(recoverable_wait_turn_code(Some("voice_turn_too_large")));
+        for code in [
+            "authentication_failed",
+            "microphone_unavailable",
+            "request_cancelled",
+            "session_expired",
+            "voice_turn_invalid",
+        ] {
+            assert!(!recoverable_wait_turn_code(Some(code)), "{code}");
+        }
+        assert!(!recoverable_wait_turn_code(None));
     }
 }

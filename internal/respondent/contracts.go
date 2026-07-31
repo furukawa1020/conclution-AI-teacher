@@ -81,6 +81,11 @@ type Input struct {
 	Frame          QuestionFrame `json:"frame"`
 	Attempt        AnswerAttempt `json:"attempt"`
 	Reconstruction string        `json:"reconstruction,omitempty"`
+	// RequireTargetAtUtteranceFront is enabled by the live coach when a
+	// verified adaptive success depends on the person's actual word order.
+	// General reconstruction analysis may still treat a target qualified by a
+	// condition in the first semantic clause as fronted.
+	RequireTargetAtUtteranceFront bool `json:"require_target_at_utterance_front,omitempty"`
 }
 
 // Outcome is the gate's authoritative action.

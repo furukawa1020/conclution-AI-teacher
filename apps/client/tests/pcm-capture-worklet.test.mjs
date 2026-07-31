@@ -11,7 +11,7 @@ const workletSource = readFileSync(
 function createHarness(config = {}) {
   const generation = config.generation ?? 7;
   const maximumPreConfirmFrames =
-    config.maximumPreConfirmFrames ?? 25;
+    config.maximumPreConfirmFrames ?? 75;
   const maximumQueuedFrames =
     config.maximumQueuedFrames ?? 8;
   const sampleRateHz = config.sampleRateHz ?? 16_000;
@@ -154,7 +154,7 @@ test("processorOptions are exact and strictly bounded", () => {
     { ...valid, generation: 0 },
     { ...valid, generation: 1.5 },
     { ...valid, maximumPreConfirmFrames: 0 },
-    { ...valid, maximumPreConfirmFrames: 26 },
+    { ...valid, maximumPreConfirmFrames: 76 },
     { ...valid, maximumQueuedFrames: 0 },
     { ...valid, maximumQueuedFrames: 201 },
     { ...valid, unexpected: true },
@@ -168,7 +168,7 @@ test("processorOptions are exact and strictly bounded", () => {
 
 test("one thousand pre-confirm frames post no PCM and stay in a zeroizing fixed ring", () => {
   const harness = createHarness({
-    maximumPreConfirmFrames: 25,
+    maximumPreConfirmFrames: 75,
     maximumQueuedFrames: 8,
   });
   harness.renderFrame(0.1);
@@ -180,8 +180,8 @@ test("one thousand pre-confirm frames post no PCM and stay in a zeroizing fixed 
 
   assert.equal(harness.frameMessages().length, 0);
   assert.equal(harness.output.length, 0);
-  assert.equal(harness.processor.preConfirmCount, 25);
-  assert.equal(harness.processor.preConfirmRing.length, 25);
+  assert.equal(harness.processor.preConfirmCount, 75);
+  assert.equal(harness.processor.preConfirmRing.length, 75);
   assert.equal(isZero(firstPcm), true, "evicted PCM was not zeroized");
 
   const retained = preConfirmEntries(harness.processor)
@@ -194,6 +194,40 @@ test("one thousand pre-confirm frames post no PCM and stay in a zeroizing fixed 
   assert.equal(harness.processor.state, "stopped");
   assert.equal(retained.every(isZero), true);
   assert.equal(harness.renderFrame(), false);
+});
+
+test("finite quiet-candidate ring preserves 300 ms pre-roll through the latest valid confirmation", () => {
+  const harness = createHarness({
+    maximumPreConfirmFrames: 75,
+    maximumQueuedFrames: 100,
+  });
+  harness.renderFrame(0.1);
+  const evicted = harness.processor.preConfirmRing[0].pcm;
+  for (let frame = 1; frame < 76; frame += 1) {
+    harness.renderFrame((frame % 8 + 1) / 10);
+  }
+
+  assert.equal(harness.processor.preConfirmCount, 75);
+  assert.equal(isZero(evicted), true);
+  harness.control({
+    type: "confirm",
+    version: 1,
+    generation: harness.generation,
+    // Frame 16 starts the quiet candidate. Confirmation at frame 75 is 1.18
+    // seconds later, immediately before the finite 1.2 second privacy limit.
+    candidateContextFrame: 16 * 320,
+    leadInFrames: 15,
+    initialCredit: 75,
+  });
+
+  const frames = harness.frameMessages();
+  assert.equal(frames.length, 75);
+  assert.equal(frames[0].contextFrame, 320);
+  assert.equal(frames.at(-1).contextFrame, 75 * 320);
+  assert.deepEqual(
+    frames.map(({ sequence }) => sequence),
+    Array.from({ length: 75 }, (_, sequence) => sequence),
+  );
 });
 
 test("confirm releases only the bounded lead-in in exact FIFO and credit order", () => {

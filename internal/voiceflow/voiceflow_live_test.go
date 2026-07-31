@@ -293,7 +293,7 @@ func (speech *fakeLiveSpeech) OpenStreamingTranscription(
 	return speech.session, nil
 }
 
-func TestPipelineLiveAggregatesOnlyFinalsAndIgnoresUncalibratedConfidence(t *testing.T) {
+func TestPipelineLiveAggregatesOnlyFinalsWhenConfidenceIsUnavailable(t *testing.T) {
 	t.Parallel()
 	session := newFakeLiveTranscriptionSession(
 		speechio.StreamingTranscriptionEvent{
@@ -302,14 +302,12 @@ func TestPipelineLiveAggregatesOnlyFinalsAndIgnoresUncalibratedConfidence(t *tes
 			Stability: 0.9,
 		},
 		speechio.StreamingTranscriptionEvent{
-			Kind:       speechio.StreamingTranscriptionFinal,
-			Text:       "質問の前半",
-			Confidence: 0.1,
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "質問の前半",
 		},
 		speechio.StreamingTranscriptionEvent{
-			Kind:       speechio.StreamingTranscriptionFinal,
-			Text:       "質問の後半",
-			Confidence: 0.1,
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "質問の後半",
 		},
 	)
 	speech := &fakeLiveSpeech{
@@ -371,6 +369,184 @@ func TestPipelineLiveAggregatesOnlyFinalsAndIgnoresUncalibratedConfidence(t *tes
 		len(session.audio) != 1 ||
 		!bytes.Equal(session.audio[0], []byte{1, 0, 2, 0}) {
 		t.Fatalf("session close=%d audio=%v", session.closeCalls, session.audio)
+	}
+}
+
+func TestPipelineLiveFailsClosedOnMinimumPositiveFinalConfidence(t *testing.T) {
+	t.Parallel()
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:       speechio.StreamingTranscriptionFinal,
+			Text:       "聞き取りにくい前半",
+			Confidence: 0.64,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:       speechio.StreamingTranscriptionFinal,
+			Text:       "明瞭な後半",
+			Confidence: 0.95,
+		},
+	)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			fakeSpeech: fakeSpeech{},
+			chunks:     [][]byte{{9, 0}},
+		},
+		session: session,
+	}
+	agent := &fakeAgent{result: liveTestDecision("must not run", "new-state")}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	var output []byte
+	result, err := pipeline.ProcessLive(
+		context.Background(),
+		"uid-low-confidence",
+		httpapi.VoiceTurnInput{StateToken: "existing-state"},
+		audio,
+		func(chunk []byte) error {
+			output = append(output, chunk...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.calls != 0 {
+		t.Fatalf("low-confidence live transcript reached model: %d", agent.calls)
+	}
+	if result.Route != routeClarifyLowConfidence ||
+		result.Caption != lowConfidencePrompt ||
+		result.StateToken != "existing-state" ||
+		speech.synthesizedText != lowConfidencePrompt ||
+		speech.streamCalls != 1 ||
+		!bytes.Equal(output, []byte{9, 0}) {
+		t.Fatalf("output=%v result=%+v speech=%+v", output, result, speech)
+	}
+}
+
+func TestPipelineLiveNeverAdoptsMatchingSpeculationWithLowFinalConfidence(t *testing.T) {
+	t.Parallel()
+	const utterance = "この小声の質問を詳しく説明して"
+	finalGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.91,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.94,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:       speechio.StreamingTranscriptionFinal,
+			Text:       utterance,
+			Confidence: 0.40,
+		},
+	)
+	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	speech := &scriptedLiveSpeech{
+		fakeSpeech: fakeSpeech{},
+		session:    session,
+		scripts: []scriptedSynthesis{
+			{chunks: [][]byte{{7, 0}}},
+			{chunks: [][]byte{{8, 0}}},
+		},
+		chunkStarted: make(chan synthesisChunkEvent, 2),
+		completed:    make(chan int, 2),
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("先読みした回答", "spec-state"),
+		normalResult:      liveTestDecision("must not run", "normal-state"),
+		started:           make(chan struct{}),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(150, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	type liveOutcome struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}
+	var delivered []byte
+	done := make(chan liveOutcome, 1)
+	go func() {
+		result, processErr := pipeline.ProcessLive(
+			context.Background(),
+			"uid-low-confidence-speculation",
+			httpapi.VoiceTurnInput{StateToken: "existing-state"},
+			audio,
+			func(chunk []byte) error {
+				delivered = append(delivered, chunk...)
+				return nil
+			},
+		)
+		done <- liveOutcome{result: result, err: processErr}
+	}()
+
+	select {
+	case <-agent.started:
+	case <-time.After(time.Second):
+		t.Fatal("speculative agent did not start")
+	}
+	select {
+	case event := <-speech.chunkStarted:
+		if event.call != 0 || event.chunk != 0 {
+			t.Fatalf("speculative synthesis event=%+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("speculative synthesis did not start")
+	}
+	select {
+	case call := <-speech.completed:
+		if call != 0 {
+			t.Fatalf("completed synthesis call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("speculative synthesis did not finish buffering")
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("speculative audio escaped before final confidence: %v", delivered)
+	}
+	close(finalGate)
+
+	var outcome liveOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("low-confidence final did not finish")
+	}
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	turns := agent.recordedTurns()
+	texts := speech.synthesisTexts()
+	if len(turns) != 1 || !turns[0].Speculative ||
+		len(texts) != 2 || texts[0] != "先読みした回答" ||
+		texts[1] != lowConfidencePrompt {
+		t.Fatalf("turns=%+v synthesis=%q", turns, texts)
+	}
+	if outcome.result.Route != routeClarifyLowConfidence ||
+		outcome.result.Caption != lowConfidencePrompt ||
+		outcome.result.StateToken != "existing-state" ||
+		outcome.result.LiveTimings.SpecHit != 0 ||
+		outcome.result.LiveTimings.SpecMiss != 1 ||
+		outcome.result.LiveTimings.SpecCancel != 1 ||
+		!bytes.Equal(delivered, []byte{8, 0}) {
+		t.Fatalf("delivered=%v result=%+v", delivered, outcome.result)
 	}
 }
 

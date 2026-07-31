@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -28,6 +29,7 @@ const (
 	maxGraphNodesPerKind        = 3
 	maxGraphNodeRunes           = 100
 	maxPendingSubjectRunes      = 100
+	coachContinuityTagBytes     = 16
 	assistantFollowUpSubject    = "KOTAEが直前に尋ねたこと"
 )
 
@@ -145,20 +147,26 @@ type ThoughtStateDelta struct {
 // PendingAnswerFrame is the minimum cross-turn state needed to help a person
 // answer someone else's question. It intentionally stores no transcript,
 // question span, answer attempt, evidence span, hypothesis prose, reconstructed
-// reply, or model-written prompt. RestatementTag is a truncated HMAC of the
-// normalized semantic clause containing the person's target answer evidence.
-// It binds a requested restatement without retaining that clause and is never
-// included in a model prompt.
+// reply, or model-written prompt. RestatementTag is retained as a compatibility
+// reader for the preceding rollout. QuestionContinuityTag and ContinuityTag
+// are domain-separated, truncated HMACs of a screened question subject and the
+// person's exact target answer. None of these server-only proofs is included
+// in a model prompt. ExpansionOptIn records only the person's deterministic,
+// question-scoped request for one bounded follow-up; it carries no question or
+// answer text and is never model-writable.
 type PendingAnswerFrame struct {
-	Active            bool                          `json:"active"`
-	Operator          answercontract.Operator       `json:"operator,omitempty"`
-	Subject           string                        `json:"subject,omitempty"`
-	RequiredSlots     []answercontract.RequiredSlot `json:"required_slots,omitempty"`
-	ExpansionOperator answercontract.Operator       `json:"expansion_operator,omitempty"`
-	Phase             respondent.CoachPhase         `json:"phase,omitempty"`
-	Attempts          uint8                         `json:"attempts,omitempty"`
-	AssistantFollowUp bool                          `json:"assistant_follow_up,omitempty"`
-	RestatementTag    string                        `json:"restatement_tag,omitempty"`
+	Active                bool                          `json:"active"`
+	Operator              answercontract.Operator       `json:"operator,omitempty"`
+	Subject               string                        `json:"subject,omitempty"`
+	RequiredSlots         []answercontract.RequiredSlot `json:"required_slots,omitempty"`
+	ExpansionOperator     answercontract.Operator       `json:"expansion_operator,omitempty"`
+	Phase                 respondent.CoachPhase         `json:"phase,omitempty"`
+	Attempts              uint8                         `json:"attempts,omitempty"`
+	AssistantFollowUp     bool                          `json:"assistant_follow_up,omitempty"`
+	ExpansionOptIn        bool                          `json:"expansion_opt_in,omitempty"`
+	RestatementTag        string                        `json:"restatement_tag,omitempty"`
+	QuestionContinuityTag string                        `json:"question_continuity_tag,omitempty"`
+	ContinuityTag         string                        `json:"continuity_tag,omitempty"`
 }
 
 func (turn VoiceTurn) Validate() error {
@@ -256,9 +264,38 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 			respondent.ExpansionOperator(respondent.Operator(frame.Operator)),
 		)
 	}
-	frame.Subject = collapseSpace(frame.Subject)
+	if frame.Operator == answercontract.OperatorQuantity {
+		hasUnit := false
+		for _, slot := range frame.RequiredSlots {
+			if slot == answercontract.SlotUnit {
+				hasUnit = true
+				break
+			}
+		}
+		if !hasUnit {
+			if len(frame.RequiredSlots) >= answercontract.MaxRequiredSlots {
+				return PendingAnswerFrame{}, ErrInvalidStateToken
+			}
+			frame.RequiredSlots = append(frame.RequiredSlots, answercontract.SlotUnit)
+		}
+	}
 	target, ok := answercontract.TargetSlot(frame.Operator)
 	_, expansionOK := answercontract.TargetSlot(frame.ExpansionOperator)
+	continuityProtected := frame.QuestionContinuityTag != "" ||
+		frame.ContinuityTag != ""
+	if continuityProtected {
+		// Once continuity proofs exist, cross-turn identity is carried only by
+		// those non-reversible values. Never renew model-written subject prose.
+		if frame.AssistantFollowUp {
+			frame.Subject = assistantFollowUpSubject
+		} else {
+			frame.Subject = pendingSubjectForOperator(frame.Operator)
+		}
+	} else {
+		// Compatibility readers preserve the bounded legacy label so rolling
+		// traffic does not mutate otherwise authenticated v1 state.
+		frame.Subject = collapseSpace(frame.Subject)
+	}
 	if !ok ||
 		!expansionOK ||
 		!activeCoachPhase(frame.Phase) ||
@@ -266,8 +303,11 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		!utf8.ValidString(frame.Subject) ||
 		frame.Subject == "" ||
 		utf8.RuneCountInString(frame.Subject) > maxPendingSubjectRunes ||
-		containsSensitiveStateText(frame.Subject) ||
-		(frame.AssistantFollowUp && frame.Subject != assistantFollowUpSubject) ||
+		(!continuityProtected && containsSensitiveStateText(frame.Subject)) ||
+		(!continuityProtected && frame.AssistantFollowUp &&
+			frame.Subject != assistantFollowUpSubject) ||
+		(frame.ExpansionOptIn &&
+			(frame.AssistantFollowUp || frame.QuestionContinuityTag == "")) ||
 		(frame.AssistantFollowUp && frame.Phase == respondent.CoachPhaseExpanding) ||
 		(frame.RestatementTag != "" &&
 			(frame.Phase != respondent.CoachPhaseAwaitingRestatement ||
@@ -275,6 +315,22 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		len(frame.RequiredSlots) == 0 ||
 		len(frame.RequiredSlots) > answercontract.MaxRequiredSlots {
 		return PendingAnswerFrame{}, ErrInvalidStateToken
+	}
+	for _, encodedTag := range []string{
+		frame.QuestionContinuityTag,
+		frame.ContinuityTag,
+	} {
+		if encodedTag == "" {
+			continue
+		}
+		rawTag, decodeErr := base64.RawURLEncoding.DecodeString(encodedTag)
+		validTag := decodeErr == nil &&
+			len(rawTag) == coachContinuityTagBytes &&
+			base64.RawURLEncoding.EncodeToString(rawTag) == encodedTag
+		wipe(rawTag)
+		if !validTag {
+			return PendingAnswerFrame{}, ErrInvalidStateToken
+		}
 	}
 	seen := make(map[answercontract.RequiredSlot]struct{}, len(frame.RequiredSlots))
 	slots := make([]answercontract.RequiredSlot, 0, len(frame.RequiredSlots))

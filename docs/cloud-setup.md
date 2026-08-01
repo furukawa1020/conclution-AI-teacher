@@ -96,6 +96,24 @@ foreach ($Role in $Roles) {
 
 音声やPDF用のStorage bucketはなく、runtimeへStorage roleやKMS roleを付けません。
 
+source buildにはruntime IDや既定Compute Engine IDを使いません。専用build IDには`roles/run.builder`だけを付与し、Vertex AI、DLP、Firebase Auth、Firestore、Speech、Secret Managerのruntime権限を付けません。
+
+```powershell
+$ProjectId = "kotae-ai-u22-2026"
+$BuildSaName = "kotae-api-builder"
+$BuildSa = "$BuildSaName@$ProjectId.iam.gserviceaccount.com"
+
+gcloud iam service-accounts create $BuildSaName `
+  --display-name="KOTAE API source builder" `
+  --project=$ProjectId
+
+gcloud projects add-iam-policy-binding $ProjectId `
+  --member="serviceAccount:$BuildSa" `
+  --role="roles/run.builder"
+```
+
+既定Compute Engine IDの既存roleは、同じprojectの他workloadを確認せずに削除しません。ただしKOTAEのbuildでは今後使わず、deployごとに`--build-service-account`を明示します。
+
 ## 会話状態鍵
 
 `KOTAE_STATE_KEY_BASE64`は、暗号学的乱数32 byteをstandard Base64にした値です。リポジトリ、`.env`、shell history、Cloud Runの平文環境変数へ直接残しません。Secret Managerの`kotae-conversation-state`へ保存します。
@@ -155,6 +173,7 @@ KOTAE_STATE_KEY_BASE64=<Secret Managerから注入>
 ```powershell
 $ProjectId = "kotae-ai-u22-2026"
 $RuntimeSa = "kotae-api-runtime@$ProjectId.iam.gserviceaccount.com"
+$BuildSa = "kotae-api-builder@$ProjectId.iam.gserviceaccount.com"
 $WebAppId = "<Firebase Web App ID>"
 
 gcloud run deploy kotae-api `
@@ -164,6 +183,7 @@ gcloud run deploy kotae-api `
   --ingress=all `
   --allow-unauthenticated `
   --service-account=$RuntimeSa `
+  --build-service-account="projects/$ProjectId/serviceAccounts/$BuildSa" `
   --cpu=1 `
   --memory=1Gi `
   --concurrency=4 `

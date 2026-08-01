@@ -17,9 +17,14 @@ docs
 scripts
 .firebase
 .firebaserc
+.firebaserc.*
 .env
 .env.*
 *.log
+firepit-log.txt
+Cargo.toml
+Cargo.lock
+*_test.go
 *.test
 coverage.out
 

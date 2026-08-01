@@ -100,7 +100,7 @@ impl CoachState {
     const fn hint(self) -> &'static str {
         match (self.phase, self.action) {
             (CoachPhase::Blocked, CoachAction::Release) => "この続きでも、別の話でも大丈夫",
-            (CoachPhase::None, _) => "質問でも、ぼやきでも、短い声でも、そのままどうぞ",
+            (CoachPhase::None, _) => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
             (CoachPhase::AwaitingAnswer, _) => {
                 "わからない、まだ決めていない、でも会話は続けられます"
             }
@@ -144,9 +144,9 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "質問でも、ぼやきでも、まとまらなくても、小さな声のままどうぞ",
+            Self::Ready => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
-            Self::Listening => "話し終えて約一秒　そのまま自動で返す",
+            Self::Listening => "話し終わりの間を見て自動で返す　長い話は急いで切らない",
             Self::Thinking => {
                 "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
             }

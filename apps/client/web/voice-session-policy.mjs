@@ -948,6 +948,23 @@ export function advanceVad(
         0,
         clearVoiceRunMs - intervalMs * 0.5,
       );
+      // A confirmed quiet voice often alternates between a relative-SNR peak
+      // and a softer vowel/consonant valley. Preserve that recent valley only
+      // as envelope evidence; it does not refresh lastVoiceAt by itself. A
+      // later above-floor, voice-shaped sample must still validate the rise,
+      // so stationary low noise cannot keep a turn open indefinitely.
+      if (
+        softVoiceConfirmed &&
+        softVoiceEvidenceAt !== null &&
+        timestamp - softVoiceEvidenceAt <= softVoiceEvidenceLeaseMs &&
+        rms >= softVoiceBootstrapMinimumRms &&
+        hasVoiceShapedPeak
+      ) {
+        softVoiceMinRms =
+          softVoiceMinRms === null
+            ? rms
+            : Math.min(softVoiceMinRms, rms);
+      }
       softVoiceRunMs = Math.max(
         0,
         softVoiceRunMs - intervalMs * 0.5,

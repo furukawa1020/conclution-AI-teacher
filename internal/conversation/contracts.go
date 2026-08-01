@@ -16,7 +16,9 @@ import (
 const (
 	SchemaVersion = 1
 
-	MaxUtteranceRunes      = 2_000
+	// Four thousand Unicode code points admit a fast three-minute monologue
+	// while keeping the current-turn model prompt and injection surface finite.
+	MaxUtteranceRunes      = 4_000
 	MaxStateTokenBytes     = 16 * 1024
 	MaxInlinePDFBytes      = 7 * 1024 * 1024
 	MaxSpokenReplyRunes    = 480
@@ -64,6 +66,10 @@ type VoiceTurn struct {
 	RequestID     string `json:"-"`
 	Ambient       bool   `json:"ambient,omitempty"`
 	Foreground    bool   `json:"foreground,omitempty"`
+	// ExtendedSpeech is derived only after the server accepts a finalized
+	// transcript. It is model-visible for this turn, never decoded from a client
+	// request, written to state, or interpreted as a trait or skill score.
+	ExtendedSpeech bool `json:"-"`
 	// Speculative permits pure model computation while speech recognition is
 	// still provisional. It never widens authority: outbound research and any
 	// future executable action must fail before execution.

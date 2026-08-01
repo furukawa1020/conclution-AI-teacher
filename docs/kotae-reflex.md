@@ -27,7 +27,9 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
 
 低圧な会話方針は、厚生労働省の[ひきこもり支援ハンドブック](https://www.mhlw.go.jp/content/12200000/001605332.pdf)にある、何気ない会話、答えやすい問い、本人のペースと自己決定を尊重する原則を参照しています。会話練習への短いフィードバックは[IMBUEのランダム化研究](https://aclanthology.org/2024.acl-long.47/)に近接根拠がありますが、英語テキストの単回練習であり、本製品の対象、音声、長期効果を直接検証したものではありません。
 
-本資料には、現在動くHTTPSターン型MVPと、将来研究するincremental / full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Live、検索、個人適応は設計目標です。
+本資料には、現在動くHTTPS / WebSocketターン型MVPと、将来研究するincremental / full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Vertex Live、検索、個人適応は設計目標です。
+
+約3分の独話を一つのturnとして受ける経路は実装済みです。ただし、これは「3分話せば技能が改善する」という効果の実装ではありません。現在実装しているのは、長い発話を途中で急いで切らず、最終文字起こしに十分な意味内容がある時に限って、同じturn内で中心点を意味保存して先に返す足場です。長期定着、他場面への転移、心理的負荷の軽減は未実証です。
 
 ## 対象範囲と非目標
 
@@ -74,7 +76,7 @@ Cloud Run / Go（asia-northeast1）
                               └─ MP3 → ブラウザ再生
 ```
 
-raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。PDFはクライアントで読まず、APIへ直接渡されてもモデル推論前に拒否します。cross-turn stateには自由文要約を入れず、Sensitive Data ProtectionとCloud Runの決定論的規則で置換した後の短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。Vertex AIは`global`なので、保護後の文字列が東京リージョンだけに留まるとは保証しません。
+raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。PDFはクライアントで読まず、APIへ直接渡されてもモデル推論前に拒否します。cross-turn stateには逐語録・発話本文、モデル応答本文、`extended_speech`の今回限りの判定値、自由文要約を入れません。一方、長い発話も通常会話と同じ状態更新の対象であり、Sensitive Data ProtectionとCloud Runの決定論的規則で置換した後の、抽象化済みで件数・長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionと制御メタデータは残り得ます。これらだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。Vertex AIは`global`なので、保護後の文字列が東京リージョンだけに留まるとは保証しません。
 
 会話の足場を調整する状態は、意味nodeと分けます。保持するのは、通常会話だけにする選択、`guided / light / natural`の段階、質問のcooldown、明示練習で回答を先に置けた直近回数という短期の列挙・上限付きメタデータだけです。発話本文、答え、話題、性格・健康推定、能力scoreを入れず、15分のTTLまたはセッション終了で破棄します。この内部状態から点数、連続成功、順位をUIへ表示しません。
 
@@ -83,12 +85,14 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 ブラウザだけで高精度な日本語ASR、意味推論、自然なfull-duplex音声をすべて端末内処理するのは、対応端末、電力、モデル配布量の面でまだ不安定です。そのため現在のMVPは次の境界です。
 
 - 利用者が最初にタップして開始したsession中だけマイクを使う。
-- 端末VADで一発話を区切り、認証付きWebSocketで東京リージョンSTTへ増分送信し、利用不能時だけ同じ認証境界のHTTPS requestへ退避する。
+- 端末VADで一発話を区切り、録音開始から最大3分30秒まで認証付きWebSocketで東京リージョンSTTへ増分送信する。発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。Cloud Run側は最大4分、20 ms PCMを12,000 frame・7,680,000 byteまで受ける。Goのlive接続deadlineは6分、Cloud Runのrequest timeoutは420秒で、4分のcapture後にもcommitとモデル・TTS処理の時間を残す。
+- WebSocketが利用不能な時だけ同じ認証境界のHTTPS requestへ退避する。圧縮音声fallbackは2 MiB上限であり、codecとbitrateがブラウザごとに異なるため約3分を保証しない。2 MiBを超えたfallback chunkは全て破棄し、先頭だけの不完全な音声をuploadしない。live PCMが継続している場合はfallback超過だけを理由に発話を止めない。
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
 - raw audioをVertex AIへ送らず、STT文字列を東京リージョンのSensitive Data Protectionで検査・置換できた場合だけ`global`のVertex AIへ送る。
+- commit後のfinal transcriptが160 Unicode code point以上の時だけ、サーバーが今回限りの`extended_speech`を導出する。通常会話では現在turnの発話内に明示された中心点を、否定、条件、数値、不確実性を変えず第一文へ置いて内容へ応答する。中心点を一つに安全に定められなければ創作せず、一つだけ低負担に確認する。途中候補、過去turn、保存本文から中心点を作らず、話した時間、能力、心理状態、習熟度の判定にも使わない。
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
 - 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
-- AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、3分無発話、30分経過でsessionを止める。
+- AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、4分無発話、30分経過でsessionを止める。
 - PDFはブラウザのfile read前とAPIのモデル呼出し前に拒否し、原本byteを状態へ残さない。
 
 将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
@@ -699,7 +703,9 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 ### A. Voice-first MVP — 実装済み
 
 - 明示開始されたブラウザsessionと端末側VAD
-- 一発話ごとのHTTPS request、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
+- 一発話ごとの認証付きlive WebSocketとHTTPS fallback、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
+- 端末の録音開始から最大3分30秒、Cloud Run受信4分、Go live deadline 6分、Cloud Run request timeout 420秒という独立した上限。発話が確定しない無音候補は最大30秒で、3分30秒の実発話を保証しない
+- 圧縮音声fallbackの2 MiB上限と、超過時にpartial audioをuploadしないfail-closed処理
 - 東京リージョンSTT → `global` Vertex AI structured reasoner → 東京リージョンTTS
 - raw audio、文字起こし、応答文、PDFをアプリ側で永続化しない
 - AES-256-GCM、UID-bound、15分TTL、自由文要約なしのフィルタ済み意味状態
@@ -713,6 +719,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 曖昧な問いでのclarify、低EVIと自己修正中のsilence
 - PDFのclient read前・モデル推論前の二重拒否とbyte消去
 - 高リスクdomainのprecision fail-closed
+- 160 Unicode code point以上のfinal transcriptだけを対象に、現在turnの明示内容から中心点を意味保存して第一文へ置く長い独話用の足場。長さを能力や効果の指標にせず、途中候補や過去turnから補わない
 
 ### B. LAC評価 — 実装中
 
@@ -749,6 +756,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - score、レベル、streak、順位をUIへ表示しない
 - 暗黙feedbackだけで自動的に性格・健康状態を推定しない
 - 十分な同意データが集まるまではオンライン強化学習を行わない
+- 約3分の独話を受けて同じturnで足場を返す機能は実装済みだが、結論先行技能の長期定着、他場面への転移、心理的負荷の軽減は未実証として扱う
 
 ## セキュリティ継承
 

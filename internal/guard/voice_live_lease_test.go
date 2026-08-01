@@ -3,11 +3,101 @@ package guard
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestValidateVoiceLiveLeaseForAcquire(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	validHolder := strings.Repeat("a", 64)
+	tests := []struct {
+		name     string
+		data     map[string]any
+		wantHeld bool
+		wantErr  bool
+	}{
+		{
+			name: "expired old schema is replaceable",
+			data: map[string]any{
+				"expiresAt":     now.Add(-time.Second),
+				"holder":        validHolder,
+				"schemaVersion": int64(0),
+			},
+		},
+		{
+			name: "expired invalid holder is replaceable",
+			data: map[string]any{
+				"expiresAt":     now,
+				"holder":        "invalid",
+				"schemaVersion": int64(voiceLiveLeaseSchema),
+			},
+		},
+		{
+			name: "active old schema is rejected",
+			data: map[string]any{
+				"expiresAt":     now.Add(time.Second),
+				"holder":        validHolder,
+				"schemaVersion": int64(0),
+			},
+			wantErr: true,
+		},
+		{
+			name: "active invalid holder is rejected",
+			data: map[string]any{
+				"expiresAt":     now.Add(time.Second),
+				"holder":        "invalid",
+				"schemaVersion": int64(voiceLiveLeaseSchema),
+			},
+			wantErr: true,
+		},
+		{
+			name:    "missing expiry is rejected",
+			data:    map[string]any{},
+			wantErr: true,
+		},
+		{
+			name: "wrong expiry type is rejected",
+			data: map[string]any{
+				"expiresAt": "2026-08-01T00:00:00Z",
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero expiry is rejected",
+			data: map[string]any{
+				"expiresAt": time.Time{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "active valid lease is held",
+			data: map[string]any{
+				"expiresAt":     now.Add(time.Second),
+				"holder":        validHolder,
+				"schemaVersion": int64(voiceLiveLeaseSchema),
+			},
+			wantHeld: true,
+			wantErr:  true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateVoiceLiveLeaseForAcquire(test.data, now)
+			if got := err != nil; got != test.wantErr {
+				t.Fatalf("error = %v; want error %t", err, test.wantErr)
+			}
+			if got := errors.Is(err, ErrVoiceLiveLeaseHeld); got != test.wantHeld {
+				t.Fatalf("held = %t; want %t (error: %v)", got, test.wantHeld, err)
+			}
+		})
+	}
+}
 
 func TestMemoryVoiceLiveLeaseAllowsOnlyOneConcurrentConnectionPerUID(
 	t *testing.T,

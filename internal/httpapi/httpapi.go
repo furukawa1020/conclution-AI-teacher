@@ -163,12 +163,17 @@ type VoiceTurnLiveEndpointService interface {
 }
 
 type VoiceOptions struct {
-	Service          VoiceTurnService
-	RateLimiter      guard.Limiter
-	AppRateLimiter   guard.Limiter
-	LiveLeaseManager guard.VoiceLiveLeaseManager
-	RequestTimeout   time.Duration
-	MaxRequestBytes  int64
+	Service           VoiceTurnService
+	RateLimiter       guard.Limiter
+	AppRateLimiter    guard.Limiter
+	LiveLeaseManager  guard.VoiceLiveLeaseManager
+	LiveHandshakeGate *VoiceLiveHandshakeGate
+	RequestTimeout    time.Duration
+	MaxRequestBytes   int64
+
+	// livePipelineJoinTimeout is test-configurable inside this package. The
+	// public constructor clamps it to the production safety maximum.
+	livePipelineJoinTimeout time.Duration
 }
 
 type Server struct {
@@ -213,6 +218,10 @@ func NewWithVoice(
 	maxRequestBytes int64,
 	voice VoiceOptions,
 ) http.Handler {
+	if voice.livePipelineJoinTimeout <= 0 ||
+		voice.livePipelineJoinTimeout > voiceLivePipelineJoinTimeout {
+		voice.livePipelineJoinTimeout = voiceLivePipelineJoinTimeout
+	}
 	server := &Server{
 		logger:          logger,
 		verifier:        verifier,

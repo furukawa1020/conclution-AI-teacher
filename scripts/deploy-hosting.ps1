@@ -34,7 +34,11 @@ $expectedVoiceLiveUrl = "$expectedRunWebSocketUrl/api/v1/voice/live"
 $workspace = Split-Path -Parent $PSScriptRoot
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace $PublicDirectory))
 $expectedPublicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dist\web"))
-$gcloud = [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
+if ([System.IO.Path]::IsPathRooted($GcloudPath)) {
+    $gcloud = [System.IO.Path]::GetFullPath($GcloudPath)
+} else {
+    $gcloud = [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
+}
 
 if ($ProjectId -cne $expectedProjectId) {
     throw "Refusing to deploy project '$ProjectId'; expected '$expectedProjectId'."

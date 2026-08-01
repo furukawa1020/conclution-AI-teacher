@@ -175,11 +175,16 @@ $ProjectId = "kotae-ai-u22-2026"
 $RuntimeSa = "kotae-api-runtime@$ProjectId.iam.gserviceaccount.com"
 $BuildSa = "kotae-api-builder@$ProjectId.iam.gserviceaccount.com"
 $WebAppId = "<Firebase Web App ID>"
+$GitSha = (git rev-parse --verify HEAD).Trim()
+$RevisionSuffix = "three-$($GitSha.Substring(0, 7))-$([DateTime]::UtcNow.ToString('MMddHHmmss'))"
 
 gcloud run deploy kotae-api `
   --source=. `
   --project=$ProjectId `
   --region=asia-northeast1 `
+  --revision-suffix=$RevisionSuffix `
+  --tag=three-minute-candidate `
+  --no-traffic `
   --ingress=all `
   --allow-unauthenticated `
   --service-account=$RuntimeSa `
@@ -189,6 +194,7 @@ gcloud run deploy kotae-api `
   --concurrency=4 `
   --min=1 `
   --min-instances=default `
+  --max=3 `
   --max-instances=3 `
   --timeout=420 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL,KOTAE_COACHING_ROLLOUT" `
@@ -202,11 +208,13 @@ gcloud run deploy kotae-api `
 
 rollback時も`v1`と`v2`の状態は相互利用しません。revisionを戻した後はブラウザのopaque stateを破棄して新しいセッションから始めます。
 
-candidate検証後はservice rootへ100% trafficを移し、`gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags`で全tag URLを外します。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。
+このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認した後だけ、`gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へ100% trafficを移し、全tag URLを同時に外します。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 
-UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。live WebSocketは認証とrate枠の消費後、音声受信と`ready`送信の前にFirestore transactionでUID単位のleaseを取得し、同じFirebase UIDの同時接続をproject全体で1本に制限します。この順序により、同じ認証済みclientが重複handshakeを繰り返す場合もrate limitを迂回できません。通常終了と切断では所有者を照合して即時解放し、instance消失時も7分で期限切れになります。Firestoreの取得・更新に失敗した場合はlive接続だけをfail-closedで拒否し、buffered HTTPS voiceの経路はこのleaseを要求しません。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
+UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。live WebSocketは認証とrate枠の消費後、音声受信と`ready`送信の前にFirestore transactionでUID単位のleaseを取得し、同じFirebase UIDの同時接続をproject全体で1本に制限します。この順序により、同じ認証済みclientが重複handshakeを繰り返す場合もrate limitを迂回できません。接続終了時はpipelineをcancelし、終了signalを最大5秒待ちます。終了を確認できた時だけ所有者を照合してleaseを解放し、5秒以内に停止しない時は即時解放せず7分の`expiresAt`まで保持します。instance消失やFirestore release失敗でもdocumentは残り、transaction内の期限判定で7分後から再取得できます。Firestoreの取得・更新に失敗した場合はlive接続だけをfail-closedで拒否し、buffered HTTPS voiceの経路はこのleaseを要求しません。
+
+未認証live handshakeにはinstanceごとのnon-blockingな2 slot gateを使います。2 slotが使用中ならWebSocketへupgradeする前にHTTP 429を返し、受け入れた接続にも最初のframeを2秒以内に要求します。Firebase ID tokenとApp Check tokenの検証が完了した直後にslotを解放するため、通常のlive sessionは保持しません。`--concurrency=4`のうち、gateが待機を許す未認証handshakeは最大2 request（最大1/2）で、未認証handshakeだけでは残り2 request slotを占有できません。これはinstance内resourceの占有上限であってedge DDoS防御ではなく、最初のframeのcredentialも一回限りticketではありません。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証はありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
 
 ## FirestoreとTTL
 
@@ -220,39 +228,11 @@ UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消�
 | `voiceLiveLeases` | SHA-256化UIDとランダム所有者だけを持つlive同時接続lease。音声・文字起こし・raw UIDは保存しない | `expiresAt`、最長7分 |
 
 ```powershell
-$ProjectId = "kotae-ai-u22-2026"
-
-gcloud firestore fields ttls update expiresAt `
-  --collection-group=evaluations `
-  --database="(default)" `
-  --enable-ttl `
-  --project=$ProjectId
-
-gcloud firestore fields ttls update expiresAt `
-  --collection-group=evaluationRateLimits `
-  --database="(default)" `
-  --enable-ttl `
-  --project=$ProjectId
-
-gcloud firestore fields ttls update expiresAt `
-  --collection-group=voiceRateLimits `
-  --database="(default)" `
-  --enable-ttl `
-  --project=$ProjectId
-
-gcloud firestore fields ttls update expiresAt `
-  --collection-group=voiceLiveLeases `
-  --database="(default)" `
-  --enable-ttl `
-  --project=$ProjectId
-
-gcloud firestore fields ttls list `
-  --database="(default)" `
-  --project=$ProjectId `
-  --format="table(name,ttlConfig.state)"
+powershell -ExecutionPolicy Bypass -File scripts/configure-firestore-ttl.ps1 `
+  -ProjectId kotae-ai-u22-2026
 ```
 
-4 collectionすべてが`ACTIVE`になるまで配備完了としません。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、live leaseはtransaction内で`expiresAt`を検証し、期限を過ぎたdocumentを削除待ちでも上書き取得できます。会話状態tokenの15分期限も、復号後にAPIが独立して検証します。
+このscriptは4 collectionの`expiresAt` TTLを冪等に有効化し、一定間隔で状態を確認します。4つすべてが`ACTIVE`になってexit code 0で終了するまでは、Cloud RunとHostingを更新済みでも配備完了としません。timeout、CLI失敗、不正なJSON、必須policyの欠落はすべて非0で失敗します。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、live leaseはtransaction内で`expiresAt`を検証し、期限を過ぎたdocumentを削除待ちでも上書き取得できます。会話状態tokenの15分期限も、復号後にAPIが独立して検証します。
 
 ## Hosting
 

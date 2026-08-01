@@ -212,6 +212,7 @@ impl VoiceState {
 enum CloudState {
     Connecting,
     Ready,
+    IdentityRequired,
     ConfigurationRequired,
     Unavailable,
 }
@@ -221,6 +222,7 @@ impl CloudState {
         match self {
             Self::Connecting => "SECURE LINK / …",
             Self::Ready => "SECURE LINK / READY",
+            Self::IdentityRequired => "IDENTITY / REQUIRED",
             Self::ConfigurationRequired => "SECURE LINK / SETUP",
             Self::Unavailable => "SECURE LINK / OFFLINE",
         }
@@ -228,7 +230,9 @@ impl CloudState {
 
     const fn class_name(self) -> &'static str {
         match self {
-            Self::Connecting | Self::ConfigurationRequired => "cloud-pill is-pending",
+            Self::Connecting | Self::IdentityRequired | Self::ConfigurationRequired => {
+                "cloud-pill is-pending"
+            }
             Self::Ready => "cloud-pill is-ready",
             Self::Unavailable => "cloud-pill is-offline",
         }
@@ -435,6 +439,7 @@ mod cloud {
         };
         match status.state.as_str() {
             "ready" => CloudState::Ready,
+            "identity-required" => CloudState::IdentityRequired,
             "configuration-required" => CloudState::ConfigurationRequired,
             _ => CloudState::Unavailable,
         }
@@ -631,6 +636,9 @@ mod cloud {
                 "声を待っています　言い直そうとせず　続きや別のひと言をそのままどうぞ"
             }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
+            Some("identity_required") | Some("identity_verification_failed") => {
+                "話し始める前にGoogleアカウントの本人確認を終えてください"
+            }
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
             Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
@@ -1271,6 +1279,12 @@ fn App() -> Element {
                     "data-voice-state": state_snapshot.class_name(),
 
                     div { class: "context-line", aria_live: "polite",
+                        if prepared_cloud_state == CloudState::IdentityRequired {
+                            span {
+                                class: "context-chip",
+                                "最初の一回だけ　Googleアカウントを確認"
+                            }
+                        }
                         if !detected_domain.read().is_empty() {
                             span { class: "context-chip",
                                 "CONTEXT / "
@@ -1639,7 +1653,7 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "接続" }
-                                "匿名セッションと正規アプリからのリクエストか毎回たしかめる"
+                                "確認済みGoogleアカウントと正規アプリからのリクエストか毎回たしかめる。メールアドレスはKOTAEの画面・ログ・会話状態へ保存しません。"
                             }
                             p {
                                 strong { "会話支援" }
@@ -1647,7 +1661,7 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "話者" }
-                                "話者本人の認証・識別はしていません。周囲を聴かせ続けず、相手の質問はあなた自身が言い直してから答えてください。"
+                                "アカウントの本人確認と、いまマイクで話す人の識別は別です。声紋は収集せず、話者本人の認証はしていません。相手の質問はあなた自身が言い直してから答えてください。"
                             }
                             p {
                                 strong { "外部検索" }

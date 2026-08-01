@@ -493,14 +493,14 @@ test("bridge cancellation releases ownership before rejecting the recording", as
   );
 });
 
-test("bridge primes App Check before a fresh anonymous sign-in", async () => {
+test("bridge requires a verified provider account and never creates anonymous identity", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
-  const start = bridge.indexOf("async function initializeAuthenticatedUser()");
+  const start = bridge.indexOf("async function initializeFirebaseAuth()");
   const end = bridge.indexOf(
-    "\n}\n\nconst authenticatedUser",
+    "\n}\n\nconst firebaseAuth",
     start,
   );
   assert.notEqual(start, -1);
@@ -511,10 +511,16 @@ test("bridge primes App Check before a fresh anonymous sign-in", async () => {
     "await getAppCheckToken(appCheck, false)",
   );
   const initializeAuthAt = initializeUser.indexOf("initializeAuth(app");
-  const anonymousSignInAt = initializeUser.indexOf("signInAnonymously(auth)");
   assert.ok(appCheckAt >= 0);
   assert.ok(initializeAuthAt > appCheckAt);
-  assert.ok(anonymousSignInAt > initializeAuthAt);
+  assert.doesNotMatch(bridge, /signInAnonymously/u);
+  assert.match(bridge, /!user\.isAnonymous/u);
+  assert.match(bridge, /user\.emailVerified === true/u);
+  assert.match(bridge, /providerId === "google\.com"/u);
+  assert.match(bridge, /if \(!interactive\) \{\s*fail\("identity_required"\)/u);
+  assert.match(bridge, /await signInWithPopup\(auth, provider\)/u);
+  assert.match(bridge, /secureCredentials\(true\)/u);
+  assert.match(bridge, /state: "identity-required"/u);
 });
 
 test("explicit voice start warms only the fixed transport without private data", async () => {

@@ -397,7 +397,7 @@ test("voice startup awaits fresh passkey credentials before microphone or AudioC
   const main = await readFile(new URL("../src/main.rs", import.meta.url), "utf8");
   assert.match(main, /パスキーでアカウント操作を確認/u);
   assert.match(main, /登録済みの方　同じパスキーで戻る/u);
-  assert.match(main, /初めての方　パスキーを登録する/u);
+  assert.match(main, /初めての方　新しい仮名アカウントを作る/u);
   assert.match(main, /既存の仮名アカウントとは別/u);
   assert.match(main, /声の本人確認ではない/u);
   assert.match(main, /長期効果は未実証/u);

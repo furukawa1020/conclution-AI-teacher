@@ -51,23 +51,40 @@ function Invoke-GcloudQuiet {
         [string] $Operation
     )
 
-    $null = & $gcloud @CommandArguments 2>$null
-    $commandExitCode = $LASTEXITCODE
+    # Windows PowerShell converts any native stderr output into an ErrorRecord.
+    # gcloud writes harmless progress messages (for example, "Request issued")
+    # to stderr even when it exits successfully, so Stop would turn a successful
+    # command into a terminating PowerShell error before we can inspect its exit
+    # code. Suppress stderr under Continue, then fail only on the native exit code.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $null = & $gcloud @CommandArguments 2>$null
+        $commandExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($commandExitCode -ne 0) {
         throw "Google Cloud CLI failed while $Operation."
     }
 }
 
 function Get-TtlPolicies {
-    $jsonLines = @(
-        & $gcloud firestore fields ttls list `
-            --database=$databaseId `
-            --project=$ProjectId `
-            --format=json `
-            --quiet `
-            --verbosity=error 2>$null
-    )
-    $commandExitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $jsonLines = @(
+            & $gcloud firestore fields ttls list `
+                --database=$databaseId `
+                --project=$ProjectId `
+                --format=json `
+                --quiet `
+                --verbosity=error 2>$null
+        )
+        $commandExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($commandExitCode -ne 0) {
         throw "Google Cloud CLI failed while checking Firestore TTL policies."
     }

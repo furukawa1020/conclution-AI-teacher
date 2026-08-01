@@ -22,6 +22,7 @@ import {
   createTurnGate,
   createVadState,
   initializeWithCleanup,
+  isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
   shouldCommitHybridEndpoint,
@@ -313,6 +314,7 @@ async function createExecutablePlaybackHarness() {
   const timers = new FakePlaybackTimers();
   const state = {
     abandonedInterrupts: 0,
+    clearedDocuments: [],
     micEnabled: false,
     pauseEvents: [],
     releasedCodes: [],
@@ -333,9 +335,11 @@ async function createExecutablePlaybackHarness() {
     "dependencies",
     `"use strict";
 let activeLiveSession;
+let activePasskeyController;
 let activePlayback;
 let activeRequestController;
 let audioContext = dependencies.audioContext;
+let documentEpoch = 0;
 let sessionEpoch = 1;
 const stoppedSessionCodes = new Map();
 const CustomEvent = dependencies.CustomEvent;
@@ -343,6 +347,7 @@ const TextDecoder = dependencies.TextDecoder;
 const VOICE_STREAM_LIMITS = dependencies.VOICE_STREAM_LIMITS;
 const abandonInterruptRecording = dependencies.abandonInterruptRecording;
 const classifyVoiceSessionStopReason = dependencies.classifyVoiceSessionStopReason;
+const clearPendingDocument = dependencies.clearPendingDocument;
 const clearTimeout = dependencies.clearTimeout;
 const createVoiceStreamParser = dependencies.createVoiceStreamParser;
 const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
@@ -398,6 +403,9 @@ return Object.freeze({
     },
     audioContext: context,
     classifyVoiceSessionStopReason,
+    clearPendingDocument(reason) {
+      state.clearedDocuments.push(reason);
+    },
     clearTimeout: (id) => timers.clearTimeout(id),
     createVoiceStreamParser,
     estimateAudiblePerformanceTime,
@@ -486,7 +494,7 @@ test("bridge cancellation releases ownership before rejecting the recording", as
   );
 });
 
-test("bridge requires a verified provider account and never creates anonymous identity", async () => {
+test("bridge requires a fresh passkey and never creates anonymous or popup identity", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -507,74 +515,55 @@ test("bridge requires a verified provider account and never creates anonymous id
   assert.ok(appCheckAt >= 0);
   assert.ok(initializeAuthAt > appCheckAt);
   assert.doesNotMatch(bridge, /signInAnonymously/u);
+  assert.doesNotMatch(bridge, /signInWithPopup|GoogleAuthProvider/u);
   assert.match(bridge, /!user\.isAnonymous/u);
-  assert.match(bridge, /user\.emailVerified === true/u);
-  assert.match(bridge, /providerId === "google\.com"/u);
-  assert.match(bridge, /if \(!interactive\) \{\s*fail\("identity_required"\)/u);
-  assert.match(bridge, /await signInWithPopup\(auth, provider\)/u);
   assert.match(
-    initializeUser,
-    /popupRedirectResolver:\s*browserPopupRedirectResolver/u,
+    bridge,
+    /if \(!user\) \{\s*if \(!interactive\) fail\("passkey_required"\);\s*return authenticatePasskey\(auth, appCheckToken\)/u,
   );
+  const freshStart = bridge.indexOf("async function freshPasskeyUser(");
+  const freshEnd = bridge.indexOf(
+    "async function registerPasskeyAccount(",
+    freshStart,
+  );
+  const freshPasskeyUser = bridge.slice(freshStart, freshEnd);
+  assert.doesNotMatch(freshPasskeyUser, /return registerPasskey\(/u);
+  assert.match(freshPasskeyUser, /fail\("passkey_required"\)/u);
+  assert.match(
+    bridge.slice(bridge.indexOf("const publicBridge")),
+    /registerPasskeyAccount/u,
+  );
+  assert.match(bridge, /await signInWithCustomToken\(auth, finish\.customToken\)/u);
   assert.match(bridge, /secureCredentials\(true\)/u);
-  assert.match(bridge, /state: "identity-required"/u);
+  assert.match(bridge, /state: "passkey-required"/u);
 });
 
-test("hosting headers preserve Google sign-in popup communication", async () => {
-  const firebaseConfig = JSON.parse(
-    await readFile(new URL("../../../firebase.json", import.meta.url), "utf8"),
-  );
-  const globalHeaders = firebaseConfig.hosting.headers.find(
-    (entry) => entry.source === "**",
-  );
-  const headers = Object.fromEntries(
-    globalHeaders.headers.map(({ key, value }) => [key, value]),
-  );
-  assert.equal(
-    headers["Cross-Origin-Opener-Policy"],
-    "same-origin-allow-popups",
-  );
-  assert.match(
-    headers["Content-Security-Policy"],
-    /frame-src[^;]*https:\/\/kotae-ai-u22-2026\.firebaseapp\.com/u,
-  );
-
-  const deployScript = await readFile(
-    new URL("../../../scripts/deploy-hosting.ps1", import.meta.url),
-    "utf8",
-  );
-  assert.match(
-    deployScript,
-    /"Cross-Origin-Opener-Policy"\s*=\s*"same-origin-allow-popups"/u,
-  );
-  assert.match(
-    deployScript,
-    /frame-src https:\/\/kotae-ai-u22-2026\.firebaseapp\.com/u,
-  );
-});
-
-test("PDF is blocked before file bytes are read or serialized", async () => {
+test("ordinary one-turn PDF remains available and bounded", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
-  assert.doesNotMatch(
-    bridge,
-    /attachDocument|pendingDocument|safeDocumentName|payload\.document/u,
-  );
+  const attachStart = bridge.indexOf("async function attachDocument(");
+  const attachEnd = bridge.indexOf("\n}\n\nfunction stopSession", attachStart);
+  assert.notEqual(attachStart, -1);
+  assert.notEqual(attachEnd, -1);
+  const attach = bridge.slice(attachStart, attachEnd);
+
+  assert.match(attach, /input\.files\?\.length !== 1/u);
+  assert.match(attach, /file\.size === 0 \|\| file\.size > DOCUMENT_MAX_BYTES/u);
+  assert.match(attach, /arrayBufferToBase64\(await file\.arrayBuffer\(\)\)/u);
+  assert.match(attach, /pendingDocument = Object\.freeze/u);
+  assert.match(attach, /armPendingDocumentExpiry/u);
 
   const finishStart = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction stopSession", finishStart);
-  const finish = bridge.slice(finishStart, finishEnd);
-  assert.doesNotMatch(finish, /documentForTurn|payload\.document/u);
-
-  const client = await readFile(
-    new URL("../src/main.rs", import.meta.url),
-    "utf8",
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishStart,
   );
-  assert.doesNotMatch(client, /DocumentInfo|attach_document|paper-input|r#type:\s*"file"/u);
-  assert.match(client, /aria_disabled:\s*"true"/u);
-  assert.match(client, /ファイルを読まず、クラウドへも送りません/u);
+  const finish = bridge.slice(finishStart, finishEnd);
+  assert.match(finish, /documentForTurn = pendingDocument/u);
+  assert.match(finish, /payload\.document = \{/u);
+  assert.match(finish, /mimeType: documentForTurn\.mimeType/u);
 });
 
 test("explicit voice start warms only the fixed transport without private data", async () => {
@@ -644,7 +633,7 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
     "utf8",
   );
   const start = bridge.indexOf("async function finishTurn(");
-  const end = bridge.indexOf("\n}\n\nfunction stopSession", start);
+  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const finish = bridge.slice(start, end);
@@ -1257,10 +1246,55 @@ test("finite lifecycle stops pause Rust while preserving opaque session state", 
   assert.match(listener, /generation\.set\(next\)/u);
   assert.match(listener, /voice_state\.set\(VoiceState::Paused\)/u);
   assert.doesNotMatch(listener, /session_state\.set|String::new\(\)/u);
+  const setupStart = client.indexOf(
+    "let result = cloud::register_passkey_account().await;",
+  );
+  const setupReady = client.indexOf(
+    "voice_state.set(VoiceState::Ready);",
+    setupStart,
+  );
+  const setupError = client.indexOf("Err(message) =>", setupReady);
+  assert.ok(setupStart >= 0);
+  assert.ok(setupReady > setupStart);
+  assert.ok(setupError > setupReady);
+  const setupSuccess = client.slice(setupStart, setupError);
+  for (const reset of [
+    /generation\.set\(next\)/u,
+    /session_state\.set\(String::new\(\)\)/u,
+    /detected_domain\.set\(String::new\(\)\)/u,
+    /route\.set\(String::new\(\)\)/u,
+    /coach_state\.set\(CoachState::NONE\)/u,
+    /needs_paper\.set\(false\)/u,
+    /research_status\.set\(ResearchStatus::None\)/u,
+    /research_records\.set\(Vec::new\(\)\)/u,
+    /document_info\.set\(None\)/u,
+    /document_error\.set\(None\)/u,
+    /caption\.set\(None\)/u,
+    /cloud::stop_session\(\)/u,
+  ]) {
+    assert.match(setupSuccess, reset);
+  }
+  const generationAt = setupSuccess.indexOf("generation.set(next)");
+  const stopAt = setupSuccess.indexOf("cloud::stop_session()");
+  const sessionClearAt = setupSuccess.indexOf(
+    "session_state.set(String::new())",
+  );
+  const statusRefreshAt = setupSuccess.indexOf("cloud_status.restart()");
+  const readyAt = setupSuccess.indexOf("voice_state.set(VoiceState::Ready)");
+  assert.ok(generationAt >= 0);
+  assert.ok(stopAt > generationAt);
+  assert.ok(sessionClearAt > stopAt);
+  assert.ok(statusRefreshAt > sessionClearAt);
+  assert.ok(readyAt > statusRefreshAt);
+  const setupReadyStatement = "voice_state.set(VoiceState::Ready);";
+  const sessionLifecycleClient =
+    client.slice(0, setupReady) +
+    client.slice(setupReady + setupReadyStatement.length);
   assert.equal(
-    client.match(/voice_state\.set\(VoiceState::Ready\)/gu)?.length,
+    sessionLifecycleClient.match(/voice_state\.set\(VoiceState::Ready\)/gu)
+      ?.length,
     1,
-    "Ready must remain explicit End only",
+    "outside completed account setup, Ready must remain explicit End only",
   );
 });
 
@@ -1640,6 +1674,7 @@ function liveStartFrame() {
     idToken: "firebase-id-token",
     appCheckToken: "app-check-token",
     sessionState: "opaque-state",
+    strictCloudMinimization: false,
     turnMode: "ambient",
     sampleRateHz: 16_000,
   };
@@ -2445,18 +2480,12 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     providerEndpointAt: 12_500,
   };
   assert.equal(
-    shouldCommitHybridEndpoint({
-      ...monologue,
-      now: 17_099,
-    }),
+    shouldCommitHybridEndpoint({ ...monologue, now: 17_099 }),
     false,
     "a long monologue may continue after a reflective pause",
   );
   assert.equal(
-    shouldCommitHybridEndpoint({
-      ...monologue,
-      now: 17_100,
-    }),
+    shouldCommitHybridEndpoint({ ...monologue, now: 17_100 }),
     true,
   );
 });
@@ -2888,7 +2917,7 @@ test("interrupt VAD preserves 2.2 seconds for reflective speech", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("interrupt VAD also permits a three-minute follow-up monologue", () => {
+test("interrupt VAD permits a three-minute follow-up monologue", () => {
   const startedAt = 28_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -2995,7 +3024,10 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
   assert.match(bridge, /fail\(stoppedSessionCode\(expectedEpoch\)\)/u);
   const finishAt = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction stopSession", finishAt);
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishAt,
+  );
   const finish = bridge.slice(finishAt, finishEnd);
   assert.doesNotMatch(
     finish,
@@ -3103,7 +3135,10 @@ test("network keeps one finite deadline while validated playback drains separate
     /const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;/u,
   );
   const finishAt = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction stopSession", finishAt);
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishAt,
+  );
   const finish = bridge.slice(finishAt, finishEnd);
   assert.match(
     finish,
@@ -3183,7 +3218,7 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
   const validatorSource = executableBridgeFunction(
     bridge,
     "function hasValidCoachMetadata(",
-    "function safeVoiceResponse(",
+    "function clearPendingDocument(",
   );
   const validate = Function(
     `"use strict"; ${validatorSource}; return hasValidCoachMetadata;`,
@@ -3223,6 +3258,22 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
   );
   assert.match(response, /coachPhase: payload\.coachPhase/u);
   assert.match(response, /coachAction: payload\.coachAction/u);
+  assert.match(
+    response,
+    /expectedStrictCloudMinimization[\s\S]*payload\.privacyStatus !== "blocked"[\s\S]*payload\.privacyStatus !== "clear"/u,
+  );
+  assert.match(
+    response,
+    /!expectedStrictCloudMinimization && payload\.privacyStatus !== ""/u,
+  );
+  assert.match(
+    bridge,
+    /safeVoiceResponse\(result, strictCloudMinimization\)/u,
+  );
+  assert.match(
+    bridge,
+    /safeVoiceResponse\(result, expectedStrictCloudMinimization\)/u,
+  );
 });
 
 test("stream bridge uses direct authenticated CORS with bounded PCM playback", async () => {
@@ -3424,6 +3475,24 @@ test("voice session pause reasons are finite and contain no user content", () =>
   });
 });
 
+test("the pending document deadline remains bounded", () => {
+  const attachedAt = 50_000;
+  assert.equal(
+    isPendingDocumentExpired(
+      attachedAt,
+      attachedAt + VOICE_SESSION_LIMITS.pendingDocumentLimitMs - 1,
+    ),
+    false,
+  );
+  assert.equal(
+    isPendingDocumentExpired(
+      attachedAt,
+      attachedAt + VOICE_SESSION_LIMITS.pendingDocumentLimitMs,
+    ),
+    true,
+  );
+});
+
 test("idle and absolute session expiries are checked at their boundaries", () => {
   let now = 10_000;
   const clock = createSessionClock({ now: () => now });
@@ -3503,7 +3572,7 @@ test("finishTurn holds the idle clock through validated playback only", async ()
     "utf8",
   );
   const start = bridge.indexOf("async function finishTurn(");
-  const end = bridge.indexOf("\n}\n\nfunction stopSession", start);
+  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const finish = bridge.slice(start, end);
@@ -4066,7 +4135,7 @@ test("VAD caps a spoken capture at three minutes thirty seconds", () => {
   assert.equal(state.action, "duration-limit");
 });
 
-test("VAD keeps a three-minute monologue open through a natural pause", () => {
+test("VAD keeps a three-minute clear monologue open through a natural pause", () => {
   assert.ok(
     VOICE_SESSION_LIMITS.spokenCaptureLimitMs >=
       VOICE_SESSION_LIMITS.silentCaptureLimitMs + 3 * 60_000,
@@ -4097,12 +4166,9 @@ test("VAD keeps a three-minute monologue open through a natural pause", () => {
   });
   assert.equal(state.action, null);
   const lastVoiceAt = state.lastVoiceAt;
-
   state = advanceVad(state, {
-    now:
-      lastVoiceAt +
-      VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
-    peak: 0,
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    peak: 0.004,
     rms: 0.003,
   });
   assert.equal(state.action, null);
@@ -4111,15 +4177,42 @@ test("VAD keeps a three-minute monologue open through a natural pause", () => {
       lastVoiceAt +
       VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs -
       1,
-    peak: 0,
+    peak: 0.004,
     rms: 0.003,
   });
   assert.equal(state.action, null);
   state = advanceVad(state, {
-    now:
-      lastVoiceAt +
-      VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
-    peak: 0,
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("cold-start changing quiet speech remains open for a three-minute monologue", () => {
+  let now = 0;
+  let state = createVadState(now);
+  const speechFrames =
+    (3 * 60_000) / VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 1; frame <= speechFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.009;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+    assert.equal(state.action, null, `quiet speech ended at frame ${frame}`);
+  }
+  assert.equal(state.hasSpeech, true);
+  assert.equal(state.softVoiceConfirmed, true);
+  assert.ok(state.lastVoiceAt >= now - VOICE_SESSION_LIMITS.vadIntervalMs);
+  const lastVoiceAt = state.lastVoiceAt;
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    peak: 0.004,
     rms: 0.003,
   });
   assert.equal(state.action, "end-of-turn");
@@ -4438,7 +4531,7 @@ test("an incomplete recorder fallback can never be uploaded after live fails", a
   );
   const finishStart = bridge.indexOf("async function finishTurn(");
   const finishEnd = bridge.indexOf(
-    "\n}\n\nfunction stopSession",
+    "\n}\n\nfunction safeDocumentName",
     finishStart,
   );
   assert.notEqual(resolveStart, -1);

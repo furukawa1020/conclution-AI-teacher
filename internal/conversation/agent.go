@@ -137,6 +137,13 @@ type Agent interface {
 	Process(ctx context.Context, uid string, turn VoiceTurn) (VoiceTurnResult, error)
 }
 
+// StateTokenValidator authenticates an opaque state token without advancing
+// conversation state. Voice transports use this optional production
+// capability before reflecting a token on an STT no-op path.
+type StateTokenValidator interface {
+	ValidateStateToken(uid string, token string) error
+}
+
 type ContentGenerator interface {
 	GenerateContent(
 		ctx context.Context,
@@ -451,6 +458,16 @@ func (agent *vertexAgent) sealState(
 		}
 	}
 	return agent.codec.seal(uid, state)
+}
+
+// ValidateStateToken authenticates the token, its Firebase UID binding,
+// schema, and expiry without exposing decrypted state to the voice layer.
+func (agent *vertexAgent) ValidateStateToken(uid string, token string) error {
+	if agent == nil || agent.codec == nil || token == "" {
+		return ErrInvalidStateToken
+	}
+	_, err := agent.codec.open(uid, token)
+	return err
 }
 
 func (agent *vertexAgent) Process(
@@ -909,7 +926,8 @@ func (agent *vertexAgent) Process(
 	}
 	if !plannerRecoveredWithPrecision &&
 		!skipOptionalForegroundPrecision &&
-		(needsPrecision(fastPlan) || failClosedPrecision) &&
+		(needsPrecision(fastPlan) ||
+			failClosedPrecision) &&
 		!awaitingAnswerWithoutPublishableDraft {
 		precisionBudget, hasPrecisionBudget := timeoutBudgetWithReserve(
 			ctx,
@@ -970,6 +988,16 @@ func (agent *vertexAgent) Process(
 	researchStatus := "none"
 	researchRecords := []ResearchRecord{}
 	researchReply := ""
+	if normalized.ResearchDisabled && finalPlan.ResearchAction != "none" {
+		// This flag is authored by the trusted voice pipeline, never by model
+		// output. Remove the capability before performResearch can mint a lease.
+		// The deterministic reply also avoids speaking an unverified promise
+		// from the plan that an external search was performed.
+		finalPlan.ResearchAction = "none"
+		finalPlan.ResearchQuery = ""
+		finalPlan.SpokenReply = "厳格モードでは外部検索を行いません。検索を使わない範囲で、この話を一緒に整理できます。"
+		route = "strict-research-disabled"
+	}
 	if normalized.Speculative && finalPlan.ResearchAction != "none" {
 		return VoiceTurnResult{}, ErrSpeculativeExternalAction
 	}

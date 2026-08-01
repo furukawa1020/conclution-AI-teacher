@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"cloud.google.com/go/firestore"
 )
 
 func TestMemoryLimiterEnforcesMinuteAndDailyWindows(t *testing.T) {
@@ -117,5 +119,127 @@ func TestLimitsRejectUnsafeValues(t *testing.T) {
 		if err := limits.Validate(); err == nil {
 			t.Fatalf("Validate(%+v) succeeded; want error", limits)
 		}
+	}
+}
+
+func TestPasskeyAppCircuitBreakerHasDedicatedBounds(t *testing.T) {
+	t.Parallel()
+
+	breaker := Limits{
+		PerMinute: MaxPasskeyAppCircuitBreakerPerMinute,
+		PerDay:    MaxPasskeyAppCircuitBreakerPerDay,
+	}
+	if err := breaker.ValidatePasskeyAppCircuitBreaker(); err != nil {
+		t.Fatalf("passkey app circuit breaker rejected: %v", err)
+	}
+	if err := breaker.Validate(); err == nil {
+		t.Fatal("ordinary per-client validation accepted application-wide limits")
+	}
+
+	for _, limits := range []Limits{
+		{PerMinute: 0, PerDay: MaxPasskeyAppCircuitBreakerPerDay},
+		{PerMinute: MaxPasskeyAppCircuitBreakerPerMinute + 1, PerDay: MaxPasskeyAppCircuitBreakerPerDay},
+		{PerMinute: MaxPasskeyAppCircuitBreakerPerMinute, PerDay: 0},
+		{PerMinute: MaxPasskeyAppCircuitBreakerPerMinute, PerDay: MaxPasskeyAppCircuitBreakerPerDay + 1},
+	} {
+		if err := limits.ValidatePasskeyAppCircuitBreaker(); err == nil {
+			t.Fatalf("ValidatePasskeyAppCircuitBreaker(%+v) succeeded; want error", limits)
+		}
+	}
+}
+
+func TestMemoryPasskeyAppLimiterUsesCircuitBreakerValidation(t *testing.T) {
+	t.Parallel()
+
+	limits := Limits{PerMinute: 21, PerDay: 201}
+	if _, err := NewMemoryLimiter(limits); err == nil {
+		t.Fatal("ordinary memory limiter accepted limits above the per-client ceiling")
+	}
+	if _, err := NewMemoryPasskeyClientLimiter(limits); err == nil {
+		t.Fatal("passkey client limiter accepted limits above the per-client ceiling")
+	}
+	if _, err := NewMemoryPasskeyAppLimiter(limits); err != nil {
+		t.Fatalf("passkey app limiter rejected dedicated breaker limits: %v", err)
+	}
+}
+
+func TestFirestoreLimiterScopesUseDedicatedCollections(t *testing.T) {
+	t.Parallel()
+
+	client := &firestore.Client{}
+	limits := Limits{PerMinute: 5, PerDay: 40}
+	for scope, wantCollection := range map[string]string{
+		"evaluation": evaluationRateLimitCollection,
+		"voice":      voiceRateLimitCollection,
+	} {
+		limiter, err := NewFirestoreLimiterForScope(client, limits, scope)
+		if err != nil {
+			t.Fatalf("NewFirestoreLimiterForScope(%q): %v", scope, err)
+		}
+		if limiter.collection != wantCollection {
+			t.Fatalf(
+				"NewFirestoreLimiterForScope(%q) collection = %q; want %q",
+				scope,
+				limiter.collection,
+				wantCollection,
+			)
+		}
+	}
+
+	if _, err := NewFirestoreLimiterForScope(client, limits, "unknown"); err == nil {
+		t.Fatal("unknown rate-limit scope was accepted")
+	}
+	if _, err := NewFirestoreLimiterForScope(client, limits, "passkey"); err == nil {
+		t.Fatal("legacy ambiguous passkey scope was accepted")
+	}
+}
+
+func TestPasskeyFirestoreLimitersUseSeparateCollections(t *testing.T) {
+	t.Parallel()
+
+	client := &firestore.Client{}
+	clientLimiter, err := NewFirestorePasskeyClientLimiter(
+		client,
+		Limits{PerMinute: 10, PerDay: 100},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appLimiter, err := NewFirestorePasskeyAppLimiter(
+		client,
+		Limits{
+			PerMinute: MaxPasskeyAppCircuitBreakerPerMinute,
+			PerDay:    MaxPasskeyAppCircuitBreakerPerDay,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientLimiter.collection != passkeyClientRateLimitCollection {
+		t.Fatalf("client collection = %q", clientLimiter.collection)
+	}
+	if appLimiter.collection != passkeyAppRateLimitCollection {
+		t.Fatalf("app collection = %q", appLimiter.collection)
+	}
+	if clientLimiter.collection == appLimiter.collection {
+		t.Fatal("passkey client and app counters share a collection")
+	}
+}
+
+func TestFirestoreCounterDocumentKeepsTTLField(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 1, 12, 30, 0, 0, time.FixedZone("JST", 9*60*60))
+	document := firestoreCounterDocument(counterState{}, now)
+	expiresAt, ok := document[rateLimitTTLField].(time.Time)
+	if !ok {
+		t.Fatalf("%s field is missing or is not time.Time: %#v", rateLimitTTLField, document)
+	}
+	want := now.UTC().Add(rateLimitDocumentTTL)
+	if !expiresAt.Equal(want) {
+		t.Fatalf("%s = %s; want %s", rateLimitTTLField, expiresAt, want)
+	}
+	if _, legacyFieldPresent := document["expiry"]; legacyFieldPresent {
+		t.Fatal("unexpected legacy TTL field is present")
 	}
 }

@@ -64,16 +64,17 @@ const (
 )
 
 type VoiceTurnInput struct {
-	Audio         []byte
-	MIMEType      string
-	StateToken    string
-	RequestID     string
-	TurnMode      VoiceTurnMode
-	Ambient       bool
-	Foreground    bool
-	Document      *VoiceDocument
-	STTLocale     string
-	SchemaVersion int
+	Audio                   []byte
+	MIMEType                string
+	StateToken              string
+	RequestID               string
+	TurnMode                VoiceTurnMode
+	Ambient                 bool
+	Foreground              bool
+	Document                *VoiceDocument
+	STTLocale               string
+	SchemaVersion           int
+	StrictCloudMinimization bool
 	// ProcessingTimeout is server-authored. Live pipelines start this budget
 	// at the audio commit boundary so downstream agents can observe the same
 	// deadline that the transport enforces.
@@ -96,6 +97,7 @@ type VoiceTurnResult struct {
 	CoachPhase       string
 	CoachAction      string
 	ResearchStatus   string
+	PrivacyStatus    string
 	ResearchRecords  []ResearchRecord
 	Route            string
 	NeedsPaper       bool
@@ -163,13 +165,14 @@ type VoiceTurnLiveEndpointService interface {
 }
 
 type VoiceOptions struct {
-	Service           VoiceTurnService
-	RateLimiter       guard.Limiter
-	AppRateLimiter    guard.Limiter
-	LiveLeaseManager  guard.VoiceLiveLeaseManager
-	LiveHandshakeGate *VoiceLiveHandshakeGate
-	RequestTimeout    time.Duration
-	MaxRequestBytes   int64
+	Service              VoiceTurnService
+	RateLimiter          guard.Limiter
+	AppRateLimiter       guard.Limiter
+	LiveLeaseManager     guard.VoiceLiveLeaseManager
+	LiveHandshakeGate    *VoiceLiveHandshakeGate
+	RequestTimeout       time.Duration
+	MaxRequestBytes      int64
+	RequireRecentPasskey bool
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -177,14 +180,18 @@ type VoiceOptions struct {
 }
 
 type Server struct {
-	logger          *slog.Logger
-	verifier        identity.Verifier
-	rateLimiter     guard.Limiter
-	evaluator       evaluation.Evaluator
-	store           store.EvaluationStore
-	requestTimeout  time.Duration
-	maxRequestBytes int64
-	voice           VoiceOptions
+	logger                   *slog.Logger
+	verifier                 identity.Verifier
+	rateLimiter              guard.Limiter
+	evaluator                evaluation.Evaluator
+	store                    store.EvaluationStore
+	requestTimeout           time.Duration
+	maxRequestBytes          int64
+	voice                    VoiceOptions
+	passkeys                 PasskeyService
+	appVerifier              identity.AppVerifier
+	passkeyClientRateLimiter guard.Limiter
+	passkeyAppCircuitBreaker guard.Limiter
 }
 
 func New(
@@ -218,32 +225,78 @@ func NewWithVoice(
 	maxRequestBytes int64,
 	voice VoiceOptions,
 ) http.Handler {
+	return NewWithVoiceAndPasskeys(
+		logger,
+		verifier,
+		rateLimiter,
+		evaluator,
+		evaluationStore,
+		requestTimeout,
+		maxRequestBytes,
+		voice,
+		nil,
+		nil,
+		nil,
+	)
+}
+
+func NewWithVoiceAndPasskeys(
+	logger *slog.Logger,
+	verifier identity.Verifier,
+	rateLimiter guard.Limiter,
+	evaluator evaluation.Evaluator,
+	evaluationStore store.EvaluationStore,
+	requestTimeout time.Duration,
+	maxRequestBytes int64,
+	voice VoiceOptions,
+	passkeys PasskeyService,
+	passkeyClientRateLimiter guard.Limiter,
+	passkeyAppCircuitBreaker guard.Limiter,
+) http.Handler {
+	appVerifier, _ := verifier.(identity.AppVerifier)
+	// The passkey branch predates the unauthenticated WebSocket admission gate.
+	// Preserve its public constructor behavior without weakening the latest
+	// lifecycle boundary: passkey-gated live voice receives the same bounded
+	// default gate when an older caller did not yet provide one explicitly.
+	if voice.RequireRecentPasskey && voice.LiveHandshakeGate == nil {
+		voice.LiveHandshakeGate = NewVoiceLiveHandshakeGate(
+			DefaultVoiceLiveHandshakeLimit,
+		)
+	}
 	if voice.livePipelineJoinTimeout <= 0 ||
 		voice.livePipelineJoinTimeout > voiceLivePipelineJoinTimeout {
 		voice.livePipelineJoinTimeout = voiceLivePipelineJoinTimeout
 	}
 	server := &Server{
-		logger:          logger,
-		verifier:        verifier,
-		rateLimiter:     rateLimiter,
-		evaluator:       evaluator,
-		store:           evaluationStore,
-		requestTimeout:  requestTimeout,
-		maxRequestBytes: maxRequestBytes,
-		voice:           voice,
+		logger:                   logger,
+		verifier:                 verifier,
+		rateLimiter:              rateLimiter,
+		evaluator:                evaluator,
+		store:                    evaluationStore,
+		requestTimeout:           requestTimeout,
+		maxRequestBytes:          maxRequestBytes,
+		voice:                    voice,
+		passkeys:                 passkeys,
+		appVerifier:              appVerifier,
+		passkeyClientRateLimiter: passkeyClientRateLimiter,
+		passkeyAppCircuitBreaker: passkeyAppCircuitBreaker,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
 	mux.Handle("GET /api/v1/me", server.requireIdentity(http.HandlerFunc(server.me)))
 	mux.Handle("POST /api/v1/evaluations", server.requireIdentity(http.HandlerFunc(server.evaluate)))
-	mux.Handle("POST /api/v1/voice/turns", server.requireIdentity(http.HandlerFunc(server.voiceTurn)))
+	mux.Handle("POST /api/v1/voice/turns", server.requireIdentity(server.requireFreshPasskey(http.HandlerFunc(server.voiceTurn))))
 	mux.Handle(
 		"POST "+voiceStreamPath,
-		server.requireIdentity(http.HandlerFunc(server.voiceTurnStream)),
+		server.requireIdentity(server.requireFreshPasskey(http.HandlerFunc(server.voiceTurnStream))),
 	)
 	mux.HandleFunc("OPTIONS "+voiceStreamPath, server.voiceStreamPreflight)
 	mux.HandleFunc("GET "+voiceLivePath, server.voiceLive)
+	mux.Handle("POST "+passkeyRegistrationBeginPath, server.requireAppAttestation(http.HandlerFunc(server.beginPasskeyRegistration)))
+	mux.Handle("POST "+passkeyRegistrationFinishPath, server.requireAppAttestation(http.HandlerFunc(server.finishPasskeyRegistration)))
+	mux.Handle("POST "+passkeyAuthenticationBeginPath, server.requireAppAttestation(http.HandlerFunc(server.beginPasskeyAuthentication)))
+	mux.Handle("POST "+passkeyAuthenticationFinishPath, server.requireAppAttestation(http.HandlerFunc(server.finishPasskeyAuthentication)))
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(
@@ -257,11 +310,12 @@ func NewWithVoice(
 }
 
 type voiceTurnRequest struct {
-	AudioBase64  string                `json:"audioBase64"`
-	MIMEType     string                `json:"mimeType"`
-	SessionState string                `json:"sessionState"`
-	TurnMode     VoiceTurnMode         `json:"turnMode"`
-	Document     *voiceDocumentRequest `json:"document,omitempty"`
+	AudioBase64             string                `json:"audioBase64"`
+	MIMEType                string                `json:"mimeType"`
+	SessionState            string                `json:"sessionState"`
+	TurnMode                VoiceTurnMode         `json:"turnMode"`
+	StrictCloudMinimization bool                  `json:"strictCloudMinimization"`
+	Document                *voiceDocumentRequest `json:"document,omitempty"`
 }
 
 type voiceDocumentRequest struct {
@@ -343,7 +397,7 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clear(result.Audio)
 
-	if err := validateVoiceResult(result); err != nil {
+	if err := validateVoiceResultForInput(input, result); err != nil {
 		s.logger.ErrorContext(ctx, "voice result rejected",
 			"request_id", requestIDFromContext(ctx),
 			"error_class", "invalid_voice_result",
@@ -368,6 +422,7 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"coachAction":      result.CoachAction,
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
+		"privacyStatus":    result.PrivacyStatus,
 		"route":            result.Route,
 		"needsPaper":       result.NeedsPaper,
 	}); err != nil {
@@ -438,6 +493,10 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	if mimeType == "" || len(request.SessionState) > maxStateBytes {
 		return VoiceTurnInput{}, errors.New("invalid voice metadata")
 	}
+	if request.StrictCloudMinimization &&
+		(request.SessionState != "" || request.Document != nil) {
+		return VoiceTurnInput{}, errors.New("strict voice metadata retained state or document")
+	}
 	ambient := false
 	foreground := false
 	switch request.TurnMode {
@@ -457,14 +516,15 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	}
 
 	input := VoiceTurnInput{
-		Audio:         audio,
-		MIMEType:      mimeType,
-		StateToken:    request.SessionState,
-		TurnMode:      request.TurnMode,
-		Ambient:       ambient,
-		Foreground:    foreground,
-		STTLocale:     "ja-JP",
-		SchemaVersion: 1,
+		Audio:                   audio,
+		MIMEType:                mimeType,
+		StateToken:              request.SessionState,
+		TurnMode:                request.TurnMode,
+		Ambient:                 ambient,
+		Foreground:              foreground,
+		STTLocale:               "ja-JP",
+		SchemaVersion:           1,
+		StrictCloudMinimization: request.StrictCloudMinimization,
 	}
 	if request.Document == nil {
 		return input, nil
@@ -516,9 +576,27 @@ func normalizedAudioMIME(value string) string {
 }
 
 func validateVoiceResult(result VoiceTurnResult) error {
+	if result.PrivacyStatus == "blocked" {
+		if len(result.Audio) != 0 || result.AudioMIMEType != "" ||
+			result.StateToken != "" || result.Caption != "" ||
+			result.DetectedDomain != "unknown" ||
+			result.AssistanceTarget != "assistant" ||
+			result.RespondentStage != "none" ||
+			result.CoachPhase != "none" || result.CoachAction != "none" ||
+			result.ResearchStatus != "none" ||
+			result.ResearchRecords == nil || len(result.ResearchRecords) != 0 ||
+			result.Route != "strict-privacy-blocked" || result.NeedsPaper {
+			return errors.New("blocked privacy result has unsafe fields")
+		}
+		return nil
+	}
+	if result.PrivacyStatus != "" && result.PrivacyStatus != "clear" {
+		return errors.New("voice result has unknown privacy status")
+	}
 	preInferenceRecognitionResult := isPreInferenceRecognitionRoute(result.Route)
 	if len(result.Audio) > maxAudioBytes ||
-		(len(result.StateToken) == 0 && !preInferenceRecognitionResult) ||
+		(len(result.StateToken) == 0 && !preInferenceRecognitionResult &&
+			result.PrivacyStatus != "clear") ||
 		len(result.StateToken) > maxStateBytes ||
 		len(result.DetectedDomain) == 0 ||
 		len(result.DetectedDomain) > 40 ||
@@ -551,6 +629,11 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		!validResearchRecords(result.ResearchStatus, result.ResearchRecords) {
 		return errors.New("voice result has inconsistent metadata")
 	}
+	if result.PrivacyStatus == "clear" &&
+		(result.StateToken != "" || result.ResearchStatus != "none" ||
+			len(result.ResearchRecords) != 0) {
+		return errors.New("strict clear result retained state or research")
+	}
 	if len(result.Audio) == 0 {
 		if result.AudioMIMEType != "" || result.Caption != "" {
 			return errors.New("silent result has audio metadata")
@@ -562,6 +645,32 @@ func validateVoiceResult(result VoiceTurnResult) error {
 	}
 	if result.AudioMIMEType != "audio/mpeg" && result.AudioMIMEType != "audio/ogg" {
 		return errors.New("unsupported synthesized audio type")
+	}
+	return nil
+}
+
+func validateVoiceResultForInput(
+	input VoiceTurnInput,
+	result VoiceTurnResult,
+) error {
+	if err := validateVoiceResult(result); err != nil {
+		return err
+	}
+	return validateVoiceResultMode(input, result)
+}
+
+func validateVoiceResultMode(
+	input VoiceTurnInput,
+	result VoiceTurnResult,
+) error {
+	if input.StrictCloudMinimization {
+		if result.PrivacyStatus != "clear" && result.PrivacyStatus != "blocked" {
+			return errors.New("strict request returned an uninspected result")
+		}
+		return nil
+	}
+	if result.PrivacyStatus != "" {
+		return errors.New("ordinary request returned strict-mode metadata")
 	}
 	return nil
 }

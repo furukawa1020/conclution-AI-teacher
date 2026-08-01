@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -202,6 +203,148 @@ func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
 				t.Fatalf("principal = %+v; want empty", principal)
 			}
 		})
+	}
+}
+
+func TestFirebaseVerifierAcceptsExplicitVerifiedCustomIdentity(t *testing.T) {
+	t.Parallel()
+	authTime := int64(1_786_000_000)
+	passkeyAt := authTime - int64((10*time.Minute)/time.Second)
+
+	verifier := testFirebaseVerifier(
+		authTokenVerifierFunc(func(context.Context, string) (*auth.Token, error) {
+			return &auth.Token{
+				UID:      "passkey-user",
+				AuthTime: authTime,
+				IssuedAt: authTime,
+				Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
+				Claims: map[string]any{
+					"kotae_account_verified": true,
+					"kotae_authn":            "passkey-v1",
+					"kotae_passkey_at":       float64(passkeyAt),
+				},
+			}, nil
+		}),
+		appCheckTokenVerifierFunc(func(context.Context, string) (*appcheck.DecodedAppCheckToken, error) {
+			return &appcheck.DecodedAppCheckToken{AppID: "app-123"}, nil
+		}),
+	)
+
+	principal, err := verifier.Verify(
+		context.Background(),
+		"id-token",
+		"app-check-token",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.Provider != "custom" || principal.AuthMethod != "passkey-v1" ||
+		principal.AuthTime.Unix() != authTime || principal.PasskeyAt.Unix() != passkeyAt ||
+		!principal.AccountVerified {
+		t.Fatalf("principal = %+v", principal)
+	}
+}
+
+func TestFirebaseVerifierRejectsInvalidPasskeyTimestampClaims(t *testing.T) {
+	t.Parallel()
+
+	const tokenTime = int64(1_786_000_000)
+	tests := []struct {
+		name     string
+		claim    any
+		omit     bool
+		authTime int64
+		issuedAt int64
+		authn    string
+	}{
+		{name: "missing", omit: true, authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "string", claim: "1786000000", authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "fractional float", claim: float64(tokenTime) - 0.5, authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "float32 wrong type", claim: float32(tokenTime), authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "NaN", claim: math.NaN(), authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "positive infinity", claim: math.Inf(1), authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "negative", claim: float64(-1), authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "zero", claim: float64(0), authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "out of exact JSON integer bounds", claim: float64(1 << 53), authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{
+			name:     "future of authentication time",
+			claim:    float64(tokenTime + int64(passkeyTimestampClockSkew/time.Second) + 1),
+			authTime: tokenTime, issuedAt: tokenTime + 60, authn: passkeyAuthMethod,
+		},
+		{
+			name:     "future of token issued at",
+			claim:    float64(tokenTime + int64(passkeyTimestampClockSkew/time.Second) + 1),
+			authTime: tokenTime + 60, issuedAt: tokenTime, authn: passkeyAuthMethod,
+		},
+		{
+			name:     "older than custom token exchange bound",
+			claim:    float64(tokenTime - int64((maxPasskeyTokenExchangeDelay+passkeyTimestampClockSkew)/time.Second) - 1),
+			authTime: tokenTime, issuedAt: tokenTime, authn: passkeyAuthMethod,
+		},
+		{name: "missing auth time", claim: float64(tokenTime), issuedAt: tokenTime, authn: passkeyAuthMethod},
+		{name: "missing issued at", claim: float64(tokenTime), authTime: tokenTime, authn: passkeyAuthMethod},
+		{name: "wrong custom auth method", claim: float64(tokenTime), authTime: tokenTime, issuedAt: tokenTime, authn: "password-v1"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			claims := map[string]any{
+				"kotae_account_verified": true,
+				"kotae_authn":            test.authn,
+			}
+			if !test.omit {
+				claims[passkeyAtClaim] = test.claim
+			}
+			verifier := testFirebaseVerifier(
+				authTokenVerifierFunc(func(context.Context, string) (*auth.Token, error) {
+					return &auth.Token{
+						UID:      "passkey-user",
+						AuthTime: test.authTime,
+						IssuedAt: test.issuedAt,
+						Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
+						Claims:   claims,
+					}, nil
+				}),
+				appCheckTokenVerifierFunc(func(context.Context, string) (*appcheck.DecodedAppCheckToken, error) {
+					return &appcheck.DecodedAppCheckToken{AppID: "app-123"}, nil
+				}),
+			)
+
+			principal, err := verifier.Verify(context.Background(), "id-token", "app-check-token")
+			if !errors.Is(err, ErrUnauthenticated) {
+				t.Fatalf("error = %v; want ErrUnauthenticated", err)
+			}
+			if principal.UID != "" || !principal.PasskeyAt.IsZero() {
+				t.Fatalf("principal = %+v; want empty", principal)
+			}
+		})
+	}
+}
+
+func TestExactUnixSecondsAcceptsCanonicalFirebaseJSONNumbers(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []int64{0, 1_786_000_000, maxExactJSONInteger} {
+		got, ok := exactUnixSeconds(float64(want))
+		if !ok || got != want {
+			t.Fatalf("exactUnixSeconds(%d) = (%d, %v)", want, got, ok)
+		}
+	}
+	for _, invalid := range []any{
+		float64(1 << 53),
+		-1.0,
+		1.5,
+		math.NaN(),
+		math.Inf(1),
+		"1786000000",
+		true,
+		int64(1_786_000_000),
+		int(1_786_000_000),
+	} {
+		if got, ok := exactUnixSeconds(invalid); ok {
+			t.Fatalf("exactUnixSeconds(%#v) = (%d, true); want rejection", invalid, got)
+		}
 	}
 }
 

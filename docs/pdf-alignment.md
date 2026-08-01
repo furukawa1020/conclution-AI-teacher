@@ -69,15 +69,16 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 
 ## セキュリティ機能の現在地
 
-- Google providerと確認済みemailを持つFirebase ID tokenを要求し、匿名tokenを拒否する。確認できるのはGoogleアカウントを使用できることまでで、法的な本人確認や現在の話者認証ではない
-- 音声はSpeech-to-Textで平文処理される。文字起こしはローカル検査とregional DLPで検査・置換できた場合だけVertex AIへ進め、検査不能時はfail-closedにする
+- PasskeyのWebAuthn ceremonyを実装し、仮名Firebase accountの操作をuser verification付き署名で確認する。秘密鍵はPasskey providerが管理し、KOTAEのブラウザコードとサーバーは受け取らない（同期や保管の方式はproviderに依存する）。これは法的な本人確認や現在の話者認証ではない
+- 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をCloud Run内の決定論的検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
 - DLPにも検出漏れがあり得るため、完全なPII除去とは呼ばない。Cloud Run、Speech-to-Text、DLPが平文を扱うためE2EEとも呼ばない
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
-- PDF添付は、安全にPIIを除く経路が未完成なので、クライアントのfile readより前とAPIの推論より前の両方で停止する
+- 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する
 - 約3分の独話は、端末の録音開始から最大3分30秒、Cloud Run受信4分、Go live deadline 6分、Cloud Run request timeout 420秒の順に上限を分離して受ける。発話が確定しない無音候補は最大30秒で、その上限直前から話し始めても約3分を確保するが、3分30秒の実発話は保証しない。Cloud Speech-to-Textの5分上限まで使い切らず、provider境界まで60秒を残す
 - 圧縮音声のHTTPS fallbackは2 MiB上限で、約3分を通せる保証はない。上限を超えた場合は保持中のchunkを全て破棄し、先頭だけのpartial audioをuploadしない。live PCMが生きていればfallback超過だけでlive captureを止めない
+- live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。接続終了時にpipelineの停止を確認できない場合は即時解放せず7分TTLまでleaseを保持する
 - final transcriptが160 Unicode code point以上の場合だけ、クライアントから指定できないサーバー由来の印を付ける。中心点の根拠は現在turnのfinal transcriptだけとし、否定、条件、数値、不確実性を保つ。途中候補や過去turnから補わず、安全に一つへ定められない時は創作せず確認へ戻る。この印と逐語録・発話本文はcross-turn stateへ入れないが、長い発話も通常会話と同じ状態更新の対象であり、検査・フィルタ後の抽象化済み・有限化されたgoal、claim、open loopなどは暗号化された15分stateへ残り得る
-- 長期効果は未実証である。測定用コードを書くことと、本人を対象にした有効性を示すことを同一視しない
+- opt-in、固定測定窓、未見質問への有限回答、端末内保存、時点別の生観測表示、撤回・全削除を備えた個人内長期測定は実装した。有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionだけを扱い、音声、文字起こし、自由文、Firebase UID、時刻は保存しない。別tab競合はgeneration fenceで停止し、全削除後は個人情報を含まない固定markerだけを残す。ただし署名付き研究台帳や比較試験ではなく、長期効果は未実証である。測定用コードを書くことと、本人を対象にした有効性を示すことを同一視しない
 
 ## 現在も解決していないこと
 

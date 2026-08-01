@@ -23,6 +23,9 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   reflectiveEndOfTurnSilenceMs: 2_200,
   softVoiceEndOfTurnSilenceMs: 3_000,
   reflectiveSpeechSpanMs: 1_600,
+  // A sustained monologue gets a wider endpoint window than a short answer.
+  // This does not retain extra audio locally: confirmed PCM continues to flow
+  // through the bounded live transport while only these timestamps are kept.
   monologueEndOfTurnSilenceMs: 5_000,
   monologueSpeechSpanMs: 12_000,
   hybridEndpointSilenceMs: 1_200,
@@ -40,15 +43,14 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // confirmed from sustained signal-to-noise and envelope evidence.
   softCandidateCaptureLimitMs: 1_200,
   silentCaptureLimitMs: 30_000,
-  // Give a roughly three-minute monologue thirty seconds of client-side
-  // headroom. The server keeps a separate four-minute hard transport bound,
-  // still below Cloud Speech-to-Text's five-minute streaming limit.
-  spokenCaptureLimitMs: 210_000,
-  // This watchdog is refreshed when speech confirms, not on every PCM frame.
-  // Keep it beyond the longest client capture so it cannot expire during one
-  // continuous monologue; the independent 30-minute session cap remains.
+  // Three minutes of speaking plus bounded lead-in and endpoint headroom.
+  // The server independently stops confirmed live PCM at four minutes.
+  spokenCaptureLimitMs: 3 * 60_000 + 30_000,
+  // Speech confirmations refresh this idle clock. Keep it beyond the longest
+  // single capture so an active monologue cannot be mistaken for abandonment.
   idleSessionLimitMs: 4 * 60_000,
   maximumSessionMs: 30 * 60_000,
+  pendingDocumentLimitMs: 5 * 60_000,
 });
 
 const RESEARCH_STATUSES = Object.freeze([
@@ -420,6 +422,22 @@ export function shouldStopSessionForLifecycle(eventType, hidden, active) {
   return eventType === "visibilitychange" && hidden === true;
 }
 
+export function isPendingDocumentExpired(
+  attachedAt,
+  now,
+  limitMs = VOICE_SESSION_LIMITS.pendingDocumentLimitMs,
+) {
+  const attachedTimestamp = finiteTimestamp(attachedAt, "document_attached_at");
+  const currentTimestamp = finiteTimestamp(now, "document_time");
+  if (!Number.isFinite(limitMs) || limitMs <= 0) {
+    throw new TypeError("document_limit_invalid");
+  }
+  if (currentTimestamp < attachedTimestamp) {
+    throw new TypeError("document_time_invalid");
+  }
+  return currentTimestamp - attachedTimestamp >= limitMs;
+}
+
 export function createTurnGate() {
   let activeToken = null;
   let sequence = 0;
@@ -755,21 +773,21 @@ export function shouldCommitHybridEndpoint({
     lastVoiceAt -
     firstVoiceAt +
     VOICE_SESSION_LIMITS.vadIntervalMs;
-  const agreementWindow =
-    speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs
-      ? VOICE_SESSION_LIMITS.hybridMonologueEndpointAgreementWindowMs
-      : softVoiceConfirmed
-        ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
-        : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
+  const monologue =
+    speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
+  const requiredSilence = monologue
+    ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
+    : softVoiceConfirmed
+      ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
+      : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+        ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
+        : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+  const agreementWindow = monologue
+    ? VOICE_SESSION_LIMITS.hybridMonologueEndpointAgreementWindowMs
+    : softVoiceConfirmed
+      ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
+      : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
   if (now - providerEndpointAt > agreementWindow) return false;
-  const requiredSilence =
-    speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs
-      ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
-      : softVoiceConfirmed
-        ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
-        : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
-          ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
-          : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
   return now - lastVoiceAt >= requiredSilence;
 }
 

@@ -27,26 +27,24 @@ const (
 	// ground a same-turn main-point reflection safely.
 	extendedSpeechMinRunes       = 160
 	maxSpeculativeTTSBufferBytes = 24_000
-	voiceSynthesisReserve         = 5 * time.Second
-	lowConfidencePrompt           = "急がなくて大丈夫です。こちらから小さな話題を一つ置きます。音がない時間と、何か流れている時間では、どちらが少し楽ですか。答えは一語でも、聞いているだけでも大丈夫です。"
-	routeClarifyNoSpeech          = "stt-clarify-no-speech"
-	routeClarifyLowConfidence     = "stt-clarify-low-confidence"
-	routeSilentNoSpeech           = "stt-silent-no-speech"
-	routeSilentLowConfidence      = "stt-silent-low-confidence"
-	routePrivacyProtectionBlocked = "privacy-protection-blocked"
-	routeDocumentPrivacyBlocked   = "document-privacy-blocked"
-	privacyProtectionReply        = "個人情報を安全に伏せられなかったため、この内容はクラウドAIへ送りませんでした。同じことを言い直さなくて大丈夫です。固有名や連絡先を外して、別の話から続けられます。"
-	documentPrivacyReply          = "PDFは個人情報を安全に除ける経路がまだないため、クラウドAIへ送りませんでした。ファイル内容は会話や状態に使っていません。"
+	voiceSynthesisReserve        = 5 * time.Second
+	lowConfidencePrompt          = "急がなくて大丈夫です。こちらから小さな話題を一つ置きます。音がない時間と、何か流れている時間では、どちらが少し楽ですか。答えは一語でも、聞いているだけでも大丈夫です。"
+	routeClarifyNoSpeech         = "stt-clarify-no-speech"
+	routeClarifyLowConfidence    = "stt-clarify-low-confidence"
+	routeSilentNoSpeech          = "stt-silent-no-speech"
+	routeSilentLowConfidence     = "stt-silent-low-confidence"
+	routeStrictPrivacyBlocked    = "strict-privacy-blocked"
+	privacyStatusBlocked         = "blocked"
 )
 
 // Pipeline keeps the three trust boundaries explicit: regional speech
 // recognition, semantic reasoning, and regional speech synthesis. It does not
 // persist audio, transcripts, model replies, or documents.
 type Pipeline struct {
-	speech    speechio.Service
-	agent     conversation.Agent
-	protector privacyguard.Protector
-	now       func() time.Time
+	speech         speechio.Service
+	agent          conversation.Agent
+	strictBoundary *privacyguard.StrictBoundary
+	now            func() time.Time
 }
 
 type speculativeCandidateTracker struct {
@@ -161,22 +159,27 @@ func New(speech speechio.Service, agent conversation.Agent) (*Pipeline, error) {
 	return &Pipeline{speech: speech, agent: agent, now: time.Now}, nil
 }
 
-// NewProtected constructs the production pipeline. Interim recognition never
-// reaches the model; finalized input and model output must both pass the
-// fail-closed privacy boundary.
-func NewProtected(
+// NewWithPrivacy equips the ordinary pipeline with an opt-in strict boundary.
+// Ordinary turns retain their existing state, PDF, research and speculation
+// behavior. A strict turn blocks rather than redacts whenever either the local
+// detector or managed inspector cannot positively classify text as clear.
+func NewWithPrivacy(
 	speech speechio.Service,
 	agent conversation.Agent,
-	protector privacyguard.Protector,
+	inspector privacyguard.Inspector,
 ) (*Pipeline, error) {
 	pipeline, err := New(speech, agent)
 	if err != nil {
 		return nil, err
 	}
-	if protector == nil {
-		return nil, errors.New("voiceflow: privacy protector is required")
+	boundary, err := privacyguard.NewStrictBoundary(
+		inspector,
+		privacyguard.DefaultStrictInspectionTimeout,
+	)
+	if err != nil {
+		return nil, errors.New("voiceflow: strict privacy inspector is required")
 	}
-	pipeline.protector = protector
+	pipeline.strictBoundary = boundary
 	return pipeline, nil
 }
 
@@ -186,6 +189,7 @@ func (p *Pipeline) Process(
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, error) {
 	result, spokenReply, err := p.prepareTurn(ctx, uid, input)
+	result = withStrictPrivacyStatus(input, result)
 	if err != nil || spokenReply == "" {
 		return result, err
 	}
@@ -225,6 +229,7 @@ func (p *Pipeline) ProcessStream(
 		)
 	}
 	result, spokenReply, err := p.prepareTurn(ctx, uid, input)
+	result = withStrictPrivacyStatus(input, result)
 	if err != nil || spokenReply == "" {
 		return result, err
 	}
@@ -305,12 +310,12 @@ func (p *Pipeline) processLive(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
-	if input.Document != nil {
+	if strictInputBlocked(input) {
 		clearDocument(input.Document)
-		return privacyBlockedResult(
-			routeDocumentPrivacyBlocked,
-			documentPrivacyReply,
-		), nil
+		return strictPrivacyBlockedResult(), nil
+	}
+	if input.Document != nil {
+		defer clearDocument(input.Document)
 	}
 	streamingSpeech, ok := p.speech.(liveStreamingSpeech)
 	if !ok {
@@ -344,7 +349,7 @@ func (p *Pipeline) processLive(
 	}
 	armTranscriptionReserve := func(deadline time.Time) *time.Timer {
 		reserveDelay := time.Until(
-			deadline.Add(-p.preInferenceReserve()),
+			deadline.Add(-p.preInferenceReserve(input)),
 		)
 		if reserveDelay <= 0 {
 			cancelTranscription(errTranscriptionResponseReserve)
@@ -473,7 +478,7 @@ func (p *Pipeline) processLive(
 	// boundary explicit so a future protocol extension cannot accidentally
 	// race the agent's mandatory document wipe.
 	speculationEligible := responseExpected && input.Document == nil &&
-		p.protector == nil
+		!input.StrictCloudMinimization
 	finalFragments := make([]string, 0, 4)
 	finalConfidence := float32(0)
 	finalConfidenceObserved := false
@@ -746,7 +751,7 @@ func (p *Pipeline) processLive(
 			}
 		}
 		route := routeSilentNoSpeech
-		result = silentRecognitionResult(input.StateToken, route)
+		result = p.silentRecognitionResult(uid, input.StateToken, route)
 		if promptOnRecognitionMiss(input) {
 			result.Route = routeClarifyNoSpeech
 			spokenReply = lowConfidencePrompt
@@ -881,6 +886,7 @@ func (p *Pipeline) processLive(
 			conversationMS = time.Since(conversationStarted).Milliseconds()
 		}
 	}
+	result = withStrictPrivacyStatus(input, result)
 	if err != nil || spokenReply == "" {
 		result.LiveTimings = liveTimings()
 		return result, err
@@ -961,7 +967,7 @@ func (p *Pipeline) startLiveSpeculation(
 	streamingSpeech speechio.StreamingService,
 	deliverAudio func([]byte) error,
 ) *liveSpeculation {
-	if p.protector != nil || input.Document != nil ||
+	if input.StrictCloudMinimization || input.Document != nil ||
 		liveProcessingCommitted(input) {
 		return nil
 	}
@@ -1419,15 +1425,15 @@ func (p *Pipeline) prepareTurn(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, string, error) {
-	if input.Document != nil {
+	if strictInputBlocked(input) {
 		clearDocument(input.Document)
-		return privacyBlockedResult(
-			routeDocumentPrivacyBlocked,
-			documentPrivacyReply,
-		), documentPrivacyReply, nil
+		return strictPrivacyBlockedResult(), "", nil
+	}
+	if input.Document != nil {
+		defer clearDocument(input.Document)
 	}
 	transcriptionCtx, cancelTranscription, hasTranscriptionBudget :=
-		transcriptionContextWithResponseReserve(ctx, p.preInferenceReserve())
+		transcriptionContextWithResponseReserve(ctx, p.preInferenceReserve(input))
 	if !hasTranscriptionBudget {
 		return httpapi.VoiceTurnResult{}, "",
 			httpapi.NewVoicePipelineFailure(
@@ -1453,12 +1459,14 @@ func (p *Pipeline) prepareTurn(
 			"transcribe_budget",
 		)
 		if !promptOnRecognitionMiss(input) {
-			return silentRecognitionResult(
+			return p.silentRecognitionResult(
+				uid,
 				input.StateToken,
 				routeSilentNoSpeech,
 			), "", nil
 		}
-		return silentRecognitionResult(
+		return p.silentRecognitionResult(
+			uid,
 			input.StateToken,
 			routeClarifyNoSpeech,
 		), lowConfidencePrompt, nil
@@ -1472,12 +1480,14 @@ func (p *Pipeline) prepareTurn(
 		)
 		if errors.Is(err, speechio.ErrNoSpeech) {
 			if !promptOnRecognitionMiss(input) {
-				return silentRecognitionResult(
+				return p.silentRecognitionResult(
+					uid,
 					input.StateToken,
 					routeSilentNoSpeech,
 				), "", nil
 			}
-			return silentRecognitionResult(
+			return p.silentRecognitionResult(
+				uid,
 				input.StateToken,
 				routeClarifyNoSpeech,
 			), lowConfidencePrompt, nil
@@ -1515,10 +1525,13 @@ func transcriptionContextWithResponseReserve(
 	return transcriptionCtx, cancel, true
 }
 
-func (p *Pipeline) preInferenceReserve() time.Duration {
+func (p *Pipeline) preInferenceReserve(input httpapi.VoiceTurnInput) time.Duration {
 	reserve := conversation.VoiceResponseReserve
-	if p != nil && p.protector != nil {
-		reserve += privacyguard.DefaultTimeout
+	if input.StrictCloudMinimization {
+		// Strict turns inspect both finalized STT text and the model reply. Leave
+		// both bounded checks outside the transcription budget so a slow DLP
+		// response cannot consume the model/TTS reserve.
+		reserve += 2 * privacyguard.DefaultStrictInspectionTimeout
 	}
 	return reserve
 }
@@ -1550,39 +1563,27 @@ func (p *Pipeline) prepareRecognizedTurn(
 	transcript string,
 	confidence float32,
 ) (httpapi.VoiceTurnResult, string, error) {
+	if input.StrictCloudMinimization {
+		if p.strictBoundary == nil ||
+			p.strictBoundary.Check(ctx, transcript) != nil ||
+			privacyguard.IsResearchRequest(transcript) {
+			return strictPrivacyBlockedResult(), "", nil
+		}
+	}
 	if transcriptConfidenceTooLow(confidence) {
 		if !promptOnRecognitionMiss(input) {
-			return silentRecognitionResult(
+			return p.silentRecognitionResult(
+				uid,
 				input.StateToken,
 				routeSilentLowConfidence,
 			), "", nil
 		}
-		return silentRecognitionResult(
+		return p.silentRecognitionResult(
+			uid,
 			input.StateToken,
 			routeClarifyLowConfidence,
 		), lowConfidencePrompt, nil
 	}
-	if p.protector != nil {
-		protectionCtx, cancelProtection, hasProtectionBudget :=
-			contextWithReserve(ctx, conversation.VoiceResponseReserve)
-		if !hasProtectionBudget {
-			return privacyBlockedResult(
-				routePrivacyProtectionBlocked,
-				privacyProtectionReply,
-			), privacyProtectionReply, nil
-		}
-		protected, err := p.protector.Protect(protectionCtx, transcript)
-		cancelProtection()
-		if err != nil || strings.TrimSpace(protected.Text) == "" {
-			return privacyBlockedResult(
-				routePrivacyProtectionBlocked,
-				privacyProtectionReply,
-			), privacyProtectionReply, nil
-		}
-		// Never pass the original STT text to the conversation agent or state.
-		transcript = protected.Text
-	}
-
 	turn := conversationTurn(input, transcript, false)
 	conversationStarted := time.Now()
 	decision, err := p.agent.Process(ctx, uid, turn)
@@ -1618,32 +1619,33 @@ func (p *Pipeline) prepareRecognizedTurn(
 			httpapi.VoicePipelineStageConversation,
 		)
 	}
-	if p.protector != nil && decision.SpokenReply != "" {
-		protectionCtx, cancelProtection, hasProtectionBudget :=
-			contextWithReserve(ctx, voiceSynthesisReserve)
-		if !hasProtectionBudget {
-			return privacyBlockedResult(
-				routePrivacyProtectionBlocked,
-				privacyProtectionReply,
-			), privacyProtectionReply, nil
+	if input.StrictCloudMinimization {
+		if decision.ResearchStatus != "none" ||
+			len(decision.ResearchRecords) != 0 {
+			return strictPrivacyBlockedResult(), "", nil
 		}
-		protectedReply, protectErr := p.protector.Protect(
-			protectionCtx,
-			decision.SpokenReply,
-		)
-		cancelProtection()
-		if protectErr != nil || strings.TrimSpace(protectedReply.Text) == "" {
-			return privacyBlockedResult(
-				routePrivacyProtectionBlocked,
-				privacyProtectionReply,
-			), privacyProtectionReply, nil
+		if decision.SpokenReply != "" {
+			protectionCtx, cancelProtection, hasProtectionBudget :=
+				contextWithReserve(ctx, voiceSynthesisReserve)
+			if !hasProtectionBudget {
+				return strictPrivacyBlockedResult(), "", nil
+			}
+			protectionBlocked := p.strictBoundary == nil
+			if !protectionBlocked {
+				protectionBlocked = p.strictBoundary.Check(
+					protectionCtx,
+					decision.SpokenReply,
+				) != nil
+			}
+			cancelProtection()
+			if protectionBlocked {
+				return strictPrivacyBlockedResult(), "", nil
+			}
 		}
-		decision.SpokenReply = protectedReply.Text
-		if protectedReply.Redacted {
-			// The state was issued before output redaction and may contain the
-			// original model reply, so it must not be published.
-			decision.StateToken = ""
-		}
+		// Strict turns never publish cross-turn semantic state, even after a
+		// clear output inspection. The encrypted token is server-readable and
+		// therefore is not an end-to-end encrypted memory channel.
+		decision.StateToken = ""
 	}
 	slog.InfoContext(ctx, "voice pipeline stage completed",
 		"request_id", input.RequestID,
@@ -1653,6 +1655,9 @@ func (p *Pipeline) prepareRecognizedTurn(
 	)
 
 	result := voiceResultFromDecision(input, decision)
+	if input.StrictCloudMinimization {
+		result.PrivacyStatus = "clear"
+	}
 	if decision.SpokenReply == "" {
 		return result, "", nil
 	}
@@ -1664,10 +1669,7 @@ func conversationTurn(
 	transcript string,
 	speculative bool,
 ) conversation.VoiceTurn {
-	// Documents are rejected and cleared at every Pipeline entry point. Do not
-	// map the HTTP document field into the model contract even if a future
-	// caller accidentally reaches this helper without the entry-point guard.
-	return conversation.VoiceTurn{
+	turn := conversation.VoiceTurn{
 		SchemaVersion: conversation.SchemaVersion,
 		Utterance:     transcript,
 		StateToken:    input.StateToken,
@@ -1676,8 +1678,17 @@ func conversationTurn(
 		Foreground:    input.Foreground,
 		ExtendedSpeech: !speculative &&
 			utf8.RuneCountInString(transcript) >= extendedSpeechMinRunes,
-		Speculative: speculative,
+		Speculative:      speculative,
+		ResearchDisabled: input.StrictCloudMinimization,
 	}
+	if input.Document == nil {
+		return turn
+	}
+	turn.PDF = &conversation.InlinePDF{
+		MIMEType: input.Document.MIMEType,
+		Data:     input.Document.Data,
+	}
+	return turn
 }
 
 func voiceResultFromDecision(
@@ -1702,10 +1713,12 @@ func voiceResultFromDecision(
 	}
 }
 
-func silentRecognitionResult(
+func (p *Pipeline) silentRecognitionResult(
+	uid string,
 	stateToken string,
 	route string,
 ) httpapi.VoiceTurnResult {
+	stateToken = p.authenticatedStateToken(uid, stateToken)
 	return httpapi.VoiceTurnResult{
 		StateToken:       stateToken,
 		DetectedDomain:   "unknown",
@@ -1719,6 +1732,17 @@ func silentRecognitionResult(
 	}
 }
 
+func (p *Pipeline) authenticatedStateToken(uid string, token string) string {
+	if p == nil || p.agent == nil || token == "" {
+		return ""
+	}
+	validator, ok := p.agent.(conversation.StateTokenValidator)
+	if !ok || validator.ValidateStateToken(uid, token) != nil {
+		return ""
+	}
+	return token
+}
+
 func clearDocument(document *httpapi.VoiceDocument) {
 	if document == nil {
 		return
@@ -1727,7 +1751,12 @@ func clearDocument(document *httpapi.VoiceDocument) {
 	document.Data = nil
 }
 
-func privacyBlockedResult(route string, caption string) httpapi.VoiceTurnResult {
+func strictInputBlocked(input httpapi.VoiceTurnInput) bool {
+	return input.StrictCloudMinimization &&
+		(input.StateToken != "" || input.Document != nil)
+}
+
+func strictPrivacyBlockedResult() httpapi.VoiceTurnResult {
 	return httpapi.VoiceTurnResult{
 		DetectedDomain:   "unknown",
 		AssistanceTarget: "assistant",
@@ -1736,9 +1765,20 @@ func privacyBlockedResult(route string, caption string) httpapi.VoiceTurnResult 
 		CoachAction:      "none",
 		ResearchStatus:   "none",
 		ResearchRecords:  []httpapi.ResearchRecord{},
-		Route:            route,
-		Caption:          caption,
+		Route:            routeStrictPrivacyBlocked,
+		PrivacyStatus:    privacyStatusBlocked,
 	}
+}
+
+func withStrictPrivacyStatus(
+	input httpapi.VoiceTurnInput,
+	result httpapi.VoiceTurnResult,
+) httpapi.VoiceTurnResult {
+	if input.StrictCloudMinimization && result.PrivacyStatus == "" {
+		result.PrivacyStatus = "clear"
+		result.StateToken = ""
+	}
+	return result
 }
 
 func researchRecords(records []conversation.ResearchRecord) []httpapi.ResearchRecord {

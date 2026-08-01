@@ -26,8 +26,9 @@ const (
 	DefaultTimeout = 5 * time.Second
 )
 
-// defaultInfoTypes is deliberately explicit. Adding provider detectors must
-// be reviewed rather than silently changing the production disclosure policy.
+// defaultInfoTypes is deliberately explicit. Sensitive Data Protection does
+// not assume a useful policy when no infoTypes are supplied, and adding new
+// provider detectors must be reviewed rather than silently changing behavior.
 var defaultInfoTypes = []string{
 	"AUTH_TOKEN",
 	"AWS_CREDENTIALS",
@@ -431,8 +432,9 @@ func screenDeterministic(text string) (string, bool) {
 		}
 	}
 
-	// Long identifiers must be classified before the deliberately broad phone
-	// expression so account IDs do not receive a misleading PHONE placeholder.
+	// Long identifiers are handled before the deliberately broad phone pattern
+	// so UUIDs and long numeric account identifiers retain the safer, stable ID
+	// placeholder instead of being classified as telephone-like digit strings.
 	text = longIDPattern.ReplaceAllStringFunc(text, func(candidate string) string {
 		if countDigits(candidate) == 0 {
 			return candidate

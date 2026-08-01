@@ -25,15 +25,27 @@ type fakeSpeech struct {
 func TestConversationTurnMarksOnlyFinalizedExtendedSpeech(t *testing.T) {
 	t.Parallel()
 	input := httpapi.VoiceTurnInput{RequestID: "request-long-form"}
-	final := conversationTurn(input, strings.Repeat("界", extendedSpeechMinRunes), false)
+	final := conversationTurn(
+		input,
+		strings.Repeat("界", extendedSpeechMinRunes),
+		false,
+	)
 	if !final.ExtendedSpeech {
 		t.Fatal("bounded finalized long-form transcript was not marked")
 	}
-	short := conversationTurn(input, strings.Repeat("界", extendedSpeechMinRunes-1), false)
+	short := conversationTurn(
+		input,
+		strings.Repeat("界", extendedSpeechMinRunes-1),
+		false,
+	)
 	if short.ExtendedSpeech {
 		t.Fatal("short transcript was marked as extended speech")
 	}
-	speculative := conversationTurn(input, strings.Repeat("界", extendedSpeechMinRunes), true)
+	speculative := conversationTurn(
+		input,
+		strings.Repeat("界", extendedSpeechMinRunes),
+		true,
+	)
 	if speculative.ExtendedSpeech {
 		t.Fatal("provisional transcript received finalized long-form authority")
 	}
@@ -69,11 +81,12 @@ func (s *fakeSpeech) Synthesize(_ context.Context, text string) ([]byte, string,
 }
 
 type fakeAgent struct {
-	calls            int
-	turn             conversation.VoiceTurn
-	result           conversation.VoiceTurnResult
-	err              error
-	processingBudget time.Duration
+	calls              int
+	turn               conversation.VoiceTurn
+	result             conversation.VoiceTurnResult
+	err                error
+	stateValidationErr error
+	processingBudget   time.Duration
 }
 
 type expiredStateRecoveryAgent struct {
@@ -115,6 +128,55 @@ func (a *fakeAgent) Process(
 		a.processingBudget = time.Until(deadline)
 	}
 	return a.result, a.err
+}
+
+func (a *fakeAgent) ValidateStateToken(_ string, token string) error {
+	if token == "" {
+		return conversation.ErrInvalidStateToken
+	}
+	return a.stateValidationErr
+}
+
+func TestPipelineDoesNotReflectUnvalidatedStateOnRecognitionFallback(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		speech fakeSpeech
+	}{
+		{
+			name:   "no speech",
+			speech: fakeSpeech{transcribeErr: speechio.ErrNoSpeech},
+		},
+		{
+			name:   "low confidence",
+			speech: fakeSpeech{transcript: "recognized", confidence: 0.1},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			agent := &fakeAgent{stateValidationErr: conversation.ErrInvalidStateToken}
+			pipeline, err := New(&test.speech, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := pipeline.Process(
+				context.Background(),
+				"uid",
+				httpapi.VoiceTurnInput{
+					Audio:      []byte("audio"),
+					StateToken: "attacker-controlled-state",
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.StateToken != "" || agent.calls != 0 {
+				t.Fatalf("unvalidated state crossed fallback: result=%+v calls=%d", result, agent.calls)
+			}
+		})
+	}
 }
 
 func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {
@@ -511,75 +573,38 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	}
 }
 
-func TestPipelineBlocksPDFBeforePlannerForEveryTurnMode(t *testing.T) {
+func TestPipelinePassesPDFToPlannerInStandardMode(t *testing.T) {
 	t.Parallel()
-
-	for _, test := range []struct {
-		name       string
-		ambient    bool
-		foreground bool
-	}{
-		{name: "intentional"},
-		{name: "ambient", ambient: true},
-		{
-			name:       "foreground",
-			ambient:    true,
-			foreground: true,
-		},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			speech := &fakeSpeech{
-				transcript: "この内容に答えてください",
-				confidence: 0.95,
-			}
-			agent := &fakeAgent{result: conversation.VoiceTurnResult{
-				Route:       "planner-unavailable",
-				StateToken:  "must-not-be-returned",
-				SpokenReply: "must not reach synthesis",
-			}}
-			pipeline, err := New(speech, agent)
-			if err != nil {
-				t.Fatal(err)
-			}
-			document := &httpapi.VoiceDocument{
-				MIMEType: "application/pdf",
-				Data:     []byte("%PDF private bytes"),
-			}
-			result, err := pipeline.Process(
-				context.Background(),
-				"uid",
-				httpapi.VoiceTurnInput{
-					Audio:      []byte("audio"),
-					MIMEType:   "audio/webm",
-					Ambient:    test.ambient,
-					Foreground: test.foreground,
-					Document:   document,
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.Route != routeDocumentPrivacyBlocked ||
-				result.StateToken != "" ||
-				result.Caption != documentPrivacyReply ||
-				result.NeedsPaper ||
-				agent.calls != 0 ||
-				speech.synthesizeCalls != 1 ||
-				speech.synthesizedText != documentPrivacyReply ||
-				len(document.Data) != 0 {
-				t.Fatalf(
-					"PDF privacy block result=%+v agent=%d synth=%d text=%q doc=%d",
-					result,
-					agent.calls,
-					speech.synthesizeCalls,
-					speech.synthesizedText,
-					len(document.Data),
-				)
-			}
-		})
+	speech := &fakeSpeech{transcript: "この内容に答えてください", confidence: 0.95}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		Route:       "fast",
+		StateToken:  "next-state",
+		SpokenReply: "PDFの内容に沿った返答",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := &httpapi.VoiceDocument{
+		MIMEType: "application/pdf",
+		Data:     []byte("%PDF standard-mode bytes"),
+	}
+	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio:    []byte("audio"),
+		MIMEType: "audio/webm",
+		Document: document,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Route != "fast" || result.StateToken != "next-state" ||
+		result.Caption != "PDFの内容に沿った返答" || result.NeedsPaper ||
+		agent.calls != 1 || agent.turn.PDF == nil ||
+		agent.turn.PDF.MIMEType != "application/pdf" ||
+		speech.synthesizeCalls != 1 ||
+		speech.synthesizedText != "PDFの内容に沿った返答" ||
+		len(document.Data) != 0 {
+		t.Fatalf("standard PDF result=%+v agent=%d turn=%+v synth=%d text=%q doc=%d", result, agent.calls, agent.turn, speech.synthesizeCalls, speech.synthesizedText, len(document.Data))
 	}
 }
 

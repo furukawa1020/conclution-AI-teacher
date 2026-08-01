@@ -18,6 +18,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/passkey"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
@@ -62,6 +63,9 @@ func main() {
 	)
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
+	var passkeyService *passkey.Service
+	var passkeyClientRateLimiter guard.Limiter
+	var passkeyAppCircuitBreaker guard.Limiter
 	var closeFirestore func() error
 	var closeSpeech func() error
 
@@ -75,6 +79,27 @@ func main() {
 			os.Exit(1)
 		}
 		evaluationStore = store.MemoryEvaluationStore{}
+		passkeyClientRateLimiter, err = guard.NewMemoryPasskeyClientLimiter(cfg.PasskeyClientRateLimits)
+		if err != nil {
+			logger.Error("initialize development passkey client rate limiter", "error", err)
+			os.Exit(1)
+		}
+		passkeyAppCircuitBreaker, err = guard.NewMemoryPasskeyAppLimiter(cfg.PasskeyAppCircuitBreaker)
+		if err != nil {
+			logger.Error("initialize development passkey app circuit breaker", "error", err)
+			os.Exit(1)
+		}
+		passkeyService, err = passkey.New(passkey.Config{
+			RPID:          cfg.PasskeyRPID,
+			RPDisplayName: "コタエーAI",
+			Origin:        cfg.PasskeyOrigin,
+			Store:         passkey.NewMemoryStore(),
+			TokenMinter:   passkey.DevelopmentTokenMinter{},
+		})
+		if err != nil {
+			logger.Error("initialize development passkeys", "error", err)
+			os.Exit(1)
+		}
 		voiceLiveLeaseManager = guard.NewMemoryVoiceLiveLeaseManager()
 		closeFirestore = func() error { return nil }
 		closeSpeech = func() error { return nil }
@@ -92,6 +117,11 @@ func main() {
 		// privacy boundary must prevent this revision from accepting traffic.
 		if _, protectorErr = protector.Protect(ctx, "KOTAE privacy readiness"); protectorErr != nil {
 			logger.Error("verify fail-closed privacy boundary", "error", protectorErr)
+			os.Exit(1)
+		}
+		privacyInspector, protectorErr := privacyguard.NewGoogleDLPInspector(protector)
+		if protectorErr != nil {
+			logger.Error("initialize strict privacy inspector", "error", protectorErr)
 			os.Exit(1)
 		}
 
@@ -140,6 +170,43 @@ func main() {
 		}
 		evaluationStore = store.NewFirestoreEvaluationStore(firestoreClient)
 		closeFirestore = firestoreClient.Close
+		passkeyStore, err := passkey.NewFirestoreStore(firestoreClient)
+		if err != nil {
+			logger.Error("initialize passkey store", "error", err)
+			os.Exit(1)
+		}
+		passkeyMinter, err := passkey.NewFirebaseTokenMinter(authClient)
+		if err != nil {
+			logger.Error("initialize passkey token minter", "error", err)
+			os.Exit(1)
+		}
+		passkeyService, err = passkey.New(passkey.Config{
+			RPID:          cfg.PasskeyRPID,
+			RPDisplayName: "コタエーAI",
+			Origin:        cfg.PasskeyOrigin,
+			Store:         passkeyStore,
+			TokenMinter:   passkeyMinter,
+		})
+		if err != nil {
+			logger.Error("initialize passkey service", "error", err)
+			os.Exit(1)
+		}
+		passkeyClientRateLimiter, err = guard.NewFirestorePasskeyClientLimiter(
+			firestoreClient,
+			cfg.PasskeyClientRateLimits,
+		)
+		if err != nil {
+			logger.Error("initialize passkey client rate limiter", "error", err)
+			os.Exit(1)
+		}
+		passkeyAppCircuitBreaker, err = guard.NewFirestorePasskeyAppLimiter(
+			firestoreClient,
+			cfg.PasskeyAppCircuitBreaker,
+		)
+		if err != nil {
+			logger.Error("initialize passkey app circuit breaker", "error", err)
+			os.Exit(1)
+		}
 
 		voiceRateLimiter, err = guard.NewFirestoreLimiterForScope(
 			firestoreClient,
@@ -193,10 +260,10 @@ func main() {
 			os.Exit(1)
 		}
 		closeSpeech = speechService.Close
-		voiceService, err = voiceflow.NewProtected(
+		voiceService, err = voiceflow.NewWithPrivacy(
 			speechService,
 			conversationAgent,
-			protector,
+			privacyInspector,
 		)
 		if err != nil {
 			logger.Error("initialize secure voice pipeline", "error", err)
@@ -214,7 +281,7 @@ func main() {
 		}
 	}()
 
-	handler := httpapi.NewWithVoice(
+	handler := httpapi.NewWithVoiceAndPasskeys(
 		logger,
 		verifier,
 		rateLimiter,
@@ -223,14 +290,18 @@ func main() {
 		cfg.RequestTimeout,
 		cfg.MaxRequestBytes,
 		httpapi.VoiceOptions{
-			Service:           voiceService,
-			RateLimiter:       voiceRateLimiter,
-			AppRateLimiter:    voiceAppRateLimiter,
-			LiveLeaseManager:  voiceLiveLeaseManager,
-			LiveHandshakeGate: voiceLiveHandshakeGate,
-			RequestTimeout:    cfg.VoiceTimeout,
-			MaxRequestBytes:   cfg.MaxVoiceBytes,
+			Service:              voiceService,
+			RateLimiter:          voiceRateLimiter,
+			AppRateLimiter:       voiceAppRateLimiter,
+			LiveLeaseManager:     voiceLiveLeaseManager,
+			LiveHandshakeGate:    voiceLiveHandshakeGate,
+			RequestTimeout:       cfg.VoiceTimeout,
+			MaxRequestBytes:      cfg.MaxVoiceBytes,
+			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,
 		},
+		passkeyService,
+		passkeyClientRateLimiter,
+		passkeyAppCircuitBreaker,
 	)
 	server := newAPIServer(":"+cfg.Port, handler)
 
@@ -243,7 +314,7 @@ func main() {
 			"vertex_priority", cfg.VertexPriority,
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
-			"privacy_boundary", "regional-deidentify-fail-closed",
+			"privacy_boundary", "evaluation-deidentify-and-strict-voice-inspect-fail-closed",
 		)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server stopped unexpectedly", "error", err)

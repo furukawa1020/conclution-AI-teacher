@@ -35,25 +35,25 @@ func TestVoiceLiveBudgetsSupportThreeMinuteMonologueBelowProviderLimit(
 		maxPostCommitProcess   = 50 * time.Second
 	)
 	if voiceLiveMaxCaptureDuration < targetMonologue {
-		t.Fatal(`capture budget does not admit a three-minute monologue`)
+		t.Fatal("capture budget does not admit a three-minute monologue")
 	}
 	if voiceLiveMaxCaptureDuration >= providerStreamingLimit {
-		t.Fatal(`capture budget reaches the provider streaming limit`)
+		t.Fatal("capture budget reaches the provider streaming limit")
 	}
 	frameBudget := time.Duration(voiceLiveMaxPCMFrames) * pcmFrameDuration
 	if frameBudget < voiceLiveMaxCaptureDuration {
-		t.Fatal(`PCM frame budget ends before the capture deadline`)
+		t.Fatal("PCM frame budget ends before the capture deadline")
 	}
 	if voiceLiveMaxPCMTotalBytes !=
 		voiceLiveMaxPCMFrames*voiceLivePCMFrameBytes {
-		t.Fatal(`PCM byte and frame bounds diverged`)
+		t.Fatal("PCM byte and frame bounds diverged")
 	}
 	minimumConnectionBudget := voiceLiveFirstFrameTimeout +
 		2*voiceLiveGuardTimeout +
 		voiceLiveMaxCaptureDuration +
 		maxPostCommitProcess
 	if VoiceLiveConnectionTimeout <= minimumConnectionBudget {
-		t.Fatal(`HTTP connection timeout has no cleanup margin`)
+		t.Fatal("HTTP connection timeout has no cleanup margin")
 	}
 	if voiceLiveFirstFrameTimeout <= 0 ||
 		voiceLiveFirstFrameTimeout > 2*time.Second {
@@ -109,6 +109,7 @@ type liveTestVerifier struct {
 	idToken       string
 	appCheckToken string
 	err           error
+	principal     identity.Principal
 }
 
 type liveTestLease struct {
@@ -198,11 +199,63 @@ func (verifier *liveTestVerifier) Verify(
 	if verifier.err != nil {
 		return identity.Principal{}, verifier.err
 	}
+	if verifier.principal.UID != "" {
+		return verifier.principal, nil
+	}
 	return identity.Principal{
 		UID:   "user-123",
 		AppID: "app-123",
 		Roles: map[string]bool{"user": true},
 	}, nil
+}
+
+func TestVoiceLiveRequiresFreshPasskeyWhenGateEnabled(t *testing.T) {
+	service := &liveTestVoiceService{}
+	verifier := &liveTestVerifier{principal: identity.Principal{
+		UID:             "pk_user",
+		AppID:           "app-123",
+		Provider:        "custom",
+		AuthMethod:      "passkey-v1",
+		AuthTime:        time.Now().Add(-6 * time.Minute),
+		AccountVerified: true,
+	}}
+	handler := NewWithVoice(
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		verifier,
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:              service,
+			RateLimiter:          &fakeLimiter{},
+			AppRateLimiter:       &fakeLimiter{wantKey: "app:app-123"},
+			LiveLeaseManager:     guard.NewMemoryVoiceLiveLeaseManager(),
+			RequestTimeout:       2 * time.Second,
+			MaxRequestBytes:      13 * 1024 * 1024,
+			RequireRecentPasskey: true,
+		},
+	)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" || frame["code"] != voiceLiveCodeAuthenticationFailed {
+		t.Fatalf("frame = %#v", frame)
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.input.ProcessingTimeout != 0 {
+		t.Fatal("stale passkey reached live voice service")
+	}
 }
 
 type liveTestVoiceService struct {
@@ -485,6 +538,87 @@ func writeVoiceLiveStartMode(
 	}
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeVoiceLiveStrictStart(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+	t.Helper()
+	frame := voiceLiveStartFrame{
+		Type:                    "start",
+		Version:                 voiceLiveVersion,
+		IDToken:                 liveTestIDToken,
+		AppCheckToken:           liveTestAppCheckToken,
+		TurnMode:                VoiceTurnIntentional,
+		StrictCloudMinimization: true,
+		SampleRateHz:            voiceLiveSampleRateHz,
+	}
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStrictVoiceLiveNeverReleasesAudioBeforeResultValidation(t *testing.T) {
+	t.Parallel()
+	service := &liveTestVoiceService{
+		output: [][]byte{{4, 0, 5, 0}},
+		result: VoiceTurnResult{
+			DetectedDomain:   "unknown",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			PrivacyStatus:    "blocked",
+			Route:            "strict-privacy-blocked",
+		},
+	}
+	server := newVoiceLiveTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLiveStrictStart(t, ctx, conn)
+	if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{Type: "commit", Version: voiceLiveVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	messageType, payload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("strict live leaked binary audio before validation: type=%v bytes=%d", messageType, len(payload))
+	}
+	var frame map[string]any
+	if err := json.Unmarshal(payload, &frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame["type"] != "error" || frame["code"] != voiceLiveCodeResponseInvalid {
+		t.Fatalf("frame=%#v", frame)
 	}
 }
 

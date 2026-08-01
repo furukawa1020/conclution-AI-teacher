@@ -35,7 +35,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 │ Browser                                      │
 │ Rust / Dioxus / Wasm                         │
 │  └─ JS bridge: MediaRecorder / Web Audio VAD │
-│                 Firebase Auth / App Check    │
+│                 Passkey Auth / App Check     │
 └───────────────────┬──────────────────────────┘
                     │ authenticated WSS / HTTPS CORS
                     │ /api/v1/voice/live | turns:stream
@@ -45,26 +45,30 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 │ Auth + App Check + Origin + size + rate limit│
 └──────────┬──────────────────┬────────────────┘
            │ raw audio        │ PDF field
-           ▼                  └─ reject + clear bytes
+           ▼                  ├─ standard: one turn only
+                              └─ strict: reject + clear bytes
 ┌──────────────────┐
 │ Cloud STT V2     │
 │ asia-northeast1  │
 │ long, fixed      │
 └────────┬─────────┘
          │ transcript
-         ▼
+         ├─ standard ───────────────────────────────┐
+         ▼ strict                                  │
 ┌──────────────────────────────┐
 │ Sensitive Data Protection    │
 │ asia-northeast1 / fail closed│
 └────────┬─────────────────────┘
-         │ protected transcript only
-         ▼
+         │ clear transcript only                   │
+         ▼                                         ▼
 ┌─────────────────────────────┐
 │ Vertex AI（global）          │
 │ Gemini fast / precision     │
 │ Thought Graph + EVI + LAC   │
 └────────────┬────────────────┘
-             │ silence / protected reply text
+             │ silence / reply text
+             ▼
+        strict reply: Cloud Run deterministic + DLP clear
              ▼
                          ┌──────────────────────────┐
                          │ Cloud TTS                │
@@ -78,11 +82,11 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 
 利用者のintentional turn全体が「外部検索で、テーマは何々の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ、Cloud Runの独立tool-policy gateが許可します。自然文から検索同意を推測せず、追記、取消し、複数命令、ambient turnから外部queryは作りません。topicは「テーマは」と「の最新論文」の間全体、DOIは空白で区切ったbare DOI全体を決定論的に抽出し、モデル出力と取得結果へ完全に結びつけます。送信前にはNFKC差とUnicode format文字をfail-closedで拒否し、可逆encodingを再検査し、topic文字を限定し、topic内の節区切り・取消語とDOIに付いたcomma・semicolon・取消語も拒否します。固定hostのCrossref REST APIから返ったtitle、DOI、日付は候補発見にだけ使い、本文を読んだ証拠やclaimの支持根拠にはしません。topic探索は発表日ではなくCrossrefのindex date filterを使うため、「Crossrefの索引日が指定期間内の書誌候補」と表示します。任意の語が氏名か未知の技術名かを完全には区別できないため、固定発話のtopicそのものがCrossrefへ送られることもUIで明示します。
 
-Cloud STTにはraw audioだけを渡します。文字起こしは東京リージョンのSensitive Data Protectionで検査・置換し、成功した文字列だけをVertex AIへ渡します。モデル応答も同じ検査を通過した短い文字列だけをCloud TTSへ渡します。PDFはブラウザでファイルを読む前とCloud Runでモデルを呼ぶ前の両方で拒否します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。
+Cloud STTにはraw audioだけを渡します。厳格モードは文字起こしとモデル応答をCloud Run内の決定論的検査と東京リージョンのSensitive Data Protectionへ通し、両方が明示的に`clear`の時だけVertex AIまたはCloud TTSへ進めます。標準モードに同じ保証があるとは表示しません。標準モードのPDFは本人が明示選択した次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放します。厳格モードではブラウザのfile read前とCloud RunのSTT・モデル推論前の両方で拒否します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。この構成では管理サービスが処理に必要な平文を扱うためE2EEではなく、DLPにも漏れがあり得るため完全なPII除去でもありません。
 
 ## 状態
 
-長い会話履歴をサーバーへ置かず、短い意味状態だけを暗号化tokenとしてブラウザメモリへ返します。
+標準モードでは長い会話履歴をサーバーへ置かず、短い意味状態だけを暗号化tokenとしてブラウザメモリへ返します。厳格モードはcross-turn stateを受け取らず、返しません。
 
 ```text
 AES-256-GCM token
@@ -100,7 +104,7 @@ tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret Man
 | 体験 | Rust / Dioxus / Wasm | 音声中心UI、session状態、アクセシビリティ |
 | ブラウザ境界 | JavaScript module | MediaRecorder、Web Audio VAD、Firebase Web SDK、音声再生 |
 | API | Go / Cloud Run | 認証、App Check、Origin、入力検証、timeout、rate limit |
-| PII境界 | Sensitive Data Protection / Go | 文字起こしと応答の検査・置換、失敗時のモデル/TTS遮断 |
+| 厳格PII境界 | Sensitive Data Protection / Go | 厳格モードの文字起こしと応答の検査、失敗時のモデル/TTS遮断 |
 | 音声認識 | Cloud Speech-to-Text V2 | `asia-northeast1`で日本語音声を文字へ変換 |
 | 推論 | Go / Vertex AI | structured output、fast / precision routing、KOTAE Reflex |
 | 答え契約 | Go | LACの決定論的検証、曖昧性・coverage・意味保存guard |
@@ -108,21 +112,21 @@ tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret Man
 | 研究候補探索 | Go / Crossref | 明示したDOI・新着topicの書誌候補。claim evidenceではない |
 | 音声合成 | Cloud Text-to-Speech | `asia-northeast1`で短い応答文をMP3へ変換 |
 | 一時状態 | Go / browser memory | UID-bound AES-GCM token、15分TTL |
-| 運用メタデータ | Firestore | 評価メタデータとrate counterだけをTTL付きで保存 |
+| 運用メタデータ | Firestore | 評価メタデータ、rate counter、短命ceremony、live接続leaseをTTL付きで保存。Passkey public credentialはTTLなし |
 
 TypeScriptは使いません。ブラウザAPIとFirebase Web SDKを直接呼ぶ必要がある範囲だけをJavaScriptへ隔離し、認証判断、推論、暗号、LACをJavaScriptへ置きません。
 
 ## 推論経路
 
 1. Gemini 3.6 Flashの高速経路が、domain、潜在問い、Thought State Graph差分、介入候補、advisory LACを構造化出力する。
-2. 研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。医療・法律・金融・研究根拠では精密経路の失敗時に実質回答へfallbackしない。PDFはこの経路へ入れず、推論前に拒否する。
+2. 研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。医療・法律・金融・研究根拠では精密経路の失敗時に実質回答へfallbackしない。標準モードの明示PDFは一ターンだけこの経路へ送り、厳格モードのPDFは推論前に拒否する。
 3. 最終draftの後に、低遅延のfast modelを使う別のstructured callでLACを監査する。独立性は別モデルという主張ではなく、隔離prompt、別call、draft側LAC自己申告の非共有で確保する。高速監査が構造不正または一時的provider障害で二度失敗した時だけprecision modelの中思考で一度回復監査し、安全終了・cancelでは切り替えない。
 4. モデル出力をJSON schemaと上限で検証し、Go側が仮説gap、entropy、必須slotの完全充足、回答内に実在するcommitment、意味保存を決定論的に再計算する。
 5. `respondent`経路では、本人の回答試行、slotごとの完全一致evidence、protected spanをGoの別gateへ渡す。再構成案が元回答の意味節の並べ替えでない、または否定・条件・数値・不確実性・固有内容が変わった場合は拒否する。
 6. 潜在問いが曖昧ならclarifyまたはsilence、答えの核が欠けていて意味保存できる時だけrestructureする。独立監査が使えない場合も未監査draftは話さない。
 7. intentional turnで明示され、否定されていないDOI / 論文検索だけを、PII・credential screenの後にCrossrefへ送る。ambientでは常に拒否し、結果を`needs_primary_evidence`として現在のturnだけへ返す。任意URLは取得しない。
 8. Self-repair graceとEVIで、モデルが話したがっても介入価値が低ければsilenceへ落とす。ただし緊急安全介入を曖昧判定で消さない。
-9. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送り、同じ最終文だけをbounded captionとして返す。
+9. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送り、同じ最終文だけをbounded captionとして返す。厳格モードはTTSより前に応答文もCloud Run内決定論検査 + regional DLPで`clear`と検証し、streaming音声を検証完了まで送信しない。
 
 LACの指標は内部評価用で、画面へ分析文を大量表示しません。モデルの非公開chain-of-thoughtを保存または表示する設計でもありません。
 
@@ -130,8 +134,8 @@ LACの指標は内部評価用で、画面へ分析文を大量表示しませ�
 
 - 静的なWasm UI: Firebase Hosting
 - REST API: Firebase Hostingの`/api/**` rewriteからCloud Run `kotae-api`
-- 音声の主経路: `WSS /api/v1/voice/live`、検証済みfallback: `POST /api/v1/voice/turns:stream`
+- 音声の主経路: 固定Cloud Run URLの`WSS /api/v1/voice/live`、検証済みfallback: 固定Cloud Run URLの`POST /api/v1/voice/turns:stream`
 - Cloud Run、Speech-to-Text、Text-to-Speech: `asia-northeast1`
 - Vertex AI: `global`
 
-通常の音声ターンは認証付きWebSocketで20 ms PCMを増分送信し、利用できない場合だけ同じ認証境界のHTTPS requestへ退避します。AI処理中と音声再生中は、利用者が開始したセッション内に限って端末内VADで訂正・割り込みを待ち、確認前PCMはAudioWorklet内の固定長リングから外へ出しません。確認済みbarge-inだけをForeground turnへ引き継ぎます。Vertex Live API、話者本人認証、保存音声履歴、Vault、任意Web巡回、論文本文のclaim-level検証、無人の後日再評価は現在の公開経路の保証には含めません。
+通常の音声ターンは認証付きWebSocketで20 ms PCMを増分送信し、利用できない場合だけ同じ認証境界のHTTPS requestへ退避します。クライアントcaptureは最大3分30秒、サーバーcaptureは最大4分または12,000 frame、turnは6分、Cloud Run requestは420秒で停止します。同じ仮名Firebase UIDのlive接続はFirestoreの短命leaseで同時に1本へ制限します。AI処理中と音声再生中は、利用者が開始したセッション内に限って端末内VADで訂正・割り込みを待ち、確認前PCMはAudioWorklet内の固定長リングから外へ出しません。確認済みbarge-inだけをForeground turnへ引き継ぎます。Vertex Live API、話者本人認証、保存音声履歴、Vault、任意Web巡回、論文本文のclaim-level検証、無人の後日再評価は現在の公開経路の保証には含めません。

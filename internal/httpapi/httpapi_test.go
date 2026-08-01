@@ -1504,6 +1504,43 @@ func TestPreInferenceRecognitionFallbackMayKeepStateEmpty(t *testing.T) {
 	}
 }
 
+func TestVoiceResultPrivacyStatusIsBoundToRequestedMode(t *testing.T) {
+	t.Parallel()
+	ordinary := VoiceTurnResult{
+		StateToken:       "opaque-state",
+		DetectedDomain:   "general",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "fast",
+	}
+	if err := validateVoiceResultForInput(VoiceTurnInput{}, ordinary); err != nil {
+		t.Fatalf("ordinary result rejected: %v", err)
+	}
+	if err := validateVoiceResultForInput(
+		VoiceTurnInput{StrictCloudMinimization: true},
+		ordinary,
+	); err == nil {
+		t.Fatal("strict request accepted an ordinary uninspected result")
+	}
+
+	strict := ordinary
+	strict.StateToken = ""
+	strict.PrivacyStatus = "clear"
+	if err := validateVoiceResultForInput(
+		VoiceTurnInput{StrictCloudMinimization: true},
+		strict,
+	); err != nil {
+		t.Fatalf("strict clear result rejected: %v", err)
+	}
+	if err := validateVoiceResultForInput(VoiceTurnInput{}, strict); err == nil {
+		t.Fatal("ordinary request accepted strict-mode metadata")
+	}
+}
+
 func TestSecurityHeadersAreApplied(t *testing.T) {
 	t.Parallel()
 

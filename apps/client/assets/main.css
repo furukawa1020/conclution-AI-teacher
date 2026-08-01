@@ -163,6 +163,21 @@
     min-height: min(780px, calc(100svh - 154px));
   }
 
+  .conversation-stage--passkey {
+    grid-template-columns: minmax(0, 1fr);
+    width: min(880px, 100%);
+  }
+
+  .conversation-stage--passkey .utility-dock {
+    display: none;
+  }
+
+  .voice-space--passkey {
+    grid-template-rows: auto auto;
+    align-content: start;
+    min-height: 0;
+  }
+
   .utility-dock {
     display: grid;
     align-self: center;
@@ -292,9 +307,26 @@
 
   .context-line {
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
     min-height: 30px;
+  }
+
+  .passkey-setup-status {
+    display: inline-flex;
+    flex: 0 0 0;
+    min-width: 0;
+  }
+
+  .passkey-setup-status:not(:empty) {
+    flex-basis: 100%;
+    justify-content: center;
+    color: var(--cyan);
+    font: 650 0.68rem/1.55 var(--mono);
+    letter-spacing: 0.04em;
+    overflow-wrap: anywhere;
+    text-align: center;
   }
 
   .context-chip,
@@ -531,6 +563,95 @@
     letter-spacing: 0.07em;
   }
 
+  .passkey-gate {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    place-items: start center;
+    margin-top: clamp(14px, 4svh, 40px);
+  }
+
+  .passkey-entry {
+    width: 100%;
+    min-width: 0;
+    max-width: 580px;
+    margin: 0;
+    padding: clamp(18px, 3.5svh, 26px) clamp(16px, 4vw, 26px);
+    border: 1px solid oklch(84% 0.16 190 / 32%);
+    border-radius: 16px;
+    background: oklch(20% 0.045 230 / 88%);
+    box-shadow:
+      0 24px 70px oklch(4% 0.02 260 / 46%),
+      inset 0 1px 0 oklch(96% 0.02 210 / 10%);
+    text-align: center;
+    backdrop-filter: blur(18px);
+  }
+
+  .passkey-entry__eyebrow {
+    color: var(--cyan);
+    font: 700 0.58rem/1.4 var(--mono);
+    letter-spacing: 0.14em;
+  }
+
+  .passkey-entry h1 {
+    margin: 5px 0 0;
+    font: 600 clamp(1.3rem, 4vw, 1.8rem)/1.4 var(--display);
+    letter-spacing: 0.04em;
+    text-wrap: balance;
+  }
+
+  .passkey-entry__error {
+    margin-top: 10px;
+    color: var(--amber);
+    font-size: 0.74rem;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+
+  .passkey-entry__lead {
+    margin-top: 9px;
+    color: var(--white-soft);
+    font-size: 0.76rem;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+  }
+
+  .passkey-entry__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .passkey-entry__actions .control-button {
+    justify-content: center;
+    min-width: 0;
+    min-height: 48px;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .passkey-entry__warning,
+  .passkey-entry__notice {
+    margin-top: 11px;
+    font-size: 0.75rem;
+    line-height: 1.75;
+    overflow-wrap: anywhere;
+  }
+
+  .passkey-entry__warning {
+    color: var(--amber);
+  }
+
+  .passkey-entry__notice {
+    color: var(--cyan);
+  }
+
   .capability-strip {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -636,7 +757,7 @@
       translate 180ms ease;
   }
 
-  .control-button:hover {
+  .control-button:not(:disabled):hover {
     translate: 0 -2px;
     border-color: var(--line-strong);
     color: var(--white);
@@ -648,7 +769,16 @@
     color: var(--cyan);
   }
 
-  .control-button--end:hover {
+  .control-button:disabled {
+    translate: none;
+    border-color: var(--line);
+    background: oklch(18% 0.02 258 / 34%);
+    color: var(--white-faint);
+    cursor: not-allowed;
+    opacity: 0.52;
+  }
+
+  .control-button--end:not(:disabled):hover {
     border-color: oklch(66% 0.23 25 / 58%);
     color: var(--danger);
   }
@@ -1058,6 +1188,10 @@
       min-height: min(720px, calc(100svh - 128px));
     }
 
+    .voice-space--passkey {
+      min-height: 0;
+    }
+
     .utility-dock {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-self: auto;
@@ -1088,6 +1222,31 @@
 
     .voice-space {
       min-height: calc(100svh - 112px);
+    }
+
+    .voice-space--passkey {
+      min-height: 0;
+    }
+
+    .conversation-stage--passkey {
+      padding-top: 14px;
+    }
+
+    .conversation-stage--passkey .context-line {
+      flex-wrap: wrap;
+      width: 100%;
+    }
+
+    .passkey-gate {
+      margin-top: 10px;
+    }
+
+    .passkey-entry {
+      padding: 16px 14px;
+    }
+
+    .passkey-entry__actions {
+      grid-template-columns: 1fr;
     }
 
     .orb-field {
@@ -1152,12 +1311,59 @@
       min-height: 590px;
     }
 
+    .voice-space--passkey {
+      min-height: 0;
+    }
+
     .orb-field {
       width: min(43vw, 340px);
     }
 
     .voice-status h1 {
       font-size: clamp(1.65rem, 2.7vw, 2.65rem);
+    }
+  }
+
+  @media (max-height: 540px) {
+    .conversation-stage--passkey {
+      padding-block: 10px;
+    }
+
+    .conversation-stage--passkey .context-line {
+      gap: 4px;
+      min-height: 0;
+    }
+
+    .conversation-stage--passkey .context-chip {
+      min-height: 24px;
+      padding: 4px 7px;
+      font-size: 0.6rem;
+      line-height: 1.25;
+      text-align: center;
+      white-space: normal;
+    }
+
+    .passkey-gate {
+      margin-top: 0;
+    }
+
+    .passkey-entry {
+      max-height: calc(100svh - 148px);
+      padding-block: 12px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .passkey-entry__lead,
+    .passkey-entry__warning,
+    .passkey-entry__notice {
+      margin-top: 6px;
+      line-height: 1.45;
+    }
+
+    .passkey-entry__actions {
+      margin-top: 8px;
     }
   }
 }

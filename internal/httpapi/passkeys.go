@@ -1,0 +1,338 @@
+package httpapi
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/passkey"
+)
+
+const (
+	passkeyRegistrationBeginPath    = "/api/v1/passkeys/registration:begin"
+	passkeyRegistrationFinishPath   = "/api/v1/passkeys/registration:finish"
+	passkeyAuthenticationBeginPath  = "/api/v1/passkeys/authentication:begin"
+	passkeyAuthenticationFinishPath = "/api/v1/passkeys/authentication:finish"
+	passkeyVoiceAuthorizationAge    = 5 * time.Minute
+	passkeyMaxCredentialBody        = 256 * 1024
+)
+
+type PasskeyService interface {
+	BeginRegistration(context.Context, string) (passkey.BeginRegistrationResult, error)
+	FinishRegistration(context.Context, string, string, *http.Request) (passkey.FinishResult, error)
+	BeginAuthentication(context.Context, string) (passkey.BeginAuthenticationResult, error)
+	FinishAuthentication(context.Context, string, string, *http.Request) (passkey.FinishResult, error)
+}
+
+func (s *Server) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
+	appID, ok := appIDFromContext(r.Context())
+	if !ok || s.passkeys == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey registration is unavailable.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, appID) {
+		return
+	}
+	if !emptyJSONRequest(r) {
+		writeProblem(w, http.StatusBadRequest, "invalid_request", "The request is invalid.")
+		return
+	}
+	result, err := s.passkeys.BeginRegistration(r.Context(), appID)
+	if errors.Is(err, passkey.ErrCredentialConflict) {
+		writeProblem(w, http.StatusConflict, "passkey_limit_reached", "No more passkeys can be registered for this account.")
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey registration is unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
+	appID, ok := appIDFromContext(r.Context())
+	if !ok || s.passkeys == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey registration is unavailable.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, appID) {
+		return
+	}
+	ceremonyID, ok := exactCeremonyID(r)
+	if !ok || !isJSONContentType(r) {
+		writeProblem(w, http.StatusBadRequest, "invalid_request", "The request is invalid.")
+		return
+	}
+	if !boundPasskeyCredentialBody(w, r) {
+		return
+	}
+	result, err := s.passkeys.FinishRegistration(r.Context(), appID, ceremonyID, r)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "passkey_registration_failed", "Passkey registration failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) beginPasskeyAuthentication(w http.ResponseWriter, r *http.Request) {
+	appID, ok := appIDFromContext(r.Context())
+	if !ok || s.passkeys == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, appID) {
+		return
+	}
+	if !emptyJSONRequest(r) {
+		writeProblem(w, http.StatusBadRequest, "invalid_request", "The request is invalid.")
+		return
+	}
+	result, err := s.passkeys.BeginAuthentication(r.Context(), appID)
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) consumePasskeyQuota(w http.ResponseWriter, r *http.Request, appID string) bool {
+	if s.passkeyClientRateLimiter == nil || s.passkeyAppCircuitBreaker == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+		return false
+	}
+	clientQuotaKey, ok := anonymousPasskeyQuotaKeyFromContext(r.Context())
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+		return false
+	}
+	if principal, authenticated := principalFromContext(r.Context()); authenticated {
+		if principal.AppID != appID {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return false
+		}
+		clientQuotaKey, ok = authenticatedPasskeyQuotaKey(appID, principal.UID)
+		if !ok {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return false
+		}
+	}
+	appQuotaKey, ok := appPasskeyQuotaKey(appID)
+	if !ok {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+		return false
+	}
+	at := time.Now().UTC()
+	// The high app-wide breaker protects backend capacity even when an attacker
+	// rotates valid App Check tokens. It is intentionally consumed first; the
+	// lower opaque client bucket then limits one attested token or verified UID.
+	if err := s.passkeyAppCircuitBreaker.Consume(r.Context(), appQuotaKey, at); err != nil {
+		return writePasskeyQuotaFailure(w, err)
+	}
+	if err := s.passkeyClientRateLimiter.Consume(r.Context(), clientQuotaKey, at); err != nil {
+		return writePasskeyQuotaFailure(w, err)
+	}
+	return true
+}
+
+func writePasskeyQuotaFailure(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, guard.ErrRateLimitExceeded) {
+		writeProblem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "The passkey request limit has been reached.")
+		return false
+	}
+	writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+	return false
+}
+
+func (s *Server) finishPasskeyAuthentication(w http.ResponseWriter, r *http.Request) {
+	appID, ok := appIDFromContext(r.Context())
+	if !ok || s.passkeys == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, appID) {
+		return
+	}
+	ceremonyID, ok := exactCeremonyID(r)
+	if !ok || !isJSONContentType(r) {
+		writeProblem(w, http.StatusBadRequest, "invalid_request", "The request is invalid.")
+		return
+	}
+	if !boundPasskeyCredentialBody(w, r) {
+		return
+	}
+	result, err := s.passkeys.FinishAuthentication(r.Context(), appID, ceremonyID, r)
+	if err != nil {
+		// Deliberately identical for an unknown credential, invalid signature,
+		// expired challenge, wrong origin, and counter race.
+		writeProblem(w, http.StatusUnauthorized, "passkey_authentication_failed", "Passkey authentication failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) requireAppAttestation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.Header.Values("X-Firebase-AppCheck")
+		if len(values) != 1 || len(values[0]) > 8*1024 || strings.TrimSpace(values[0]) == "" || s.appVerifier == nil {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "App attestation failed.")
+			return
+		}
+		appCheckToken := strings.TrimSpace(values[0])
+		appID, err := s.appVerifier.VerifyApp(r.Context(), appCheckToken)
+		appID = strings.TrimSpace(appID)
+		if err != nil || appID == "" || len(appID) > 256 {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "App attestation failed.")
+			return
+		}
+		anonymousQuotaKey, ok := anonymousPasskeyQuotaKey(appID, appCheckToken)
+		if !ok {
+			writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
+			return
+		}
+		ctx := context.WithValue(r.Context(), appIDContextKey{}, appID)
+		ctx = context.WithValue(ctx, anonymousPasskeyQuotaKeyContextKey{}, anonymousQuotaKey)
+
+		authHeaders := r.Header.Values("Authorization")
+		if len(authHeaders) == 0 {
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		if len(authHeaders) != 1 || s.verifier == nil {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return
+		}
+		authFields := strings.Fields(authHeaders[0])
+		if len(authFields) != 2 || !strings.EqualFold(authFields[0], "Bearer") ||
+			authFields[1] == "" || len(authFields[1]) > 8*1024 {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return
+		}
+		principal, err := s.verifier.Verify(ctx, authFields[1], appCheckToken)
+		if err != nil || principal.AppID != appID || strings.TrimSpace(principal.UID) == "" {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return
+		}
+		ctx = context.WithValue(ctx, principalContextKey{}, principal)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) requireFreshPasskey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.voice.RequireRecentPasskey {
+			next.ServeHTTP(w, r)
+			return
+		}
+		principal, ok := principalFromContext(r.Context())
+		if !ok || !voiceAuthorized(principal, time.Now().UTC()) {
+			writeProblem(w, http.StatusUnauthorized, "passkey_required", "Recent passkey authentication is required for voice.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func voiceAuthorized(principal identity.Principal, now time.Time) bool {
+	if principal.Provider == "development" && principal.AccountVerified {
+		return true
+	}
+	if !principal.AccountVerified || principal.Provider != "custom" || principal.AuthMethod != "passkey-v1" || principal.PasskeyAt.IsZero() {
+		return false
+	}
+	age := now.Sub(principal.PasskeyAt)
+	return age >= -30*time.Second && age <= passkeyVoiceAuthorizationAge
+}
+
+func exactCeremonyID(r *http.Request) (string, bool) {
+	query := r.URL.Query()
+	values, exists := query["ceremonyId"]
+	if !exists || len(query) != 1 || len(values) != 1 {
+		return "", false
+	}
+	value := strings.TrimSpace(values[0])
+	return value, value != "" && len(value) <= 128
+}
+
+func emptyJSONRequest(r *http.Request) bool {
+	if r.URL.RawQuery != "" || (r.ContentLength != 0 && r.ContentLength != -1) {
+		return false
+	}
+	return r.Body == nil || r.ContentLength == 0
+}
+
+func isJSONContentType(r *http.Request) bool {
+	value := strings.TrimSpace(r.Header.Get("Content-Type"))
+	return value == "application/json" || strings.HasPrefix(value, "application/json;")
+}
+
+func boundPasskeyCredentialBody(w http.ResponseWriter, r *http.Request) bool {
+	if r.ContentLength > passkeyMaxCredentialBody {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "request_too_large", "The passkey response is too large.")
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, passkeyMaxCredentialBody)
+	return true
+}
+
+func appIDFromContext(ctx context.Context) (string, bool) {
+	value, ok := ctx.Value(appIDContextKey{}).(string)
+	return value, ok && value != ""
+}
+
+type appIDContextKey struct{}
+type anonymousPasskeyQuotaKeyContextKey struct{}
+
+func anonymousPasskeyQuotaKeyFromContext(ctx context.Context) (string, bool) {
+	value, ok := ctx.Value(anonymousPasskeyQuotaKeyContextKey{}).(string)
+	return value, ok && value != ""
+}
+
+func anonymousPasskeyQuotaKey(appID, appCheckToken string) (string, bool) {
+	if appID == "" || len(appID) > 256 || appCheckToken == "" || len(appCheckToken) > 8*1024 {
+		return "", false
+	}
+	return digestPasskeyQuotaKey("anonymous-v1", appID, appCheckToken), true
+}
+
+func authenticatedPasskeyQuotaKey(appID, uid string) (string, bool) {
+	uid = strings.TrimSpace(uid)
+	if appID == "" || len(appID) > 256 || uid == "" || len(uid) > 256 {
+		return "", false
+	}
+	return digestPasskeyQuotaKey("authenticated-v1", appID, uid), true
+}
+
+func appPasskeyQuotaKey(appID string) (string, bool) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" || len(appID) > 256 {
+		return "", false
+	}
+	return digestPasskeyQuotaKey("app-circuit-v1", appID), true
+}
+
+func digestPasskeyQuotaKey(scope string, parts ...string) string {
+	digest := sha256.New()
+	writePasskeyQuotaPart(digest, scope)
+	for _, part := range parts {
+		writePasskeyQuotaPart(digest, part)
+	}
+	return "passkey:v2:" + hex.EncodeToString(digest.Sum(nil))
+}
+
+type passkeyQuotaHash interface {
+	Write([]byte) (int, error)
+}
+
+func writePasskeyQuotaPart(digest passkeyQuotaHash, value string) {
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	_, _ = digest.Write(length[:])
+	_, _ = digest.Write([]byte(value))
+}

@@ -73,39 +73,47 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	sequence := 0
 	totalAudioBytes := 0
 	firstAudioAt := time.Time{}
+	strictOutput := &strictAudioBuffer{}
+	defer strictOutput.clear()
+	strictOutput.markCommitted()
+	deliverAudio := func(audio []byte) error {
+		if len(audio) == 0 ||
+			len(audio) > voiceStreamMaxChunkBytes ||
+			len(audio)%2 != 0 ||
+			sequence >= voiceStreamMaxChunks ||
+			len(audio) > voiceStreamMaxAudioBytes-totalAudioBytes {
+			return errors.New("streamed audio is outside bounds")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if firstAudioAt.IsZero() {
+			firstAudioAt = time.Now()
+		}
+		frame := voiceStreamFrame{
+			Type:         "audio",
+			Version:      voiceStreamVersion,
+			Sequence:     &sequence,
+			AudioBase64:  base64.StdEncoding.EncodeToString(audio),
+			SampleRateHz: pointerTo(voiceStreamSampleRateHz),
+		}
+		if err := encoder.Encode(frame); err != nil {
+			return err
+		}
+		flusher.Flush()
+		totalAudioBytes += len(audio)
+		sequence++
+		return nil
+	}
+	onAudio := deliverAudio
+	if input.StrictCloudMinimization {
+		onAudio = strictOutput.append
+	}
 	result, err := streamService.ProcessStream(
 		ctx,
 		principal.UID,
 		input,
-		func(audio []byte) error {
-			if len(audio) == 0 ||
-				len(audio) > voiceStreamMaxChunkBytes ||
-				len(audio)%2 != 0 ||
-				sequence >= voiceStreamMaxChunks ||
-				len(audio) > voiceStreamMaxAudioBytes-totalAudioBytes {
-				return errors.New("streamed audio is outside bounds")
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if firstAudioAt.IsZero() {
-				firstAudioAt = time.Now()
-			}
-			frame := voiceStreamFrame{
-				Type:         "audio",
-				Version:      voiceStreamVersion,
-				Sequence:     &sequence,
-				AudioBase64:  base64.StdEncoding.EncodeToString(audio),
-				SampleRateHz: pointerTo(voiceStreamSampleRateHz),
-			}
-			if err := encoder.Encode(frame); err != nil {
-				return err
-			}
-			flusher.Flush()
-			totalAudioBytes += len(audio)
-			sequence++
-			return nil
-		},
+		onAudio,
 	)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -148,7 +156,10 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	defer clear(result.Audio)
 
 	spoke := sequence > 0
-	if err := validateStreamedVoiceResult(result, spoke); err != nil {
+	if input.StrictCloudMinimization {
+		spoke = strictOutput.spoke()
+	}
+	if err := validateStreamedVoiceResultForInput(input, result, spoke); err != nil {
 		s.logger.ErrorContext(ctx, "voice stream result rejected",
 			"request_id", requestIDFromContext(ctx),
 			"error_class", "invalid_voice_result",
@@ -161,6 +172,11 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		})
 		flusher.Flush()
 		return
+	}
+	if input.StrictCloudMinimization && spoke {
+		if err := strictOutput.release(deliverAudio); err != nil {
+			return
+		}
 	}
 
 	var caption any
@@ -181,6 +197,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		"coachAction":      result.CoachAction,
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
+		"privacyStatus":    result.PrivacyStatus,
 		"route":            result.Route,
 		"needsPaper":       result.NeedsPaper,
 	}
@@ -262,6 +279,17 @@ func validateStreamedVoiceResult(result VoiceTurnResult, spoke bool) error {
 	bufferedShape.Audio = []byte{0}
 	bufferedShape.AudioMIMEType = "audio/mpeg"
 	return validateVoiceResult(bufferedShape)
+}
+
+func validateStreamedVoiceResultForInput(
+	input VoiceTurnInput,
+	result VoiceTurnResult,
+	spoke bool,
+) error {
+	if err := validateStreamedVoiceResult(result, spoke); err != nil {
+		return err
+	}
+	return validateVoiceResultMode(input, result)
 }
 
 func (s *Server) voiceStreamPreflight(w http.ResponseWriter, r *http.Request) {

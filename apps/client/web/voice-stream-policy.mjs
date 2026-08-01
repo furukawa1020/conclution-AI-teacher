@@ -37,7 +37,7 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   confirmationMs: 160,
   guardMs: 320,
   intervalMs: 40,
-  maximumCaptureMs: 210_000,
+  maximumCaptureMs: 3 * 60_000 + 30_000,
   monologueSilenceMs: 5_000,
   monologueSpeechMs: 12_000,
   reflectiveSilenceMs: 2_200,
@@ -549,6 +549,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       "idToken",
       "sampleRateHz",
       "sessionState",
+      "strictCloudMinimization",
       "turnMode",
       "type",
       "version",
@@ -560,6 +561,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     typeof startFrame.appCheckToken !== "string" ||
     startFrame.appCheckToken.length === 0 ||
     typeof startFrame.sessionState !== "string" ||
+    typeof startFrame.strictCloudMinimization !== "boolean" ||
     !["ambient", "foreground", "intentional"].includes(startFrame.turnMode) ||
     startFrame.sampleRateHz !== VOICE_LIVE_LIMITS.inputSampleRateHz
   ) {

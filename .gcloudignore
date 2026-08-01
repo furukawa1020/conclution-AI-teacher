@@ -7,6 +7,7 @@
 .tmp
 .gocache
 .gocache-*
+.tmp-gocache-*
 .tmp-go-cache-*
 target
 dist

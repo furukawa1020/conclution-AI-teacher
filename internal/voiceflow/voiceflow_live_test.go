@@ -246,6 +246,13 @@ func (agent *speculativeTestAgent) Process(
 	return agent.speculativeResult, agent.speculativeErr
 }
 
+func (agent *speculativeTestAgent) ValidateStateToken(_ string, token string) error {
+	if token == "" {
+		return conversation.ErrInvalidStateToken
+	}
+	return nil
+}
+
 func (agent *speculativeTestAgent) recordedTurns() []conversation.VoiceTurn {
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
@@ -2407,7 +2414,7 @@ func TestPipelineLiveSpeculativeCancellationDoesNotLeak(t *testing.T) {
 	}
 }
 
-func TestPipelineLiveSpeculationRequiresReplyExpectedAndBlocksDocuments(t *testing.T) {
+func TestPipelineLiveSpeculationRequiresReplyExpectedAndDisablesForDocuments(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name       string
@@ -2435,7 +2442,9 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndBlocksDocuments(t *testi
 				MIMEType: "application/pdf",
 				Data:     []byte("pdf"),
 			},
-			wantRoute: routeDocumentPrivacyBlocked,
+			wantTurns: 1,
+			wantMiss:  1,
+			wantRoute: "fast",
 		},
 	} {
 		test := test
@@ -2506,6 +2515,10 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndBlocksDocuments(t *testi
 				(turns[0].Speculative != test.wantSpec ||
 					turns[0].Foreground != test.foreground) {
 				t.Fatalf("turns=%+v", turns)
+			}
+			if test.document != nil &&
+				(turns[0].PDF == nil || turns[0].PDF.MIMEType != "application/pdf") {
+				t.Fatalf("document was not passed to the normal turn: %+v", turns[0])
 			}
 			if test.wantRoute != "" && result.Route != test.wantRoute {
 				t.Fatalf("route=%q; want %q", result.Route, test.wantRoute)

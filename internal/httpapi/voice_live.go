@@ -94,13 +94,14 @@ const (
 )
 
 type voiceLiveStartFrame struct {
-	Type          string        `json:"type"`
-	Version       int           `json:"version"`
-	IDToken       string        `json:"idToken"`
-	AppCheckToken string        `json:"appCheckToken"`
-	SessionState  string        `json:"sessionState"`
-	TurnMode      VoiceTurnMode `json:"turnMode"`
-	SampleRateHz  int           `json:"sampleRateHz"`
+	Type                    string        `json:"type"`
+	Version                 int           `json:"version"`
+	IDToken                 string        `json:"idToken"`
+	AppCheckToken           string        `json:"appCheckToken"`
+	SessionState            string        `json:"sessionState"`
+	TurnMode                VoiceTurnMode `json:"turnMode"`
+	SampleRateHz            int           `json:"sampleRateHz"`
+	StrictCloudMinimization bool          `json:"strictCloudMinimization"`
 }
 
 type voiceLiveCommitFrame struct {
@@ -127,6 +128,7 @@ type voiceLiveFinalResult struct {
 	CoachAction      string           `json:"coachAction"`
 	ResearchStatus   string           `json:"researchStatus"`
 	ResearchRecords  []ResearchRecord `json:"researchRecords"`
+	PrivacyStatus    string           `json:"privacyStatus"`
 	Route            string           `json:"route"`
 	NeedsPaper       bool             `json:"needsPaper"`
 }
@@ -350,7 +352,15 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-
+	if s.voice.RequireRecentPasskey && !voiceAuthorized(principal, time.Now().UTC()) {
+		finishVoiceLiveWithError(
+			liveCtx,
+			conn,
+			voiceLiveCodeAuthenticationFailed,
+			websocket.StatusPolicyViolation,
+		)
+		return
+	}
 	quotaCtx, cancelQuota := context.WithTimeout(
 		liveCtx,
 		voiceLiveGuardTimeout,
@@ -427,10 +437,11 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	input := VoiceTurnInput{
-		MIMEType:   "audio/L16",
-		StateToken: start.SessionState,
-		RequestID:  requestIDFromContext(liveCtx),
-		TurnMode:   start.TurnMode,
+		MIMEType:                "audio/L16",
+		StateToken:              start.SessionState,
+		RequestID:               requestIDFromContext(liveCtx),
+		TurnMode:                start.TurnMode,
+		StrictCloudMinimization: start.StrictCloudMinimization,
 		Ambient: start.TurnMode == VoiceTurnAmbient ||
 			start.TurnMode == VoiceTurnForeground,
 		Foreground:          start.TurnMode == VoiceTurnForeground,
@@ -451,6 +462,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	outputMetrics := &voiceLiveOutputMetrics{}
+	strictOutput := &strictAudioBuffer{}
+	defer strictOutput.clear()
 	outcomeChannel := make(chan voiceLiveOutcome, 1)
 	endpointChannel := make(chan struct{}, 1)
 	pipelineDoneSignal := make(chan struct{})
@@ -465,6 +478,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 		onAudio := func(audio []byte) error {
+			if input.StrictCloudMinimization {
+				return strictOutput.append(audio)
+			}
 			return outputMetrics.deliver(
 				liveCtx,
 				conn,
@@ -722,6 +738,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				close(processingDeadlineSignal)
 				processingDeadlinePublished = true
 				outputMetrics.markCommitted()
+				strictOutput.markCommitted()
 				if !acknowledgeRead(false) {
 					cancelLive()
 					return
@@ -819,7 +836,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 
 	_, outputFrames, _ := outputMetrics.snapshot()
 	spoke := outputFrames > 0
-	if err := validateStreamedVoiceResult(outcome.result, spoke); err != nil {
+	if input.StrictCloudMinimization {
+		spoke = strictOutput.spoke()
+	}
+	if err := validateStreamedVoiceResultForInput(input, outcome.result, spoke); err != nil {
 		finishVoiceLiveWithError(
 			liveCtx,
 			conn,
@@ -827,6 +847,14 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			websocket.StatusInternalError,
 		)
 		return
+	}
+	if input.StrictCloudMinimization && spoke {
+		if err := strictOutput.release(func(audio []byte) error {
+			return outputMetrics.deliver(liveCtx, conn, audio)
+		}); err != nil {
+			cancelLive()
+			return
+		}
 	}
 	finalResult := voiceLiveFinalResult{
 		AudioBase64:      "",
@@ -839,6 +867,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		CoachAction:      outcome.result.CoachAction,
 		ResearchStatus:   outcome.result.ResearchStatus,
 		ResearchRecords:  outcome.result.ResearchRecords,
+		PrivacyStatus:    outcome.result.PrivacyStatus,
 		Route:            outcome.result.Route,
 		NeedsPaper:       outcome.result.NeedsPaper,
 	}
@@ -877,7 +906,8 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		!validVoiceLiveJWT(start.AppCheckToken) ||
 		len(start.SessionState) > maxStateBytes ||
 		!utf8.ValidString(start.SessionState) ||
-		strings.TrimSpace(start.SessionState) != start.SessionState {
+		strings.TrimSpace(start.SessionState) != start.SessionState ||
+		(start.StrictCloudMinimization && start.SessionState != "") {
 		return false
 	}
 	switch start.TurnMode {

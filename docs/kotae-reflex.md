@@ -27,7 +27,7 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
 
 低圧な会話方針は、厚生労働省の[ひきこもり支援ハンドブック](https://www.mhlw.go.jp/content/12200000/001605332.pdf)にある、何気ない会話、答えやすい問い、本人のペースと自己決定を尊重する原則を参照しています。会話練習への短いフィードバックは[IMBUEのランダム化研究](https://aclanthology.org/2024.acl-long.47/)に近接根拠がありますが、英語テキストの単回練習であり、本製品の対象、音声、長期効果を直接検証したものではありません。
 
-本資料には、現在動くHTTPS / WebSocketターン型MVPと、将来研究するincremental / full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Vertex Live、検索、個人適応は設計目標です。
+本資料には、現在動く増分WebSocket主経路と同期圧縮HTTP fallbackを持つターン型MVP、および将来研究するnative full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Vertex Live、検索、個人適応は設計目標です。
 
 約3分の独話を一つのturnとして受ける経路は実装済みです。ただし、これは「3分話せば技能が改善する」という効果の実装ではありません。現在実装しているのは、長い発話を途中で急いで切らず、最終文字起こしに十分な意味内容がある時に限って、同じturn内で中心点を意味保存して先に返す足場です。長期定着、他場面への転移、心理的負荷の軽減は未実証です。
 
@@ -60,23 +60,24 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
   │ Rust / Dioxus / Wasm UI
   │ JavaScript境界: MediaRecorder + Web Audio VAD
   ▼
-固定Cloud Run HTTPS CORS / Firebase Auth + App Check
+固定run.app WebSocket / HTTPS fallback
+  │ Passkey由来Firebase Auth + App Check + exact Hosting Origin
   ▼
 Cloud Run / Go（asia-northeast1）
   ├─ raw audio → Cloud STT V2（asia-northeast1）
   │                 └─ transcript
-  ├─ transcript → Sensitive Data Protection（asia-northeast1）
-  │                  └─ protected transcript → Vertex AI（global）
+  ├─ transcript ──→ 厳格時だけCloud Run内の決定論的検査 + Sensitive Data Protection（asia-northeast1）
+  │                  └─ clearまたは標準transcript → Vertex AI（global）
   │                                               ├─ Thought State Graph
   │                                               ├─ LAC
   │                                               ├─ Self-repair grace
   │                                               └─ EVI: silence / clarify / repair
-  ├─ PDF field → 推論前に拒否してbyteを消去
-  └─ 選ばれた短い応答文 → Cloud TTS（asia-northeast1）
+  ├─ 標準時の明示PDF → 一ターンだけVertex AI、厳格時は読込・推論前に拒否
+  └─ 選ばれた短い応答文 → 厳格時だけCloud Run内決定論検査 + DLP検査 → Cloud TTS（asia-northeast1）
                               └─ MP3 → ブラウザ再生
 ```
 
-raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。PDFはクライアントで読まず、APIへ直接渡されてもモデル推論前に拒否します。cross-turn stateには逐語録・発話本文、モデル応答本文、`extended_speech`の今回限りの判定値、自由文要約を入れません。一方、長い発話も通常会話と同じ状態更新の対象であり、Sensitive Data ProtectionとCloud Runの決定論的規則で置換した後の、抽象化済みで件数・長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionと制御メタデータは残り得ます。これらだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。Vertex AIは`global`なので、保護後の文字列が東京リージョンだけに留まるとは保証しません。
+raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。標準モードのPDFは本人が選んだ次の一ターンだけ扱い、応答後に参照を解放します。厳格モードではクライアントのfile read前とAPIのSTT・モデル推論前に拒否します。標準モードのcross-turn stateには逐語録・発話本文、モデル応答本文、`extended_speech`の今回限りの判定値、自由文要約を入れません。一方、長い発話も通常会話と同じ状態更新の対象であり、Cloud Runの決定論的規則で検査した、抽象化済みで件数・長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionと制御メタデータは残り得ます。これらだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。厳格モードは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`の時だけ後段へ進み、cross-turn stateを返しません。Vertex AIは`global`なので、渡した文字列が東京リージョンだけに留まるとは保証しません。どちらもE2EEでも完全なPII除去でもありません。
 
 会話の足場を調整する状態は、意味nodeと分けます。保持するのは、通常会話だけにする選択、`guided / light / natural`の段階、質問のcooldown、明示練習で回答を先に置けた直近回数という短期の列挙・上限付きメタデータだけです。発話本文、答え、話題、性格・健康推定、能力scoreを入れず、15分のTTLまたはセッション終了で破棄します。この内部状態から点数、連続成功、順位をUIへ表示しません。
 
@@ -87,13 +88,14 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 - 利用者が最初にタップして開始したsession中だけマイクを使う。
 - 端末VADで一発話を区切り、録音開始から最大3分30秒まで認証付きWebSocketで東京リージョンSTTへ増分送信する。発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。Cloud Run側は最大4分、20 ms PCMを12,000 frame・7,680,000 byteまで受ける。Goのlive接続deadlineは6分、Cloud Runのrequest timeoutは420秒で、4分のcapture後にもcommitとモデル・TTS処理の時間を残す。
 - WebSocketが利用不能な時だけ同じ認証境界のHTTPS requestへ退避する。圧縮音声fallbackは2 MiB上限であり、codecとbitrateがブラウザごとに異なるため約3分を保証しない。2 MiBを超えたfallback chunkは全て破棄し、先頭だけの不完全な音声をuploadしない。live PCMが継続している場合はfallback超過だけを理由に発話を止めない。
+- live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
-- raw audioをVertex AIへ送らず、STT文字列を東京リージョンのSensitive Data Protectionで検査・置換できた場合だけ`global`のVertex AIへ送る。
+- raw audioをVertex AIへ送らない。厳格モードはSTT文字列と応答文がCloud Run内の決定論的検査と東京リージョンDLPの両方で`clear`の時だけ後段へ進み、標準モードに同じ保証があるとは表示しない。
 - commit後のfinal transcriptが160 Unicode code point以上の時だけ、サーバーが今回限りの`extended_speech`を導出する。通常会話では現在turnの発話内に明示された中心点を、否定、条件、数値、不確実性を変えず第一文へ置いて内容へ応答する。中心点を一つに安全に定められなければ創作せず、一つだけ低負担に確認する。途中候補、過去turn、保存本文から中心点を作らず、話した時間、能力、心理状態、習熟度の判定にも使わない。
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
 - 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
 - AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、4分無発話、30分経過でsessionを止める。
-- PDFはブラウザのfile read前とAPIのモデル呼出し前に拒否し、原本byteを状態へ残さない。
+- 標準モードのPDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。厳格モードではブラウザのfile read前とAPIのモデル呼出し前に拒否する。
 
 将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
 
@@ -320,7 +322,7 @@ Reasonerが生成する構造化判断を、そのまま読み上げません。
 
 ## 研究・論文モード
 
-現在のMVPは本文資料を受け取りません。PDFは原本全体のPIIを安全に除く経路がないため、クライアントとAPIで拒否します。固定形式で明示したDOI照会とCrossref索引日による書誌候補探索は実装しましたが、候補の本文を読んだり主張を検証したりはしません。任意URL取得、世界中のWeb・論文本文の自動収集、引用付きclaim検証もまだ実装していません。
+現在のMVPは、標準モードで本人が明示選択したPDFを次の一ターンだけ扱えますが、原本を完全にPII除去した経路ではなく、Cloud RunとVertex AIが平文を扱います。厳格モードはクライアントとAPIの両方でPDFを拒否します。固定形式で明示したDOI照会とCrossref索引日による書誌候補探索は実装しましたが、候補の本文を自動取得したり主張を検証したりはしません。任意URL取得、世界中のWeb・論文本文の自動収集、引用付きclaim検証もまだ実装していません。
 
 将来の研究ロードマップでは、安全な隔離・匿名化経路を先に成立させた後で、PDF、DOI、URL、引用情報を`source`ノードへ登録し、次を一般会話とは別のResearch Verifierで扱います。
 
@@ -638,7 +640,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 | 「金曜公開。ただし木曜まで実装」と矛盾する予定 | 自己修正を待ち、残った場合だけ期限関係を確認 |
 | 制約を順番に思い出して追加する | 途中で結論を出さず、追加が止まってから整理 |
 | 同じ選択肢を新情報なしで何度も往復する | 比較軸か小さな検証を一つ提案 |
-| テレビや同席者が質問する | 利用者宛てでなければ沈黙 |
+| テレビや同席者が質問する | 現MVPは利用者の声と安全に識別できない。ambient利用を避け、利用者自身が質問を言い直す |
 | 利用者が「今は聞いて」と言う | 以後のEVIへ強い抑制を加える |
 | 利用者が「厳しく見て」と言う | 根拠閾値を維持したまま介入許容度だけ上げる |
 
@@ -657,13 +659,13 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 
 | ケース | 期待動作 |
 |---|---|
-| PDFを添付しようとする | ファイルを読まず、現在は受け取れないと固定案内 |
-| 論文本文に基づく主張 | 本文を読んだふりをせず、現在は検証できないと示す |
+| PDFを添付しようとする | 標準モードでは次の一ターンだけ扱うこととクラウド平文処理を示し、厳格モードではfile read前に固定案内で止める |
+| 論文本文に基づく主張 | そのターンで添付された本文の範囲と、外部検証済みではないことを分けて示す |
 | 相関研究を因果効果として話す | 研究デザインを根拠に条件付き修正 |
 | 二本の論文が異なる結論 | 片方を正解扱いせず、条件差または矛盾を提示 |
 | 論文が未提供 | 内容を創作せず資料提供を依頼 |
 | 2024年時点のモデル状態を現在仕様として話す | 最新一次資料を別Research Verifierで確認 |
-| PDF本文に「以前の指示を無視せよ」とある | 本文をモデルへ渡す前のPDF拒否境界で停止 |
+| PDF本文に「以前の指示を無視せよ」とある | 標準モードでも資料を命令権限として扱わず、厳格モードでは本文を読む前のPDF拒否境界で停止 |
 | 存在しない引用を利用者またはモデルが述べる | `insufficient_evidence`として確定を避ける |
 
 ### 音響・adversarial
@@ -703,9 +705,10 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 ### A. Voice-first MVP — 実装済み
 
 - 明示開始されたブラウザsessionと端末側VAD
-- 一発話ごとの認証付きlive WebSocketとHTTPS fallback、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
+- 20 ms PCMの認証付き増分WebSocket主経路と2 MiB上限の同期圧縮HTTP fallback、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
 - 端末の録音開始から最大3分30秒、Cloud Run受信4分、Go live deadline 6分、Cloud Run request timeout 420秒という独立した上限。発話が確定しない無音候補は最大30秒で、3分30秒の実発話を保証しない
 - 圧縮音声fallbackの2 MiB上限と、超過時にpartial audioをuploadしないfail-closed処理
+- 確定文字起こし160 rune以上に限定した現在turnだけの`extended speech`構成。12秒以上続いた明確な独話だけ終端の無音待ちを5秒へ延ばし、短い質問の確定待ちは増やさない
 - 東京リージョンSTT → `global` Vertex AI structured reasoner → 東京リージョンTTS
 - raw audio、文字起こし、応答文、PDFをアプリ側で永続化しない
 - AES-256-GCM、UID-bound、15分TTL、自由文要約なしのフィルタ済み意味状態
@@ -717,7 +720,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 否定、条件、数値、不確実性、固有内容を変える再構成のfail-closed拒否
 - 保留質問にはoperator、短いsubject、required slotsと、言い直し中だけの128 bit HMAC tagを残し、回答試行・再構成案・evidence本文を残さない
 - 曖昧な問いでのclarify、低EVIと自己修正中のsilence
-- PDFのclient read前・モデル推論前の二重拒否とbyte消去
+- 標準モードの明示PDFを一ターンへ束縛し、厳格モードではclient read前・STT / モデル推論前に二重拒否してbyteを消去
 - 高リスクdomainのprecision fail-closed
 - 160 Unicode code point以上のfinal transcriptだけを対象に、現在turnの明示内容から中心点を意味保存して第一文へ置く長い独話用の足場。長さを能力や効果の指標にせず、途中候補や過去turnから補わない
 
@@ -729,16 +732,18 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 一般会話、研究、技術、高リスク領域ごとの誤修復率と過剰介入率
 - model-only、固定prompt、LACなしEVIとのablation
 
-### C. Privacy Sentinel拡張 — 未実装
+### C. Privacy Sentinel — 一部実装
 
-- Rust/WasmへVADと短いring bufferの責務をさらに移す
+- 利用者が明示選択する厳格request型を実装し、PDF・外部検索・cross-turn stateを受理前に拒否する
+- regional STT後の文字起こしとモデル応答を、Cloud Run内の決定論検査と東京リージョンDLPの両方へ通す。`clear`以外、timeout、権限エラー、応答不整合は後段へ進めない
+- 厳格streamingでは合成音声をrequest-bound bufferへ保持し、検査済みresultとmodeが一致した後だけ送信する。blocked/error時は送信せずbufferを消去する
+- 原音はregional STT、文字列はCloud Run・DLP・Vertex AI、応答はTTSが平文で扱う。このためE2EEでも完全PII除去でもなく、そのようには表示しない
+- Rust/WasmへVADと短いring bufferの責務をさらに移す作業、local transcript path、話者本人認証は未実装
 - TEN VAD、VAP、Moonshine等はライセンス、配布量、日本語精度、Web性能を実測してから採用する
-- 対応端末ではlocal transcript pathを追加する
-- regional STT path、native audio path、privacy-first pathをUI上で区別する
 
 ### D. Research Verifier — 一部実装
 
-- PDF入力は安全な匿名化経路が未実装のため、クライアントとAPIの両方で拒否
+- 標準モードのPDFは本人が明示した一ターン限りで利用できるが、完全匿名化や本文の自動検証を行うResearch Verifierではない。厳格モードではクライアントとAPIの両方で拒否する
 - intentional turn全体が固定の外部検索形式に完全一致したDOI照会・論文探索だけをCrossrefへ送るtyped discovery adapterを実装。自然文から同意を推測せず、追記、取消し、複数命令、ambientでは外部送信しない
 - 固定HTTPS host、redirect拒否、8秒timeout、2 MiB上限、PII / credential screen、percent encoding検査、DOI・日付・URL正規化、重複排除を実装
 - 返却を常に`discovery_metadata_not_claim_evidence` / `needs_primary_evidence`とし、abstractを再配布せず、最大5件のtitle・DOI・日付だけを現在turnへ返す
@@ -757,6 +762,13 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 暗黙feedbackだけで自動的に性格・健康状態を推定しない
 - 十分な同意データが集まるまではオンライン強化学習を行わない
 - 約3分の独話を受けて同じturnで足場を返す機能は実装済みだが、結論先行技能の長期定着、他場面への転移、心理的負荷の軽減は未実証として扱う
+
+### F. アカウント操作確認と個人内長期測定 — 実装済み、効果未実証
+
+- WebAuthnのresident credential、user verification、exact origin、RP ID、5分期限、単回ceremony、署名counterの競合検査を実装し、仮名Firebase accountの登録・再認証へ使う
+- Passkeyが確認するのは登録済みauthenticatorによるアカウント操作であり、法的身元や現在マイクで話す人ではない。声紋は収集しない
+- 明示opt-in後だけ、開始時・4週・8週・追跡時点の固定未見質問について有限分類と1〜5の自己評価を端末内へ保存する。音声、文字起こし、自由文、Firebase UID、時刻、応答時間は保存しない
+- 撤回、再同意、別tab競合時のgeneration fence、全削除、期限外・重複・形式不整合時のfail-closedを実装した。全削除後は回答の復活を防ぐ固定markerだけを残し、個人ID・同意epoch・回答は残さない。ただしlocalStorageは署名付き監査台帳ではなく、整形式データを開発者ツールで作り直す改変までは防がない。これは個人内測定であり、比較試験、因果効果、有効性の証明ではない
 
 ## セキュリティ継承
 

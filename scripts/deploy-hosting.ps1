@@ -12,7 +12,9 @@ param(
 
     [string] $RunRegion = "asia-northeast1",
 
-    [string] $GcloudPath = ".tools/gcloud-577.0.0/google-cloud-sdk/bin/gcloud.cmd"
+    [string] $GcloudPath = ".tools/gcloud-577.0.0/google-cloud-sdk/bin/gcloud.cmd",
+
+    [switch] $PreflightOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +32,17 @@ $expectedRunUrl = "https://kotae-api-r6kgkvtrmq-an.a.run.app"
 $expectedRunWebSocketUrl = "wss://kotae-api-r6kgkvtrmq-an.a.run.app"
 $expectedVoiceStreamUrl = "$expectedRunUrl/api/v1/voice/turns:stream"
 $expectedVoiceLiveUrl = "$expectedRunWebSocketUrl/api/v1/voice/live"
+$expectedRuntimeServiceAccount = "kotae-api-runtime@$expectedProjectId.iam.gserviceaccount.com"
+$expectedBuildServiceAccount = "projects/$expectedProjectId/serviceAccounts/kotae-api-builder@$expectedProjectId.iam.gserviceaccount.com"
+$requiredTtlCollectionGroups = @(
+    "evaluations",
+    "evaluationRateLimits",
+    "voiceRateLimits",
+    "voiceLiveLeases",
+    "passkey_ceremonies_v1",
+    "passkeyClientRateLimits",
+    "passkeyAppRateLimits"
+)
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace $PublicDirectory))
@@ -184,6 +197,209 @@ function Invoke-BinaryUpload {
     }
 }
 
+function Invoke-GcloudJson {
+    param(
+        [Parameter(Mandatory)]
+        [string[]] $CommandArguments,
+
+        [Parameter(Mandatory)]
+        [string] $Operation
+    )
+
+    # Windows PowerShell treats native stderr as PowerShell errors. gcloud can
+    # write successful progress messages there, so inspect its native exit code
+    # instead of letting ErrorActionPreference=Stop terminate this preflight.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $jsonLines = @(& $gcloud @CommandArguments 2>$null)
+        $commandExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($commandExitCode -ne 0) {
+        throw "Google Cloud CLI failed while $Operation."
+    }
+    $jsonText = ($jsonLines -join [System.Environment]::NewLine).Trim()
+    if ([string]::IsNullOrWhiteSpace($jsonText)) {
+        throw "Google Cloud CLI returned no JSON while $Operation."
+    }
+    try {
+        # Windows PowerShell 5.1 preserves a top-level JSON array as one
+        # non-enumerated pipeline object when ConvertFrom-Json is returned
+        # directly. Materialize it first so callers receive every TTL policy.
+        $decoded = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
+    } catch {
+        throw "Google Cloud CLI returned invalid JSON while $Operation."
+    }
+    return @($decoded)
+}
+
+function Assert-PromotedBackendBoundary {
+    $service = Invoke-GcloudJson `
+        -Operation "checking the promoted Cloud Run service" `
+        -CommandArguments @(
+            "run", "services", "describe", $RunService,
+            "--project=$ProjectId",
+            "--region=$RunRegion",
+            "--format=json",
+            "--quiet",
+            "--verbosity=error"
+        )
+
+    if (
+        $service.metadata.name -cne $expectedRunService -or
+        $service.status.url.TrimEnd("/") -cne $expectedRunUrl -or
+        $service.spec.template.spec.serviceAccountName -cne $expectedRuntimeServiceAccount -or
+        [int] $service.spec.template.spec.timeoutSeconds -ne 420 -or
+        [int] $service.spec.template.spec.containerConcurrency -ne 4
+    ) {
+        throw "The promoted Cloud Run service does not match the reviewed runtime boundary."
+    }
+
+    $serviceAnnotations = $service.metadata.annotations
+    $buildAccountProperty = $serviceAnnotations.PSObject.Properties[
+        "run.googleapis.com/build-service-account"
+    ]
+    $ingressProperty = $serviceAnnotations.PSObject.Properties[
+        "run.googleapis.com/ingress-status"
+    ]
+    $minimumProperty = $serviceAnnotations.PSObject.Properties[
+        "run.googleapis.com/minScale"
+    ]
+    $maximumProperty = $serviceAnnotations.PSObject.Properties[
+        "run.googleapis.com/maxScale"
+    ]
+    if (
+        $null -eq $buildAccountProperty -or
+        [string] $buildAccountProperty.Value -cne $expectedBuildServiceAccount -or
+        $null -eq $ingressProperty -or
+        [string] $ingressProperty.Value -cne "all" -or
+        $null -eq $minimumProperty -or
+        [string] $minimumProperty.Value -cne "1" -or
+        $null -eq $maximumProperty -or
+        [string] $maximumProperty.Value -cne "3"
+    ) {
+        throw "The promoted Cloud Run service annotations are outside the reviewed boundary."
+    }
+
+    $traffic = @($service.status.traffic)
+    if (
+        $traffic.Count -ne 1 -or
+        [int] $traffic[0].percent -ne 100 -or
+        [string]::IsNullOrWhiteSpace([string] $traffic[0].revisionName) -or
+        [string] $traffic[0].revisionName -cne [string] $service.status.latestReadyRevisionName
+    ) {
+        throw "The latest ready Cloud Run revision is not the sole promoted revision."
+    }
+
+    $containers = @($service.spec.template.spec.containers)
+    if ($containers.Count -ne 1) {
+        throw "The promoted Cloud Run service must contain exactly one container."
+    }
+    $environment = @{}
+    foreach ($entry in @($containers[0].env)) {
+        $nameProperty = $entry.PSObject.Properties["name"]
+        if ($null -eq $nameProperty -or [string]::IsNullOrWhiteSpace([string] $nameProperty.Value)) {
+            throw "The promoted Cloud Run service contains an invalid environment entry."
+        }
+        $name = [string] $nameProperty.Value
+        if ($environment.ContainsKey($name)) {
+            throw "The promoted Cloud Run service contains a duplicate environment entry."
+        }
+        $valueProperty = $entry.PSObject.Properties["value"]
+        if ($null -ne $valueProperty) {
+            $environment[$name] = [string] $valueProperty.Value
+        }
+    }
+
+    $requiredEnvironment = @{
+        "KOTAE_ENV" = "production"
+        "KOTAE_ALLOW_INSECURE_DEV" = "false"
+        "GOOGLE_CLOUD_PROJECT" = $expectedProjectId
+        "GOOGLE_CLOUD_LOCATION" = "global"
+        "KOTAE_ALLOWED_APP_IDS" = $expectedAppId
+        "KOTAE_STATE_V2_WRITES" = "true"
+        "KOTAE_COACH_RESTATEMENT_BINDING" = "true"
+        "KOTAE_SPEECH_LOCATION" = $expectedRunRegion
+        "KOTAE_PASSKEY_RP_ID" = $expectedDefaultUrl.Replace("https://", "")
+        "KOTAE_PASSKEY_ORIGIN" = $expectedDefaultUrl
+        "KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE" = "true"
+    }
+    foreach ($name in $requiredEnvironment.Keys) {
+        if (
+            -not $environment.ContainsKey($name) -or
+            [string] $environment[$name] -cne [string] $requiredEnvironment[$name]
+        ) {
+            throw "The promoted Cloud Run service is missing a required security setting."
+        }
+    }
+    foreach ($legacyName in @(
+            "KOTAE_PRIVACY_LOCATION",
+            "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE",
+            "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY"
+        )) {
+        if ($environment.ContainsKey($legacyName)) {
+            throw "The promoted Cloud Run service still contains a legacy security setting."
+        }
+    }
+
+    $stateSecret = @($containers[0].env | Where-Object { $_.name -ceq "KOTAE_STATE_KEY_BASE64" })
+    if ($stateSecret.Count -ne 1) {
+        throw "The promoted Cloud Run service does not have one state-key binding."
+    }
+    $secretReference = $stateSecret[0].valueFrom.secretKeyRef
+    if (
+        $secretReference.name -cne "kotae-conversation-state" -or
+        [string] $secretReference.key -notmatch '^[1-9][0-9]*$'
+    ) {
+        throw "The promoted Cloud Run state key is not bound to a pinned Secret version."
+    }
+
+    $ttlPolicies = @(
+        Invoke-GcloudJson `
+            -Operation "checking required Firestore TTL policies" `
+            -CommandArguments @(
+                "firestore", "fields", "ttls", "list",
+                "--database=(default)",
+                "--project=$ProjectId",
+                "--format=json",
+                "--quiet",
+                "--verbosity=error"
+            )
+    )
+    $activeTtlGroups = @{}
+    foreach ($policy in $ttlPolicies) {
+        $resourceName = [string] $policy.name
+        foreach ($collectionGroup in $requiredTtlCollectionGroups) {
+            $suffix = "/collectionGroups/$collectionGroup/fields/expiresAt"
+            if (-not $resourceName.EndsWith($suffix, [System.StringComparison]::Ordinal)) {
+                continue
+            }
+            if ($activeTtlGroups.ContainsKey($collectionGroup)) {
+                throw "Firestore returned a duplicate required TTL policy."
+            }
+            $activeTtlGroups[$collectionGroup] = [string] $policy.ttlConfig.state
+        }
+    }
+    foreach ($collectionGroup in $requiredTtlCollectionGroups) {
+        if (
+            -not $activeTtlGroups.ContainsKey($collectionGroup) -or
+            [string] $activeTtlGroups[$collectionGroup] -cne "ACTIVE"
+        ) {
+            throw "A required Firestore TTL policy is not ACTIVE."
+        }
+    }
+
+    $health = Invoke-RestMethod `
+        -Method Get `
+        -Uri "$expectedRunUrl/health" `
+        -TimeoutSec 20
+    if ($health.status -cne "ok" -or $health.service -cne $expectedRunService) {
+        throw "The promoted Cloud Run health boundary did not validate."
+    }
+}
+
 function Assert-HostingArtifact {
     param(
         [Parameter(Mandatory)]
@@ -194,6 +410,7 @@ function Assert-HostingArtifact {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "passkey-policy.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-stream-policy.mjs",
@@ -226,6 +443,7 @@ function Assert-HostingArtifact {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "passkey-policy.mjs",
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-stream-policy.mjs",
@@ -269,6 +487,9 @@ function Assert-HostingArtifact {
     if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice stream policy module."
     }
+    if ($bridge -notmatch [regex]::Escape('from "./passkey-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited passkey policy module."
+    }
     if (
         $bridge -notmatch [regex]::Escape("const EXPECTED_PROJECT_ID = `"$expectedProjectId`";") -or
         $bridge -notmatch [regex]::Escape("const EXPECTED_APP_ID = `"$expectedAppId`";") -or
@@ -306,6 +527,11 @@ function Assert-HostingArtifact {
 }
 
 Assert-HostingArtifact -Root $publicRoot
+Assert-PromotedBackendBoundary
+if ($PreflightOnly) {
+    Write-Output "HOSTING_PREFLIGHT=PASS"
+    return
+}
 
 $token = ((& $gcloud auth print-access-token) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {

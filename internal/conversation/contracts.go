@@ -73,8 +73,11 @@ type VoiceTurn struct {
 	// Speculative permits pure model computation while speech recognition is
 	// still provisional. It never widens authority: outbound research and any
 	// future executable action must fail before execution.
-	Speculative bool       `json:"-"`
-	PDF         *InlinePDF `json:"pdf,omitempty"`
+	Speculative bool `json:"-"`
+	// ResearchDisabled is a server-authored capability restriction. It is not
+	// model-visible input and must be checked before any outbound verifier call.
+	ResearchDisabled bool       `json:"-"`
+	PDF              *InlinePDF `json:"pdf,omitempty"`
 }
 
 type InlinePDF struct {

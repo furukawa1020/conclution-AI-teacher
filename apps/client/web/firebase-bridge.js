@@ -1,11 +1,10 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import {
-  browserPopupRedirectResolver,
   browserSessionPersistence,
   getIdToken,
-  GoogleAuthProvider,
+  getIdTokenResult,
   initializeAuth,
-  signInWithPopup,
+  signInWithCustomToken,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 import {
   getToken as getAppCheckToken,
@@ -25,6 +24,7 @@ import {
   createTurnGate,
   createVadState,
   initializeWithCleanup,
+  isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
   shouldCommitHybridEndpoint,
@@ -51,6 +51,17 @@ import {
   shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
 } from "./voice-stream-policy.mjs";
+import {
+  decidePasskeyAction,
+  createPasskeyRegistrationRecoveryLatch,
+  decidePasskeyRegistrationRecoveryAction,
+  decodeAuthenticationBegin,
+  decodeRegistrationBegin,
+  encodeAuthenticationCredential,
+  encodeRegistrationCredential,
+  isPasskeyCancellation,
+  parsePasskeyFinish,
+} from "./passkey-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
@@ -66,7 +77,22 @@ const VOICE_LIVE_ENDPOINT =
 const PCM_CAPTURE_WORKLET_URL = "/pcm-capture-worklet.js";
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
 const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/health`;
+const PASSKEY_REGISTRATION_BEGIN_ENDPOINT =
+  "/api/v1/passkeys/registration:begin";
+const PASSKEY_REGISTRATION_FINISH_ENDPOINT =
+  "/api/v1/passkeys/registration:finish";
+const PASSKEY_AUTHENTICATION_BEGIN_ENDPOINT =
+  "/api/v1/passkeys/authentication:begin";
+const PASSKEY_AUTHENTICATION_FINISH_ENDPOINT =
+  "/api/v1/passkeys/authentication:finish";
+// The server caps finish bodies at 256 KiB. JSON produced here is ASCII-only,
+// so a character limit is also a byte-safe upper bound before fetch.
+const PASSKEY_JSON_MAX_CHARS = 255 * 1024;
+const passkeyRegistrationRecovery = createPasskeyRegistrationRecoveryLatch(
+  () => globalThis.sessionStorage,
+);
 
+const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 4 * Math.ceil(AUDIO_MAX_BYTES / 3);
 const SESSION_STATE_MAX_CHARS = 16 * 1024;
@@ -82,6 +108,7 @@ const ALLOWED_CONFIG_KEYS = Object.freeze([
 ]);
 
 let authInstance;
+let verifiedAccountUid;
 let mediaStream;
 let mediaStreamLossBinding;
 let audioContext;
@@ -93,13 +120,18 @@ let activeRequestController;
 let activePlayback;
 let activeLiveSession;
 let pendingLiveSession;
+let pendingDocument;
+let pendingDocumentTimer;
 let voiceTransportPrimed = false;
 let sessionEpoch = 0;
+let documentEpoch = 0;
 let pcmCaptureGeneration = 0;
 const MAX_STOPPED_SESSION_CODES = 8;
 const stoppedSessionCodes = new Map();
 const beginGate = createTurnGate();
 const finishGate = createTurnGate();
+const passkeyGate = createTurnGate();
+let activePasskeyController;
 const sessionClock = createSessionClock({
   now: () => performance.now(),
 });
@@ -247,7 +279,6 @@ async function initializeFirebaseAuth() {
   await getAppCheckToken(appCheck, false);
   authInstance ??= initializeAuth(app, {
     persistence: browserSessionPersistence,
-    popupRedirectResolver: browserPopupRedirectResolver,
   });
   const auth = authInstance;
   await auth.authStateReady();
@@ -266,39 +297,437 @@ function verifiedAccountUser(user) {
   );
 }
 
-async function accountUser(interactive) {
-  const { auth } = await firebaseAuth();
-  if (verifiedAccountUser(auth.currentUser)) {
+function customTokenCandidateUser(user) {
+  return Boolean(
+    user &&
+      !user.isAnonymous &&
+      Array.isArray(user.providerData) &&
+      user.providerData.length === 0,
+  );
+}
+
+function currentAccountUser(auth) {
+  if (
+    verifiedAccountUser(auth.currentUser) ||
+    customTokenCandidateUser(auth.currentUser)
+  ) {
     return auth.currentUser;
   }
-  if (!interactive) {
-    fail("identity_required");
-  }
-
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
-  let credential;
-  try {
-    credential = await signInWithPopup(auth, provider);
-  } catch {
-    fail("identity_required");
-  }
-  if (!verifiedAccountUser(credential?.user)) {
+  if (auth.currentUser) {
     fail("identity_verification_failed");
   }
-  return credential.user;
+  return null;
+}
+
+function passkeyAccountUid(user) {
+  const uid = user?.uid;
+  if (typeof uid !== "string" || !/^pk_[A-Za-z0-9_-]{32}$/u.test(uid)) {
+    fail("identity_verification_failed");
+  }
+  return uid;
+}
+
+function passkeySessionSnapshot(user, tokenResult) {
+  const provider =
+    tokenResult?.signInProvider === "google.com"
+      ? "google.com"
+      : tokenResult?.signInProvider === "custom"
+        ? "custom"
+        : "";
+  return Object.freeze({
+    accountVerified:
+      provider === "google.com"
+        ? verifiedAccountUser(user)
+        : tokenResult?.claims?.kotae_account_verified === true,
+    authMethod: tokenResult?.claims?.kotae_authn,
+    passkeyAtSeconds: tokenResult?.claims?.kotae_passkey_at,
+    provider,
+  });
+}
+
+function requirePasskeySupport(operation) {
+  const method = operation === "registration" ? "create" : "get";
+  if (
+    globalThis.isSecureContext !== true ||
+    typeof globalThis.PublicKeyCredential !== "function" ||
+    !navigator.credentials ||
+    typeof navigator.credentials[method] !== "function"
+  ) {
+    fail("passkey_unsupported");
+  }
+}
+
+function passkeyRequestToken(value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 32 * 1024 ||
+    /\s/u.test(value)
+  ) {
+    fail("authentication_failed");
+  }
+  return value;
+}
+
+async function passkeyJSON(
+  endpoint,
+  { appCheckToken, beforeRequest, body, failureCode, signal },
+) {
+  const headers = {
+    Accept: "application/json",
+    "X-Firebase-AppCheck": passkeyRequestToken(appCheckToken),
+  };
+  let serializedBody;
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    serializedBody = JSON.stringify(body);
+    if (
+      serializedBody.length === 0 ||
+      serializedBody.length > PASSKEY_JSON_MAX_CHARS
+    ) {
+      fail(failureCode);
+    }
+  }
+  if (beforeRequest !== undefined) {
+    if (typeof beforeRequest !== "function") fail(failureCode);
+    beforeRequest();
+  }
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      body: serializedBody,
+      cache: "no-store",
+      credentials: "omit",
+      headers,
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal,
+    });
+  } catch {
+    if (signal?.aborted) fail("passkey_cancelled");
+    fail(failureCode);
+  }
+  if (!response.ok) fail(failureCode);
+  const contentType = response.headers.get("Content-Type") ?? "";
+  if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) fail(failureCode);
+  const encoded = await response.text();
+  if (encoded.length === 0 || encoded.length > PASSKEY_JSON_MAX_CHARS) {
+    fail(failureCode);
+  }
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    fail(failureCode);
+  }
+}
+
+async function runPasskeyOperation(failureCode, operation) {
+  const passkeyToken = passkeyGate.acquire();
+  if (passkeyToken === null) fail(failureCode);
+  const controller = new AbortController();
+  activePasskeyController = controller;
+  try {
+    return await operation(controller.signal);
+  } finally {
+    if (activePasskeyController === controller) {
+      activePasskeyController = undefined;
+    }
+    passkeyGate.release(passkeyToken);
+  }
+}
+
+function finishEndpoint(endpoint, ceremonyId) {
+  return `${endpoint}?ceremonyId=${encodeURIComponent(ceremonyId)}`;
+}
+
+function preservePasskeyBoundaryError(error) {
+  return Boolean(
+    error instanceof Error &&
+      (error.message === "passkey_cancelled" ||
+        error.message === "passkey_registration_cancelled" ||
+        error.message === "passkey_registration_recovery_required" ||
+        error.message === "passkey_unsupported"),
+  );
+}
+
+async function verifyFreshCustomPasskeyUser(user, failureCode) {
+  const tokenResult = await getIdTokenResult(user, true);
+  const action = decidePasskeyAction(
+    passkeySessionSnapshot(user, tokenResult),
+    Math.floor(Date.now() / 1000),
+  );
+  if (action !== "reuse") fail(failureCode);
+  return user;
+}
+
+async function registerPasskey(auth, appCheckToken) {
+  requirePasskeySupport("registration");
+  return runPasskeyOperation("passkey_registration_failed", async (signal) => {
+    let credential;
+    let encodedCredential;
+    let registrationFinishStarted = false;
+    try {
+      const begin = decodeRegistrationBegin(
+        await passkeyJSON(PASSKEY_REGISTRATION_BEGIN_ENDPOINT, {
+          appCheckToken,
+          failureCode: "passkey_registration_failed",
+          signal,
+        }),
+      );
+      try {
+        credential = await navigator.credentials.create({
+          ...begin.options,
+          signal,
+        });
+      } catch (error) {
+        if (isPasskeyCancellation(error)) {
+          fail("passkey_registration_cancelled");
+        }
+        throw error;
+      }
+      if (!credential) fail("passkey_registration_failed");
+      encodedCredential = encodeRegistrationCredential(credential);
+      const finish = parsePasskeyFinish(
+        await passkeyJSON(
+          finishEndpoint(PASSKEY_REGISTRATION_FINISH_ENDPOINT, begin.ceremonyId),
+          {
+            appCheckToken,
+            beforeRequest: () => {
+              if (
+                !passkeyRegistrationRecovery.mark(
+                  begin.options.publicKey.user.name,
+                )
+              ) {
+                fail("passkey_registration_failed");
+              }
+              registrationFinishStarted = true;
+            },
+            body: encodedCredential,
+            failureCode: "passkey_registration_recovery_required",
+            signal,
+          },
+        ),
+      );
+      const signedIn = await signInWithCustomToken(auth, finish.customToken);
+      const verified = await verifyFreshCustomPasskeyUser(
+        signedIn.user,
+        "passkey_registration_recovery_required",
+      );
+      if (!passkeyRegistrationRecovery.clear(passkeyAccountUid(verified))) {
+        fail("passkey_registration_recovery_required");
+      }
+      return verified;
+    } catch (error) {
+      if (registrationFinishStarted) {
+        fail("passkey_registration_recovery_required");
+      }
+      if (error instanceof Error && error.message === "passkey_cancelled") {
+        fail("passkey_registration_cancelled");
+      }
+      if (preservePasskeyBoundaryError(error)) throw error;
+      fail("passkey_registration_failed");
+    } finally {
+      credential = undefined;
+      encodedCredential = undefined;
+    }
+  });
+}
+
+async function authenticatePasskey(auth, appCheckToken) {
+  requirePasskeySupport("authentication");
+  return runPasskeyOperation("passkey_authentication_failed", async (signal) => {
+    let credential;
+    let encodedCredential;
+    try {
+      const begin = decodeAuthenticationBegin(
+        await passkeyJSON(PASSKEY_AUTHENTICATION_BEGIN_ENDPOINT, {
+          appCheckToken,
+          failureCode: "passkey_authentication_failed",
+          signal,
+        }),
+      );
+      try {
+        credential = await navigator.credentials.get({
+          ...begin.options,
+          signal,
+        });
+      } catch (error) {
+        if (isPasskeyCancellation(error)) fail("passkey_cancelled");
+        throw error;
+      }
+      if (!credential) fail("passkey_authentication_failed");
+      encodedCredential = encodeAuthenticationCredential(credential);
+      const finish = parsePasskeyFinish(
+        await passkeyJSON(
+          finishEndpoint(PASSKEY_AUTHENTICATION_FINISH_ENDPOINT, begin.ceremonyId),
+          {
+            appCheckToken,
+            body: encodedCredential,
+            failureCode: "passkey_authentication_failed",
+            signal,
+          },
+        ),
+      );
+      const signedIn = await signInWithCustomToken(auth, finish.customToken);
+      const verified = await verifyFreshCustomPasskeyUser(
+        signedIn.user,
+        "passkey_authentication_failed",
+      );
+      return verified;
+    } catch (error) {
+      if (preservePasskeyBoundaryError(error)) throw error;
+      fail("passkey_authentication_failed");
+    } finally {
+      credential = undefined;
+      encodedCredential = undefined;
+    }
+  });
+}
+
+async function freshPasskeyUser(auth, user, appCheckToken, interactive) {
+  if (!user) {
+    if (!interactive) fail("passkey_required");
+    return authenticatePasskey(auth, appCheckToken);
+  }
+  const tokenResult = await getIdTokenResult(user, false);
+  const action = decidePasskeyAction(
+    passkeySessionSnapshot(user, tokenResult),
+    Math.floor(Date.now() / 1000),
+  );
+  if (action === "reuse") return user;
+  if (action === "reject") fail("identity_verification_failed");
+  if (!interactive) fail("passkey_required");
+  if (action === "registration") {
+    fail("passkey_required");
+  }
+  return authenticatePasskey(auth, appCheckToken);
+}
+
+async function registerPasskeyAccount() {
+  if (passkeyRegistrationRecovery.isPending()) {
+    fail("passkey_registration_recovery_required");
+  }
+  if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
+    fail("passkey_registration_failed");
+  }
+  try {
+    const { appCheck } = await appServices();
+    const { auth } = await firebaseAuth();
+    const appCheckResult = await getAppCheckToken(appCheck, false);
+    let user;
+    try {
+      user = currentAccountUser(auth);
+      if (user) {
+        const tokenResult = await getIdTokenResult(user, false);
+        const action = decidePasskeyAction(
+          passkeySessionSnapshot(user, tokenResult),
+          Math.floor(Date.now() / 1000),
+        );
+        if (action === "reject") {
+          fail("identity_verification_failed");
+        }
+      }
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.message !== "identity_verification_failed"
+      ) {
+        throw error;
+      }
+      user = null;
+    }
+    if (user) {
+      fail("passkey_account_exists");
+    }
+    const registeredUser = await registerPasskey(auth, appCheckResult.token);
+    verifiedAccountUid = passkeyAccountUid(registeredUser);
+    return Object.freeze({ state: "ready" });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message === "passkey_account_exists" ||
+        preservePasskeyBoundaryError(error))
+    ) {
+      throw error;
+    }
+    fail("passkey_registration_failed");
+  }
 }
 
 async function secureCredentials(interactive = false) {
   try {
-    const [{ appCheck }, user] = await Promise.all([
-      appServices(),
-      accountUser(interactive),
-    ]);
-    const [idToken, appCheckResult] = await Promise.all([
-      getIdToken(user, false),
-      getAppCheckToken(appCheck, false),
-    ]);
+    const { appCheck } = await appServices();
+    const { auth } = await firebaseAuth();
+    const appCheckResult = await getAppCheckToken(appCheck, false);
+    const registrationRecoveryPending =
+      passkeyRegistrationRecovery.isPending();
+    let user;
+    try {
+      user = currentAccountUser(auth);
+    } catch (error) {
+      if (
+        !interactive ||
+        !(error instanceof Error) ||
+        error.message !== "identity_verification_failed"
+      ) {
+        throw error;
+      }
+      user = null;
+    }
+    const currentUserMatchesRecovery =
+      user !== null && passkeyRegistrationRecovery.matches(user.uid);
+    const registrationRecoveryAction =
+      decidePasskeyRegistrationRecoveryAction({
+        currentAccountMatches: currentUserMatchesRecovery,
+        interactive,
+        pending: registrationRecoveryPending,
+      });
+    if (registrationRecoveryAction === "block") {
+      fail("passkey_registration_recovery_required");
+    }
+    let authorizedUser;
+    try {
+      authorizedUser =
+        registrationRecoveryAction === "authenticate"
+          ? await authenticatePasskey(auth, appCheckResult.token)
+          : await freshPasskeyUser(
+              auth,
+              user,
+              appCheckResult.token,
+              interactive,
+            );
+    } catch (error) {
+      if (
+        !interactive ||
+        !(error instanceof Error) ||
+        error.message !== "identity_verification_failed"
+      ) {
+        throw error;
+      }
+      authorizedUser = await authenticatePasskey(auth, appCheckResult.token);
+    }
+    const idToken = await getIdToken(authorizedUser, false);
+    const accountUid = passkeyAccountUid(authorizedUser);
+    const accountBoundaryChanged =
+      verifiedAccountUid !== undefined && verifiedAccountUid !== accountUid;
+    verifiedAccountUid = accountUid;
+    const registrationRecoveryConfirmed =
+      !registrationRecoveryPending ||
+      passkeyRegistrationRecovery.clear(accountUid);
+    if (accountBoundaryChanged) {
+      globalThis.dispatchEvent(new Event("kotae:account-boundary-changed"));
+      fail("account_boundary_changed");
+    }
+    if (!registrationRecoveryConfirmed) {
+      fail("passkey_registration_recovery_required");
+    }
+    if (interactive) {
+      // This event requests a fresh status read in Rust. It carries no
+      // authorization and is never itself accepted as account proof.
+      globalThis.dispatchEvent(new Event("kotae:account-access-confirmed"));
+    }
     return Object.freeze({
       appCheckToken: appCheckResult.token,
       idToken,
@@ -307,8 +736,16 @@ async function secureCredentials(interactive = false) {
     if (error instanceof Error) {
       switch (error.message) {
         case "app_check_not_configured":
+        case "account_boundary_changed":
         case "identity_required":
         case "identity_verification_failed":
+        case "passkey_authentication_failed":
+        case "passkey_cancelled":
+        case "passkey_registration_cancelled":
+        case "passkey_registration_failed":
+        case "passkey_registration_recovery_required":
+        case "passkey_required":
+        case "passkey_unsupported":
           throw error;
         default:
           break;
@@ -347,6 +784,11 @@ async function getStatus() {
   }
   try {
     const { appCheckToken, idToken } = await secureCredentials();
+    if (passkeyRegistrationRecovery.isPending()) {
+      return Object.freeze({
+        state: "passkey-registration-recovery-required",
+      });
+    }
     const response = await fetch("/api/v1/me", {
       method: "GET",
       cache: "no-store",
@@ -363,8 +805,20 @@ async function getStatus() {
     }
     return Object.freeze({ state: "ready" });
   } catch (error) {
-    if (error instanceof Error && error.message === "identity_required") {
+    if (passkeyRegistrationRecovery.isPending()) {
+      return Object.freeze({
+        state: "passkey-registration-recovery-required",
+      });
+    }
+    if (
+      error instanceof Error &&
+      (error.message === "identity_required" ||
+        error.message === "identity_verification_failed")
+    ) {
       return Object.freeze({ state: "identity-required" });
+    }
+    if (error instanceof Error && error.message === "passkey_required") {
+      return Object.freeze({ state: "passkey-required" });
     }
     return Object.freeze({ state: "unavailable" });
   }
@@ -1242,7 +1696,11 @@ function createRecording(stream) {
   return recording;
 }
 
-async function beginTurn(serializedSessionState, turnMode) {
+async function beginTurn(
+  serializedSessionState,
+  turnMode,
+  strictCloudMinimization,
+) {
   if (document.hidden) {
     stopSession("hidden");
     fail("request_cancelled");
@@ -1251,13 +1709,21 @@ async function beginTurn(serializedSessionState, turnMode) {
     typeof serializedSessionState !== "string" ||
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
     !isValidTurnMode(turnMode) ||
+    typeof strictCloudMinimization !== "boolean" ||
     activeRecording ||
     activeLiveSession ||
     pendingLiveSession ||
     beginGate.isBusy() ||
-    finishGate.isBusy()
+    finishGate.isBusy() ||
+    passkeyGate.isBusy()
   ) {
     fail("voice_turn_invalid");
+  }
+  if (
+    strictCloudMinimization &&
+    (serializedSessionState !== "" || pendingDocument)
+  ) {
+    fail("strict_privacy_blocked");
   }
   const beginToken = beginGate.acquire();
   if (beginToken === null) {
@@ -1297,6 +1763,7 @@ async function beginTurn(serializedSessionState, turnMode) {
           expectedEpoch,
           sessionState: serializedSessionState,
           stream,
+          strictCloudMinimization,
           turnMode,
         });
         if (expectedEpoch !== sessionEpoch) {
@@ -1443,8 +1910,46 @@ function hasValidCoachMetadata(assistanceTarget, phase, action) {
   );
 }
 
-function safeVoiceResponse(payload) {
-  if (!isPlainRecord(payload)) {
+function clearPendingDocument(reason = "cleared") {
+  const hadPendingDocument = pendingDocument !== undefined;
+  pendingDocument = undefined;
+  if (pendingDocumentTimer !== undefined) {
+    clearTimeout(pendingDocumentTimer);
+    pendingDocumentTimer = undefined;
+  }
+  const input = document.getElementById("paper-input");
+  if (input instanceof HTMLInputElement) {
+    input.value = "";
+  }
+  if (hadPendingDocument) {
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:document-cleared", {
+        detail: Object.freeze({ reason }),
+      }),
+    );
+  }
+}
+
+function armPendingDocumentExpiry(documentForExpiry, attachedAt) {
+  if (pendingDocumentTimer !== undefined) {
+    clearTimeout(pendingDocumentTimer);
+  }
+  pendingDocumentTimer = setTimeout(() => {
+    pendingDocumentTimer = undefined;
+    if (
+      pendingDocument === documentForExpiry &&
+      isPendingDocumentExpired(attachedAt, performance.now())
+    ) {
+      clearPendingDocument("expired");
+    }
+  }, VOICE_SESSION_LIMITS.pendingDocumentLimitMs);
+}
+
+function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
+  if (
+    !isPlainRecord(payload) ||
+    typeof expectedStrictCloudMinimization !== "boolean"
+  ) {
     fail("voice_response_invalid");
   }
   const hasAudio = payload.audioBase64 !== "";
@@ -1473,6 +1978,11 @@ function safeVoiceResponse(payload) {
     ) ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
+    !["", "blocked", "clear"].includes(payload.privacyStatus) ||
+    (expectedStrictCloudMinimization &&
+      payload.privacyStatus !== "blocked" &&
+      payload.privacyStatus !== "clear") ||
+    (!expectedStrictCloudMinimization && payload.privacyStatus !== "") ||
     (payload.caption !== undefined &&
       payload.caption !== null &&
       !boundedString(payload.caption, 2_000))
@@ -1489,6 +1999,28 @@ function safeVoiceResponse(payload) {
   } catch {
     fail("voice_response_invalid");
   }
+  if (
+    (payload.privacyStatus === "blocked" &&
+      (hasAudio ||
+        payload.audioMimeType !== "" ||
+        payload.caption !== null ||
+        payload.sessionState !== "" ||
+        payload.detectedDomain !== "unknown" ||
+        payload.assistanceTarget !== "assistant" ||
+        payload.respondentStage !== "none" ||
+        payload.coachPhase !== "none" ||
+        payload.coachAction !== "none" ||
+        research.status !== "none" ||
+        research.records.length !== 0 ||
+        payload.route !== "strict-privacy-blocked" ||
+        payload.needsPaper)) ||
+    (payload.privacyStatus === "clear" &&
+      (payload.sessionState !== "" ||
+        research.status !== "none" ||
+        research.records.length !== 0))
+  ) {
+    fail("voice_response_invalid");
+  }
 
   return Object.freeze({
     audioBase64: payload.audioBase64,
@@ -1500,6 +2032,7 @@ function safeVoiceResponse(payload) {
     coachPhase: payload.coachPhase,
     coachAction: payload.coachAction,
     needsPaper: payload.needsPaper,
+    privacyStatus: payload.privacyStatus,
     researchStatus: research.status,
     researchRecords: research.records,
     route: payload.route,
@@ -1560,14 +2093,17 @@ async function startVoiceLiveSession({
   idToken,
   sessionState,
   stream,
+  strictCloudMinimization,
   turnMode,
 }) {
   if (
+    pendingDocument ||
     !liveVoiceSupported(stream) ||
     !liveCredential(appCheckToken) ||
     !liveCredential(idToken) ||
     typeof sessionState !== "string" ||
     sessionState.length > SESSION_STATE_MAX_CHARS ||
+    typeof strictCloudMinimization !== "boolean" ||
     !isValidTurnMode(turnMode) ||
     (captureHandoff !== undefined &&
       (captureHandoff === null ||
@@ -1597,11 +2133,12 @@ async function startVoiceLiveSession({
       idToken,
       appCheckToken,
       sessionState,
+      strictCloudMinimization,
       turnMode,
       sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
     });
     protocol = createVoiceLiveServerProtocol((result) =>
-      safeVoiceResponse(result),
+      safeVoiceResponse(result, strictCloudMinimization),
     );
   } catch {
     socket.close(1000, "http_fallback");
@@ -2217,13 +2754,19 @@ async function startVoiceLiveSession({
         idToken,
         sessionState,
         stream: nextStream,
+        strictCloudMinimization,
         turnMode: "foreground",
       });
     },
-    matches(expectedSessionState, expectedTurnMode) {
+    matches(
+      expectedSessionState,
+      expectedTurnMode,
+      expectedStrictCloudMinimization,
+    ) {
       return (
         expectedSessionState === sessionState &&
-        expectedTurnMode === turnMode
+        expectedTurnMode === turnMode &&
+        expectedStrictCloudMinimization === strictCloudMinimization
       );
     },
     cancel(error = new Error("request_cancelled")) {
@@ -3478,7 +4021,12 @@ async function awaitValidatedPlaybackCompletion(
   }
 }
 
-async function consumeVoiceStream(response, playback, expectedEpoch) {
+async function consumeVoiceStream(
+  response,
+  playback,
+  expectedEpoch,
+  expectedStrictCloudMinimization,
+) {
   if (
     !isNdjsonContentType(response.headers.get("Content-Type")) ||
     !response.body ||
@@ -3496,7 +4044,7 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
   }
 
   const parser = createVoiceStreamParser((result) =>
-    safeVoiceResponse(result),
+    safeVoiceResponse(result, expectedStrictCloudMinimization),
   );
   const decoder = new TextDecoder("utf-8", {
     fatal: true,
@@ -3557,7 +4105,11 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
   }
 }
 
-async function finishTurn(serializedSessionState, turnMode) {
+async function finishTurn(
+  serializedSessionState,
+  turnMode,
+  strictCloudMinimization,
+) {
   const recording = activeRecording;
   if (!recording || finishGate.isBusy()) {
     fail("voice_turn_invalid");
@@ -3565,7 +4117,10 @@ async function finishTurn(serializedSessionState, turnMode) {
   if (
     typeof serializedSessionState !== "string" ||
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
-    !isValidTurnMode(turnMode)
+    !isValidTurnMode(turnMode) ||
+    typeof strictCloudMinimization !== "boolean" ||
+    (strictCloudMinimization &&
+      (serializedSessionState !== "" || pendingDocument))
   ) {
     fail("voice_turn_invalid");
   }
@@ -3576,6 +4131,7 @@ async function finishTurn(serializedSessionState, turnMode) {
   }
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
+  let documentForTurn;
   let liveSession;
   let playback;
   let requestController;
@@ -3618,6 +4174,10 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     responseClockActive = true;
 
+    documentForTurn = pendingDocument;
+    if (documentForTurn) {
+      clearPendingDocument("consumed");
+    }
     liveSession = activeLiveSession;
     if (!liveSession) {
       liveSession = await takePendingLiveSession(
@@ -3627,10 +4187,21 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     if (
       liveSession &&
-      !liveSession.matches(serializedSessionState, turnMode)
+      !liveSession.matches(
+        serializedSessionState,
+        turnMode,
+        strictCloudMinimization,
+      )
     ) {
       liveSession.cancel(new Error("voice_turn_invalid"));
       fail("voice_turn_invalid");
+    }
+    if (liveSession && documentForTurn) {
+      liveSession.cancel(new Error("voice_live_pdf_fallback"));
+      if (activeLiveSession === liveSession) {
+        activeLiveSession = undefined;
+      }
+      liveSession = undefined;
     }
     if (liveSession) {
       setTracksEnabled(false);
@@ -3732,8 +4303,15 @@ async function finishTurn(serializedSessionState, turnMode) {
       audioBase64,
       mimeType: capture.mimeType,
       sessionState: serializedSessionState,
+      strictCloudMinimization,
       turnMode,
     };
+    if (documentForTurn) {
+      payload.document = {
+        base64: documentForTurn.base64,
+        mimeType: documentForTurn.mimeType,
+      };
+    }
     requestController = new AbortController();
     activeRequestController = requestController;
     const response = await awaitVoiceTurnResult(
@@ -3758,7 +4336,12 @@ async function finishTurn(serializedSessionState, turnMode) {
       fail(mapVoiceResponseError(response.status));
     }
     const completed = await awaitVoiceTurnResult(
-      consumeVoiceStream(response, playback, expectedEpoch),
+      consumeVoiceStream(
+        response,
+        playback,
+        expectedEpoch,
+        strictCloudMinimization,
+      ),
       () => requestController.abort(),
     );
     await awaitValidatedPlaybackCompletion(playback, expectedEpoch);
@@ -3817,14 +4400,84 @@ async function finishTurn(serializedSessionState, turnMode) {
   }
 }
 
+function safeDocumentName(name) {
+  const cleaned = name
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .slice(0, 180)
+    .trim();
+  return cleaned || "paper.pdf";
+}
+
+async function attachDocument(inputId) {
+  if (typeof inputId !== "string" || inputId !== "paper-input") {
+    fail("document_not_selected");
+  }
+  const input = document.getElementById(inputId);
+  if (!(input instanceof HTMLInputElement) || input.files?.length !== 1) {
+    fail("document_not_selected");
+  }
+  const file = input.files[0];
+  if (
+    file.type !== "application/pdf" ||
+    !file.name.toLowerCase().endsWith(".pdf")
+  ) {
+    input.value = "";
+    fail("document_type_invalid");
+  }
+  if (file.size === 0 || file.size > DOCUMENT_MAX_BYTES) {
+    input.value = "";
+    fail("document_too_large");
+  }
+
+  documentEpoch += 1;
+  const expectedEpoch = documentEpoch;
+  let base64;
+  try {
+    base64 = arrayBufferToBase64(await file.arrayBuffer());
+  } catch {
+    input.value = "";
+    fail("document_read_failed");
+  }
+  if (expectedEpoch !== documentEpoch) {
+    input.value = "";
+    fail("request_cancelled");
+  }
+
+  const name = safeDocumentName(file.name);
+  clearPendingDocument("replaced");
+  const attachedAt = performance.now();
+  pendingDocument = Object.freeze({
+    base64,
+    mimeType: "application/pdf",
+    name,
+  });
+  if (activeLiveSession?.canFallback()) {
+    activeLiveSession.cancel(new Error("voice_live_pdf_fallback"));
+    activeLiveSession = undefined;
+  }
+  retirePendingLiveSession(new Error("voice_live_pdf_fallback"));
+  armPendingDocumentExpiry(pendingDocument, attachedAt);
+  base64 = "";
+  return Object.freeze({
+    name,
+    sizeBytes: file.size,
+  });
+}
+
 function stopSession(reason = "request_cancelled") {
   const { pauseReason, stopCode } =
     classifyVoiceSessionStopReason(reason);
   const stoppedEpoch = sessionEpoch;
   rememberStoppedSession(stoppedEpoch, stopCode);
   sessionEpoch += 1;
+  documentEpoch += 1;
   finishGate.reset();
   sessionExpiryWatchdog.disarm();
+
+  if (activePasskeyController) {
+    activePasskeyController.abort();
+  }
 
   if (activeRequestController) {
     activeRequestController.abort();
@@ -3855,6 +4508,7 @@ function stopSession(reason = "request_cancelled") {
   releaseMicrophone(stopCode);
   sessionClock.reset();
 
+  clearPendingDocument("session-stopped");
   if (pauseReason !== null) {
     globalThis.dispatchEvent(
       new CustomEvent("kotae:voice-session-paused", {
@@ -3874,11 +4528,15 @@ function hasActiveVoiceSession() {
     pendingLiveSession ||
     activePlayback ||
     finishGate.isBusy() ||
+    pendingDocument ||
     hasLiveAudioTrack(mediaStream),
   );
 }
 
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden && activePasskeyController) {
+    activePasskeyController.abort();
+  }
   if (
     shouldStopSessionForLifecycle(
       "visibilitychange",
@@ -3890,6 +4548,9 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 globalThis.addEventListener("pagehide", () => {
+  if (activePasskeyController) {
+    activePasskeyController.abort();
+  }
   if (
     shouldStopSessionForLifecycle(
       "pagehide",
@@ -3902,10 +4563,12 @@ globalThis.addEventListener("pagehide", () => {
 });
 
 const publicBridge = Object.freeze({
+  attachDocument,
   beginTurn,
   endTurn,
   finishTurn,
   getStatus,
+  registerPasskeyAccount,
   stopSession,
   waitForTurnEnd,
 });

@@ -4,7 +4,7 @@ use serde::Deserialize;
 const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
 const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
 const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
-const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手な場面を勝手に練習させません。頼んだ練習の後は、会話内容を含まない短期の目印だけで通常会話の質問量を調整し、点数は表示しません。";
+const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではありません。普段は会話の流れを優先し、「答え方を手伝って」と頼まれたときだけ短く支えます。会話内容を含まない短期の目印で質問量を調整しますが、長期効果はまだ実証していません。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoiceState {
@@ -220,11 +220,11 @@ enum CloudState {
 impl CloudState {
     const fn label(self) -> &'static str {
         match self {
-            Self::Connecting => "SECURE LINK / …",
-            Self::Ready => "SECURE LINK / READY",
+            Self::Connecting => "ACCOUNT / …",
+            Self::Ready => "ACCOUNT / READY",
             Self::IdentityRequired => "IDENTITY / REQUIRED",
-            Self::ConfigurationRequired => "SECURE LINK / SETUP",
-            Self::Unavailable => "SECURE LINK / OFFLINE",
+            Self::ConfigurationRequired => "ACCOUNT / SETUP",
+            Self::Unavailable => "ACCOUNT / OFFLINE",
         }
     }
 
@@ -288,13 +288,6 @@ impl ResearchRecord {
     }
 }
 
-#[derive(Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DocumentInfo {
-    name: String,
-    size_bytes: u64,
-}
-
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct BridgeStatus {
@@ -344,28 +337,14 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code,
-        recoverable_wait_turn_code, session_stop_pauses, valid_voice_pause_metadata,
+        BridgeStatus, CloudState, FinishTurnError, TurnEnd, VoiceState, VoiceTurnMode,
+        VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
+        session_stop_pauses, valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::prelude::*;
-
-    pub(super) struct DocumentClearListener {
-        window: web_sys::Window,
-        callback: Closure<dyn FnMut(web_sys::Event)>,
-    }
-
-    impl Drop for DocumentClearListener {
-        fn drop(&mut self) {
-            let _ = self.window.remove_event_listener_with_callback(
-                "kotae:document-cleared",
-                self.callback.as_ref().unchecked_ref(),
-            );
-        }
-    }
 
     pub(super) struct FirstAudioListener {
         window: web_sys::Window,
@@ -422,9 +401,6 @@ mod cloud {
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = finishTurn)]
         async fn finish_turn_js(session_state: &str, turn_mode: &str) -> Result<JsValue, JsValue>;
-
-        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = attachDocument)]
-        async fn attach_document_js(input_id: &str) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = stopSession)]
         fn stop_session_js() -> Result<(), JsValue>;
@@ -492,29 +468,6 @@ mod cloud {
         };
         serde_wasm_bindgen::from_value(value)
             .map_err(|_| FinishTurnError::Message("音声応答を確認できない　もう一度ためしてみて"))
-    }
-
-    pub async fn attach_document(input_id: &str) -> Result<DocumentInfo, &'static str> {
-        let value = attach_document_js(input_id)
-            .await
-            .map_err(document_message)?;
-        serde_wasm_bindgen::from_value(value).map_err(|_| "PDFの情報を確認できない")
-    }
-
-    pub fn install_document_clear_listener(
-        mut document_info: Signal<Option<DocumentInfo>>,
-    ) -> Option<Rc<DocumentClearListener>> {
-        let window = web_sys::window()?;
-        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-            document_info.set(None);
-        });
-        window
-            .add_event_listener_with_callback(
-                "kotae:document-cleared",
-                callback.as_ref().unchecked_ref(),
-            )
-            .ok()?;
-        Some(Rc::new(DocumentClearListener { window, callback }))
     }
 
     pub fn install_first_audio_listener(
@@ -637,7 +590,7 @@ mod cloud {
             }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
             Some("identity_required") | Some("identity_verification_failed") => {
-                "話し始める前にGoogleアカウントの本人確認を終えてください"
+                "話し始める前に確認済みGoogleアカウントでログインしてください"
             }
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
@@ -654,28 +607,17 @@ mod cloud {
             _ => "音声エージェントにつながらない　もう一度ためしてみて",
         }
     }
-
-    fn document_message(error: JsValue) -> &'static str {
-        match error_code(error).as_deref() {
-            Some("document_not_selected") => "PDFを選んでみて",
-            Some("document_type_invalid") => "ここではPDFだけを読める",
-            Some("document_too_large") => "PDFは7MBまで",
-            Some("document_read_failed") => "PDFを読めなかった　別のファイルをためしてみて",
-            _ => "PDFを添付できなかった",
-        }
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
     use super::{
-        CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnMode, VoiceTurnResult,
-        WaitTurnError,
+        CloudState, FinishTurnError, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
     #[derive(Clone)]
-    pub struct DocumentClearListener;
+    pub struct Listener;
 
     pub async fn status() -> CloudState {
         CloudState::Unavailable
@@ -699,32 +641,20 @@ mod cloud {
         Err(FinishTurnError::Message("WebAssembly版で使ってみて"))
     }
 
-    pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
-        Err("WebAssembly版で使ってみて")
-    }
-
-    pub fn install_document_clear_listener(
-        _document_info: Signal<Option<DocumentInfo>>,
-    ) -> Option<DocumentClearListener> {
-        None
-    }
-
-    pub fn install_first_audio_listener(
-        _voice_state: Signal<VoiceState>,
-    ) -> Option<DocumentClearListener> {
+    pub fn install_first_audio_listener(_voice_state: Signal<VoiceState>) -> Option<Listener> {
         None
     }
 
     pub fn install_voice_interrupted_listener(
         _voice_state: Signal<VoiceState>,
-    ) -> Option<DocumentClearListener> {
+    ) -> Option<Listener> {
         None
     }
 
     pub fn install_voice_session_paused_listener(
         _voice_state: Signal<VoiceState>,
         _generation: Signal<u64>,
-    ) -> Option<DocumentClearListener> {
+    ) -> Option<Listener> {
         None
     }
 
@@ -749,7 +679,6 @@ fn arm_listening(
     needs_paper: Signal<bool>,
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
-    mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
 ) {
     if announce_permission {
@@ -761,7 +690,6 @@ fn arm_listening(
         if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode).await {
             if *generation.peek() == operation {
                 cloud::stop_session();
-                document_info.set(None);
                 voice_state.set(VoiceState::Error(message));
             }
             return;
@@ -793,7 +721,6 @@ fn arm_listening(
                         needs_paper,
                         research_status,
                         research_records,
-                        document_info,
                         caption,
                     );
                 }
@@ -802,7 +729,6 @@ fn arm_listening(
             Err(WaitTurnError::Terminal(message)) => {
                 if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
                     cloud::stop_session();
-                    document_info.set(None);
                     voice_state.set(VoiceState::Error(message));
                 }
                 return;
@@ -823,7 +749,6 @@ fn arm_listening(
                     needs_paper,
                     research_status,
                     research_records,
-                    document_info,
                     caption,
                 );
             } else {
@@ -845,7 +770,6 @@ fn arm_listening(
                     needs_paper,
                     research_status,
                     research_records,
-                    document_info,
                     caption,
                 );
             }
@@ -865,7 +789,6 @@ fn resume_foreground_interruption(
     needs_paper: Signal<bool>,
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
-    document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
 ) {
     voice_state.set(VoiceState::Listening);
@@ -888,7 +811,6 @@ fn resume_foreground_interruption(
                         needs_paper,
                         research_status,
                         research_records,
-                        document_info,
                         caption,
                     );
                 }
@@ -920,7 +842,6 @@ fn resume_foreground_interruption(
                 needs_paper,
                 research_status,
                 research_records,
-                document_info,
                 caption,
             );
         } else {
@@ -937,7 +858,6 @@ fn resume_foreground_interruption(
                 needs_paper,
                 research_status,
                 research_records,
-                document_info,
                 caption,
             );
         }
@@ -957,7 +877,6 @@ fn submit_turn(
     mut needs_paper: Signal<bool>,
     mut research_status: Signal<ResearchStatus>,
     mut research_records: Signal<Vec<ResearchRecord>>,
-    mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
 ) {
     if *generation.peek() != operation || *voice_state.peek() != VoiceState::Listening {
@@ -965,7 +884,6 @@ fn submit_turn(
     }
 
     let state_snapshot = session_state.peek().clone();
-    let consumed_document = document_info.peek().is_some();
     research_status.set(ResearchStatus::None);
     research_records.set(Vec::new());
     voice_state.set(VoiceState::Thinking);
@@ -979,9 +897,6 @@ fn submit_turn(
         let result = match result {
             Ok(result) => result,
             Err(FinishTurnError::Interrupted) => {
-                if consumed_document {
-                    document_info.set(None);
-                }
                 resume_foreground_interruption(
                     operation,
                     voice_state,
@@ -993,15 +908,11 @@ fn submit_turn(
                     needs_paper,
                     research_status,
                     research_records,
-                    document_info,
                     caption,
                 );
                 return;
             }
             Err(FinishTurnError::Recoverable(message)) => {
-                if consumed_document {
-                    document_info.set(None);
-                }
                 // The captured turn was consumed and must never be resent. A
                 // transient provider or network failure also must not revoke
                 // the user's foreground microphone gesture: keep the opaque
@@ -1022,15 +933,11 @@ fn submit_turn(
                     needs_paper,
                     research_status,
                     research_records,
-                    document_info,
                     caption,
                 );
                 return;
             }
             Err(FinishTurnError::Message(message)) => {
-                if consumed_document {
-                    document_info.set(None);
-                }
                 cloud::stop_session();
                 voice_state.set(VoiceState::Error(message));
                 return;
@@ -1056,9 +963,6 @@ fn submit_turn(
         research_status.set(result.research_status);
         research_records.set(result.research_records.clone());
         caption.set(result.caption.clone());
-        if consumed_document {
-            document_info.set(None);
-        }
         if turn_mode == VoiceTurnMode::Foreground && silent_recognition_miss(&result.route) {
             // A provider-authenticated STT miss is a no-op turn, not a reason
             // to end the conversation. Continue in foreground mode without
@@ -1077,7 +981,6 @@ fn submit_turn(
                 needs_paper,
                 research_status,
                 research_records,
-                document_info,
                 caption,
             );
             return;
@@ -1100,7 +1003,6 @@ fn submit_turn(
                 needs_paper,
                 research_status,
                 research_records,
-                document_info,
                 caption,
             );
             return;
@@ -1126,7 +1028,6 @@ fn submit_turn(
             needs_paper,
             research_status,
             research_records,
-            document_info,
             caption,
         );
     });
@@ -1143,7 +1044,6 @@ fn start_or_resume(
     needs_paper: Signal<bool>,
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
-    document_info: Signal<Option<DocumentInfo>>,
     caption: Signal<Option<String>>,
 ) {
     let operation = generation.peek().wrapping_add(1);
@@ -1161,17 +1061,8 @@ fn start_or_resume(
         needs_paper,
         research_status,
         research_records,
-        document_info,
         caption,
     );
-}
-
-fn human_file_size(bytes: u64) -> String {
-    if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else {
-        format!("{:.0} KB", bytes as f64 / 1_024.0)
-    }
 }
 
 const fn turn_mode_for_gesture_epoch(fresh_gesture: bool) -> VoiceTurnMode {
@@ -1219,12 +1110,8 @@ fn App() -> Element {
     let mut needs_paper = use_signal(|| false);
     let mut research_status = use_signal(|| ResearchStatus::None);
     let mut research_records = use_signal(Vec::<ResearchRecord>::new);
-    let mut document_info = use_signal(|| None::<DocumentInfo>);
-    let mut document_error = use_signal(|| None::<&'static str>);
     let mut caption = use_signal(|| None::<String>);
     let mut captions_visible = use_signal(|| false);
-    let _document_clear_listener =
-        use_hook(|| cloud::install_document_clear_listener(document_info));
     let _first_audio_listener = use_hook(|| cloud::install_first_audio_listener(voice_state));
     let _voice_interrupted_listener =
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
@@ -1235,13 +1122,8 @@ fn App() -> Element {
     let state_snapshot = *voice_state.read();
     let coach_snapshot = *coach_state.read();
     let captions_are_visible = *captions_visible.read();
-    let document_snapshot = document_info.read().clone();
     let research_status_snapshot = *research_status.read();
     let research_snapshot = research_records.read().clone();
-    let document_is_busy = matches!(
-        state_snapshot,
-        VoiceState::RequestingPermission | VoiceState::Thinking | VoiceState::Speaking
-    );
     let prepared_cloud_state = cloud_status
         .read()
         .as_ref()
@@ -1336,7 +1218,6 @@ fn App() -> Element {
                                             needs_paper,
                                             research_status,
                                             research_records,
-                                            document_info,
                                             caption,
                                         );
                                     }
@@ -1435,10 +1316,10 @@ fn App() -> Element {
                         }
                     }
 
-                    if *needs_paper.read() && document_snapshot.is_none() {
+                    if *needs_paper.read() {
                         p { class: "paper-request", role: "status",
                             span { "↳" }
-                            "論文の中身まで読むなら　下からPDFを今回だけ"
+                            "PDF原本の読取りは安全な匿名化経路ができるまで停止中"
                         }
                     }
 
@@ -1460,15 +1341,12 @@ fn App() -> Element {
                                             needs_paper,
                                             research_status,
                                             research_records,
-                                            document_info,
                                             caption,
                                         );
                                     } else {
                                         let next = generation.peek().wrapping_add(1);
                                         generation.set(next);
                                         voice_state.set(VoiceState::Paused);
-                                        document_info.set(None);
-                                        document_error.set(None);
                                         cloud::stop_session();
                                     }
                                 },
@@ -1492,9 +1370,7 @@ fn App() -> Element {
                                     needs_paper.set(false);
                                     research_status.set(ResearchStatus::None);
                                     research_records.set(Vec::new());
-                                    document_info.set(None);
                                     caption.set(None);
-                                    document_error.set(None);
                                     cloud::stop_session();
                                 },
                                 span { aria_hidden: "true", "×" }
@@ -1585,51 +1461,18 @@ fn App() -> Element {
                         div { class: "paper-drop__heading",
                             span { class: "utility-index", "01" }
                             div {
-                                h2 { "論文を、今回だけ" }
-                                p { "PDF / 最大7MB / 次の応答後に参照を解除" }
+                                h2 { "PDFは、まだ送らない" }
+                                p { "原本を安全に匿名化できる経路まで停止中" }
                             }
                         }
-                        input {
-                            id: "paper-input",
-                            class: "sr-only",
-                            r#type: "file",
-                            accept: "application/pdf,.pdf",
-                            disabled: document_is_busy,
-                            onchange: move |_| {
-                                document_error.set(None);
-                                spawn(async move {
-                                    match cloud::attach_document("paper-input").await {
-                                        Ok(info) => {
-                                            document_info.set(Some(info));
-                                            needs_paper.set(false);
-                                        }
-                                        Err(message) => document_error.set(Some(message)),
-                                    }
-                                });
-                            },
-                        }
-                        label {
-                            class: if document_is_busy {
-                                "paper-picker is-disabled"
-                            } else {
-                                "paper-picker"
-                            },
-                            r#for: "paper-input",
-                            span { class: "paper-picker__icon", aria_hidden: "true", "＋" }
-                            if let Some(info) = document_snapshot.as_ref() {
-                                span {
-                                    strong { {info.name.clone()} }
-                                    small { "{human_file_size(info.size_bytes)} / 次の応答だけに使用" }
-                                }
-                            } else {
-                                span {
-                                    strong { "PDFを渡す" }
-                                    small { "保存せず、文脈を読む" }
-                                }
+                        div {
+                            class: "paper-picker is-disabled",
+                            aria_disabled: "true",
+                            span { class: "paper-picker__icon", aria_hidden: "true", "×" }
+                            span {
+                                strong { "PDF送信を停止しています" }
+                                small { "ファイルを読まず、クラウドへも送りません" }
                             }
-                        }
-                        if let Some(message) = *document_error.read() {
-                            p { class: "document-error", role: "alert", {message} }
                         }
                     }
 
@@ -1645,15 +1488,19 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "発話ごとにTLSで送り　アプリの履歴には残さない。会話中は、考え中と返答再生中も訂正を受けるため端末内VADがマイクを使い、確認した割り込みだけを送ります。処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
+                                "発話ごとにTLSでCloud RunとSpeech-to-Textへ送ります。生音声はSpeech-to-Textが、文字起こしは東京リージョンのSensitive Data Protectionが平文で処理します。保護後の文字だけをVertex AIへ渡しますが、端末間E2EEではありません。"
                             }
                             p {
                                 strong { "PDF" }
-                                "選んだときだけ次の応答へ添付し、応答後にブラウザ上の参照を解除します。処理中はサーバーとVertex AIが内容を扱います。"
+                                "現在はブラウザでファイル内容を読まず、Cloud RunやVertex AIへ送りません。PDFを安全に匿名化できる隔離経路を実装するまで停止します。"
                             }
                             p {
                                 strong { "接続" }
                                 "確認済みGoogleアカウントと正規アプリからのリクエストか毎回たしかめる。メールアドレスはKOTAEの画面・ログ・会話状態へ保存しません。"
+                            }
+                            p {
+                                strong { "個人情報" }
+                                "メール・電話・長い識別子・credentialをCloud Runの決定論的規則とSensitive Data Protectionで置換し、検査不能ならVertex AIを呼びません。ただし検出器には漏れがあり得るため、完全PII除去とは表示しません。"
                             }
                             p {
                                 strong { "会話支援" }
@@ -1661,7 +1508,11 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "話者" }
-                                "アカウントの本人確認と、いまマイクで話す人の識別は別です。声紋は収集せず、話者本人の認証はしていません。相手の質問はあなた自身が言い直してから答えてください。"
+                                "Googleアカウントを使えることの確認と、いまマイクで話す人の識別は別です。声紋は収集せず、話者本人の認証はしていません。相手の質問はあなた自身が言い直してから答えてください。"
+                            }
+                            p {
+                                strong { "長期効果" }
+                                "長期的に話す力が上がるかは未実証です。追跡期間と比較条件を備えた本人参加の研究が終わるまで、効果ありとは表示しません。"
                             }
                             p {
                                 strong { "外部検索" }
@@ -1776,11 +1627,12 @@ mod tests {
         assert_eq!(TALK_ONLY_COPY, "「今日は話すだけ」");
 
         for boundary in [
-            "診断や治療ではなく",
-            "苦手な場面を勝手に練習させません",
+            "診断や治療ではありません",
+            "普段は会話の流れを優先",
+            "頼まれたときだけ短く支えます",
             "会話内容を含まない短期の目印",
-            "通常会話の質問量を調整",
-            "点数は表示しません",
+            "質問量を調整",
+            "長期効果はまだ実証していません",
         ] {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }

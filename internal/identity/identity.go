@@ -132,12 +132,6 @@ func verifiedAccountToken(token *auth.Token, provider string) bool {
 		// ownership assertion crosses this boundary.
 		verified, _ := token.Claims["email_verified"].(bool)
 		return verified
-	case "custom":
-		// Reserved for a future server-verified WebAuthn or external identity
-		// ceremony. Minting an ordinary Firebase custom token is insufficient:
-		// the issuer must add this explicit, namespaced assurance claim.
-		verified, _ := token.Claims["kotae_account_verified"].(bool)
-		return verified
 	default:
 		return false
 	}

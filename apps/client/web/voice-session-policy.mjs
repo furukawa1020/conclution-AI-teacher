@@ -39,7 +39,6 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   spokenCaptureLimitMs: 55_000,
   idleSessionLimitMs: 3 * 60_000,
   maximumSessionMs: 30 * 60_000,
-  pendingDocumentLimitMs: 5 * 60_000,
 });
 
 const RESEARCH_STATUSES = Object.freeze([
@@ -409,22 +408,6 @@ export function shouldStopSessionForLifecycle(eventType, hidden, active) {
   if (!active) return false;
   if (eventType === "pagehide") return true;
   return eventType === "visibilitychange" && hidden === true;
-}
-
-export function isPendingDocumentExpired(
-  attachedAt,
-  now,
-  limitMs = VOICE_SESSION_LIMITS.pendingDocumentLimitMs,
-) {
-  const attachedTimestamp = finiteTimestamp(attachedAt, "document_attached_at");
-  const currentTimestamp = finiteTimestamp(now, "document_time");
-  if (!Number.isFinite(limitMs) || limitMs <= 0) {
-    throw new TypeError("document_limit_invalid");
-  }
-  if (currentTimestamp < attachedTimestamp) {
-    throw new TypeError("document_time_invalid");
-  }
-  return currentTimestamp - attachedTimestamp >= limitMs;
 }
 
 export function createTurnGate() {

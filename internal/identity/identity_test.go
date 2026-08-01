@@ -160,11 +160,11 @@ func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
 			},
 		},
 		{
-			name: "custom token without server assurance",
+			name: "custom token even with an assurance-shaped claim",
 			token: &auth.Token{
 				UID:      "custom-user",
 				Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
-				Claims:   map[string]any{},
+				Claims:   map[string]any{"kotae_account_verified": true},
 			},
 		},
 		{
@@ -202,35 +202,6 @@ func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
 				t.Fatalf("principal = %+v; want empty", principal)
 			}
 		})
-	}
-}
-
-func TestFirebaseVerifierAcceptsExplicitVerifiedCustomIdentity(t *testing.T) {
-	t.Parallel()
-
-	verifier := testFirebaseVerifier(
-		authTokenVerifierFunc(func(context.Context, string) (*auth.Token, error) {
-			return &auth.Token{
-				UID:      "passkey-user",
-				Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
-				Claims:   map[string]any{"kotae_account_verified": true},
-			}, nil
-		}),
-		appCheckTokenVerifierFunc(func(context.Context, string) (*appcheck.DecodedAppCheckToken, error) {
-			return &appcheck.DecodedAppCheckToken{AppID: "app-123"}, nil
-		}),
-	)
-
-	principal, err := verifier.Verify(
-		context.Background(),
-		"id-token",
-		"app-check-token",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if principal.Provider != "custom" || !principal.AccountVerified {
-		t.Fatalf("principal = %+v", principal)
 	}
 }
 

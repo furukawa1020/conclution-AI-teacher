@@ -223,6 +223,10 @@ func TestDeterministicScreeningCoverage(t *testing.T) {
 		{"long ID", "IDは 1234567890123456", longIDReplacement},
 		{"uuid", "IDは 550e8400-e29b-41d4-a716-446655440000", longIDReplacement},
 		{"labeled credential", "APIキー：abcd-efgh-1234-5678", credentialReplacement},
+		{"spoken Japanese password", "パスワードは hunter2", credentialReplacement},
+		{"spoken English password", "password is hunter2", credentialReplacement},
+		{"compatibility-obfuscated password", "パスワードは ｈｕｎｔｅｒ２", credentialReplacement},
+		{"invisible-obfuscated password", "パス\u200bワードは hunter2", credentialReplacement},
 		{"bearer", "Bearer abcdefghijklmnop1234", credentialReplacement},
 		{"known credential", "AI" + "za" + strings.Repeat("A", 35), credentialReplacement},
 		{"JWT", "eyJabcdefghijk.abcdefghijkl.abcdefghijk", credentialReplacement},
@@ -241,6 +245,53 @@ func TestDeterministicScreeningCoverage(t *testing.T) {
 			got, redacted := screenDeterministic(test.input)
 			if !redacted || !strings.Contains(got, test.replacement) || got == test.input {
 				t.Fatalf("screenDeterministic() = (%q, %v)", got, redacted)
+			}
+		})
+	}
+}
+
+func TestProtectNeverSendsSpokenCredentialValuesToProvider(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		"パスワードは hunter2",
+		"password is hunter2",
+		"パスワードは ｈｕｎｔｅｒ２",
+		"pass\u200bword is hunter2",
+	} {
+		input := input
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+
+			client := fakeDeidentifier{call: func(
+				_ context.Context,
+				_ string,
+				request *dlp.GooglePrivacyDlpV2DeidentifyContentRequest,
+			) (*dlp.GooglePrivacyDlpV2DeidentifyContentResponse, error) {
+				if request == nil || request.Item == nil {
+					t.Fatal("content item is missing")
+				}
+				if request.Item.Value != credentialReplacement {
+					t.Fatalf("provider received %q", request.Item.Value)
+				}
+				if strings.Contains(strings.ToLower(request.Item.Value), "hunter2") {
+					t.Fatal("provider received the credential value")
+				}
+				return &dlp.GooglePrivacyDlpV2DeidentifyContentResponse{
+					Item: &dlp.GooglePrivacyDlpV2ContentItem{Value: request.Item.Value},
+				}, nil
+			}}
+			protector, err := protectorWithClient(testConfig(), client)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := protector.Protect(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != credentialReplacement || !result.Redacted {
+				t.Fatalf("result = %#v", result)
 			}
 		})
 	}
@@ -445,6 +496,42 @@ func TestRegionalEndpoint(t *testing.T) {
 	if got := regionalEndpoint("asia-northeast1"); got !=
 		"https://dlp.asia-northeast1.rep.googleapis.com/" {
 		t.Fatalf("endpoint = %q", got)
+	}
+}
+
+func TestDefaultInfoTypesReturnsIndependentReviewedPolicy(t *testing.T) {
+	first := DefaultInfoTypes()
+	second := DefaultInfoTypes()
+	if len(first) == 0 || len(first) != len(second) {
+		t.Fatalf("DefaultInfoTypes() lengths = %d, %d", len(first), len(second))
+	}
+	first[0] = "MUTATED"
+	if second[0] == "MUTATED" {
+		t.Fatal("DefaultInfoTypes() returned shared mutable storage")
+	}
+	for _, required := range []string{
+		"AWS_CREDENTIALS",
+		"BASIC_AUTH_HEADER",
+		"EMAIL_ADDRESS",
+		"GCP_CREDENTIALS",
+		"HTTP_COOKIE",
+		"JAPAN_INDIVIDUAL_NUMBER",
+		"PASSWORD",
+		"PERSON_NAME",
+		"PHONE_NUMBER",
+		"SECURITY_DATA",
+		"XSRF_TOKEN",
+	} {
+		found := false
+		for _, infoType := range second {
+			if infoType == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("DefaultInfoTypes() missing %q", required)
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/voiceflow"
@@ -61,9 +62,35 @@ func main() {
 		closeFirestore = func() error { return nil }
 		closeSpeech = func() error { return nil }
 	} else {
-		evaluator, err = evaluation.NewGenkitEvaluator(ctx, cfg.ProjectID, cfg.VertexLocation, cfg.FastModel)
+		protector, protectorErr := privacyguard.New(ctx, privacyguard.Config{
+			ProjectID: cfg.ProjectID,
+			Location:  cfg.SpeechLocation,
+			InfoTypes: privacyguard.DefaultInfoTypes(),
+		})
+		if protectorErr != nil {
+			logger.Error("initialize fail-closed privacy boundary", "error", protectorErr)
+			os.Exit(1)
+		}
+		// A fixed non-user probe proves regional API/IAM readiness. A broken
+		// privacy boundary must prevent this revision from accepting traffic.
+		if _, protectorErr = protector.Protect(ctx, "KOTAE privacy readiness"); protectorErr != nil {
+			logger.Error("verify fail-closed privacy boundary", "error", protectorErr)
+			os.Exit(1)
+		}
+
+		genkitEvaluator, evaluatorErr := evaluation.NewGenkitEvaluator(
+			ctx,
+			cfg.ProjectID,
+			cfg.VertexLocation,
+			cfg.FastModel,
+		)
+		if evaluatorErr != nil {
+			logger.Error("initialize Genkit", "error", evaluatorErr)
+			os.Exit(1)
+		}
+		evaluator, err = evaluation.NewProtectedEvaluator(genkitEvaluator, protector)
 		if err != nil {
-			logger.Error("initialize Genkit", "error", err)
+			logger.Error("protect evaluation pipeline", "error", err)
 			os.Exit(1)
 		}
 
@@ -142,7 +169,11 @@ func main() {
 			os.Exit(1)
 		}
 		closeSpeech = speechService.Close
-		voiceService, err = voiceflow.New(speechService, conversationAgent)
+		voiceService, err = voiceflow.NewProtected(
+			speechService,
+			conversationAgent,
+			protector,
+		)
 		if err != nil {
 			logger.Error("initialize secure voice pipeline", "error", err)
 			os.Exit(1)
@@ -194,6 +225,7 @@ func main() {
 			"vertex_priority", cfg.VertexPriority,
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
+			"privacy_boundary", "regional-deidentify-fail-closed",
 		)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server stopped unexpectedly", "error", err)

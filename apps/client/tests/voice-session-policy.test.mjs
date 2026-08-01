@@ -22,7 +22,6 @@ import {
   createTurnGate,
   createVadState,
   initializeWithCleanup,
-  isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
   shouldCommitHybridEndpoint,
@@ -314,7 +313,6 @@ async function createExecutablePlaybackHarness() {
   const timers = new FakePlaybackTimers();
   const state = {
     abandonedInterrupts: 0,
-    clearedDocuments: [],
     micEnabled: false,
     pauseEvents: [],
     releasedCodes: [],
@@ -338,7 +336,6 @@ let activeLiveSession;
 let activePlayback;
 let activeRequestController;
 let audioContext = dependencies.audioContext;
-let documentEpoch = 0;
 let sessionEpoch = 1;
 const stoppedSessionCodes = new Map();
 const CustomEvent = dependencies.CustomEvent;
@@ -346,7 +343,6 @@ const TextDecoder = dependencies.TextDecoder;
 const VOICE_STREAM_LIMITS = dependencies.VOICE_STREAM_LIMITS;
 const abandonInterruptRecording = dependencies.abandonInterruptRecording;
 const classifyVoiceSessionStopReason = dependencies.classifyVoiceSessionStopReason;
-const clearPendingDocument = dependencies.clearPendingDocument;
 const clearTimeout = dependencies.clearTimeout;
 const createVoiceStreamParser = dependencies.createVoiceStreamParser;
 const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
@@ -402,9 +398,6 @@ return Object.freeze({
     },
     audioContext: context,
     classifyVoiceSessionStopReason,
-    clearPendingDocument(reason) {
-      state.clearedDocuments.push(reason);
-    },
     clearTimeout: (id) => timers.clearTimeout(id),
     createVoiceStreamParser,
     estimateAudiblePerformanceTime,
@@ -523,6 +516,30 @@ test("bridge requires a verified provider account and never creates anonymous id
   assert.match(bridge, /state: "identity-required"/u);
 });
 
+test("PDF is blocked before file bytes are read or serialized", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    bridge,
+    /attachDocument|pendingDocument|safeDocumentName|payload\.document/u,
+  );
+
+  const finishStart = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf("\n}\n\nfunction stopSession", finishStart);
+  const finish = bridge.slice(finishStart, finishEnd);
+  assert.doesNotMatch(finish, /documentForTurn|payload\.document/u);
+
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(client, /DocumentInfo|attach_document|paper-input|r#type:\s*"file"/u);
+  assert.match(client, /aria_disabled:\s*"true"/u);
+  assert.match(client, /ファイルを読まず、クラウドへも送りません/u);
+});
+
 test("explicit voice start warms only the fixed transport without private data", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
@@ -590,7 +607,7 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
     "utf8",
   );
   const start = bridge.indexOf("async function finishTurn(");
-  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
+  const end = bridge.indexOf("\n}\n\nfunction stopSession", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const finish = bridge.slice(start, end);
@@ -2874,7 +2891,7 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
   assert.match(bridge, /fail\(stoppedSessionCode\(expectedEpoch\)\)/u);
   const finishAt = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finishEnd = bridge.indexOf("\n}\n\nfunction stopSession", finishAt);
   const finish = bridge.slice(finishAt, finishEnd);
   assert.doesNotMatch(
     finish,
@@ -2982,7 +2999,7 @@ test("network keeps one finite deadline while validated playback drains separate
     /const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;/u,
   );
   const finishAt = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finishEnd = bridge.indexOf("\n}\n\nfunction stopSession", finishAt);
   const finish = bridge.slice(finishAt, finishEnd);
   assert.match(
     finish,
@@ -3062,7 +3079,7 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
   const validatorSource = executableBridgeFunction(
     bridge,
     "function hasValidCoachMetadata(",
-    "function clearPendingDocument(",
+    "function safeVoiceResponse(",
   );
   const validate = Function(
     `"use strict"; ${validatorSource}; return hasValidCoachMetadata;`,
@@ -3303,24 +3320,6 @@ test("voice session pause reasons are finite and contain no user content", () =>
   });
 });
 
-test("an unsent PDF expires at five minutes, not before", () => {
-  const attachedAt = 50_000;
-  assert.equal(
-    isPendingDocumentExpired(
-      attachedAt,
-      attachedAt + VOICE_SESSION_LIMITS.pendingDocumentLimitMs - 1,
-    ),
-    false,
-  );
-  assert.equal(
-    isPendingDocumentExpired(
-      attachedAt,
-      attachedAt + VOICE_SESSION_LIMITS.pendingDocumentLimitMs,
-    ),
-    true,
-  );
-});
-
 test("idle and absolute session expiries are checked at their boundaries", () => {
   let now = 10_000;
   const clock = createSessionClock({ now: () => now });
@@ -3400,7 +3399,7 @@ test("finishTurn holds the idle clock through validated playback only", async ()
     "utf8",
   );
   const start = bridge.indexOf("async function finishTurn(");
-  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
+  const end = bridge.indexOf("\n}\n\nfunction stopSession", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const finish = bridge.slice(start, end);

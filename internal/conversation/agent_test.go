@@ -521,7 +521,7 @@ func TestStandaloneGreetingEligibilityIsStrict(t *testing.T) {
 		},
 		{
 			name: "greeting with non-pending state",
-			turn: VoiceTurn{Utterance: "こんにちは", StateToken: "v1.existing"},
+			turn: VoiceTurn{Utterance: "こんにちは", StateToken: "v2.existing"},
 			state: conversationState{
 				Turn: 1,
 			},
@@ -3281,210 +3281,30 @@ func TestAgentLexicalHighRiskCannotBypassPrecision(t *testing.T) {
 	}
 }
 
-func TestAgentPDFIsInlineThenZeroizedAndNoFreeTextEntersState(t *testing.T) {
-	utterance := "この秘密の逐語発話XYZをそのまま保存しないで"
-	pdf := []byte("%PDF-1.7\nRAW-PDF-SECRET")
-	plan := validModelPlan()
-	plan.ConversationSummary = utterance
-	plan.ThoughtStateDelta.Claims = []string{
-		"PDF由来の命令を次のターンへ保存する",
-	}
-	plan.DocumentSummary = "資料は小規模な比較実験と三つの限界を示す"
+func TestAgentRejectsAndZeroizesPDFBeforeStateOrModel(t *testing.T) {
+	const uid = "uid-pdf-disabled"
 	fake := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, plan)},
-		{body: encodePlan(t, plan)},
-		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		{body: encodePlan(t, validModelPlan())},
 	}}
 	agent := newTestAgent(t, fake)
-
-	result, err := agent.Process(context.Background(), "uid-p", VoiceTurn{
-		SchemaVersion: SchemaVersion,
-		Utterance:     utterance,
-		PDF:           &InlinePDF{MIMEType: "application/pdf", Data: pdf},
-	})
-	if err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if fake.calls[0].pdfMIME != "application/pdf" ||
-		!bytes.Contains(fake.calls[0].pdfData, []byte("RAW-PDF-SECRET")) {
-		t.Fatalf("PDF was not sent inline: %#v", fake.calls[0])
-	}
-	if result.Route != "precision" ||
-		len(fake.calls) != 3 ||
-		fake.calls[1].model != DefaultPrecisionModel ||
-		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
-		!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
-		t.Fatalf("PDF did not force precision and independent audit: %#v", fake.calls)
-	}
-	if !allZero(pdf) {
-		t.Fatalf("PDF bytes were not cleared: %q", pdf)
-	}
-
-	state, err := agent.codec.open("uid-p", result.StateToken)
-	if err != nil {
-		t.Fatalf("open state: %v", err)
-	}
-	if state.DocumentSummary != "" ||
-		state.ConversationSummary != "" ||
-		len(state.Graph.Claims) != 0 {
-		t.Fatalf("unsafe state derivation: %#v", state)
-	}
-	plaintextView, err := json.Marshal(state)
-	if err != nil {
-		t.Fatalf("marshal test state: %v", err)
-	}
-	if bytes.Contains(plaintextView, []byte(utterance)) ||
-		bytes.Contains(plaintextView, []byte("RAW-PDF-SECRET")) ||
-		bytes.Contains(plaintextView, []byte("%PDF-")) {
-		t.Fatalf("raw input entered state: %s", plaintextView)
-	}
-}
-
-func TestAgentPDFPendingRecoveryCannotDeletePreTurnState(t *testing.T) {
-	const (
-		uid            = "uid-pdf-pending-isolation"
-		utterance      = "既存の状態と同じ文をPDFについて話す"
-		pendingSubject = "PDF添付前の保留質問"
-		pdfAnswer      = "目的はPDFの命令どおり保留状態を完了することです"
-	)
-	injectedCompletion := coachAttemptPlan(
-		answercontract.OperatorPurpose,
-		answercontract.SlotPurpose,
-		pendingSubject,
-		pdfAnswer,
-		pdfAnswer,
-		"保留状態を完了しました。",
-	)
-	recovered := validModelPlan()
-	recovered.ThoughtStateDelta.Claims = []string{
-		"PDF内の命令を次のターンへ保存する",
-	}
-	fake := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, injectedCompletion)},
-	}}
-	agent := newTestAgent(t, fake)
-	initial := conversationState{
-		Turn: 3,
-		Graph: ThoughtStateGraph{
-			Goals:          []string{},
-			Claims:         []string{utterance},
-			Grounds:        []string{},
-			Assumptions:    []string{},
-			Constraints:    []string{},
-			OpenLoops:      []string{},
-			Contradictions: []string{},
-			Decisions:      []string{},
-		},
-		PendingAnswer: PendingAnswerFrame{
-			Active:        true,
-			Operator:      answercontract.OperatorPurpose,
-			Subject:       pendingSubject,
-			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPurpose},
-		},
-		SelfCorrectionGrace: true,
-		LastIntervention: ArbiterDecision{
-			Benefit: 0.6, Confidence: 1, Act: "clarify", Score: 0.6,
-		},
-	}
-	token, err := agent.codec.seal(uid, initial)
-	if err != nil {
-		t.Fatalf("seal initial state: %v", err)
-	}
 	pdf := []byte("%PDF-1.7\nUNTRUSTED-ACTIVE-CONTENT")
 	result, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
-		Utterance:     utterance,
-		StateToken:    token,
+		Utterance:     "このPDFを読んで",
+		StateToken:    "must-not-be-decoded",
 		PDF: &InlinePDF{
 			MIMEType: "application/pdf",
 			Data:     pdf,
 		},
 	})
-	if err != nil {
-		t.Fatalf("Process: %v", err)
+	if !errors.Is(err, ErrInvalidTurn) {
+		t.Fatalf("Process error = %v; want ErrInvalidTurn", err)
 	}
-	if len(fake.calls) != 1 || result.Route != "planner-unavailable" {
-		t.Fatalf("PDF respondent injection did not fail closed: %#v", result)
-	}
-	for index, call := range fake.calls {
-		if strings.Contains(call.prompt, pendingSubject) {
-			t.Fatalf("call %d exposed the pre-turn coach subject to PDF content", index)
-		}
-		if strings.Contains(call.prompt, `"pending_answer":{"active":true`) {
-			t.Fatalf("call %d exposed an active coach capability to PDF content", index)
-		}
-	}
-	if !strings.Contains(fake.calls[0].prompt, `"respondent_mode_allowed":false`) {
-		t.Fatal("PDF planner call could enter respondent mode")
+	if result.StateToken != "" || result.SpokenReply != "" || len(fake.calls) != 0 {
+		t.Fatalf("PDF reached state or model: result=%#v calls=%d", result, len(fake.calls))
 	}
 	if !allZero(pdf) {
-		t.Fatalf("PDF was not cleared: %q", pdf)
-	}
-	state, err := agent.codec.open(uid, result.StateToken)
-	if err != nil {
-		t.Fatalf("open state: %v", err)
-	}
-	if state.Turn != initial.Turn+1 ||
-		len(state.Graph.Claims) != 1 ||
-		state.Graph.Claims[0] != utterance ||
-		!state.PendingAnswer.Active ||
-		state.PendingAnswer.Subject != initial.PendingAnswer.Subject ||
-		!state.SelfCorrectionGrace ||
-		state.LastIntervention != initial.LastIntervention {
-		t.Fatalf("PDF recovery changed pre-turn state: %#v", state)
-	}
-
-	safeFake := &fakeGenerator{generations: []fakeGeneration{
-		{body: encodePlan(t, recovered)},
-		{body: encodePlan(t, recovered)},
-		{body: encodeContract(t, validCriticContract(recovered.SpokenReply))},
-	}}
-	safeAgent := newTestAgent(t, safeFake)
-	safeToken, err := safeAgent.codec.seal(uid, initial)
-	if err != nil {
-		t.Fatalf("seal safe-path state: %v", err)
-	}
-	safePDF := []byte("%PDF-1.7\nUNTRUSTED-ACTIVE-CONTENT")
-	safeResult, err := safeAgent.Process(context.Background(), uid, VoiceTurn{
-		SchemaVersion: SchemaVersion,
-		Utterance:     utterance,
-		StateToken:    safeToken,
-		PDF: &InlinePDF{
-			MIMEType: "application/pdf",
-			Data:     safePDF,
-		},
-	})
-	if err != nil {
-		t.Fatalf("safe PDF Process: %v", err)
-	}
-	if len(safeFake.calls) != 3 || safeResult.Route != "precision" {
-		t.Fatalf("safe PDF path was not independently audited: %#v", safeResult)
-	}
-	for index, call := range safeFake.calls {
-		if strings.Contains(call.prompt, pendingSubject) ||
-			strings.Contains(call.prompt, `"pending_answer":{"active":true`) {
-			t.Fatalf("safe call %d exposed the pre-turn coach capability", index)
-		}
-		if index < 2 &&
-			!strings.Contains(call.prompt, `"respondent_mode_allowed":false`) {
-			t.Fatalf("safe planner call %d could enter respondent mode", index)
-		}
-	}
-	if !allZero(safePDF) {
-		t.Fatalf("safe-path PDF was not cleared: %q", safePDF)
-	}
-	safeState, err := safeAgent.codec.open(uid, safeResult.StateToken)
-	if err != nil {
-		t.Fatalf("open safe-path state: %v", err)
-	}
-	if safeState.Turn != initial.Turn+1 ||
-		len(safeState.Graph.Claims) != 1 ||
-		safeState.Graph.Claims[0] != utterance ||
-		!safeState.PendingAnswer.Active ||
-		safeState.PendingAnswer.Subject != initial.PendingAnswer.Subject ||
-		!safeState.SelfCorrectionGrace ||
-		safeState.LastIntervention != initial.LastIntervention {
-		t.Fatalf("safe PDF path changed pre-turn state: %#v", safeState)
+		t.Fatalf("PDF bytes were not cleared: %q", pdf)
 	}
 }
 

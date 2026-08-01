@@ -494,47 +494,20 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	}
 }
 
-func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
-	t *testing.T,
-) {
+func TestPipelineBlocksPDFBeforePlannerForEveryTurnMode(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
-		name             string
-		route            string
-		spokenReply      string
-		needsClarify     bool
-		ambient          bool
-		foreground       bool
-		wantSynthesized  int
-		wantIntervention string
+		name       string
+		ambient    bool
+		foreground bool
 	}{
+		{name: "intentional"},
+		{name: "ambient", ambient: true},
 		{
-			name:             "intentional",
-			route:            "planner-unavailable",
-			spokenReply:      "今の話は聞き取れています。もう一度聞かせてください。",
-			needsClarify:     true,
-			wantSynthesized:  1,
-			wantIntervention: "clarify",
-		},
-		{
-			name:             "ambient",
-			route:            "planner-unavailable",
-			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
-			needsClarify:     true,
-			ambient:          true,
-			wantSynthesized:  1,
-			wantIntervention: "clarify",
-		},
-		{
-			name:             "foreground",
-			route:            "planner-unavailable",
-			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
-			needsClarify:     true,
-			ambient:          true,
-			foreground:       true,
-			wantSynthesized:  1,
-			wantIntervention: "clarify",
+			name:       "foreground",
+			ambient:    true,
+			foreground: true,
 		},
 	} {
 		test := test
@@ -546,23 +519,17 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 				confidence: 0.95,
 			}
 			agent := &fakeAgent{result: conversation.VoiceTurnResult{
-				Domain:             "other",
-				AssistanceTarget:   "assistant",
-				RespondentStage:    "none",
-				ResearchStatus:     "none",
-				ResearchRecords:    []conversation.ResearchRecord{},
-				Route:              test.route,
-				StateToken:         "fresh-encrypted-state",
-				SpokenReply:        test.spokenReply,
-				NeedsClarification: test.needsClarify,
-				InterventionPolicy: "clarify",
-				Intervention: conversation.ArbiterDecision{
-					Act: test.wantIntervention,
-				},
+				Route:       "planner-unavailable",
+				StateToken:  "must-not-be-returned",
+				SpokenReply: "must not reach synthesis",
 			}}
 			pipeline, err := New(speech, agent)
 			if err != nil {
 				t.Fatal(err)
+			}
+			document := &httpapi.VoiceDocument{
+				MIMEType: "application/pdf",
+				Data:     []byte("%PDF private bytes"),
 			}
 			result, err := pipeline.Process(
 				context.Background(),
@@ -572,25 +539,28 @@ func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
 					MIMEType:   "audio/webm",
 					Ambient:    test.ambient,
 					Foreground: test.foreground,
-					Document: &httpapi.VoiceDocument{
-						MIMEType: "application/pdf",
-						Data:     []byte("%PDF"),
-					},
+					Document:   document,
 				},
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Route != test.route ||
-				result.StateToken != "fresh-encrypted-state" ||
-				result.Caption != test.spokenReply ||
-				!result.NeedsPaper ||
-				speech.synthesizeCalls != test.wantSynthesized {
-				t.Fatalf("planner fallback result = %+v", result)
-			}
-			if test.wantSynthesized > 0 &&
-				speech.synthesizedText != test.spokenReply {
-				t.Fatalf("synthesized text = %q", speech.synthesizedText)
+			if result.Route != routeDocumentPrivacyBlocked ||
+				result.StateToken != "" ||
+				result.Caption != documentPrivacyReply ||
+				result.NeedsPaper ||
+				agent.calls != 0 ||
+				speech.synthesizeCalls != 1 ||
+				speech.synthesizedText != documentPrivacyReply ||
+				len(document.Data) != 0 {
+				t.Fatalf(
+					"PDF privacy block result=%+v agent=%d synth=%d text=%q doc=%d",
+					result,
+					agent.calls,
+					speech.synthesizeCalls,
+					speech.synthesizedText,
+					len(document.Data),
+				)
 			}
 		})
 	}

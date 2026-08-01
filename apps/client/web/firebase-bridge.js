@@ -24,7 +24,6 @@ import {
   createTurnGate,
   createVadState,
   initializeWithCleanup,
-  isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
   shouldCommitHybridEndpoint,
@@ -67,7 +66,6 @@ const PCM_CAPTURE_WORKLET_URL = "/pcm-capture-worklet.js";
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
 const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/health`;
 
-const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 4 * Math.ceil(AUDIO_MAX_BYTES / 3);
 const SESSION_STATE_MAX_CHARS = 16 * 1024;
@@ -94,11 +92,8 @@ let activeRequestController;
 let activePlayback;
 let activeLiveSession;
 let pendingLiveSession;
-let pendingDocument;
-let pendingDocumentTimer;
 let voiceTransportPrimed = false;
 let sessionEpoch = 0;
-let documentEpoch = 0;
 let pcmCaptureGeneration = 0;
 const MAX_STOPPED_SESSION_CODES = 8;
 const stoppedSessionCodes = new Map();
@@ -1420,41 +1415,6 @@ function hasValidCoachMetadata(assistanceTarget, phase, action) {
   );
 }
 
-function clearPendingDocument(reason = "cleared") {
-  const hadPendingDocument = pendingDocument !== undefined;
-  pendingDocument = undefined;
-  if (pendingDocumentTimer !== undefined) {
-    clearTimeout(pendingDocumentTimer);
-    pendingDocumentTimer = undefined;
-  }
-  const input = document.getElementById("paper-input");
-  if (input instanceof HTMLInputElement) {
-    input.value = "";
-  }
-  if (hadPendingDocument) {
-    globalThis.dispatchEvent(
-      new CustomEvent("kotae:document-cleared", {
-        detail: Object.freeze({ reason }),
-      }),
-    );
-  }
-}
-
-function armPendingDocumentExpiry(documentForExpiry, attachedAt) {
-  if (pendingDocumentTimer !== undefined) {
-    clearTimeout(pendingDocumentTimer);
-  }
-  pendingDocumentTimer = setTimeout(() => {
-    pendingDocumentTimer = undefined;
-    if (
-      pendingDocument === documentForExpiry &&
-      isPendingDocumentExpired(attachedAt, performance.now())
-    ) {
-      clearPendingDocument("expired");
-    }
-  }, VOICE_SESSION_LIMITS.pendingDocumentLimitMs);
-}
-
 function safeVoiceResponse(payload) {
   if (!isPlainRecord(payload)) {
     fail("voice_response_invalid");
@@ -1575,7 +1535,6 @@ async function startVoiceLiveSession({
   turnMode,
 }) {
   if (
-    pendingDocument ||
     !liveVoiceSupported(stream) ||
     !liveCredential(appCheckToken) ||
     !liveCredential(idToken) ||
@@ -3589,7 +3548,6 @@ async function finishTurn(serializedSessionState, turnMode) {
   }
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
-  let documentForTurn;
   let liveSession;
   let playback;
   let requestController;
@@ -3632,10 +3590,6 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     responseClockActive = true;
 
-    documentForTurn = pendingDocument;
-    if (documentForTurn) {
-      clearPendingDocument("consumed");
-    }
     liveSession = activeLiveSession;
     if (!liveSession) {
       liveSession = await takePendingLiveSession(
@@ -3649,13 +3603,6 @@ async function finishTurn(serializedSessionState, turnMode) {
     ) {
       liveSession.cancel(new Error("voice_turn_invalid"));
       fail("voice_turn_invalid");
-    }
-    if (liveSession && documentForTurn) {
-      liveSession.cancel(new Error("voice_live_pdf_fallback"));
-      if (activeLiveSession === liveSession) {
-        activeLiveSession = undefined;
-      }
-      liveSession = undefined;
     }
     if (liveSession) {
       setTracksEnabled(false);
@@ -3753,13 +3700,6 @@ async function finishTurn(serializedSessionState, turnMode) {
       sessionState: serializedSessionState,
       turnMode,
     };
-    if (documentForTurn) {
-      payload.document = {
-        base64: documentForTurn.base64,
-        mimeType: documentForTurn.mimeType,
-      };
-    }
-
     requestController = new AbortController();
     activeRequestController = requestController;
     const response = await awaitVoiceTurnResult(
@@ -3843,78 +3783,12 @@ async function finishTurn(serializedSessionState, turnMode) {
   }
 }
 
-function safeDocumentName(name) {
-  const cleaned = name
-    .normalize("NFC")
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .slice(0, 180)
-    .trim();
-  return cleaned || "paper.pdf";
-}
-
-async function attachDocument(inputId) {
-  if (typeof inputId !== "string" || inputId !== "paper-input") {
-    fail("document_not_selected");
-  }
-  const input = document.getElementById(inputId);
-  if (!(input instanceof HTMLInputElement) || input.files?.length !== 1) {
-    fail("document_not_selected");
-  }
-  const file = input.files[0];
-  if (
-    file.type !== "application/pdf" ||
-    !file.name.toLowerCase().endsWith(".pdf")
-  ) {
-    input.value = "";
-    fail("document_type_invalid");
-  }
-  if (file.size === 0 || file.size > DOCUMENT_MAX_BYTES) {
-    input.value = "";
-    fail("document_too_large");
-  }
-
-  documentEpoch += 1;
-  const expectedEpoch = documentEpoch;
-  let base64;
-  try {
-    base64 = arrayBufferToBase64(await file.arrayBuffer());
-  } catch {
-    input.value = "";
-    fail("document_read_failed");
-  }
-  if (expectedEpoch !== documentEpoch) {
-    input.value = "";
-    fail("request_cancelled");
-  }
-
-  const name = safeDocumentName(file.name);
-  clearPendingDocument("replaced");
-  const attachedAt = performance.now();
-  pendingDocument = Object.freeze({
-    base64,
-    mimeType: "application/pdf",
-    name,
-  });
-  if (activeLiveSession?.canFallback()) {
-    activeLiveSession.cancel(new Error("voice_live_pdf_fallback"));
-    activeLiveSession = undefined;
-  }
-  retirePendingLiveSession(new Error("voice_live_pdf_fallback"));
-  armPendingDocumentExpiry(pendingDocument, attachedAt);
-  base64 = "";
-  return Object.freeze({
-    name,
-    sizeBytes: file.size,
-  });
-}
-
 function stopSession(reason = "request_cancelled") {
   const { pauseReason, stopCode } =
     classifyVoiceSessionStopReason(reason);
   const stoppedEpoch = sessionEpoch;
   rememberStoppedSession(stoppedEpoch, stopCode);
   sessionEpoch += 1;
-  documentEpoch += 1;
   finishGate.reset();
   sessionExpiryWatchdog.disarm();
 
@@ -3947,7 +3821,6 @@ function stopSession(reason = "request_cancelled") {
   releaseMicrophone(stopCode);
   sessionClock.reset();
 
-  clearPendingDocument("session-stopped");
   if (pauseReason !== null) {
     globalThis.dispatchEvent(
       new CustomEvent("kotae:voice-session-paused", {
@@ -3967,7 +3840,6 @@ function hasActiveVoiceSession() {
     pendingLiveSession ||
     activePlayback ||
     finishGate.isBusy() ||
-    pendingDocument ||
     hasLiveAudioTrack(mediaStream),
   );
 }
@@ -3996,7 +3868,6 @@ globalThis.addEventListener("pagehide", () => {
 });
 
 const publicBridge = Object.freeze({
-  attachDocument,
   beginTurn,
   endTurn,
   finishTurn,

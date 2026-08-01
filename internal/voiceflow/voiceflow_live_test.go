@@ -2266,7 +2266,7 @@ func TestPipelineLiveSpeculativeCancellationDoesNotLeak(t *testing.T) {
 	}
 }
 
-func TestPipelineLiveSpeculationRequiresReplyExpectedDocumentFreeTurn(t *testing.T) {
+func TestPipelineLiveSpeculationRequiresReplyExpectedAndBlocksDocuments(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		name       string
@@ -2274,15 +2274,18 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedDocumentFreeTurn(t *testing
 		foreground bool
 		document   *httpapi.VoiceDocument
 		wantSpec   bool
+		wantTurns  int
 		wantHit    int64
 		wantMiss   int64
+		wantRoute  string
 	}{
-		{name: "ambient", ambient: true},
+		{name: "ambient", ambient: true, wantTurns: 1},
 		{
 			name:       "foreground",
 			ambient:    true,
 			foreground: true,
 			wantSpec:   true,
+			wantTurns:  1,
 			wantHit:    1,
 		},
 		{
@@ -2291,7 +2294,7 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedDocumentFreeTurn(t *testing
 				MIMEType: "application/pdf",
 				Data:     []byte("pdf"),
 			},
-			wantMiss: 1,
+			wantRoute: routeDocumentPrivacyBlocked,
 		},
 	} {
 		test := test
@@ -2355,10 +2358,19 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedDocumentFreeTurn(t *testing
 				t.Fatal(err)
 			}
 			turns := agent.recordedTurns()
-			if len(turns) != 1 ||
-				turns[0].Speculative != test.wantSpec ||
-				turns[0].Foreground != test.foreground {
+			if len(turns) != test.wantTurns {
 				t.Fatalf("turns=%+v", turns)
+			}
+			if test.wantTurns == 1 &&
+				(turns[0].Speculative != test.wantSpec ||
+					turns[0].Foreground != test.foreground) {
+				t.Fatalf("turns=%+v", turns)
+			}
+			if test.wantRoute != "" && result.Route != test.wantRoute {
+				t.Fatalf("route=%q; want %q", result.Route, test.wantRoute)
+			}
+			if test.document != nil && len(test.document.Data) != 0 {
+				t.Fatalf("document bytes were retained: %d", len(test.document.Data))
 			}
 			if result.LiveTimings.SpecHit != test.wantHit ||
 				result.LiveTimings.SpecMiss != test.wantMiss ||

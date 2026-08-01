@@ -44,16 +44,28 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 │ Cloud Run / Go（asia-northeast1）             │
 │ Auth + App Check + Origin + size + rate limit│
 └──────────┬──────────────────┬────────────────┘
-           │ raw audio        │ transcript / one-turn PDF
-           ▼                  ▼
-┌──────────────────┐   ┌─────────────────────────────┐
-│ Cloud STT V2     │   │ Vertex AI（global）          │
-│ asia-northeast1  │   │ Gemini fast / precision     │
-│ long, fixed         │ │ Thought Graph + EVI + LAC   │
-└────────┬─────────┘   └────────────┬────────────────┘
-         └──── transcript ──────────┘
-                                    │ silence / reply text
-                                    ▼
+           │ raw audio        │ PDF field
+           ▼                  └─ reject + clear bytes
+┌──────────────────┐
+│ Cloud STT V2     │
+│ asia-northeast1  │
+│ long, fixed      │
+└────────┬─────────┘
+         │ transcript
+         ▼
+┌──────────────────────────────┐
+│ Sensitive Data Protection    │
+│ asia-northeast1 / fail closed│
+└────────┬─────────────────────┘
+         │ protected transcript only
+         ▼
+┌─────────────────────────────┐
+│ Vertex AI（global）          │
+│ Gemini fast / precision     │
+│ Thought Graph + EVI + LAC   │
+└────────────┬────────────────┘
+             │ silence / protected reply text
+             ▼
                          ┌──────────────────────────┐
                          │ Cloud TTS                │
                          │ asia-northeast1          │
@@ -66,7 +78,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 
 利用者のintentional turn全体が「外部検索で、テーマは何々の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ、Cloud Runの独立tool-policy gateが許可します。自然文から検索同意を推測せず、追記、取消し、複数命令、ambient turnから外部queryは作りません。topicは「テーマは」と「の最新論文」の間全体、DOIは空白で区切ったbare DOI全体を決定論的に抽出し、モデル出力と取得結果へ完全に結びつけます。送信前にはNFKC差とUnicode format文字をfail-closedで拒否し、可逆encodingを再検査し、topic文字を限定し、topic内の節区切り・取消語とDOIに付いたcomma・semicolon・取消語も拒否します。固定hostのCrossref REST APIから返ったtitle、DOI、日付は候補発見にだけ使い、本文を読んだ証拠やclaimの支持根拠にはしません。topic探索は発表日ではなくCrossrefのindex date filterを使うため、「Crossrefの索引日が指定期間内の書誌候補」と表示します。任意の語が氏名か未知の技術名かを完全には区別できないため、固定発話のtopicそのものがCrossrefへ送られることもUIで明示します。
 
-Cloud STTにはraw audioだけ、Vertex AIには文字起こしと任意のPDF、Cloud TTSには選択された短い応答文だけを渡します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。
+Cloud STTにはraw audioだけを渡します。文字起こしは東京リージョンのSensitive Data Protectionで検査・置換し、成功した文字列だけをVertex AIへ渡します。モデル応答も同じ検査を通過した短い文字列だけをCloud TTSへ渡します。PDFはブラウザでファイルを読む前とCloud Runでモデルを呼ぶ前の両方で拒否します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。
 
 ## 状態
 
@@ -88,6 +100,7 @@ tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret Man
 | 体験 | Rust / Dioxus / Wasm | 音声中心UI、session状態、アクセシビリティ |
 | ブラウザ境界 | JavaScript module | MediaRecorder、Web Audio VAD、Firebase Web SDK、音声再生 |
 | API | Go / Cloud Run | 認証、App Check、Origin、入力検証、timeout、rate limit |
+| PII境界 | Sensitive Data Protection / Go | 文字起こしと応答の検査・置換、失敗時のモデル/TTS遮断 |
 | 音声認識 | Cloud Speech-to-Text V2 | `asia-northeast1`で日本語音声を文字へ変換 |
 | 推論 | Go / Vertex AI | structured output、fast / precision routing、KOTAE Reflex |
 | 答え契約 | Go | LACの決定論的検証、曖昧性・coverage・意味保存guard |
@@ -102,7 +115,7 @@ TypeScriptは使いません。ブラウザAPIとFirebase Web SDKを直接呼ぶ
 ## 推論経路
 
 1. Gemini 3.6 Flashの高速経路が、domain、潜在問い、Thought State Graph差分、介入候補、advisory LACを構造化出力する。
-2. PDF、研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。PDF・医療・法律・金融・研究根拠では精密経路の失敗時に実質回答へfallbackしない。
+2. 研究・技術、高リスク領域、低信頼のturnはGemini 3.1 Pro previewの精密経路へ送る。医療・法律・金融・研究根拠では精密経路の失敗時に実質回答へfallbackしない。PDFはこの経路へ入れず、推論前に拒否する。
 3. 最終draftの後に、低遅延のfast modelを使う別のstructured callでLACを監査する。独立性は別モデルという主張ではなく、隔離prompt、別call、draft側LAC自己申告の非共有で確保する。高速監査が構造不正または一時的provider障害で二度失敗した時だけprecision modelの中思考で一度回復監査し、安全終了・cancelでは切り替えない。
 4. モデル出力をJSON schemaと上限で検証し、Go側が仮説gap、entropy、必須slotの完全充足、回答内に実在するcommitment、意味保存を決定論的に再計算する。
 5. `respondent`経路では、本人の回答試行、slotごとの完全一致evidence、protected spanをGoの別gateへ渡す。再構成案が元回答の意味節の並べ替えでない、または否定・条件・数値・不確実性・固有内容が変わった場合は拒否する。

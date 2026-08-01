@@ -55,9 +55,10 @@ const (
 	voicePrecisionInferenceTimeout       = 3500 * time.Millisecond
 	voiceCriticTimeout                   = 3500 * time.Millisecond
 	criticMaxOutputTokens          int32 = 2_048
-	// VoiceResponseReserve is the minimum time every upstream voice stage must
-	// leave for the final regional synthesis and transport commit.
-	VoiceResponseReserve = 5 * time.Second
+	// VoiceResponseReserve is the minimum time model inference must leave for
+	// fail-closed output privacy inspection, regional synthesis, and transport.
+	// The voiceflow package separately reserves the input-inspection budget.
+	VoiceResponseReserve = 10 * time.Second
 	voiceResponseReserve = VoiceResponseReserve
 	securityflowPolicy   = securityflow.PolicyPCCMPhase1
 )
@@ -459,7 +460,11 @@ func (agent *vertexAgent) Process(
 		return VoiceTurnResult{}, ErrInvalidTurn
 	}
 	if turn.PDF != nil {
-		defer wipe(turn.PDF.Data)
+		// The public product has no reviewed PDF de-identification boundary.
+		// Reject even direct internal calls before state decoding or generation,
+		// so a future transport refactor cannot revive the legacy inline path.
+		wipe(turn.PDF.Data)
+		return VoiceTurnResult{}, ErrInvalidTurn
 	}
 	normalized, err := normalizeTurn(turn)
 	if err != nil {

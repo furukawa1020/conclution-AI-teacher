@@ -5,12 +5,13 @@
 - Google Cloud / Firebase project: `kotae-ai-u22-2026`
 - 公開URL: `https://kotae-ai.web.app`
 - Firebase Hosting: 静的Wasm UIと`/api/**`のCloud Run rewrite
-- Firebase Auth: 匿名認証、未使用匿名アカウントの自動削除
+- Firebase Authのアプリ側ポリシー: Google provider・確認済みアカウントのみ。匿名tokenはAPIで拒否する。Google providerの有効化はリポジトリ外の必須設定なので、配備前チェックで別に確認する
 - Firebase App Check: reCAPTCHA Enterprise、Authenticationと独自APIで強制
 - Firestore: `(default)`、`asia-northeast1`、削除保護、TTL
 - Cloud Run: `kotae-api`、`asia-northeast1`
 - Cloud Run実行ID: `kotae-api-runtime@kotae-ai-u22-2026.iam.gserviceaccount.com`
 - Cloud Speech-to-Text V2: `asia-northeast1`、自然会話向け`long`単独、`ja-JP`
+- Sensitive Data Protection: `asia-northeast1`、Vertex前後のfail-closed検査・置換
 - Cloud Text-to-Speech: `asia-northeast1`、`ja-JP-Chirp3-HD-Kore`
 - Vertex AI: `global`、高速`gemini-3.6-flash`、精密`gemini-3.1-pro-preview`
 - Secret Manager: `kotae-conversation-state`
@@ -26,11 +27,12 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 | Hosting / API | Hosting / Cloud Run `asia-northeast1` | 静的asset、voice request |
 | Firestore | `asia-northeast1` | TTL付き評価メタデータとrate counter |
 | Speech-to-Text | `asia-northeast1` regional endpoint | raw audio |
-| Vertex AI | `global` | 文字起こし、短い状態要約、今回添付したPDF |
+| Sensitive Data Protection | `asia-northeast1` | STT文字起こし、Vertex応答文 |
+| Vertex AI | `global` | 検査・置換後の文字列、短い状態要約 |
 | Text-to-Speech | `asia-northeast1` regional endpoint | 選ばれた短い応答文 |
 | Crossref | Google Cloud外の公開REST API | intentional turnで明示し、tool-policyとPII screenを通過したDOIまたは最小topicだけ |
 
-raw audioをVertex AIへ直接送るVertex Live APIは現在使いません。ただし文字起こしとPDFは`global`のVertex AIへ送られ、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。
+raw audioをVertex AIへ直接送るVertex Live APIは現在使いません。DLPの検査・置換後の文字列は`global`のVertex AIへ送られ、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。PDFは現在、ブラウザで読まずAPIでも推論前に拒否します。
 
 ## 必要なAPI
 
@@ -46,6 +48,7 @@ gcloud services enable `
   aiplatform.googleapis.com `
   speech.googleapis.com `
   texttospeech.googleapis.com `
+  dlp.googleapis.com `
   firestore.googleapis.com `
   identitytoolkit.googleapis.com `
   firebaseappcheck.googleapis.com `
@@ -80,6 +83,7 @@ $Roles = @(
   "roles/datastore.user",
   "roles/firebaseauth.viewer",
   "roles/speech.client",
+  "roles/dlp.user",
   "roles/serviceusage.serviceUsageConsumer"
 )
 
@@ -128,6 +132,7 @@ KOTAE_ALLOWED_APP_IDS=<Firebase Web App ID>
 KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash
 KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview
 KOTAE_VERTEX_PRIORITY=false
+KOTAE_STATE_V2_WRITES=true
 KOTAE_COACH_RESTATEMENT_BINDING=true
 KOTAE_SPEECH_LOCATION=asia-northeast1
 KOTAE_SPEECH_MODEL=long
@@ -165,22 +170,22 @@ gcloud run deploy kotae-api `
   --min-instances=1 `
   --max-instances=3 `
   --timeout=120 `
-  --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL" `
-  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200" `
+  --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL,KOTAE_COACHING_ROLLOUT" `
+  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200" `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:latest"
 ```
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い120秒にします。音声、PDF、複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。Cloud Runのtimeoutは、内部の50秒voice timeoutより長い120秒にします。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。
 
-`KOTAE_COACH_RESTATEMENT_BINDING`は状態tokenのrolling migration用flagです。新fieldを読めるrevisionをまず`false`で100% trafficへ移し、そのrevisionが安定してから同じcodeを`true`にした次revisionへ切り替えます。`true`のrevisionが発行したtokenを旧codeはstrict JSON decodeで拒否するため、rollback先は直前の`false`互換revisionに固定します。`false`revisionも既存tagは検証しますが、新しいtagは発行しません。`true`revisionはtagなしの旧`awaiting_restatement` scopeを推論前に消し、その発話を通常会話として扱うため、tagなしscopeをtoken更新で延命できません。
+`KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行を制御します。privacy境界導入後の長期運用値は両方`true`です。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
 
-上の長期運用例はmigration完了後の`true`です。このfieldを初めて追加する一回だけ、最初のcandidate deployでは同じ引数の`KOTAE_COACH_RESTATEMENT_BINDING=true`を`false`へ置き換えます。互換revisionへ100%切替・検証後、同じimageから`true` revisionを作り、candidate検証後に100%へ切り替えます。以後の通常deployは`true`を維持します。
+rollback時も`v1`と`v2`の状態は相互利用しません。revisionを戻した後はブラウザのopaque stateを破棄して新しいセッションから始めます。
 
-互換revisionのcandidate tag URLは、0% trafficへ移した時点で外します。`true`revision側はそこから発行されたtagなしscopeも採点へ使いませんが、不要な別endpointを残さないためです。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。
+candidate検証後はservice rootへ100% trafficを移し、`gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags`で全tag URLを外します。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 
-UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。匿名UIDを作り直してもproject全体の費用上限を素通りできないための二段目です。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
+UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
 
 ## FirestoreとTTL
 
@@ -231,17 +236,18 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-hosting.ps1 `
   -ProjectId kotae-ai-u22-2026
 ```
 
-ブラウザの正式なAPI URLは同一Originの`https://kotae-ai.web.app/api/v1/voice/turns`です。Firebase HostingがCloud Runへrewriteするため、Cloud Runの`run.app` URLをクライアントへ埋め込みません。
+現在の音声streamとWebSocketは、公開サイトからコードに固定したCloud Run `run.app` URLへ直接CORS/TLSで接続します。API側は`Origin: https://kotae-ai.web.app`、Firebase ID token、App Check token、許可App IDをすべて検証します。READMEやUIで「同一オリジン」とは説明しません。
 
 ## Consoleで確認する項目
 
-1. Firebase Authの匿名認証と未使用匿名アカウント自動削除
+1. Firebase AuthのGoogle providerとsupport emailが設定済みで、Authorized domainsにHosting domainがあること。匿名providerは移行確認後に無効化する
 2. App CheckのWeb App ID、reCAPTCHA Enterprise site key、Authenticationと独自APIの強制
 3. Cloud Run revisionのruntime service account、環境変数、Secret参照、60秒timeout
-4. Speech-to-Text / Text-to-Speech / Vertex AIのquotaと請求アラート
+4. Speech-to-Text / Sensitive Data Protection / Text-to-Speech / Vertex AIのquotaと請求アラート
 5. Firestoreの3つのTTL policyが`ACTIVE`
 6. Secretへruntime以外の不要な`secretAccessor`がないこと
-7. Cloud Loggingへ音声、文字起こし、prompt/response、PDF、tokenが出ていないこと
+7. Cloud Loggingへ音声、文字起こし、prompt/response、PDF本文、tokenが出ていないこと
+8. runtime service accountに`roles/dlp.user`があり、起動時の固定DLP readiness probeを通過すること
 
 参考:
 

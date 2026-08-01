@@ -1,6 +1,6 @@
 # コタエーAI
 
-コタエーAIは、本人の答えを代作したり、採点して一律に矯正したりするアプリではありません。相手から聞かれた質問と、まとまらないまま話した本人の回答を分けて捉え、「A」を本人自身の言葉で先に返すための、非強制の音声コーチングを行います。通常の質問、日常のぼやき、考え途中の独り言、研究や論文の話にも応じ、本人の言い直しで解決しそうな時は割り込みません。この練習機能が回答能力を必ず向上させるとは主張せず、本人評価と実測で検証します。
+コタエーAIは、本人の答えを代作したり、採点して一律に矯正したりするアプリではありません。相手から聞かれた質問と、まとまらないまま話した本人の回答を分けて捉え、「A」を本人自身の言葉で先に返せるよう、普通の音声会話の中で必要な時だけ短く支えます。会話を課題や訓練にせず、一往復だけでも終えられます。この会話支援が回答能力を長期に向上させることはまだ実証していません。
 
 公開版: [https://kotae-ai.web.app](https://kotae-ai.web.app)
 
@@ -19,17 +19,18 @@ KOTAE ReflexとLACは、このプロジェクトで設計・実装している�
 ```text
 Rust / Dioxus / Wasm UI
   └─ ブラウザJavaScript境界: MediaRecorder、VAD、Firebase SDK
-       └─ POST /api/v1/voice/turns
+       └─ 固定Cloud Run URLへ認証付きCORS / TLS
             └─ Cloud Run / Go
                  ├─ Cloud Speech-to-Text V2（asia-northeast1）
-                 ├─ Vertex AI（global）: KOTAE Reflex + LAC
+                 ├─ Sensitive Data Protection（asia-northeast1）
+                 ├─ 検査・置換後の文字列 → Vertex AI（global）
                  ├─ Crossref（明示したDOI / 新着論文検索だけ）
                  └─ Cloud Text-to-Speech（asia-northeast1）
 ```
 
-マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、音声を同一オリジンAPIへ送ります。Cloud Speech-to-Textで得た文字列と、利用者が今回だけ添付したPDFはVertex AIへ送られる場合があります。応答する価値が低ければ音声を返さず、そのまま聞き続けます。
+マイクは利用者が明示的に開始したセッション中だけ使います。音声は固定Cloud Run URLへ直接CORS/TLSで送り、Speech-to-Textで得た文字列は東京リージョンのSensitive Data Protectionで検査・置換できた場合だけVertex AIへ進めます。検査不能時は元の文字列へfallbackせず停止します。確定前の文字起こしを使う投機推論も本番では停止します。PDFは同じ境界で原本全体を安全に変換できないため、クライアントがファイルを読む前とAPIがモデルを呼ぶ前の両方で拒否します。
 
-音声、文字起こし、モデル応答、PDF、研究query・候補はアプリのFirestore、Cloud Storage、ログへ保存しません。会話を続ける状態には自由文要約を入れず、respondentの保留状態にも質問原文、本人の回答試行、slot evidence本文、再構成案を残しません。検出できたemail・電話番号らしい長い数列・credentialらしいtoken・現在発話との高い重複を除いた短い意味node、質問operator、必須slot、展開operator、phase・試行回数などの制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返します。氏名など未検出の機微情報がnodeへ残る可能性はあり、これはE2EEでも完全なPII除去でもありません。Cloud Run、Speech-to-Text、Vertex AI、Text-to-Speechの処理中には各サービスが必要な平文を扱い、明示した研究検索では最小化したqueryをCrossrefが扱います。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
+原音、文字起こし、モデル応答、PDF本文、研究query・候補はKOTAEのFirestore、Cloud Storage、アプリログへ保存しません。これはGoogle Cloud全体の絶対的なゼロ保持保証ではありません。Cloud Run、Speech-to-Text、Sensitive Data Protection、Vertex AI、Text-to-Speechは処理に必要な平文を扱うためE2EEではなく、検出器には漏れがあり得るため完全なPII除去でもありません。応答文もTTS前に同じ保護境界を通し、置換された応答を含む旧状態tokenは公開しません。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
 
 ## 構成
 
@@ -43,12 +44,19 @@ internal/conversation    Thought State Graph、EVI、モデル経路、暗号化
 internal/answercontract  LACの決定論的な検証と意味保存ガード
 internal/respondent      本人回答のexact evidence gateと決定論的回答コーチ
 internal/research        固定sourceの論文書誌探索と「未検証」型
+internal/privacyguard    ローカル検査 + regional DLPのfail-closed境界
 internal/speechio        東京リージョンのSTT / TTS境界
 internal/voiceflow       音声認識、推論、音声合成の一時処理
 docs                     クラウド、セキュリティ、研究設計
 ```
 
 TypeScriptは使いません。JavaScriptは、ブラウザから直接必要なMediaRecorder、Web Audio、Firebase Web SDKをRust/Wasmへ橋渡しする範囲に限定します。認証、入力検証、推論、状態暗号化、LACはGoまたはRust側です。
+
+## Firebase Authenticationの必須設定
+
+クライアントは匿名認証を作らず、検証済みGoogle providerのFirebase ID tokenだけを使います。これは「そのGoogleアカウントを現在使える」ことの確認であり、法的な本人確認、声紋照合、現在話している人の本人確認ではありません。
+
+公開前に [Firebase ConsoleのAuthentication / Sign-in method](https://console.firebase.google.com/project/kotae-ai-u22-2026/authentication/providers) でGoogle providerを有効化し、サポートメールを選んで保存します。Authorized domainsには`kotae-ai.web.app`と`kotae-ai.firebaseapp.com`が必要です。未設定時はクライアントを`IDENTITY / REQUIRED`に保ち、サーバーも匿名・未検証tokenを拒否します。
 
 ## ローカル検証
 
@@ -65,10 +73,11 @@ PDFの課題との対応と未解決点は [「Aと聞かれてAと答えられ�
 - Firebase ID token、Firebase App Check、`https://kotae-ai.web.app`と完全一致するOriginをすべて検証する
 - `turnMode`を各turnで明示し、UID単位とFirebase App単位のquotaを本文デコード前に消費する
 - サービスアカウントJSON鍵を作らず、Cloud Runの専用サービスIDを使う
-- 音声、文字起こし、モデル応答、PDF、token、秘密鍵をアプリログへ出さない
+- 原音、文字起こし、モデル応答、PDF本文、token、秘密鍵をKOTAEのアプリログへ出さない。クラウド事業者全体のゼロ保持とは表現しない
 - STT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する
-- Vertex AIは`global`であり、文字起こしと添付PDFが日本リージョン内に限定されるとは説明しない
-- PDFは一つのターンだけ送信し、本文も資料要約も暗号化状態へ残さない
+- regional DLPの検査・置換が成功した文字列だけをVertex AIへ送り、DLPを完全なPII検出とは表現しない
+- Vertex AIは`global`であり、検査・置換後の文字列が日本リージョン内に限定されるとは説明しない
+- PDFはクライアントで選択・読込・送信を止め、APIへ直接送られてもモデル推論前に拒否する
 - 状態鍵はSecret Managerで管理し、状態トークンはFirebase UIDへ束縛して15分で失効させる
 - 音声履歴、再生履歴、無人の後日再評価、保存音声Vaultは現在の公開経路に実装していない
 - 話者本人認証は実装していないため、同席者の声を自動採用せず、利用者が相手の質問を言い直した時だけ受け答え支援として扱う

@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	stateTokenPrefix         = "v1."
+	// v2 is the first state-token privacy epoch whose model inputs have passed
+	// the mandatory Sensitive Data Protection boundary. Never accept v1 tokens
+	// under the same key: they may contain pre-boundary conversation data.
+	stateTokenPrefix         = "v2."
 	stateTokenTTL            = 15 * time.Minute
 	sessionIDBytes           = 16
 	coachRestatementTagBytes = 16
@@ -23,7 +26,7 @@ const (
 	maxUIDBytes              = 256
 )
 
-var stateAADPrefix = []byte("kotae-conversation-state-v1\x00")
+var stateAADPrefix = []byte("kotae-conversation-state-privacy-v2\x00")
 
 type StateCodec struct {
 	aead   cipher.AEAD

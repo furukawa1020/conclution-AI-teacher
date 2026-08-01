@@ -2,9 +2,9 @@
 
 ## 現在の保証範囲
 
-現在の公開音声経路は「録音を暗号化して長期保存するサービス」ではありません。利用者が明示的に開始したセッション中に、一つの発話を認識、推論、必要なら音声合成し、アプリ側では音声、文字起こし、モデル応答、PDFを永続化しない構成です。
+現在の公開音声経路は「録音を暗号化して長期保存するサービス」ではありません。利用者が明示的に開始したセッション中に、一つの発話を認識し、PII検査を通過した文字列だけを推論し、必要なら音声合成します。KOTAE側では原音、文字起こし、モデル応答を永続化しません。PDFは安全にPIIを除く経路が未完成なため、クライアントで選択・読込・送信を止めます。
 
-ここでいう「アプリ側で保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話データを書かないという意味です。音声は発話ごとのrequest dataとしてregional STTへ渡し、KOTAEはrequest終了後に履歴を保持しません。一方、処理に必要な平文は端末、Cloud Run、Google Cloudの各APIから見えます。E2EE、完全な端末内処理、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。管理サービス側のデータ利用・ログ条件は公式契約とproject設定を別に確認します。
+ここでいう「KOTAE側で保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話本文を書かないという意味です。一方、処理に必要な平文は端末、Cloud Run、Speech-to-Text、Sensitive Data Protection（DLP）から見えます。E2EE、完全な端末内処理、完全なPII除去、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。
 
 ## データフローと所在地
 
@@ -17,9 +17,11 @@ Firebase Hosting /api rewrite
 Cloud Run kotae-api（asia-northeast1）
   ├─ raw audio ──→ Cloud Speech-to-Text V2（asia-northeast1）
   │                    └─ transcript
-  ├─ transcript + 今回だけのPDF ──→ Vertex AI（global）
-  │                                    ├─ KOTAE Reflex / LAC
-  │                                    └─ silence または短い応答文
+  ├─ transcript ──→ Sensitive Data Protection（asia-northeast1）
+  │                    ├─ 検査失敗 ──→ Vertex AIを呼ばず固定の安全終了
+  │                    └─ 検査・置換後の文字列 ──→ Vertex AI（global）
+  │                                                   ├─ KOTAE Reflex / LAC
+  │                                                   └─ 応答文 ──→ DLP再検査
   ├─ 明示したDOI / 新着topic ──→ Crossref REST API
   │                                  └─ 書誌候補（claim evidenceではない）
   └─ 応答文 ──→ Cloud Text-to-Speech（asia-northeast1）
@@ -29,16 +31,17 @@ Cloud Run kotae-api（asia-northeast1）
 | データ | 処理先 | アプリ側の永続化 | セッション継続に残るもの |
 |---|---|---|---|
 | マイク音声 | ブラウザ、Cloud Run、東京リージョンSTT | なし | なし |
-| 文字起こし | Cloud Run、Vertex AI `global` | なし | 自由文要約は残さない。検出できたemail・電話番号らしい長い数列・credential token・原文との高いn-gram重複を除いた短いgraph nodeだけが入り得る |
+| STT直後の文字起こし | Cloud Run、東京リージョンDLP | なし | DLPが利用不能ならVertex AIへ進めない |
+| 検査・置換後の文字列 | Cloud Run、Vertex AI `global` | なし | DLPやローカル検査で検出できなかった情報を含む短いgraph nodeが入り得る |
 | モデル応答文 | Cloud Run、東京リージョンTTS | なし | 原文は状態へ保存しない |
 | 合成音声 | Cloud Run、ブラウザ | なし | 再生後は参照を解放する |
-| PDF | Cloud Run、Vertex AI `global` | なし | 本文も資料要約もcross-turn stateへ残さない |
+| PDF | クライアントとAPIで拒否 | 読込・送信しない | なし |
 | 明示した研究query | Cloud Run、Crossref | なし | DOI、topic、候補をcross-turn stateへ残さない |
 | 研究候補 | Cloud Run、ブラウザ | なし | title、DOI、日付、sourceを現在のresponseだけへ返す |
 | 会話状態 | ブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | フィルタ済み意味グラフと制御メタデータ、15分TTL |
 | 音声レート制限 | Firestore | 48時間TTL | UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻 |
 
-STTとTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT / TTS境界では東京リージョンで処理されますが、文字起こし、応答文、添付PDFまで日本国内に限定されるとは保証しません。
+STT、DLP、TTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、検査・置換後の文字列と応答文まで日本国内に限定されるとは保証しません。
 
 STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 
@@ -52,12 +55,16 @@ STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会�
 - 割り込み待機を含むセッション全体を3分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。ただし検証済み応答の生成・再生中は3分のidle判定だけを保留し、30分の絶対上限は維持する
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
 - 応答を最後まで再生した時点から次の3分を数え直す。ページ非表示、`pagehide`、マイク喪失は応答中でも直ちに停止する
-- 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、PDFは7 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする
-- 会話状態とPDFはJavaScript変数にだけ保持し、localStorageへ保存しない。Firebaseの匿名認証だけは`browserSessionPersistence`を使う
+- 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする。document fieldはモデル推論前に拒否する
+- 会話状態はJavaScript変数にだけ保持し、localStorageへ保存しない。確認済みGoogleアカウントのFirebase Authだけは`browserSessionPersistence`を使う
 
 JavaScriptのガベージコレクションや文字列の複製は完全には制御できません。クライアントは使用後に参照を解放し、Go側は受信byte sliceを可能な範囲でclearしますが、これを暗号学的なRAM消去保証とは表現しません。
 
 現在のVADは発話区間だけを見ており、話者本人認証ではありません。同席者、テレビ、合成音声を利用者本人だと安全に識別する機能もありません。そのため公開UIは、周囲の質問を常時取り込む使い方ではなく、利用者自身が「こう聞かれた」と質問を言い直してから回答を話す使い方に限定して案内します。
+
+Firebase Authでは、`google.com` providerと`email_verified=true`を持つID tokenを要求し、匿名・password・保証claimのないcustom tokenを拒否します。ここで確認できるのはGoogleアカウントを使用できることまでです。自然人の法的身元、端末の唯一の所有者、現在マイクで話す人までは証明しません。
+
+文字起こしは、credential・URLなどのローカル決定論的検査とregional DLPの検査・置換を通った結果だけVertex AIへ渡します。DLPがtimeout、権限拒否、構造不正を返した場合は元の文字列へfallbackしません。確定前のSTT候補は本番モデルへ送りません。モデル応答もTTS前に再検査し、応答が置換された場合は置換前応答を含み得る状態tokenを返しません。ただし、自然言語中の氏名、珍しい識別子、文脈から特定できる情報を漏れなく検出できる保証はありません。
 
 ## 研究queryの境界
 
@@ -80,7 +87,7 @@ JavaScriptのガベージコレクションや文字列の複製は完全には�
 
 `POST /api/v1/voice/turns`では次をすべて要求します。
 
-- Firebase ID token
+- 確認済みGoogle providerのFirebase ID token。アカウント利用権の確認であり、話者本人認証ではない
 - Firebase App Check token
 - 許可済みFirebase App ID
 - 完全一致する`Origin: https://kotae-ai.web.app`。missing、`null`、別origin、重複Originを拒否
@@ -91,7 +98,7 @@ JavaScriptのガベージコレクションや文字列の複製は完全には�
 
 レスポンスの`caption`は、実際にTTSへ渡した最終`SpokenReply`だけです。文字起こし、内部推論、LAC本文は返しません。意図的な沈黙では音声を空、`caption`を`null`にします。
 
-PDFは`application/pdf`、サイズ上限、`%PDF-` magicを確認します。PDF内の文章は命令ではなく信頼できない資料としてモデルへ渡し、外部ツール実行や権限変更に使いません。
+`document` fieldを含むrequestはモデル推論前に拒否し、PDFをVertex AIへ渡しません。クライアントにはfile input、添付API、保留ファイルstateを公開しないため、`File.arrayBuffer()`へ到達するPDF経路自体がありません。将来再開するには、PDFを隔離環境でtext化し、PII検査・置換後の文字列だけを後段へ渡す実装と漏れ率の評価が必要です。
 
 ## 会話状態
 
@@ -114,22 +121,21 @@ tokenにはフィルタ済みでも会話由来の意味nodeが含まれ得る�
 
 HMAC tagも会話由来のpseudonymous control dataであり、完全なPII除去とは呼びません。現在のtagは言い直し前後でtarget evidenceを含む意味節が変わっていないことだけを保守的に検査します。質問topicとの意味関係、同義な言い換え、話者本人性は証明しません。target意味節が変わった場合は正しい言い換えでも完了creditを与えないことがありますが、その場合も再試験ではなく通常会話へ解放します。
 
-## PDFの「今回だけ」
+## PDFは現在停止
 
-PDFは利用者が選択した後の一つの音声ターンにだけ添付します。request完了時にブラウザ側の参照を外し、Cloud Run側のbyte bufferをclearし、FirestoreやCloud Storageへ原本を保存しません。
+PDF本文をPII検査へかけても、レイアウト、画像、埋め込み文字、メタデータを含む原本全体を完全に変換できる経路がありません。そのため現在は次をコードで強制します。
 
-ただし、次を明示します。
+- 公開UIとJavaScript bridgeからfile input、添付API、保留ファイルstateを除く
+- JavaScript bridgeはbyte列を読む前に`document_privacy_blocked`で止める
+- voice requestへ`document`をserializeしない
+- APIへ直接`document`を付けたrequestもモデル推論前に拒否し、受信byte sliceをclearする
+- PDF本文、ファイル名、資料要約を会話状態やログへ残さない
 
-- PDF本文は推論のためVertex AI `global`へ送られる
-- PDF turnは高速draftのdomain判定に依存せず必ず精密経路と独立LAC監査を通す
-- 音声turnの精密推論と独立LAC監査は、それぞれ3.5秒のone-shotとする。高リスクでは精密modelと`HIGH` thinkingを維持するが、同期criticの再試行や別modelへの回復は行わず、期限内に完了しなければ固定確認へfail-closedする
-- 精密経路または独立監査が使えない場合、実質回答を高速draftへfallbackせず、intentionalとforegroundなら短い固定確認、受動ambientなら沈黙にする
-- 資料本文と資料要約は暗号化状態tokenへ残さない
-- JavaScript、Go runtime、管理されたGoogle Cloudサービス内部の一時コピーまで物理消去を証明するものではない
+これはPDFを安全処理できる実装が完成したという意味ではなく、未完成機能をデータ境界で停止した状態です。
 
 ## ログと永続データ
 
-音声、文字起こし、モデルprompt/response、PDF、Firebase token、App Check token、状態token、秘密鍵をアプリログへ出しません。音声APIの運用ログは次に限定します。
+原音、文字起こし、モデルprompt/response、PDF本文、Firebase token、App Check token、状態token、秘密鍵をKOTAEのアプリログへ出しません。この記述はGoogle Cloudサービス全体の保持条件を一括で保証するものではありません。音声APIの運用ログは次に限定します。
 
 - request ID
 - fast / precisionなどのroute
@@ -150,7 +156,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はプロジェクト独自の実�
 - 再構成で条件、因果、boolean極性、数値・単位、選択肢label、引用anchor、不確実性が変わる場合は、その修復案を拒否する
 - 自己修正の兆候がある時は、AIの訂正より本人の言い直しを優先する
 - 日常のぼやきや感情表現を、常に論理誤りとして矯正しない
-- PDF、医療、法律、金融、研究根拠は高リスク経路として扱い、精密経路が使えない時は実質回答を読み上げない
+- PDFは現在の公開経路で常に拒否する。医療、法律、金融、研究根拠は高リスク経路として扱い、精密経路が使えない時は実質回答を読み上げない
 - STTが0より大きく0.65未満のconfidenceを返した場合、文字起こしをモデルへ渡さず、intentionalなら固定文で一度だけ聞き返し、foregroundと受動ambientは沈黙してマイクを閉じる。confidence 0はAPIが値を提供しなかった状態として扱い、低信頼判定とは区別する
 
 `0.65`は未校正の補助境界であり、誤認識をゼロにする保証ではありません。Google Cloudが返す値を真の確率とはみなさず、実利用条件の音声でROC、聞き返し率、取りこぼし率を測って校正する必要があります。
@@ -161,29 +167,33 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 
 - 端末内だけの処理
 - E2EE
+- 完全なPII除去
 - 声紋による本人確認
-- 音声・文字・PDFがすべて日本リージョン内に留まること
+- Googleアカウント確認を、自然人の法的本人確認や現在の話者認証とみなせること
+- 音声と検査・置換後の文字列がすべて日本リージョン内に留まること
 - 第三者クラウドを含む絶対的なゼロデータ保持
 - ブラウザ拡張、OSマルウェア、画面・スピーカーの盗み見への防御
 - モデル回答の正しさ、最新情報の自動保証
+- 会話支援による回答能力や生活状態の長期的な改善
 - 保存音声の履歴、再生、共有、後日再評価
 
 `crates/audio_vault`は将来の同意制履歴を検討するための暗号化コアで、現在の公開音声経路には接続していません。履歴機能を追加する場合は、raw audio保存、応答音声保存、後日再評価、共有、品質改善を別々に同意させ、保存先、削除、鍵管理、監査を改めて設計します。
 
 ## 最低限の検証
 
-- ID token、App Check、Originのどれかが不正ならモデルを呼ばない
+- Google provider・確認済みemailを持たないID token、App Check、Originのどれかが不正ならモデルを呼ばない
 - missing / unknown `turnMode`を拒否し、intentional・foreground・ambientを状態tokenから推測しない
 - 不正本文でも認証後はUID枠とApp枠が先に消費される
-- 未知field、不正MIME、過大音声、過大PDF、PDF magic不正を拒否する
+- 未知field、不正MIME、過大音声を拒否する。PDFはクライアントではfile read前、APIではモデル推論前に拒否する
 - 測定されたSTT confidenceが低い時に文字起こしがモデルへ届かない
+- ローカルPII検査またはregional DLPが失敗した時にraw transcriptがVertex AIへ届かず、同じ内容の言い直しも要求しない
 - 状態tokenの改ざん、期限切れ、別UIDでの利用を拒否する
 - 曖昧な潜在問いで断定的な再構成をしない
 - 条件、不確実性、留保を変える再構成を拒否する
 - draft自身のLACを偽装しても、独立監査と決定論的判定を迂回できない
 - plannerとcriticが別のAを成功と申告しても、言い直し前のserver-only HMAC tagと不一致なら完了できない。tag自体が両model promptへ入らない
 - AI自身の任意質問から、利用者が頼んでいない採点scopeを作らない
-- PDF・高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
+- PDFを付けたrequestではモデルを呼ばない。高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
 - タブ非表示、pagehide、3分の無発話、30分の絶対上限、マイクtrack喪失でマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る。Rust側は固定reason・version以外の通知を拒否し、通知を受けても停止処理を冪等に再実行してからPausedを表示する
 - Pausedでは暗号化済みsession stateを消さず、明示的な再開操作だけがIntentionalとなる。Foreground再待受は既存のlive trackだけを再利用し、別マイクを自動取得しない
@@ -199,6 +209,9 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - [Text-to-Speech regional endpoints](https://cloud.google.com/text-to-speech/docs/endpoints)
 - [Text-to-Speech data logging](https://cloud.google.com/text-to-speech/docs/data-logging)
 - [Vertex AI zero data retention](https://cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)
+- [Sensitive Data Protectionの検出精度に関する注意](https://cloud.google.com/sensitive-data-protection/docs/infotypes-reference)
+- [Sensitive Data Protectionの処理ロケーション](https://cloud.google.com/sensitive-data-protection/docs/locations)
+- [Firebase WebでGoogleログインを使う](https://firebase.google.com/docs/auth/web/google-signin)
 - [Firebase App Check custom backend](https://firebase.google.com/docs/app-check/custom-resource-backend)
 - [Secret Manager access control](https://cloud.google.com/secret-manager/docs/access-control)
 - [Cloud Run service identity](https://cloud.google.com/run/docs/securing/service-identity)

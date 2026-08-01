@@ -13,6 +13,7 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
@@ -22,20 +23,26 @@ const (
 	minSpeculativeCandidateRunes  = 8
 	minSpeculativeStableDuration  = 160 * time.Millisecond
 	maxSpeculativeTTSBufferBytes  = 24_000
+	voiceSynthesisReserve         = 5 * time.Second
 	lowConfidencePrompt           = "急がなくて大丈夫です。こちらから小さな話題を一つ置きます。音がない時間と、何か流れている時間では、どちらが少し楽ですか。答えは一語でも、聞いているだけでも大丈夫です。"
 	routeClarifyNoSpeech          = "stt-clarify-no-speech"
 	routeClarifyLowConfidence     = "stt-clarify-low-confidence"
 	routeSilentNoSpeech           = "stt-silent-no-speech"
 	routeSilentLowConfidence      = "stt-silent-low-confidence"
+	routePrivacyProtectionBlocked = "privacy-protection-blocked"
+	routeDocumentPrivacyBlocked   = "document-privacy-blocked"
+	privacyProtectionReply        = "個人情報を安全に伏せられなかったため、この内容はクラウドAIへ送りませんでした。同じことを言い直さなくて大丈夫です。固有名や連絡先を外して、別の話から続けられます。"
+	documentPrivacyReply          = "PDFは個人情報を安全に除ける経路がまだないため、クラウドAIへ送りませんでした。ファイル内容は会話や状態に使っていません。"
 )
 
 // Pipeline keeps the three trust boundaries explicit: regional speech
 // recognition, semantic reasoning, and regional speech synthesis. It does not
 // persist audio, transcripts, model replies, or documents.
 type Pipeline struct {
-	speech speechio.Service
-	agent  conversation.Agent
-	now    func() time.Time
+	speech    speechio.Service
+	agent     conversation.Agent
+	protector privacyguard.Protector
+	now       func() time.Time
 }
 
 type speculativeCandidateTracker struct {
@@ -148,6 +155,25 @@ func New(speech speechio.Service, agent conversation.Agent) (*Pipeline, error) {
 		return nil, errors.New("voiceflow: speech and conversation agent are required")
 	}
 	return &Pipeline{speech: speech, agent: agent, now: time.Now}, nil
+}
+
+// NewProtected constructs the production pipeline. Interim recognition never
+// reaches the model; finalized input and model output must both pass the
+// fail-closed privacy boundary.
+func NewProtected(
+	speech speechio.Service,
+	agent conversation.Agent,
+	protector privacyguard.Protector,
+) (*Pipeline, error) {
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		return nil, err
+	}
+	if protector == nil {
+		return nil, errors.New("voiceflow: privacy protector is required")
+	}
+	pipeline.protector = protector
+	return pipeline, nil
 }
 
 func (p *Pipeline) Process(
@@ -275,6 +301,13 @@ func (p *Pipeline) processLive(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
+	if input.Document != nil {
+		clearDocument(input.Document)
+		return privacyBlockedResult(
+			routeDocumentPrivacyBlocked,
+			documentPrivacyReply,
+		), nil
+	}
 	streamingSpeech, ok := p.speech.(liveStreamingSpeech)
 	if !ok {
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
@@ -307,7 +340,7 @@ func (p *Pipeline) processLive(
 	}
 	armTranscriptionReserve := func(deadline time.Time) *time.Timer {
 		reserveDelay := time.Until(
-			deadline.Add(-conversation.VoiceResponseReserve),
+			deadline.Add(-p.preInferenceReserve()),
 		)
 		if reserveDelay <= 0 {
 			cancelTranscription(errTranscriptionResponseReserve)
@@ -435,7 +468,8 @@ func (p *Pipeline) processLive(
 	// fallback. The current live protocol has no document frame, but keep this
 	// boundary explicit so a future protocol extension cannot accidentally
 	// race the agent's mandatory document wipe.
-	speculationEligible := responseExpected && input.Document == nil
+	speculationEligible := responseExpected && input.Document == nil &&
+		p.protector == nil
 	finalFragments := make([]string, 0, 4)
 	finalConfidence := float32(0)
 	finalConfidenceObserved := false
@@ -923,7 +957,8 @@ func (p *Pipeline) startLiveSpeculation(
 	streamingSpeech speechio.StreamingService,
 	deliverAudio func([]byte) error,
 ) *liveSpeculation {
-	if input.Document != nil || liveProcessingCommitted(input) {
+	if p.protector != nil || input.Document != nil ||
+		liveProcessingCommitted(input) {
 		return nil
 	}
 	speculationCtx, cancel := context.WithCancel(ctx)
@@ -1380,8 +1415,15 @@ func (p *Pipeline) prepareTurn(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, string, error) {
+	if input.Document != nil {
+		clearDocument(input.Document)
+		return privacyBlockedResult(
+			routeDocumentPrivacyBlocked,
+			documentPrivacyReply,
+		), documentPrivacyReply, nil
+	}
 	transcriptionCtx, cancelTranscription, hasTranscriptionBudget :=
-		transcriptionContextWithResponseReserve(ctx)
+		transcriptionContextWithResponseReserve(ctx, p.preInferenceReserve())
 	if !hasTranscriptionBudget {
 		return httpapi.VoiceTurnResult{}, "",
 			httpapi.NewVoicePipelineFailure(
@@ -1451,8 +1493,9 @@ func (p *Pipeline) prepareTurn(
 
 func transcriptionContextWithResponseReserve(
 	ctx context.Context,
+	reserve time.Duration,
 ) (context.Context, context.CancelFunc, bool) {
-	if ctx == nil {
+	if ctx == nil || reserve <= 0 {
 		return nil, func() {}, false
 	}
 	deadline, hasDeadline := ctx.Deadline()
@@ -1460,12 +1503,40 @@ func transcriptionContextWithResponseReserve(
 		transcriptionCtx, cancel := context.WithCancel(ctx)
 		return transcriptionCtx, cancel, true
 	}
-	budget := time.Until(deadline) - conversation.VoiceResponseReserve
+	budget := time.Until(deadline) - reserve
 	if budget <= 0 {
 		return nil, func() {}, false
 	}
 	transcriptionCtx, cancel := context.WithTimeout(ctx, budget)
 	return transcriptionCtx, cancel, true
+}
+
+func (p *Pipeline) preInferenceReserve() time.Duration {
+	reserve := conversation.VoiceResponseReserve
+	if p != nil && p.protector != nil {
+		reserve += privacyguard.DefaultTimeout
+	}
+	return reserve
+}
+
+func contextWithReserve(
+	ctx context.Context,
+	reserve time.Duration,
+) (context.Context, context.CancelFunc, bool) {
+	if ctx == nil || reserve < 0 {
+		return nil, func() {}, false
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		reservedCtx, cancel := context.WithCancel(ctx)
+		return reservedCtx, cancel, true
+	}
+	budget := time.Until(deadline) - reserve
+	if budget <= 0 {
+		return nil, func() {}, false
+	}
+	reservedCtx, cancel := context.WithTimeout(ctx, budget)
+	return reservedCtx, cancel, true
 }
 
 func (p *Pipeline) prepareRecognizedTurn(
@@ -1486,6 +1557,26 @@ func (p *Pipeline) prepareRecognizedTurn(
 			input.StateToken,
 			routeClarifyLowConfidence,
 		), lowConfidencePrompt, nil
+	}
+	if p.protector != nil {
+		protectionCtx, cancelProtection, hasProtectionBudget :=
+			contextWithReserve(ctx, conversation.VoiceResponseReserve)
+		if !hasProtectionBudget {
+			return privacyBlockedResult(
+				routePrivacyProtectionBlocked,
+				privacyProtectionReply,
+			), privacyProtectionReply, nil
+		}
+		protected, err := p.protector.Protect(protectionCtx, transcript)
+		cancelProtection()
+		if err != nil || strings.TrimSpace(protected.Text) == "" {
+			return privacyBlockedResult(
+				routePrivacyProtectionBlocked,
+				privacyProtectionReply,
+			), privacyProtectionReply, nil
+		}
+		// Never pass the original STT text to the conversation agent or state.
+		transcript = protected.Text
 	}
 
 	turn := conversationTurn(input, transcript, false)
@@ -1523,6 +1614,33 @@ func (p *Pipeline) prepareRecognizedTurn(
 			httpapi.VoicePipelineStageConversation,
 		)
 	}
+	if p.protector != nil && decision.SpokenReply != "" {
+		protectionCtx, cancelProtection, hasProtectionBudget :=
+			contextWithReserve(ctx, voiceSynthesisReserve)
+		if !hasProtectionBudget {
+			return privacyBlockedResult(
+				routePrivacyProtectionBlocked,
+				privacyProtectionReply,
+			), privacyProtectionReply, nil
+		}
+		protectedReply, protectErr := p.protector.Protect(
+			protectionCtx,
+			decision.SpokenReply,
+		)
+		cancelProtection()
+		if protectErr != nil || strings.TrimSpace(protectedReply.Text) == "" {
+			return privacyBlockedResult(
+				routePrivacyProtectionBlocked,
+				privacyProtectionReply,
+			), privacyProtectionReply, nil
+		}
+		decision.SpokenReply = protectedReply.Text
+		if protectedReply.Redacted {
+			// The state was issued before output redaction and may contain the
+			// original model reply, so it must not be published.
+			decision.StateToken = ""
+		}
+	}
 	slog.InfoContext(ctx, "voice pipeline stage completed",
 		"request_id", input.RequestID,
 		"stage", "conversation",
@@ -1542,7 +1660,10 @@ func conversationTurn(
 	transcript string,
 	speculative bool,
 ) conversation.VoiceTurn {
-	turn := conversation.VoiceTurn{
+	// Documents are rejected and cleared at every Pipeline entry point. Do not
+	// map the HTTP document field into the model contract even if a future
+	// caller accidentally reaches this helper without the entry-point guard.
+	return conversation.VoiceTurn{
 		SchemaVersion: conversation.SchemaVersion,
 		Utterance:     transcript,
 		StateToken:    input.StateToken,
@@ -1551,14 +1672,6 @@ func conversationTurn(
 		Foreground:    input.Foreground,
 		Speculative:   speculative,
 	}
-	if input.Document == nil {
-		return turn
-	}
-	turn.PDF = &conversation.InlinePDF{
-		MIMEType: input.Document.MIMEType,
-		Data:     input.Document.Data,
-	}
-	return turn
 }
 
 func voiceResultFromDecision(
@@ -1597,6 +1710,28 @@ func silentRecognitionResult(
 		ResearchStatus:   "none",
 		ResearchRecords:  []httpapi.ResearchRecord{},
 		Route:            route,
+	}
+}
+
+func clearDocument(document *httpapi.VoiceDocument) {
+	if document == nil {
+		return
+	}
+	clear(document.Data)
+	document.Data = nil
+}
+
+func privacyBlockedResult(route string, caption string) httpapi.VoiceTurnResult {
+	return httpapi.VoiceTurnResult{
+		DetectedDomain:   "unknown",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []httpapi.ResearchRecord{},
+		Route:            route,
+		Caption:          caption,
 	}
 }
 

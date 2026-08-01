@@ -2437,6 +2437,28 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     false,
     "soft-voice provider agreement is longer but still finite",
   );
+
+  const monologue = {
+    firstVoiceAt: 100,
+    hasSpeech: true,
+    lastVoiceAt: 12_100,
+    providerEndpointAt: 12_500,
+  };
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...monologue,
+      now: 17_099,
+    }),
+    false,
+    "a long monologue may continue after a reflective pause",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...monologue,
+      now: 17_100,
+    }),
+    true,
+  );
 });
 
 test("bridge forwards soft-voice confirmation to hybrid endpoint policy", async () => {
@@ -2859,6 +2881,51 @@ test("interrupt VAD preserves 2.2 seconds for reflective speech", () => {
   assert.equal(state.action, null);
   state = advanceInterruptVad(state, {
     now: lastVoiceAt + INTERRUPT_VAD_LIMITS.reflectiveSilenceMs,
+    outputActive: false,
+    peak: 0.003,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("interrupt VAD also permits a three-minute follow-up monologue", () => {
+  const startedAt = 28_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  const firstVoiceAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  const confirmationFrames =
+    INTERRUPT_VAD_LIMITS.confirmationMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 0; frame < confirmationFrames; frame += 1) {
+    state = advanceInterruptVad(state, {
+      now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.15,
+      rms: 0.05,
+    });
+  }
+  state = advanceInterruptVad(state, {
+    now: firstVoiceAt + 3 * 60_000,
+    outputActive: false,
+    peak: 0.15,
+    rms: 0.05,
+  });
+  assert.equal(state.action, null);
+  const lastVoiceAt = state.lastVoiceAt;
+  state = advanceInterruptVad(state, {
+    now: lastVoiceAt + INTERRUPT_VAD_LIMITS.reflectiveSilenceMs,
+    outputActive: false,
+    peak: 0.003,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceInterruptVad(state, {
+    now: lastVoiceAt + INTERRUPT_VAD_LIMITS.monologueSilenceMs,
     outputActive: false,
     peak: 0.003,
     rms: 0.003,
@@ -3970,7 +4037,7 @@ test("VAD keeps a weak word ending after speech is confirmed", () => {
   assert.equal(state.action, null);
 });
 
-test("VAD caps a spoken capture at 55 seconds", () => {
+test("VAD caps a spoken capture at three minutes thirty seconds", () => {
   const startedAt = 20_000;
   let state = createVadState(startedAt);
   const confirmationFrames =
@@ -3997,6 +4064,65 @@ test("VAD caps a spoken capture at 55 seconds", () => {
     rms: 0.03,
   });
   assert.equal(state.action, "duration-limit");
+});
+
+test("VAD keeps a three-minute monologue open through a natural pause", () => {
+  assert.ok(
+    VOICE_SESSION_LIMITS.spokenCaptureLimitMs >=
+      VOICE_SESSION_LIMITS.silentCaptureLimitMs + 3 * 60_000,
+    "a slow start must still leave three full minutes of capture",
+  );
+  assert.ok(
+    VOICE_SESSION_LIMITS.idleSessionLimitMs >
+      VOICE_SESSION_LIMITS.spokenCaptureLimitMs +
+        VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    "the idle watchdog must not terminate an active bounded monologue",
+  );
+  const startedAt = 60_000;
+  let state = createVadState(startedAt);
+  const confirmationFrames =
+    VOICE_SESSION_LIMITS.minimumVoiceMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let sample = 1; sample <= confirmationFrames; sample += 1) {
+    state = advanceVad(state, {
+      now: startedAt + sample * VOICE_SESSION_LIMITS.vadIntervalMs,
+      peak: 0.08,
+      rms: 0.03,
+    });
+  }
+  state = advanceVad(state, {
+    now: startedAt + 3 * 60_000,
+    peak: 0.08,
+    rms: 0.03,
+  });
+  assert.equal(state.action, null);
+  const lastVoiceAt = state.lastVoiceAt;
+
+  state = advanceVad(state, {
+    now:
+      lastVoiceAt +
+      VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now:
+      lastVoiceAt +
+      VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs -
+      1,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now:
+      lastVoiceAt +
+      VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
 });
 
 test("VAD refreshes the trailing-silence clock as soon as confirmed speech resumes", () => {

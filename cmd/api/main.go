@@ -24,6 +24,18 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/voiceflow"
 )
 
+func newAPIServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       httpapi.VoiceLiveConnectionTimeout,
+		WriteTimeout:      httpapi.VoiceLiveConnectionTimeout,
+		IdleTimeout:       httpapi.VoiceLiveConnectionTimeout,
+		MaxHeaderBytes:    16 * 1024,
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -206,15 +218,7 @@ func main() {
 			MaxRequestBytes: cfg.MaxVoiceBytes,
 		},
 	)
-	server := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       120 * time.Second,
-		WriteTimeout:      120 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    16 * 1024,
-	}
+	server := newAPIServer(":"+cfg.Port, handler)
 
 	go func() {
 		logger.Info("API listening",

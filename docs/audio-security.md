@@ -45,6 +45,10 @@ STT、DLP、TTSは`asia-northeast1`のリージョナルAPIエンドポイント
 
 STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 
+Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEはその境界まで使わず、端末の音声ありcaptureを3分30秒、Cloud Runの受信を4分（20 ms PCMを最大12,000 frame、7,680,000 byte）で止めます。約3分の独話を通しつつ、provider上限まで60秒を残すためです。providerのendpoint通知は助言に留め、端末VADとの一致なしにcommitしません。
+
+認証後のlive WebSocketには6分の外側deadlineを置きます。4分のcapture deadlineと、commit時点から始まる最大50秒のモデル・TTS処理deadlineは別です。長く話した時間をモデル処理時間へ加算せず、逆に長いcaptureでcommit後の処理枠を先食いもしません。Goの`ReadTimeout`、`WriteTimeout`、`IdleTimeout`も6分です。Cloud RunではWebSocketもrequest timeoutの対象なので、service側も`--timeout=360s`以上を必須とします。既定の300秒は理論上限に近すぎるため採用しません。
+
 ## マイクとセッション制御
 
 - 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
@@ -52,10 +56,10 @@ STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会�
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
 - AI処理中と合成音声の再生中も、利用者が開始した会話セッション内では訂正・割り込みを受けるためマイクトラックを有効にする。端末内VADが確認する前の音声は送信せず、確認した割り込みだけをForeground turnとして送る
 - 確認前PCMはAudioWorklet内だけに保持し、通常発話は最大25 frame、割り込みは最大20 frameに固定する。VAD確認後はAudioContextのsample-clock cutoff、session generation、連続sequenceを検証し、credit制御でMessagePortの未処理数も固定する。turn確定は全PCMの`sealed`確認後だけ許可する
-- 割り込み待機を含むセッション全体を3分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。ただし検証済み応答の生成・再生中は3分のidle判定だけを保留し、30分の絶対上限は維持する
+- 割り込み待機を含むセッション全体を4分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。idle時計は発話確認時に更新されるため、3分30秒の単一captureと5秒の終端待ちより後へ固定する。ただし検証済み応答の生成・再生中は4分のidle判定だけを保留し、30分の絶対上限は維持する
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
-- 応答を最後まで再生した時点から次の3分を数え直す。ページ非表示、`pagehide`、マイク喪失は応答中でも直ちに停止する
-- 一発話は音声ありで最大55秒、無音で最大30秒とし、音声は2 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする。document fieldはモデル推論前に拒否する
+- 応答を最後まで再生した時点から次の4分を数え直す。ページ非表示、`pagehide`、マイク喪失は応答中でも直ちに停止する
+- 一発話は端末側で音声あり最大3分30秒、無音最大30秒とする。live PCMはCloud Run側で4分・12,000 frame・7,680,000 byteを上限とし、圧縮音声fallbackは2 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする。document fieldはモデル推論前に拒否する
 - 会話状態はJavaScript変数にだけ保持し、localStorageへ保存しない。確認済みGoogleアカウントのFirebase Authだけは`browserSessionPersistence`を使う
 
 JavaScriptのガベージコレクションや文字列の複製は完全には制御できません。クライアントは使用後に参照を解放し、Go側は受信byte sliceを可能な範囲でclearしますが、これを暗号学的なRAM消去保証とは表現しません。
@@ -94,7 +98,7 @@ Firebase Authでは、`google.com` providerと`email_verified=true`を持つID t
 - `application/json`と許可済み音声MIME
 - サイズ上限、strict Base64、未知JSON fieldの拒否
 - JSON本文とBase64を読む前に消費するUID単位とFirebase App単位の二段階レート制限
-- request timeout
+- buffered requestは個別のrequest timeout、live WebSocketは6分の外側deadlineを持つ。liveのモデル処理deadlineはcommit時点から別に開始する
 
 レスポンスの`caption`は、実際にTTSへ渡した最終`SpokenReply`だけです。文字起こし、内部推論、LAC本文は返しません。意図的な沈黙では音声を空、`caption`を`null`にします。
 
@@ -195,15 +199,17 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - AI自身の任意質問から、利用者が頼んでいない採点scopeを作らない
 - PDFを付けたrequestではモデルを呼ばない。高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
-- タブ非表示、pagehide、3分の無発話、30分の絶対上限、マイクtrack喪失でマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る。Rust側は固定reason・version以外の通知を拒否し、通知を受けても停止処理を冪等に再実行してからPausedを表示する
+- タブ非表示、pagehide、4分の無発話、30分の絶対上限、マイクtrack喪失で直ちにマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る。Rust側は固定reason・version以外の通知を拒否し、通知を受けても停止処理を冪等に再実行してからPausedを表示する
 - Pausedでは暗号化済みsession stateを消さず、明示的な再開操作だけがIntentionalとなる。Foreground再待受は既存のlive trackだけを再利用し、別マイクを自動取得しない
 - 30秒の空captureと認証済みSTT no-speechはForegroundで再待受し、Intentional権限を継承しない。確定発話の送信失敗を自動再送しない
-- 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待ち、1turnの55秒上限は維持する
+- 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待つ。12秒以上続いた明確な独話だけ5秒へ延ばし、短い質問の確定待ちは増やさない。約3分の連続発話を端末の3分30秒上限とserverの4分上限の内側で処理する
+- 4分のcaptureとcommit後最大50秒の処理がGo HTTP 6分deadline内に収まり、Cloud Run request timeoutも360秒以上である
 - ログ、Firestore、Cloud Storageへ音声、逐語録、PDF本文が作られない
 
 参考:
 
 - [Cloud Speech-to-Text V2の対応モデルと地域](https://cloud.google.com/speech-to-text/docs/speech-to-text-supported-languages)
+- [Cloud Speech-to-Textのquotaと5分streaming上限](https://cloud.google.com/speech-to-text/docs/quotas)
 - [Speech-to-Text data usage FAQ](https://cloud.google.com/speech-to-text/docs/data-usage-faq)
 - [Cloud Text-to-Speech Chirp 3 HD](https://cloud.google.com/text-to-speech/docs/chirp3-hd)
 - [Text-to-Speech regional endpoints](https://cloud.google.com/text-to-speech/docs/endpoints)
@@ -215,3 +221,5 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - [Firebase App Check custom backend](https://firebase.google.com/docs/app-check/custom-resource-backend)
 - [Secret Manager access control](https://cloud.google.com/secret-manager/docs/access-control)
 - [Cloud Run service identity](https://cloud.google.com/run/docs/securing/service-identity)
+- [Cloud RunのWebSocketとrequest timeout](https://cloud.google.com/run/docs/triggering/websockets)
+- [Cloud Run request timeoutの設定](https://cloud.google.com/run/docs/configuring/request-timeout)

@@ -24,6 +24,39 @@ const (
 	liveTestPCMFrameBytes = 640
 )
 
+func TestVoiceLiveBudgetsSupportThreeMinuteMonologueBelowProviderLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	const (
+		providerStreamingLimit = 5 * time.Minute
+		targetMonologue        = 3 * time.Minute
+		pcmFrameDuration       = 20 * time.Millisecond
+		maxPostCommitProcess   = 50 * time.Second
+	)
+	if voiceLiveMaxCaptureDuration < targetMonologue {
+		t.Fatal(`capture budget does not admit a three-minute monologue`)
+	}
+	if voiceLiveMaxCaptureDuration >= providerStreamingLimit {
+		t.Fatal(`capture budget reaches the provider streaming limit`)
+	}
+	frameBudget := time.Duration(voiceLiveMaxPCMFrames) * pcmFrameDuration
+	if frameBudget < voiceLiveMaxCaptureDuration {
+		t.Fatal(`PCM frame budget ends before the capture deadline`)
+	}
+	if voiceLiveMaxPCMTotalBytes !=
+		voiceLiveMaxPCMFrames*voiceLivePCMFrameBytes {
+		t.Fatal(`PCM byte and frame bounds diverged`)
+	}
+	minimumConnectionBudget := voiceLiveFirstFrameTimeout +
+		2*voiceLiveGuardTimeout +
+		voiceLiveMaxCaptureDuration +
+		maxPostCommitProcess
+	if VoiceLiveConnectionTimeout <= minimumConnectionBudget {
+		t.Fatal(`HTTP connection timeout has no cleanup margin`)
+	}
+}
+
 func liveTestPCMFrame() []byte {
 	frame := make([]byte, liveTestPCMFrameBytes)
 	frame[0] = 1

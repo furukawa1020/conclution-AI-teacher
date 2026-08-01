@@ -18,20 +18,29 @@ import (
 )
 
 const (
-	voiceLiveVersion            = 1
-	voiceLiveSampleRateHz       = 16_000
-	voiceLiveFirstFrameTimeout  = 3 * time.Second
-	voiceLiveGuardTimeout       = 5 * time.Second
-	voiceLiveReaderJoinTimeout  = 500 * time.Millisecond
-	voiceLiveMaxCaptureDuration = 55 * time.Second
+	voiceLiveVersion           = 1
+	voiceLiveSampleRateHz      = 16_000
+	voiceLiveFirstFrameTimeout = 3 * time.Second
+	voiceLiveGuardTimeout      = 5 * time.Second
+	voiceLiveReaderJoinTimeout = 500 * time.Millisecond
+	// The client stops normal capture at 3m30s. The extra 30 seconds absorb
+	// lead-in and scheduling jitter while keeping the provider stream a full
+	// minute below Cloud Speech-to-Text's five-minute hard limit.
+	voiceLiveMaxCaptureDuration = 4 * time.Minute
 	voiceLiveMaxStartBytes      = 40 * 1024
 	voiceLiveMaxPCMFrameBytes   = 15 * 1024
 	voiceLivePCMFrameBytes      = 640
-	voiceLiveMaxPCMFrames       = 2_800
+	voiceLiveMaxPCMFrames       = 12_000
 	voiceLiveMaxPCMTotalBytes   = voiceLivePCMFrameBytes *
 		voiceLiveMaxPCMFrames
 	voiceLiveMaxTokenBytes = 8 * 1024
 )
+
+// VoiceLiveConnectionTimeout is the Go HTTP and Cloud Run request-timeout
+// floor for a bounded live turn: authentication, at most four minutes of
+// capture, and the independent post-commit processing budget all fit inside
+// it. Cloud Run must be configured to the same value or higher.
+const VoiceLiveConnectionTimeout = 6 * time.Minute
 
 const (
 	voiceLiveCodeAuthenticationFailed = "authentication_failed"
@@ -222,7 +231,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 
 	liveCtx, cancelLive := context.WithTimeout(
 		r.Context(),
-		voiceLiveMaxCaptureDuration+s.voice.RequestTimeout,
+		VoiceLiveConnectionTimeout,
 	)
 	defer cancelLive()
 	quotaCtx, cancelQuota := context.WithTimeout(

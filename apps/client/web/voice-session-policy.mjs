@@ -23,11 +23,15 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   reflectiveEndOfTurnSilenceMs: 2_200,
   softVoiceEndOfTurnSilenceMs: 3_000,
   reflectiveSpeechSpanMs: 1_600,
+  monologueEndOfTurnSilenceMs: 5_000,
+  monologueSpeechSpanMs: 12_000,
   hybridEndpointSilenceMs: 1_200,
   hybridReflectiveEndpointSilenceMs: 2_200,
   hybridSoftVoiceEndpointSilenceMs: 3_000,
+  hybridMonologueEndpointSilenceMs: 5_000,
   hybridEndpointAgreementWindowMs: 2_000,
   hybridSoftVoiceAgreementWindowMs: 3_500,
+  hybridMonologueEndpointAgreementWindowMs: 6_000,
   // A voice candidate must either reach the 120 ms confirmation threshold
   // promptly or be discarded. This also bounds unconfirmed room audio before
   // a fresh candidate and its isolated recorder are created.
@@ -36,8 +40,14 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // confirmed from sustained signal-to-noise and envelope evidence.
   softCandidateCaptureLimitMs: 1_200,
   silentCaptureLimitMs: 30_000,
-  spokenCaptureLimitMs: 55_000,
-  idleSessionLimitMs: 3 * 60_000,
+  // Give a roughly three-minute monologue thirty seconds of client-side
+  // headroom. The server keeps a separate four-minute hard transport bound,
+  // still below Cloud Speech-to-Text's five-minute streaming limit.
+  spokenCaptureLimitMs: 210_000,
+  // This watchdog is refreshed when speech confirms, not on every PCM frame.
+  // Keep it beyond the longest client capture so it cannot expire during one
+  // continuous monologue; the independent 30-minute session cap remains.
+  idleSessionLimitMs: 4 * 60_000,
   maximumSessionMs: 30 * 60_000,
 });
 
@@ -745,15 +755,21 @@ export function shouldCommitHybridEndpoint({
     lastVoiceAt -
     firstVoiceAt +
     VOICE_SESSION_LIMITS.vadIntervalMs;
-  const requiredSilence = softVoiceConfirmed
-    ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
-    : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
-      ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
-      : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
-  const agreementWindow = softVoiceConfirmed
-    ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
-    : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
+  const agreementWindow =
+    speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs
+      ? VOICE_SESSION_LIMITS.hybridMonologueEndpointAgreementWindowMs
+      : softVoiceConfirmed
+        ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
+        : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
   if (now - providerEndpointAt > agreementWindow) return false;
+  const requiredSilence =
+    speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs
+      ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
+      : softVoiceConfirmed
+        ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
+        : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+          ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
+          : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
   return now - lastVoiceAt >= requiredSilence;
 }
 
@@ -787,6 +803,10 @@ export function advanceVad(
       VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
     reflectiveSpeechSpanMs =
       VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs,
+    monologueEndOfTurnSilenceMs =
+      VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    monologueSpeechSpanMs =
+      VOICE_SESSION_LIMITS.monologueSpeechSpanMs,
     silentCaptureLimitMs = VOICE_SESSION_LIMITS.silentCaptureLimitMs,
     spokenCaptureLimitMs = VOICE_SESSION_LIMITS.spokenCaptureLimitMs,
   } = {},
@@ -1019,11 +1039,14 @@ export function advanceVad(
     firstVoiceAt === null || lastVoiceAt === null
       ? 0
       : lastVoiceAt - firstVoiceAt + intervalMs;
-  const trailingSilenceMs = softVoiceConfirmed
-    ? softVoiceEndOfTurnSilenceMs
-    : speechSpanMs >= reflectiveSpeechSpanMs
-      ? reflectiveEndOfTurnSilenceMs
-      : endOfTurnSilenceMs;
+  const trailingSilenceMs =
+    speechSpanMs >= monologueSpeechSpanMs
+      ? monologueEndOfTurnSilenceMs
+      : softVoiceConfirmed
+        ? softVoiceEndOfTurnSilenceMs
+        : speechSpanMs >= reflectiveSpeechSpanMs
+          ? reflectiveEndOfTurnSilenceMs
+          : endOfTurnSilenceMs;
   // Keep direct questions fast, while giving a longer, think-aloud utterance
   // enough room for a natural Japanese pause before committing the turn.
   if (

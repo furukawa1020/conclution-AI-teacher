@@ -71,6 +71,80 @@ type liveTestVerifier struct {
 	err           error
 }
 
+type liveTestLease struct {
+	mu           sync.Mutex
+	releaseCalls int
+	err          error
+}
+
+func (lease *liveTestLease) Release(context.Context) error {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	lease.releaseCalls++
+	return lease.err
+}
+
+type liveTestLeaseManager struct {
+	mu           sync.Mutex
+	acquireCalls int
+	uids         []string
+	err          error
+	lease        *liveTestLease
+}
+
+type liveDeadlineResponseWriter struct {
+	header        http.Header
+	status        int
+	readDeadline  time.Time
+	writeDeadline time.Time
+	readErr       error
+	writeErr      error
+}
+
+func (writer *liveDeadlineResponseWriter) Header() http.Header {
+	if writer.header == nil {
+		writer.header = make(http.Header)
+	}
+	return writer.header
+}
+
+func (writer *liveDeadlineResponseWriter) Write(payload []byte) (int, error) {
+	return len(payload), nil
+}
+
+func (writer *liveDeadlineResponseWriter) WriteHeader(status int) {
+	writer.status = status
+}
+
+func (writer *liveDeadlineResponseWriter) SetReadDeadline(deadline time.Time) error {
+	writer.readDeadline = deadline
+	return writer.readErr
+}
+
+func (writer *liveDeadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	writer.writeDeadline = deadline
+	return writer.writeErr
+}
+
+func (manager *liveTestLeaseManager) Acquire(
+	_ context.Context,
+	uid string,
+	_ time.Time,
+	_ time.Duration,
+) (guard.VoiceLiveLease, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.acquireCalls++
+	manager.uids = append(manager.uids, uid)
+	if manager.err != nil {
+		return nil, manager.err
+	}
+	if manager.lease == nil {
+		manager.lease = &liveTestLease{}
+	}
+	return manager.lease, nil
+}
+
 func (verifier *liveTestVerifier) Verify(
 	_ context.Context,
 	idToken string,
@@ -209,8 +283,15 @@ func newVoiceLiveTestServer(
 	verifier identity.Verifier,
 	uidLimiter guard.Limiter,
 	appLimiter guard.Limiter,
+	leaseManagers ...guard.VoiceLiveLeaseManager,
 ) *httptest.Server {
 	t.Helper()
+	leaseManager := guard.VoiceLiveLeaseManager(
+		guard.NewMemoryVoiceLiveLeaseManager(),
+	)
+	if len(leaseManagers) > 0 {
+		leaseManager = leaseManagers[0]
+	}
 	handler := NewWithVoice(
 		slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		verifier,
@@ -220,11 +301,12 @@ func newVoiceLiveTestServer(
 		time.Second,
 		4*1024,
 		VoiceOptions{
-			Service:         service,
-			RateLimiter:     uidLimiter,
-			AppRateLimiter:  appLimiter,
-			RequestTimeout:  2 * time.Second,
-			MaxRequestBytes: 13 * 1024 * 1024,
+			Service:          service,
+			RateLimiter:      uidLimiter,
+			AppRateLimiter:   appLimiter,
+			LiveLeaseManager: leaseManager,
+			RequestTimeout:   2 * time.Second,
+			MaxRequestBytes:  13 * 1024 * 1024,
 		},
 	)
 	server := httptest.NewServer(handler)
@@ -364,6 +446,177 @@ func readVoiceLiveJSON(
 		t.Fatal(err)
 	}
 	return result
+}
+
+func TestVoiceLiveDeadlinesExtendOnlyTheValidatedLiveRoute(t *testing.T) {
+	t.Parallel()
+	deadline := time.Date(2026, time.August, 1, 0, 7, 0, 0, time.UTC)
+	writer := &liveDeadlineResponseWriter{}
+	if err := setVoiceLiveDeadlines(writer, deadline); err != nil {
+		t.Fatal(err)
+	}
+	if !writer.readDeadline.Equal(deadline) ||
+		!writer.writeDeadline.Equal(deadline) {
+		t.Fatalf(
+			"live deadlines = read:%s write:%s; want %s",
+			writer.readDeadline,
+			writer.writeDeadline,
+			deadline,
+		)
+	}
+}
+
+func TestVoiceLiveDeadlineFailureFailsClosedBeforeUpgrade(t *testing.T) {
+	t.Parallel()
+	leaseManager := &liveTestLeaseManager{}
+	server := &Server{
+		verifier: &liveTestVerifier{},
+		voice: VoiceOptions{
+			Service:          &liveTestVoiceService{},
+			RateLimiter:      &fakeLimiter{},
+			AppRateLimiter:   &fakeLimiter{wantKey: "app:app-123"},
+			LiveLeaseManager: leaseManager,
+			RequestTimeout:   time.Second,
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, voiceLivePath, nil)
+	request.Header.Set("Origin", allowedWebOrigin)
+	writer := &liveDeadlineResponseWriter{writeErr: errors.New("deadline unavailable")}
+
+	server.voiceLive(writer, request)
+
+	if writer.status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want %d", writer.status, http.StatusServiceUnavailable)
+	}
+	if writer.readDeadline.IsZero() || writer.writeDeadline.IsZero() {
+		t.Fatal("both live deadline operations were not attempted")
+	}
+	leaseManager.mu.Lock()
+	acquireCalls := leaseManager.acquireCalls
+	leaseManager.mu.Unlock()
+	if acquireCalls != 0 {
+		t.Fatalf("lease acquisitions before failed upgrade = %d; want 0", acquireCalls)
+	}
+}
+
+func TestVoiceLiveLeaseBackendFailureFailsClosedAfterQuota(t *testing.T) {
+	t.Parallel()
+	leaseManager := &liveTestLeaseManager{err: errors.New("Firestore unavailable")}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{wantKey: "app:app-123"}
+	server := newVoiceLiveTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		uidLimiter,
+		appLimiter,
+		leaseManager,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("frame = %#v", frame)
+	}
+	leaseManager.mu.Lock()
+	acquireCalls := leaseManager.acquireCalls
+	leaseManager.mu.Unlock()
+	if acquireCalls != 1 {
+		t.Fatalf("lease acquisitions = %d; want 1", acquireCalls)
+	}
+	if uidLimiter.calls != 1 || appLimiter.calls != 1 {
+		t.Fatalf(
+			"quota calls before lease failure = uid:%d app:%d; want one each",
+			uidLimiter.calls,
+			appLimiter.calls,
+		)
+	}
+}
+
+func TestVoiceLiveUnauthenticatedStartDoesNotConsumeLeaseOrQuota(t *testing.T) {
+	t.Parallel()
+	leaseManager := &liveTestLeaseManager{}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{wantKey: "app:app-123"}
+	server := newVoiceLiveTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{err: identity.ErrUnauthenticated},
+		uidLimiter,
+		appLimiter,
+		leaseManager,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveStart(t, ctx, conn)
+	frame := readVoiceLiveJSON(t, ctx, conn)
+	if frame["type"] != "error" ||
+		frame["code"] != voiceLiveCodeAuthenticationFailed {
+		t.Fatalf("frame = %#v", frame)
+	}
+	leaseManager.mu.Lock()
+	acquireCalls := leaseManager.acquireCalls
+	leaseManager.mu.Unlock()
+	if acquireCalls != 0 || uidLimiter.calls != 0 || appLimiter.calls != 0 {
+		t.Fatalf(
+			"unauthenticated guards = lease:%d uid:%d app:%d; want zero",
+			acquireCalls,
+			uidLimiter.calls,
+			appLimiter.calls,
+		)
+	}
+}
+
+func TestVoiceLiveReleasesLeaseAfterConnectionEnds(t *testing.T) {
+	t.Parallel()
+	lease := &liveTestLease{}
+	leaseManager := &liveTestLeaseManager{lease: lease}
+	server := newVoiceLiveTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		leaseManager,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVoiceLiveStart(t, ctx, conn)
+	ready := readVoiceLiveJSON(t, ctx, conn)
+	if ready["type"] != "ready" {
+		t.Fatalf("ready = %#v", ready)
+	}
+	conn.CloseNow()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		lease.mu.Lock()
+		releaseCalls := lease.releaseCalls
+		lease.mu.Unlock()
+		if releaseCalls == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("release calls = %d; want 1", releaseCalls)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {

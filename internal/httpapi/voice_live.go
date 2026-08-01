@@ -34,6 +34,10 @@ const (
 	voiceLiveMaxPCMTotalBytes   = voiceLivePCMFrameBytes *
 		voiceLiveMaxPCMFrames
 	voiceLiveMaxTokenBytes = 8 * 1024
+	// A process crash cannot run the normal release path. The lease therefore
+	// expires shortly after the absolute connection deadline, while remaining
+	// valid for every connection the server could still be processing.
+	voiceLiveLeaseTTL = VoiceLiveConnectionTimeout + time.Minute
 )
 
 // VoiceLiveConnectionTimeout is the Go HTTP and Cloud Run request-timeout
@@ -150,6 +154,17 @@ func (metrics *voiceLiveOutputMetrics) snapshot() (time.Time, int, int) {
 	return metrics.firstOutputAt, metrics.frames, metrics.bytes
 }
 
+func setVoiceLiveDeadlines(w http.ResponseWriter, deadline time.Time) error {
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	if err := controller.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	origins := r.Header.Values("Origin")
@@ -168,7 +183,19 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	if !ok || s.verifier == nil ||
 		s.voice.RateLimiter == nil ||
 		s.voice.AppRateLimiter == nil ||
+		s.voice.LiveLeaseManager == nil ||
 		s.voice.RequestTimeout <= 0 {
+		writeProblem(w, http.StatusServiceUnavailable, "voice_unavailable", "Live voice conversation is not configured.")
+		return
+	}
+	liveCtx, cancelLive := context.WithTimeout(
+		r.Context(),
+		VoiceLiveConnectionTimeout,
+	)
+	defer cancelLive()
+	liveRequestID := requestIDFromContext(liveCtx)
+	liveDeadline, ok := liveCtx.Deadline()
+	if !ok || setVoiceLiveDeadlines(w, liveDeadline) != nil {
 		writeProblem(w, http.StatusServiceUnavailable, "voice_unavailable", "Live voice conversation is not configured.")
 		return
 	}
@@ -184,7 +211,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(voiceLiveMaxStartBytes)
 
 	firstFrameCtx, cancelFirstFrame := context.WithTimeout(
-		r.Context(),
+		liveCtx,
 		voiceLiveFirstFrameTimeout,
 	)
 	messageType, payload, err := conn.Read(firstFrameCtx)
@@ -199,7 +226,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		decodeErr != nil ||
 		!validVoiceLiveStart(start) {
 		finishVoiceLiveWithError(
-			r.Context(),
+			liveCtx,
 			conn,
 			voiceLiveCodeResponseInvalid,
 			websocket.StatusPolicyViolation,
@@ -208,7 +235,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	verifyCtx, cancelVerify := context.WithTimeout(
-		r.Context(),
+		liveCtx,
 		voiceLiveGuardTimeout,
 	)
 	principal, err := s.verifier.Verify(
@@ -221,7 +248,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	start.AppCheckToken = ""
 	if err != nil {
 		finishVoiceLiveWithError(
-			r.Context(),
+			liveCtx,
 			conn,
 			voiceLiveCodeAuthenticationFailed,
 			websocket.StatusPolicyViolation,
@@ -229,11 +256,6 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	liveCtx, cancelLive := context.WithTimeout(
-		r.Context(),
-		VoiceLiveConnectionTimeout,
-	)
-	defer cancelLive()
 	quotaCtx, cancelQuota := context.WithTimeout(
 		liveCtx,
 		voiceLiveGuardTimeout,
@@ -253,6 +275,51 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	leaseCtx, cancelLease := context.WithTimeout(
+		liveCtx,
+		voiceLiveGuardTimeout,
+	)
+	liveLease, leaseErr := s.voice.LiveLeaseManager.Acquire(
+		leaseCtx,
+		principal.UID,
+		time.Now().UTC(),
+		voiceLiveLeaseTTL,
+	)
+	cancelLease()
+	if leaseErr != nil {
+		code := voiceLiveCodeAPIUnavailable
+		if errors.Is(leaseErr, guard.ErrVoiceLiveLeaseHeld) {
+			code = voiceLiveCodeRateLimited
+		} else {
+			s.logger.ErrorContext(liveCtx, "voice live lease guard failed",
+				"request_id", liveRequestID,
+				"error_class", "voice_live_lease_store_failure",
+			)
+		}
+		finishVoiceLiveWithError(
+			liveCtx,
+			conn,
+			code,
+			websocket.StatusPolicyViolation,
+		)
+		return
+	}
+	defer func() {
+		// Stop all work owned by this connection before making its UID slot
+		// available to another Cloud Run instance.
+		cancelLive()
+		releaseCtx, cancelRelease := context.WithTimeout(
+			context.Background(),
+			voiceLiveGuardTimeout,
+		)
+		defer cancelRelease()
+		if err := liveLease.Release(releaseCtx); err != nil {
+			s.logger.ErrorContext(releaseCtx, "voice live lease release failed",
+				"request_id", liveRequestID,
+				"error_class", "voice_live_lease_store_failure",
+			)
+		}
+	}()
 	if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
 		Type:    "ready",
 		Version: voiceLiveVersion,

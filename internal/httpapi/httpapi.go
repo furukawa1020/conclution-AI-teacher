@@ -163,11 +163,12 @@ type VoiceTurnLiveEndpointService interface {
 }
 
 type VoiceOptions struct {
-	Service         VoiceTurnService
-	RateLimiter     guard.Limiter
-	AppRateLimiter  guard.Limiter
-	RequestTimeout  time.Duration
-	MaxRequestBytes int64
+	Service          VoiceTurnService
+	RateLimiter      guard.Limiter
+	AppRateLimiter   guard.Limiter
+	LiveLeaseManager guard.VoiceLiveLeaseManager
+	RequestTimeout   time.Duration
+	MaxRequestBytes  int64
 }
 
 type Server struct {
@@ -670,7 +671,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"authLevel":      "account",
+		"authLevel":       "account",
 		"accountVerified": principal.AccountVerified,
 		"provider":        principal.Provider,
 	})

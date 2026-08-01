@@ -25,7 +25,7 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 | 処理 | ロケーション | 入るデータ |
 |---|---|---|
 | Hosting / API | Hosting / Cloud Run `asia-northeast1` | 静的asset、voice request |
-| Firestore | `asia-northeast1` | TTL付き評価メタデータとrate counter |
+| Firestore | `asia-northeast1` | TTL付き評価メタデータ、rate counter、live接続lease |
 | Speech-to-Text | `asia-northeast1` regional endpoint | raw audio |
 | Sensitive Data Protection | `asia-northeast1` | STT文字起こし、Vertex応答文 |
 | Vertex AI | `global` | 検査・置換後の文字列、短い状態要約 |
@@ -196,7 +196,7 @@ gcloud run deploy kotae-api `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:1"
 ```
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。環境変数として注入するSecretは`latest`ではなく確認済みversionへ固定し、鍵rotate時だけ新versionへ更新します。Cloud Runのtimeoutは、アプリ側の6分live deadlineより1分長い420秒にします。これで最長4分のcapture、認証、終了処理、内部の50秒voice timeoutを収め、アプリがdeadline処理する前に基盤側が接続を切る競合を避けます。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。最小instanceはservice単位で1にし、revision単位の最小instanceは`default`へ戻します。これにより、tag付き旧revisionをすべて常時起動する設定を残しません。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。環境変数として注入するSecretは`latest`ではなく確認済みversionへ固定し、鍵rotate時だけ新versionへ更新します。Cloud Runのtimeoutは、アプリ側の6分live deadlineより1分長い420秒にします。これで最長4分のcapture、認証、終了処理、内部の50秒voice timeoutを収め、アプリがdeadline処理する前に基盤側が接続を切る競合を避けます。Go HTTP serverの通常routeは従来どおりread/write/idle各120秒を維持し、検証済み`/api/v1/voice/live`だけがWebSocket upgrade前に接続deadlineを6分へ延長します。deadline更新不能時はupgrade前にfail-closedで拒否します。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。最小instanceはservice単位で1にし、revision単位の最小instanceは`default`へ戻します。これにより、tag付き旧revisionをすべて常時起動する設定を残しません。
 
 `KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行を制御します。privacy境界導入後の長期運用値は両方`true`です。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
 
@@ -206,7 +206,7 @@ candidate検証後はservice rootへ100% trafficを移し、`gcloud run services
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 
-UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
+UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消費します。live WebSocketは認証とrate枠の消費後、音声受信と`ready`送信の前にFirestore transactionでUID単位のleaseを取得し、同じFirebase UIDの同時接続をproject全体で1本に制限します。この順序により、同じ認証済みclientが重複handshakeを繰り返す場合もrate limitを迂回できません。通常終了と切断では所有者を照合して即時解放し、instance消失時も7分で期限切れになります。Firestoreの取得・更新に失敗した場合はlive接続だけをfail-closedで拒否し、buffered HTTPS voiceの経路はこのleaseを要求しません。App Checkは不正利用を減らしますが、Web attestationや通常tokenがすべての濫用を防ぐ保証ではありません。Go Admin SDKではcustom backend向けlimited-use token消費が未対応のため、現在は再利用可能なtoken検証、二段rate limit、厳密なOrigin、Cloud Run上限、Google Cloud quotaと請求アラートを重ねます。
 
 ## FirestoreとTTL
 
@@ -217,6 +217,7 @@ UID単位の枠に加え、許可App ID全体のvoice枠をbody decode前に消�
 | `evaluations` | 従来評価APIの本文を含まない評価メタデータ | `expiresAt`、30日 |
 | `evaluationRateLimits` | 従来評価APIのrate counter | `expiresAt`、48時間 |
 | `voiceRateLimits` | 音声APIのrate counter | `expiresAt`、48時間 |
+| `voiceLiveLeases` | SHA-256化UIDとランダム所有者だけを持つlive同時接続lease。音声・文字起こし・raw UIDは保存しない | `expiresAt`、最長7分 |
 
 ```powershell
 $ProjectId = "kotae-ai-u22-2026"
@@ -239,13 +240,19 @@ gcloud firestore fields ttls update expiresAt `
   --enable-ttl `
   --project=$ProjectId
 
+gcloud firestore fields ttls update expiresAt `
+  --collection-group=voiceLiveLeases `
+  --database="(default)" `
+  --enable-ttl `
+  --project=$ProjectId
+
 gcloud firestore fields ttls list `
   --database="(default)" `
   --project=$ProjectId `
   --format="table(name,ttlConfig.state)"
 ```
 
-3 collectionすべてが`ACTIVE`になるまで配備完了としません。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、セキュリティ認可の期限としてTTLだけに依存しません。会話状態tokenの15分期限は、復号後にAPIが独立して検証します。
+4 collectionすべてが`ACTIVE`になるまで配備完了としません。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、live leaseはtransaction内で`expiresAt`を検証し、期限を過ぎたdocumentを削除待ちでも上書き取得できます。会話状態tokenの15分期限も、復号後にAPIが独立して検証します。
 
 ## Hosting
 
@@ -263,9 +270,9 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-hosting.ps1 `
 
 1. Firebase AuthのGoogle providerとsupport emailが設定済みで、Authorized domainsにHosting domainがあること。匿名providerは移行確認後に無効化する
 2. App CheckのWeb App ID、reCAPTCHA Enterprise site key、Authenticationと独自APIの強制
-3. Cloud Run revisionのruntime service account、環境変数、Secret参照、60秒timeout
+3. Cloud Run revisionのruntime service account、環境変数、Secret参照、420秒timeout
 4. Speech-to-Text / Sensitive Data Protection / Text-to-Speech / Vertex AIのquotaと請求アラート
-5. Firestoreの3つのTTL policyが`ACTIVE`
+5. Firestoreの4つのTTL policyが`ACTIVE`
 6. Secretへruntime以外の不要な`secretAccessor`がないこと
 7. Cloud Loggingへ音声、文字起こし、prompt/response、PDF本文、tokenが出ていないこと
 8. runtime service accountに`roles/dlp.user`があり、起動時の固定DLP readiness probeを通過すること

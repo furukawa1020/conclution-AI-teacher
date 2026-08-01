@@ -29,9 +29,9 @@ func newAPIServer(addr string, handler http.Handler) *http.Server {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       httpapi.VoiceLiveConnectionTimeout,
-		WriteTimeout:      httpapi.VoiceLiveConnectionTimeout,
-		IdleTimeout:       httpapi.VoiceLiveConnectionTimeout,
+		ReadTimeout:       120 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}
 }
@@ -56,6 +56,7 @@ func main() {
 	var rateLimiter guard.Limiter
 	var voiceRateLimiter guard.Limiter
 	var voiceAppRateLimiter guard.Limiter
+	var voiceLiveLeaseManager guard.VoiceLiveLeaseManager
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
 	var closeFirestore func() error
@@ -71,6 +72,7 @@ func main() {
 			os.Exit(1)
 		}
 		evaluationStore = store.MemoryEvaluationStore{}
+		voiceLiveLeaseManager = guard.NewMemoryVoiceLiveLeaseManager()
 		closeFirestore = func() error { return nil }
 		closeSpeech = func() error { return nil }
 	} else {
@@ -154,6 +156,13 @@ func main() {
 			logger.Error("initialize voice app rate limiter", "error", err)
 			os.Exit(1)
 		}
+		voiceLiveLeaseManager, err = guard.NewFirestoreVoiceLiveLeaseManager(
+			firestoreClient,
+		)
+		if err != nil {
+			logger.Error("initialize voice live lease manager", "error", err)
+			os.Exit(1)
+		}
 		conversationAgent, err := conversation.NewVertexAgent(
 			ctx,
 			cfg.ProjectID,
@@ -211,11 +220,12 @@ func main() {
 		cfg.RequestTimeout,
 		cfg.MaxRequestBytes,
 		httpapi.VoiceOptions{
-			Service:         voiceService,
-			RateLimiter:     voiceRateLimiter,
-			AppRateLimiter:  voiceAppRateLimiter,
-			RequestTimeout:  cfg.VoiceTimeout,
-			MaxRequestBytes: cfg.MaxVoiceBytes,
+			Service:          voiceService,
+			RateLimiter:      voiceRateLimiter,
+			AppRateLimiter:   voiceAppRateLimiter,
+			LiveLeaseManager: voiceLiveLeaseManager,
+			RequestTimeout:   cfg.VoiceTimeout,
+			MaxRequestBytes:  cfg.MaxVoiceBytes,
 		},
 	)
 	server := newAPIServer(":"+cfg.Port, handler)

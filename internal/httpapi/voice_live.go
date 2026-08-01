@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	voiceLiveVersion           = 1
-	voiceLiveSampleRateHz      = 16_000
-	voiceLiveFirstFrameTimeout = 3 * time.Second
-	voiceLiveGuardTimeout      = 5 * time.Second
-	voiceLiveReaderJoinTimeout = 500 * time.Millisecond
+	voiceLiveVersion             = 1
+	voiceLiveSampleRateHz        = 16_000
+	voiceLiveFirstFrameTimeout   = 2 * time.Second
+	voiceLiveGuardTimeout        = 5 * time.Second
+	voiceLiveReaderJoinTimeout   = 500 * time.Millisecond
+	voiceLivePipelineJoinTimeout = 5 * time.Second
 	// The client stops normal capture at 3m30s. The extra 30 seconds absorb
 	// lead-in and scheduling jitter while keeping the provider stream a full
 	// minute below Cloud Speech-to-Text's five-minute hard limit.
@@ -45,6 +46,42 @@ const (
 // capture, and the independent post-commit processing budget all fit inside
 // it. Cloud Run must be configured to the same value or higher.
 const VoiceLiveConnectionTimeout = 6 * time.Minute
+
+// DefaultVoiceLiveHandshakeLimit bounds unauthenticated WebSockets to half of
+// the service's Cloud Run concurrency of four. At least two request slots
+// therefore cannot be consumed by clients waiting to authenticate.
+const DefaultVoiceLiveHandshakeLimit = 2
+
+// VoiceLiveHandshakeGate is an instance-local, non-blocking semaphore. Its
+// slot is held only until the first frame has been authenticated, never for a
+// normal long-running live session.
+type VoiceLiveHandshakeGate struct {
+	slots chan struct{}
+}
+
+func NewVoiceLiveHandshakeGate(limit int) *VoiceLiveHandshakeGate {
+	if limit <= 0 {
+		return nil
+	}
+	return &VoiceLiveHandshakeGate{slots: make(chan struct{}, limit)}
+}
+
+func (gate *VoiceLiveHandshakeGate) tryAcquire() (func(), bool) {
+	if gate == nil || gate.slots == nil || cap(gate.slots) == 0 {
+		return nil, false
+	}
+	select {
+	case gate.slots <- struct{}{}:
+		var releaseOnce sync.Once
+		return func() {
+			releaseOnce.Do(func() {
+				<-gate.slots
+			})
+		}, true
+	default:
+		return nil, false
+	}
+}
 
 const (
 	voiceLiveCodeAuthenticationFailed = "authentication_failed"
@@ -167,6 +204,47 @@ func setVoiceLiveDeadlines(w http.ResponseWriter, deadline time.Time) error {
 	return nil
 }
 
+func (s *Server) finishVoiceLiveLease(
+	liveRequestID string,
+	cancelLive context.CancelFunc,
+	liveLease guard.VoiceLiveLease,
+	pipelineDone <-chan struct{},
+) {
+	cancelLive()
+	if pipelineDone != nil {
+		joinTimeout := s.voice.livePipelineJoinTimeout
+		if joinTimeout <= 0 || joinTimeout > voiceLivePipelineJoinTimeout {
+			joinTimeout = voiceLivePipelineJoinTimeout
+		}
+		joinTimer := time.NewTimer(joinTimeout)
+		defer joinTimer.Stop()
+		select {
+		case <-pipelineDone:
+		case <-joinTimer.C:
+			s.logger.Error("voice live pipeline shutdown timed out",
+				"request_id", liveRequestID,
+				"error_class", "voice_live_pipeline_shutdown_timeout",
+			)
+			// The old worker may still own provider resources. Keep the UID
+			// lease until its bounded Firestore TTL expires rather than permit
+			// a second live pipeline to overlap it.
+			return
+		}
+	}
+
+	releaseCtx, cancelRelease := context.WithTimeout(
+		context.Background(),
+		voiceLiveGuardTimeout,
+	)
+	defer cancelRelease()
+	if err := liveLease.Release(releaseCtx); err != nil {
+		s.logger.ErrorContext(releaseCtx, "voice live lease release failed",
+			"request_id", liveRequestID,
+			"error_class", "voice_live_lease_store_failure",
+		)
+	}
+}
+
 func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	origins := r.Header.Values("Origin")
@@ -186,10 +264,25 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		s.voice.RateLimiter == nil ||
 		s.voice.AppRateLimiter == nil ||
 		s.voice.LiveLeaseManager == nil ||
+		s.voice.LiveHandshakeGate == nil ||
 		s.voice.RequestTimeout <= 0 {
 		writeProblem(w, http.StatusServiceUnavailable, "voice_unavailable", "Live voice conversation is not configured.")
 		return
 	}
+	releaseHandshake, admitted := s.voice.LiveHandshakeGate.tryAcquire()
+	if !admitted {
+		writeProblem(w, http.StatusTooManyRequests, "voice_handshake_busy", "Live voice authentication is busy.")
+		return
+	}
+	handshakeHeld := true
+	releaseAuthenticationSlot := func() {
+		if handshakeHeld {
+			handshakeHeld = false
+			releaseHandshake()
+		}
+	}
+	defer releaseAuthenticationSlot()
+
 	liveCtx, cancelLive := context.WithTimeout(
 		r.Context(),
 		VoiceLiveConnectionTimeout,
@@ -227,6 +320,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	if messageType != websocket.MessageText ||
 		decodeErr != nil ||
 		!validVoiceLiveStart(start) {
+		releaseAuthenticationSlot()
 		finishVoiceLiveWithError(
 			liveCtx,
 			conn,
@@ -248,6 +342,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	cancelVerify()
 	start.IDToken = ""
 	start.AppCheckToken = ""
+	releaseAuthenticationSlot()
 	if err != nil {
 		finishVoiceLiveWithError(
 			liveCtx,
@@ -314,21 +409,14 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	var pipelineDone <-chan struct{}
 	defer func() {
-		// Stop all work owned by this connection before making its UID slot
-		// available to another Cloud Run instance.
-		cancelLive()
-		releaseCtx, cancelRelease := context.WithTimeout(
-			context.Background(),
-			voiceLiveGuardTimeout,
+		s.finishVoiceLiveLease(
+			liveRequestID,
+			cancelLive,
+			liveLease,
+			pipelineDone,
 		)
-		defer cancelRelease()
-		if err := liveLease.Release(releaseCtx); err != nil {
-			s.logger.ErrorContext(releaseCtx, "voice live lease release failed",
-				"request_id", liveRequestID,
-				"error_class", "voice_live_lease_store_failure",
-			)
-		}
 	}()
 	if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
 		Type:    "ready",
@@ -378,7 +466,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	defer strictOutput.clear()
 	outcomeChannel := make(chan voiceLiveOutcome, 1)
 	endpointChannel := make(chan struct{}, 1)
+	pipelineDoneSignal := make(chan struct{})
+	pipelineDone = pipelineDoneSignal
 	go func() {
+		defer close(pipelineDoneSignal)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				outcomeChannel <- voiceLiveOutcome{

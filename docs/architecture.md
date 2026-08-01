@@ -68,7 +68,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 └────────────┬────────────────┘
              │ silence / reply text
              ▼
-        strict reply: local + DLP clear
+        strict reply: Cloud Run deterministic + DLP clear
              ▼
                          ┌──────────────────────────┐
                          │ Cloud TTS                │
@@ -82,7 +82,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 
 利用者のintentional turn全体が「外部検索で、テーマは何々の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ、Cloud Runの独立tool-policy gateが許可します。自然文から検索同意を推測せず、追記、取消し、複数命令、ambient turnから外部queryは作りません。topicは「テーマは」と「の最新論文」の間全体、DOIは空白で区切ったbare DOI全体を決定論的に抽出し、モデル出力と取得結果へ完全に結びつけます。送信前にはNFKC差とUnicode format文字をfail-closedで拒否し、可逆encodingを再検査し、topic文字を限定し、topic内の節区切り・取消語とDOIに付いたcomma・semicolon・取消語も拒否します。固定hostのCrossref REST APIから返ったtitle、DOI、日付は候補発見にだけ使い、本文を読んだ証拠やclaimの支持根拠にはしません。topic探索は発表日ではなくCrossrefのindex date filterを使うため、「Crossrefの索引日が指定期間内の書誌候補」と表示します。任意の語が氏名か未知の技術名かを完全には区別できないため、固定発話のtopicそのものがCrossrefへ送られることもUIで明示します。
 
-Cloud STTにはraw audioだけを渡します。厳格モードは文字起こしとモデル応答をローカル検査と東京リージョンのSensitive Data Protectionへ通し、両方が明示的に`clear`の時だけVertex AIまたはCloud TTSへ進めます。標準モードに同じ保証があるとは表示しません。標準モードのPDFは本人が明示選択した次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放します。厳格モードではブラウザのfile read前とCloud RunのSTT・モデル推論前の両方で拒否します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。この構成では管理サービスが処理に必要な平文を扱うためE2EEではなく、DLPにも漏れがあり得るため完全なPII除去でもありません。
+Cloud STTにはraw audioだけを渡します。厳格モードは文字起こしとモデル応答をCloud Run内の決定論的検査と東京リージョンのSensitive Data Protectionへ通し、両方が明示的に`clear`の時だけVertex AIまたはCloud TTSへ進めます。標準モードに同じ保証があるとは表示しません。標準モードのPDFは本人が明示選択した次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放します。厳格モードではブラウザのfile read前とCloud RunのSTT・モデル推論前の両方で拒否します。音声、逐語録、PDF、応答文はアプリのDBやStorageへ保存しません。この構成では管理サービスが処理に必要な平文を扱うためE2EEではなく、DLPにも漏れがあり得るため完全なPII除去でもありません。
 
 ## 状態
 
@@ -126,7 +126,7 @@ TypeScriptは使いません。ブラウザAPIとFirebase Web SDKを直接呼ぶ
 6. 潜在問いが曖昧ならclarifyまたはsilence、答えの核が欠けていて意味保存できる時だけrestructureする。独立監査が使えない場合も未監査draftは話さない。
 7. intentional turnで明示され、否定されていないDOI / 論文検索だけを、PII・credential screenの後にCrossrefへ送る。ambientでは常に拒否し、結果を`needs_primary_evidence`として現在のturnだけへ返す。任意URLは取得しない。
 8. Self-repair graceとEVIで、モデルが話したがっても介入価値が低ければsilenceへ落とす。ただし緊急安全介入を曖昧判定で消さない。
-9. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送り、同じ最終文だけをbounded captionとして返す。厳格モードはTTSより前に応答文もlocal + regional DLPで`clear`と検証し、streaming音声を検証完了まで送信しない。
+9. 発話を選んだ場合だけ、短い応答文を東京リージョンTTSへ送り、同じ最終文だけをbounded captionとして返す。厳格モードはTTSより前に応答文もCloud Run内決定論検査 + regional DLPで`clear`と検証し、streaming音声を検証完了まで送信しない。
 
 LACの指標は内部評価用で、画面へ分析文を大量表示しません。モデルの非公開chain-of-thoughtを保存または表示する設計でもありません。
 

@@ -246,6 +246,13 @@ func (agent *speculativeTestAgent) Process(
 	return agent.speculativeResult, agent.speculativeErr
 }
 
+func (agent *speculativeTestAgent) ValidateStateToken(_ string, token string) error {
+	if token == "" {
+		return conversation.ErrInvalidStateToken
+	}
+	return nil
+}
+
 func (agent *speculativeTestAgent) recordedTurns() []conversation.VoiceTurn {
 	agent.mu.Lock()
 	defer agent.mu.Unlock()

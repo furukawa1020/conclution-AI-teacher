@@ -13,6 +13,8 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 
 この支援は会話を訓練や課題として感じさせることを目的にしない。日常会話を優先し、本人が明示的に助けを求めた時だけ一問を短く返す。一往復で閉じてよく、滞在時間や反復回数を達成条件にしない。
 
+約3分まとまらずに話した場合も、時間だけで失敗や能力不足と判定しない。現在のlive経路は端末で録音開始から最大3分30秒、Cloud Run側で最大4分のcaptureを受け、Go側のlive接続を6分、Cloud Runのrequest timeoutを420秒に制限する。発話が確定しない無音候補は録音開始後最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。commit後のfinal transcriptが160 Unicode code point以上の場合だけ、サーバーが今回限りの長い発話と判定し、現在turn内で本人が明示した中心点を、条件や不確実性を変えず第一文へ置いて自然に応答する。160未満でも通常会話は続け、長さだけを根拠に指導、採点、言い直し要求をしない。
+
 ## PDFの場面との対応
 
 | PDFの場面 | KOTAEの動作 |
@@ -68,19 +70,21 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 ## セキュリティ機能の現在地
 
 - PasskeyのWebAuthn ceremonyを実装し、仮名Firebase accountの操作をuser verification付き署名で確認する。秘密鍵はPasskey providerが管理し、KOTAEのブラウザコードとサーバーは受け取らない（同期や保管の方式はproviderに依存する）。これは法的な本人確認や現在の話者認証ではない
-- 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をローカル検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
+- 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をCloud Run内の決定論的検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
 - DLPにも検出漏れがあり得るため、完全なPII除去とは呼ばない。Cloud Run、Speech-to-Text、DLPが平文を扱うためE2EEとも呼ばない
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
 - 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する
-- 3分級の独話は認証付きWebSocketの増分PCM経路で扱う。クライアントcaptureは最大3分30秒、サーバーcaptureは最大4分または20 ms PCM 12,000 frame、live / HTTP turn全体は最大6分で、長い独話の終端は5秒の無音を待つ。同期圧縮HTTP fallbackは2 MiB上限のため長時間処理を保証しない
-- live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。Cloud Run request timeoutはアプリの6分境界より長い420秒とする
-- 確定文字起こしが160 rune以上なら、現在turnだけを`extended speech`として主点の反射と回答構成へ使う。この分類と本文は次turnへ残さず、3分の入力を受けられること自体を長期効果の証拠にはしない
-- opt-in、固定測定窓、未見質問への有限回答、端末内保存、時点別の生観測表示、撤回・全削除を備えた個人内長期測定は実装した。有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionだけを扱い、音声、文字起こし、自由文、Firebase UID、時刻は保存しない。別tab競合はgeneration fenceで停止し、全削除後は個人情報を含まない固定markerだけを残す。ただし署名付き研究台帳や比較試験ではなく、長期効果は未実証である
+- 約3分の独話は、端末の録音開始から最大3分30秒、Cloud Run受信4分、Go live deadline 6分、Cloud Run request timeout 420秒の順に上限を分離して受ける。発話が確定しない無音候補は最大30秒で、その上限直前から話し始めても約3分を確保するが、3分30秒の実発話は保証しない。Cloud Speech-to-Textの5分上限まで使い切らず、provider境界まで60秒を残す
+- 圧縮音声のHTTPS fallbackは2 MiB上限で、約3分を通せる保証はない。上限を超えた場合は保持中のchunkを全て破棄し、先頭だけのpartial audioをuploadしない。live PCMが生きていればfallback超過だけでlive captureを止めない
+- live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。接続終了時にpipelineの停止を確認できない場合は即時解放せず7分TTLまでleaseを保持する
+- final transcriptが160 Unicode code point以上の場合だけ、クライアントから指定できないサーバー由来の印を付ける。中心点の根拠は現在turnのfinal transcriptだけとし、否定、条件、数値、不確実性を保つ。途中候補や過去turnから補わず、安全に一つへ定められない時は創作せず確認へ戻る。この印と逐語録・発話本文はcross-turn stateへ入れないが、長い発話も通常会話と同じ状態更新の対象であり、検査・フィルタ後の抽象化済み・有限化されたgoal、claim、open loopなどは暗号化された15分stateへ残り得る
+- opt-in、固定測定窓、未見質問への有限回答、端末内保存、時点別の生観測表示、撤回・全削除を備えた個人内長期測定は実装した。有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionだけを扱い、音声、文字起こし、自由文、Firebase UID、時刻は保存しない。別tab競合はgeneration fenceで停止し、全削除後は個人情報を含まない固定markerだけを残す。ただし署名付き研究台帳や比較試験ではなく、長期効果は未実証である。測定用コードを書くことと、本人を対象にした有効性を示すことを同一視しない
 
 ## 現在も解決していないこと
 
 - 話者本人認証と、同席者・テレビ・合成音声の識別
 - E2EEと完全なPII除去（現在のDLP境界は低減策であり解決ではない）
+- 録音開始から3分30秒を超える一turn capture、Cloud Speech-to-Textのstreaming上限をまたぐsession継続、発話途中の意味へ介入する完全増分校正。端末上限には発話前の無音や発話中の間も含まれる
 - 任意Web、複数論文本文、claim単位の自動検証
 - 本人を対象にした有効性、誤修復率、負荷軽減の実証
 

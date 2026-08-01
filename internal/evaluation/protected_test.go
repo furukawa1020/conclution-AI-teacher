@@ -12,8 +12,10 @@ import (
 )
 
 type evaluatorSpy struct {
-	calls int
-	input contracts.EvaluationInput
+	calls  int
+	input  contracts.EvaluationInput
+	result *contracts.EvaluationResult
+	err    error
 }
 
 func (s *evaluatorSpy) Evaluate(
@@ -22,7 +24,32 @@ func (s *evaluatorSpy) Evaluate(
 ) (contracts.EvaluationResult, error) {
 	s.calls++
 	s.input = input
-	return contracts.EvaluationResult{ModelLogicalID: "spy"}, nil
+	if s.err != nil {
+		return contracts.EvaluationResult{}, s.err
+	}
+	if s.result != nil {
+		return *s.result, nil
+	}
+	return validProtectedEvaluationResult(), nil
+}
+
+func validProtectedEvaluationResult() contracts.EvaluationResult {
+	return contracts.EvaluationResult{
+		Answered:              true,
+		ConclusionStartRune:   0,
+		ConclusionFirst:       true,
+		DirectnessScore:       80,
+		FirstSentenceComplete: true,
+		CalibrationScore:      80,
+		PrimaryIssue:          "none",
+		SecondaryIssues:       []string{},
+		Feedback:              "safe feedback",
+		RetryInstruction:      "safe retry",
+		Confidence:            0.8,
+		ModelLogicalID:        "spy",
+		RubricVersion:         "spy-rubric",
+		PromptVersion:         "spy-prompt",
+	}
 }
 
 type protectorStub struct {
@@ -56,6 +83,8 @@ func TestProtectedEvaluatorPassesOnlyProtectedQuestionAndAnswer(t *testing.T) {
 				Text:     "はい、電話番号は[PHONE]です",
 				Redacted: true,
 			}, nil
+		case "", "safe feedback", "safe retry":
+			return privacyguard.Result{Text: text}, nil
 		default:
 			t.Fatalf("unexpected text passed to protector")
 			return privacyguard.Result{}, nil
@@ -90,9 +119,14 @@ func TestProtectedEvaluatorPassesOnlyProtectedQuestionAndAnswer(t *testing.T) {
 	if delegate.input.Mode != "daily" {
 		t.Fatalf("delegate mode = %q", delegate.input.Mode)
 	}
-	if len(protector.calls) != 2 ||
-		protector.calls[0] != rawQuestion ||
-		protector.calls[1] != rawAnswer {
+	if !reflect.DeepEqual(protector.calls, []string{
+		rawQuestion,
+		rawAnswer,
+		"",
+		"safe feedback",
+		"safe retry",
+		"",
+	}) {
 		t.Fatalf("protector calls = %#v", protector.calls)
 	}
 }
@@ -152,6 +186,183 @@ func TestProtectedEvaluatorFailsClosedWithoutCallingDelegate(t *testing.T) {
 	}
 }
 
+func TestProtectedEvaluatorProtectsEveryFreeformResultField(t *testing.T) {
+	const (
+		question             = "safe question"
+		answer               = "safe evidence and answer"
+		conclusion           = "reviewer@example.invalid に連絡"
+		feedback             = "reviewer@example.invalid を含む feedback"
+		retry                = "090-1234-5678 を含む retry"
+		evidence             = "safe evidence"
+		protectedConclusion  = "[EMAIL] に連絡"
+		protectedFeedback    = "[EMAIL] を含む feedback"
+		protectedInstruction = "[PHONE] を含む retry"
+	)
+	delegateResult := validProtectedEvaluationResult()
+	delegateResult.EstimatedConclusion = conclusion
+	delegateResult.Feedback = feedback
+	delegateResult.RetryInstruction = retry
+	delegateResult.EvidenceExcerpt = evidence
+	delegate := &evaluatorSpy{result: &delegateResult}
+	protector := &protectorStub{protect: func(text string) (privacyguard.Result, error) {
+		switch text {
+		case question, answer, evidence:
+			return privacyguard.Result{Text: text}, nil
+		case conclusion:
+			return privacyguard.Result{Text: protectedConclusion, Redacted: true}, nil
+		case feedback:
+			return privacyguard.Result{Text: protectedFeedback, Redacted: true}, nil
+		case retry:
+			return privacyguard.Result{Text: protectedInstruction, Redacted: true}, nil
+		default:
+			t.Fatalf("unexpected protector input %q", text)
+			return privacyguard.Result{}, nil
+		}
+	}}
+	evaluator, err := NewProtectedEvaluator(delegate, protector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := evaluator.Evaluate(context.Background(), contracts.EvaluationInput{
+		Question: question,
+		Answer:   answer,
+		Mode:     "daily",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EstimatedConclusion != protectedConclusion ||
+		result.Feedback != protectedFeedback ||
+		result.RetryInstruction != protectedInstruction ||
+		result.EvidenceExcerpt != evidence {
+		t.Fatalf("protected result = %#v", result)
+	}
+	if !reflect.DeepEqual(protector.calls, []string{
+		question,
+		answer,
+		conclusion,
+		feedback,
+		retry,
+		evidence,
+	}) {
+		t.Fatalf("protector calls = %#v", protector.calls)
+	}
+}
+
+func TestProtectedEvaluatorFailsClosedOnEveryFreeformOutput(t *testing.T) {
+	const (
+		question   = "safe question"
+		answer     = "safe evidence and answer"
+		conclusion = "output conclusion"
+		feedback   = "output feedback"
+		retry      = "output retry"
+		evidence   = "safe evidence"
+	)
+	tests := []struct {
+		name      string
+		failOn    string
+		wantCalls int
+	}{
+		{name: "estimated conclusion", failOn: conclusion, wantCalls: 3},
+		{name: "feedback", failOn: feedback, wantCalls: 4},
+		{name: "retry instruction", failOn: retry, wantCalls: 5},
+		{name: "evidence excerpt", failOn: evidence, wantCalls: 6},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			delegateResult := validProtectedEvaluationResult()
+			delegateResult.EstimatedConclusion = conclusion
+			delegateResult.Feedback = feedback
+			delegateResult.RetryInstruction = retry
+			delegateResult.EvidenceExcerpt = evidence
+			delegate := &evaluatorSpy{result: &delegateResult}
+			protector := &protectorStub{protect: func(text string) (privacyguard.Result, error) {
+				if text == test.failOn {
+					return privacyguard.Result{}, errors.New("provider included " + text)
+				}
+				return privacyguard.Result{Text: text}, nil
+			}}
+			evaluator, err := NewProtectedEvaluator(delegate, protector)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := evaluator.Evaluate(context.Background(), contracts.EvaluationInput{
+				Question: question,
+				Answer:   answer,
+				Mode:     "daily",
+			})
+			if !errors.Is(err, ErrEvaluationProtectionFailed) ||
+				!reflect.DeepEqual(result, contracts.EvaluationResult{}) {
+				t.Fatalf("error = %v, result = %#v", err, result)
+			}
+			if delegate.calls != 1 || len(protector.calls) != test.wantCalls {
+				t.Fatalf(
+					"delegate calls = %d, protector calls = %#v",
+					delegate.calls,
+					protector.calls,
+				)
+			}
+			if strings.Contains(err.Error(), test.failOn) {
+				t.Fatalf("error leaked model output: %q", err)
+			}
+		})
+	}
+}
+
+func TestProtectedEvaluatorRevalidatesProtectedOutput(t *testing.T) {
+	delegateResult := validProtectedEvaluationResult()
+	delegateResult.EvidenceExcerpt = "safe evidence"
+	delegate := &evaluatorSpy{result: &delegateResult}
+	protector := &protectorStub{protect: func(text string) (privacyguard.Result, error) {
+		if text == delegateResult.EvidenceExcerpt {
+			return privacyguard.Result{Text: "invented excerpt", Redacted: true}, nil
+		}
+		return privacyguard.Result{Text: text}, nil
+	}}
+	evaluator, err := NewProtectedEvaluator(delegate, protector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := evaluator.Evaluate(context.Background(), contracts.EvaluationInput{
+		Question: "safe question",
+		Answer:   "safe evidence and answer",
+		Mode:     "daily",
+	})
+	if !errors.Is(err, ErrEvaluationProtectionFailed) ||
+		!reflect.DeepEqual(result, contracts.EvaluationResult{}) {
+		t.Fatalf("error = %v, result = %#v", err, result)
+	}
+}
+
+func TestProtectedEvaluatorSuppressesDelegateErrorContent(t *testing.T) {
+	const sensitiveErrorContent = "provider echoed protected answer"
+	delegate := &evaluatorSpy{err: errors.New(sensitiveErrorContent)}
+	protector := &protectorStub{protect: func(text string) (privacyguard.Result, error) {
+		return privacyguard.Result{Text: text}, nil
+	}}
+	evaluator, err := NewProtectedEvaluator(delegate, protector)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := evaluator.Evaluate(context.Background(), contracts.EvaluationInput{
+		Question: "safe question",
+		Answer:   "safe answer",
+		Mode:     "daily",
+	})
+	if !errors.Is(err, ErrEvaluationProtectionFailed) ||
+		!reflect.DeepEqual(result, contracts.EvaluationResult{}) {
+		t.Fatalf("error = %v, result = %#v", err, result)
+	}
+	if strings.Contains(err.Error(), sensitiveErrorContent) {
+		t.Fatalf("delegate error content leaked: %q", err)
+	}
+}
+
 func TestNewProtectedEvaluatorRequiresBothDependencies(t *testing.T) {
 	protector := &protectorStub{protect: func(text string) (privacyguard.Result, error) {
 		return privacyguard.Result{Text: text}, nil
@@ -163,5 +374,12 @@ func TestNewProtectedEvaluatorRequiresBothDependencies(t *testing.T) {
 	}
 	if _, err := NewProtectedEvaluator(delegate, nil); !errors.Is(err, ErrInvalidPrivacyBoundary) {
 		t.Fatalf("nil protector error = %v", err)
+	}
+	evaluator, err := NewProtectedEvaluator(delegate, protector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.Evaluate(nil, contracts.EvaluationInput{}); !errors.Is(err, ErrInvalidPrivacyBoundary) {
+		t.Fatalf("nil context error = %v", err)
 	}
 }

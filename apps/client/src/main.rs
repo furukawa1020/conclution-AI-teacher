@@ -2138,7 +2138,7 @@ fn App() -> Element {
                         }
                     }
 
-                    if *needs_paper.read() {
+                    if *needs_paper.read() && document_snapshot.is_none() {
                         p { class: "paper-request", role: "status",
                             span { "↳" }
                             if strict_mode {
@@ -2311,7 +2311,7 @@ fn App() -> Element {
                         }
                         p {
                             if strict_mode {
-                                "原音はSpeech-to-Textへ送ります。その後の文字起こしと返答を端末内検査とregional DLPの両方で検査し、検出・障害・時間切れならVertex AI・TTS・会話状態へ進めません。"
+                                "原音はSpeech-to-Textへ送ります。文字起こしの検査に通らなければVertex AIを呼びません。Vertex AIが作った返答も別に検査し、通らなければTTS・画面・音声へ出しません。PDF・外部検索・会話状態は使いません。"
                             } else {
                                 "通常の会話機能を使うモードです。処理中はSpeech-to-Text・Cloud Run・Vertex AI・TTSが平文を扱います。"
                             }
@@ -2421,6 +2421,9 @@ fn App() -> Element {
                                 }
                             }
                         }
+                        if let Some(message) = *document_error.read() {
+                            p { class: "document-error", role: "alert", {message} }
+                        }
                     }
 
                     LongitudinalPanel {}
@@ -2438,7 +2441,7 @@ fn App() -> Element {
                             p {
                                 strong { "音声" }
                                 if strict_mode {
-                                    "原音はTLSでSpeech-to-Textへ送ります。文字起こしと返答は端末内検査とregional DLPの両方がclearの時だけ次へ進み、検出・障害・時間切れでは停止します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
+                                    "原音はTLSでSpeech-to-Textへ送ります。文字起こしはCloud Run内の決定論的検査とregional DLPがclearの時だけVertex AIへ進みます。返答も同じ検査がclearの時だけTTS・画面・音声へ出します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
                                 } else {
                                     "発話ごとにTLSでCloud RunとSpeech-to-Textへ送り、文字起こしをVertex AI、返答をText-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
                                 }
@@ -2457,7 +2460,11 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "個人情報" }
-                                "メール・電話・長い識別子・credentialをCloud Runの決定論的規則とSensitive Data Protectionで置換し、検査不能ならVertex AIを呼びません。ただし検出器には漏れがあり得るため、完全PII除去とは表示しません。"
+                                if strict_mode {
+                                    "文字起こしと返答をCloud Runの決定論的規則とSensitive Data Protectionで検査し、検出・検査不能なら後段へ進めません。検出箇所だけを置換して会話を続ける機能ではなく、検出漏れもあり得ます。"
+                                } else {
+                                    "標準モードの文字起こしは、個人情報を除去せずVertex AIへ送ります。氏名・連絡先・credentialを話さないでください。"
+                                }
                             }
                             p {
                                 strong { "会話支援" }
@@ -2465,7 +2472,7 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "話者" }
-                                "パスキーは声の本人確認ではないため、いまマイクで話す人がアカウントの持ち主かは認証していません。声紋は収集せず、周囲の声を自動採用しません。"
+                                "パスキーは声の本人確認ではないため、いまマイクで話す人がアカウントの持ち主かは認証していません。声紋は収集せず、現行VADは同席者・テレビ・合成音声を利用者の声から識別できません。周囲の声を取り込まない環境で、自分で質問を言い直して使ってください。"
                             }
                             p {
                                 strong { "長期効果" }

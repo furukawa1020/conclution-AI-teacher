@@ -3,6 +3,7 @@ package evaluation
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
@@ -49,19 +50,82 @@ func (e *ProtectedEvaluator) Evaluate(
 	ctx context.Context,
 	input contracts.EvaluationInput,
 ) (contracts.EvaluationResult, error) {
-	if e == nil || e.delegate == nil || e.protector == nil {
+	if ctx == nil || e == nil || e.delegate == nil || e.protector == nil {
 		return contracts.EvaluationResult{}, ErrInvalidPrivacyBoundary
 	}
-	question, err := e.protector.Protect(ctx, input.Question)
+	question, err := e.protectText(ctx, input.Question)
 	if err != nil {
 		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
 	}
-	answer, err := e.protector.Protect(ctx, input.Answer)
+	answer, err := e.protectText(ctx, input.Answer)
 	if err != nil {
 		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
 	}
 	protectedInput := input
-	protectedInput.Question = question.Text
-	protectedInput.Answer = answer.Text
-	return e.delegate.Evaluate(ctx, protectedInput)
+	protectedInput.Question = question
+	protectedInput.Answer = answer
+	if err := protectedInput.Validate(); err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+
+	result, err := e.delegate.Evaluate(ctx, protectedInput)
+	if err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+	// Do not trust a delegate implementation to keep output bounded or keep its
+	// evidence excerpt inside the already-protected answer.
+	if err := result.Validate(protectedInput.Answer); err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+
+	protectedResult := result
+	protectedResult.EstimatedConclusion, err = e.protectText(
+		ctx,
+		result.EstimatedConclusion,
+	)
+	if err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+	protectedResult.Feedback, err = e.protectText(ctx, result.Feedback)
+	if err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+	protectedResult.RetryInstruction, err = e.protectText(
+		ctx,
+		result.RetryInstruction,
+	)
+	if err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+	protectedResult.EvidenceExcerpt, err = e.protectText(
+		ctx,
+		result.EvidenceExcerpt,
+	)
+	if err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+	if err := protectedResult.Validate(protectedInput.Answer); err != nil {
+		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
+	}
+	return protectedResult, nil
+}
+
+func (e *ProtectedEvaluator) protectText(
+	ctx context.Context,
+	text string,
+) (string, error) {
+	protected, err := e.protector.Protect(ctx, text)
+	if err != nil {
+		return "", ErrEvaluationProtectionFailed
+	}
+	if text == "" {
+		if protected.Text != "" {
+			return "", ErrEvaluationProtectionFailed
+		}
+		return "", nil
+	}
+	if strings.TrimSpace(protected.Text) == "" {
+		return "", ErrEvaluationProtectionFailed
+	}
+	return protected.Text, nil
 }

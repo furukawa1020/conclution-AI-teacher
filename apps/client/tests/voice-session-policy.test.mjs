@@ -4173,6 +4173,35 @@ test("cold-start changing quiet speech remains open for a three-minute monologue
   assert.equal(state.action, "end-of-turn");
 });
 
+test("cold-start changing quiet speech remains open for a three-minute monologue", () => {
+  let now = 0;
+  let state = createVadState(now);
+  const speechFrames =
+    (3 * 60_000) / VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 1; frame <= speechFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.009;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+    assert.equal(state.action, null, `quiet speech ended at frame ${frame}`);
+  }
+  assert.equal(state.hasSpeech, true);
+  assert.equal(state.softVoiceConfirmed, true);
+  assert.ok(state.lastVoiceAt >= now - VOICE_SESSION_LIMITS.vadIntervalMs);
+  const lastVoiceAt = state.lastVoiceAt;
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
 test("VAD refreshes the trailing-silence clock as soon as confirmed speech resumes", () => {
   const startedAt = 30_000;
   let state = createVadState(startedAt);

@@ -24,7 +24,7 @@ Rust / Dioxus / Wasm UI
             └─ WebSocket、HTTPS stream、またはPOST /api/v1/voice/turns
                  └─ Cloud Run / Go
                   ├─ Cloud Speech-to-Text V2（asia-northeast1）
-                  ├─ 厳格モード: local検査 + Sensitive Data Protection（asia-northeast1）
+                  ├─ 厳格モード: Cloud Run内の決定論的検査 + Sensitive Data Protection（asia-northeast1）
                   ├─ 文字列 ──→ Vertex AI（global）: KOTAE Reflex + LAC
                   ├─ Crossref（明示したDOI / 新着論文検索だけ）
                   └─ Cloud Text-to-Speech（asia-northeast1）
@@ -32,7 +32,7 @@ Rust / Dioxus / Wasm UI
 
 マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。
 
-標準モードでは、文字起こし、短い暗号化会話状態、利用者が選んだ一ターン限りのPDF、明示したCrossref検索を使えます。厳格モードは別のrequest型として束縛し、raw audioだけを東京リージョンSTTへ渡した後、文字起こしと応答文の両方がローカル検査とregional DLPで`clear`になった時だけVertex AIまたはTTSへ進めます。検出、timeout、権限エラー、応答不整合はすべて停止し、PDF、外部検索、cross-turn stateを許可しません。厳格streamingの合成音声も`clear`検証が終わるまでサーバー内に保持します。どちらもE2EEでも完全なPII除去でもありません。
+標準モードでは、文字起こし、短い暗号化会話状態、利用者が選んだ一ターン限りのPDF、明示したCrossref検索を使えます。厳格モードは別のrequest型として束縛し、raw audioだけを東京リージョンSTTへ渡した後、文字起こしと応答文の両方がCloud Run内の決定論的検査とregional DLPで`clear`になった時だけVertex AIまたはTTSへ進めます。検出、timeout、権限エラー、応答不整合はすべて停止し、PDF、外部検索、cross-turn stateを許可しません。厳格streamingの合成音声も`clear`検証が終わるまでサーバー内に保持します。どちらもE2EEでも完全なPII除去でもありません。
 
 原音、文字起こし、モデル応答、PDF本文、研究query・候補はKOTAEのFirestore、Cloud Storage、アプリログへ保存しません。これはクラウド事業者全体の絶対的なゼロ保持保証ではありません。標準モードの会話状態は自由文要約を避け、短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返しますが、未検出の機微情報が残る可能性があり、Cloud Runは復号できます。厳格モードでは会話状態自体を返しません。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
 
@@ -48,7 +48,7 @@ internal/conversation    Thought State Graph、EVI、モデル経路、暗号化
 internal/answercontract  LACの決定論的な検証と意味保存ガード
 internal/respondent      本人回答のexact evidence gateと決定論的回答コーチ
 internal/research        固定sourceの論文書誌探索と「未検証」型
-internal/privacyguard    ローカル検査 + regional DLPのfail-closed境界
+internal/privacyguard    Cloud Run内の決定論的検査 + regional DLPのfail-closed境界
 internal/speechio        東京リージョンのSTT / TTS境界
 internal/voiceflow       音声認識、推論、音声合成の一時処理
 docs                     クラウド、セキュリティ、研究設計
@@ -81,12 +81,12 @@ PDFの課題との対応と未解決点は [「Aと聞かれてAと答えられ�
 - サービスアカウントJSON鍵を作らず、Cloud Runの専用サービスIDを使う
 - 原音、文字起こし、モデル応答、PDF本文、token、秘密鍵をKOTAEのアプリログへ出さない。Google Cloud全体の絶対的なゼロ保持とは表現しない
 - STT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する
-- 厳格モードはSTT文字列と応答文のlocal + regional DLP検査が`clear`の時だけ後段へ進め、失敗時は停止する。標準モードに同じ保証があるとは表現しない
-- Vertex AIは`global`であり、検査・置換後の文字列が日本リージョン内に限定されるとは説明しない
+- 厳格モードはSTT文字列と応答文のCloud Run内決定論検査 + regional DLP検査が`clear`の時だけ後段へ進め、失敗時は停止する。標準モードに同じ保証があるとは表現しない
+- Vertex AIは`global`であり、評価APIで置換した文字列や厳格音声で検査済みの文字列が日本リージョン内に限定されるとは説明しない
 - 標準モードのPDFは利用者が選んだ次の一turnだけVertex AIへ渡し、応答後に参照を解放する。厳格モードでは選択・読込・送信を止め、APIでも拒否する
 - 状態鍵はSecret Managerで管理し、状態トークンはFirebase UIDへ束縛して15分で失効させる
 - 音声履歴、再生履歴、無人の後日再評価、保存音声Vaultは現在の公開経路に実装していない
-- Passkeyによるアカウント操作確認は実装したが、話者本人認証ではない。同席者の声を自動採用せず、利用者が相手の質問を言い直した時だけ受け答え支援として扱う
+- Passkeyによるアカウント操作確認は実装したが、話者本人認証ではない。現行VADは同席者・テレビ・合成音声を利用者の声から識別できないため、周囲の声を取り込まない環境で、利用者自身が相手の質問を言い直した時だけ使う
 - 端末内の任意長期測定と時点別の生観測表示は実装済みだが、個人内の自己記録であって有効性・因果効果を示す比較試験ではない
 - respondent coachingは利用者が前景で開始・継続した`intentional` / `foreground` turnだけで動かし、受動的な`ambient` turnから保留質問を作成・変更・進行・解除しない
 - Crossref候補発見を「検証済み」と呼ばない。任意Web巡回、論文本文取得、claim-evidence照合、定期的な自動収集はまだ実装していない

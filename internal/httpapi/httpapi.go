@@ -169,9 +169,14 @@ type VoiceOptions struct {
 	RateLimiter          guard.Limiter
 	AppRateLimiter       guard.Limiter
 	LiveLeaseManager     guard.VoiceLiveLeaseManager
+	LiveHandshakeGate    *VoiceLiveHandshakeGate
 	RequestTimeout       time.Duration
 	MaxRequestBytes      int64
 	RequireRecentPasskey bool
+
+	// livePipelineJoinTimeout is test-configurable inside this package. The
+	// public constructor clamps it to the production safety maximum.
+	livePipelineJoinTimeout time.Duration
 }
 
 type Server struct {
@@ -249,6 +254,19 @@ func NewWithVoiceAndPasskeys(
 	passkeyAppCircuitBreaker guard.Limiter,
 ) http.Handler {
 	appVerifier, _ := verifier.(identity.AppVerifier)
+	// The passkey branch predates the unauthenticated WebSocket admission gate.
+	// Preserve its public constructor behavior without weakening the latest
+	// lifecycle boundary: passkey-gated live voice receives the same bounded
+	// default gate when an older caller did not yet provide one explicitly.
+	if voice.RequireRecentPasskey && voice.LiveHandshakeGate == nil {
+		voice.LiveHandshakeGate = NewVoiceLiveHandshakeGate(
+			DefaultVoiceLiveHandshakeLimit,
+		)
+	}
+	if voice.livePipelineJoinTimeout <= 0 ||
+		voice.livePipelineJoinTimeout > voiceLivePipelineJoinTimeout {
+		voice.livePipelineJoinTimeout = voiceLivePipelineJoinTimeout
+	}
 	server := &Server{
 		logger:                   logger,
 		verifier:                 verifier,

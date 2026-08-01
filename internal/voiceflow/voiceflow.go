@@ -751,7 +751,7 @@ func (p *Pipeline) processLive(
 			}
 		}
 		route := routeSilentNoSpeech
-		result = silentRecognitionResult(input.StateToken, route)
+		result = p.silentRecognitionResult(uid, input.StateToken, route)
 		if promptOnRecognitionMiss(input) {
 			result.Route = routeClarifyNoSpeech
 			spokenReply = lowConfidencePrompt
@@ -1459,12 +1459,14 @@ func (p *Pipeline) prepareTurn(
 			"transcribe_budget",
 		)
 		if !promptOnRecognitionMiss(input) {
-			return silentRecognitionResult(
+			return p.silentRecognitionResult(
+				uid,
 				input.StateToken,
 				routeSilentNoSpeech,
 			), "", nil
 		}
-		return silentRecognitionResult(
+		return p.silentRecognitionResult(
+			uid,
 			input.StateToken,
 			routeClarifyNoSpeech,
 		), lowConfidencePrompt, nil
@@ -1478,12 +1480,14 @@ func (p *Pipeline) prepareTurn(
 		)
 		if errors.Is(err, speechio.ErrNoSpeech) {
 			if !promptOnRecognitionMiss(input) {
-				return silentRecognitionResult(
+				return p.silentRecognitionResult(
+					uid,
 					input.StateToken,
 					routeSilentNoSpeech,
 				), "", nil
 			}
-			return silentRecognitionResult(
+			return p.silentRecognitionResult(
+				uid,
 				input.StateToken,
 				routeClarifyNoSpeech,
 			), lowConfidencePrompt, nil
@@ -1568,12 +1572,14 @@ func (p *Pipeline) prepareRecognizedTurn(
 	}
 	if transcriptConfidenceTooLow(confidence) {
 		if !promptOnRecognitionMiss(input) {
-			return silentRecognitionResult(
+			return p.silentRecognitionResult(
+				uid,
 				input.StateToken,
 				routeSilentLowConfidence,
 			), "", nil
 		}
-		return silentRecognitionResult(
+		return p.silentRecognitionResult(
+			uid,
 			input.StateToken,
 			routeClarifyLowConfidence,
 		), lowConfidencePrompt, nil
@@ -1707,10 +1713,12 @@ func voiceResultFromDecision(
 	}
 }
 
-func silentRecognitionResult(
+func (p *Pipeline) silentRecognitionResult(
+	uid string,
 	stateToken string,
 	route string,
 ) httpapi.VoiceTurnResult {
+	stateToken = p.authenticatedStateToken(uid, stateToken)
 	return httpapi.VoiceTurnResult{
 		StateToken:       stateToken,
 		DetectedDomain:   "unknown",
@@ -1722,6 +1730,17 @@ func silentRecognitionResult(
 		ResearchRecords:  []httpapi.ResearchRecord{},
 		Route:            route,
 	}
+}
+
+func (p *Pipeline) authenticatedStateToken(uid string, token string) string {
+	if p == nil || p.agent == nil || token == "" {
+		return ""
+	}
+	validator, ok := p.agent.(conversation.StateTokenValidator)
+	if !ok || validator.ValidateStateToken(uid, token) != nil {
+		return ""
+	}
+	return token
 }
 
 func clearDocument(document *httpapi.VoiceDocument) {

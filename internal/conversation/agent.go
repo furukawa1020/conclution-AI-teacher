@@ -137,6 +137,13 @@ type Agent interface {
 	Process(ctx context.Context, uid string, turn VoiceTurn) (VoiceTurnResult, error)
 }
 
+// StateTokenValidator authenticates an opaque state token without advancing
+// conversation state. Voice transports use this optional production
+// capability before reflecting a token on an STT no-op path.
+type StateTokenValidator interface {
+	ValidateStateToken(uid string, token string) error
+}
+
 type ContentGenerator interface {
 	GenerateContent(
 		ctx context.Context,
@@ -451,6 +458,16 @@ func (agent *vertexAgent) sealState(
 		}
 	}
 	return agent.codec.seal(uid, state)
+}
+
+// ValidateStateToken authenticates the token, its Firebase UID binding,
+// schema, and expiry without exposing decrypted state to the voice layer.
+func (agent *vertexAgent) ValidateStateToken(uid string, token string) error {
+	if agent == nil || agent.codec == nil || token == "" {
+		return ErrInvalidStateToken
+	}
+	_, err := agent.codec.open(uid, token)
+	return err
 }
 
 func (agent *vertexAgent) Process(
@@ -910,7 +927,6 @@ func (agent *vertexAgent) Process(
 	if !plannerRecoveredWithPrecision &&
 		!skipOptionalForegroundPrecision &&
 		(needsPrecision(fastPlan) ||
-			normalized.ExtendedSpeech ||
 			failClosedPrecision) &&
 		!awaitingAnswerWithoutPublishableDraft {
 		precisionBudget, hasPrecisionBudget := timeoutBudgetWithReserve(
@@ -4467,6 +4483,7 @@ func eligibleForForegroundTechnicalFastPath(
 ) bool {
 	return route == "fast" &&
 		turn.Foreground &&
+		!turn.ExtendedSpeech &&
 		plan.Domain == "technical" &&
 		plan.ResearchAction == "none" &&
 		plan.AssistanceTarget == "assistant" &&

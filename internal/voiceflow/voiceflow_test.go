@@ -81,11 +81,12 @@ func (s *fakeSpeech) Synthesize(_ context.Context, text string) ([]byte, string,
 }
 
 type fakeAgent struct {
-	calls            int
-	turn             conversation.VoiceTurn
-	result           conversation.VoiceTurnResult
-	err              error
-	processingBudget time.Duration
+	calls              int
+	turn               conversation.VoiceTurn
+	result             conversation.VoiceTurnResult
+	err                error
+	stateValidationErr error
+	processingBudget   time.Duration
 }
 
 type expiredStateRecoveryAgent struct {
@@ -127,6 +128,55 @@ func (a *fakeAgent) Process(
 		a.processingBudget = time.Until(deadline)
 	}
 	return a.result, a.err
+}
+
+func (a *fakeAgent) ValidateStateToken(_ string, token string) error {
+	if token == "" {
+		return conversation.ErrInvalidStateToken
+	}
+	return a.stateValidationErr
+}
+
+func TestPipelineDoesNotReflectUnvalidatedStateOnRecognitionFallback(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		speech fakeSpeech
+	}{
+		{
+			name:   "no speech",
+			speech: fakeSpeech{transcribeErr: speechio.ErrNoSpeech},
+		},
+		{
+			name:   "low confidence",
+			speech: fakeSpeech{transcript: "recognized", confidence: 0.1},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			agent := &fakeAgent{stateValidationErr: conversation.ErrInvalidStateToken}
+			pipeline, err := New(&test.speech, agent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := pipeline.Process(
+				context.Background(),
+				"uid",
+				httpapi.VoiceTurnInput{
+					Audio:      []byte("audio"),
+					StateToken: "attacker-controlled-state",
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.StateToken != "" || agent.calls != 0 {
+				t.Fatalf("unvalidated state crossed fallback: result=%+v calls=%d", result, agent.calls)
+			}
+		})
+	}
 }
 
 func TestPipelineFailsClosedOnMeasuredLowSTTConfidence(t *testing.T) {

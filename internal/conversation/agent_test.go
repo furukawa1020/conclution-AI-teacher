@@ -1162,6 +1162,112 @@ func TestExtendedSpeechUsesNaturalGroundedImmediateScaffolding(t *testing.T) {
 	}
 }
 
+func TestOrdinaryExtendedSpeechUsesFastPlannerAndIndependentHighThinkingCritic(
+	t *testing.T,
+) {
+	fast := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, fast)},
+		{body: encodeContract(t, validCriticContract(fast.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	utterance := strings.Repeat(
+		"While considering a community garden project, I keep returning to how shared goals, available time, seasonal limits, and a small reversible next step fit together. ",
+		3,
+	)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-ordinary-extended-speech",
+		VoiceTurn{
+			SchemaVersion:  SchemaVersion,
+			Utterance:      utterance,
+			ExtendedSpeech: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process extended speech: %v", err)
+	}
+	if result.Route != "fast" {
+		t.Fatalf("ordinary extended speech route = %q, want fast", result.Route)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("calls = %d, want fast planner and critic", len(fake.calls))
+	}
+	if fake.calls[0].model != DefaultFastModel ||
+		fake.calls[0].thinkingLevel != genai.ThinkingLevelLow {
+		t.Fatalf("unexpected fast planner call: %#v", fake.calls[0])
+	}
+	if fake.calls[1].model != DefaultFastModel ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[1].prompt, "<lac_critic_data>") {
+		t.Fatalf("extended speech did not use an independent high-thinking critic: %#v", fake.calls[1])
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"extended_speech":true`) {
+			t.Fatalf("call %d is missing the server-derived extended-speech flag", index)
+		}
+	}
+}
+
+func TestForegroundTechnicalExtendedSpeechRunsPrecisionAndIndependentHighThinkingCritic(
+	t *testing.T,
+) {
+	fast := validModelPlan()
+	fast.Domain = "technical"
+	precision := validModelPlan()
+	precision.Domain = "technical"
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, fast)},
+		{body: encodePlan(t, precision)},
+		{body: encodeContract(t, validCriticContract(precision.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	utterance := strings.Repeat(
+		"While considering the implementation, I keep returning to how the technical constraints and a small reversible next step fit together. ",
+		3,
+	)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-foreground-technical-extended-speech",
+		VoiceTurn{
+			SchemaVersion:  SchemaVersion,
+			Utterance:      utterance,
+			Ambient:        true,
+			Foreground:     true,
+			ExtendedSpeech: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process foreground technical extended speech: %v", err)
+	}
+	if result.Route != "precision" {
+		t.Fatalf("foreground technical extended speech route = %q, want precision", result.Route)
+	}
+	if len(fake.calls) != 3 {
+		t.Fatalf("calls = %d, want fast planner, precision planner, and critic", len(fake.calls))
+	}
+	if fake.calls[0].model != DefaultFastModel ||
+		fake.calls[0].thinkingLevel != genai.ThinkingLevelLow {
+		t.Fatalf("unexpected fast planner call: %#v", fake.calls[0])
+	}
+	if fake.calls[1].model != DefaultPrecisionModel ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
+		t.Fatalf("foreground technical extended speech did not reach precision planner: %#v", fake.calls[1])
+	}
+	if fake.calls[2].model != DefaultFastModel ||
+		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
+		t.Fatalf("foreground technical extended speech did not use an independent high-thinking critic: %#v", fake.calls[2])
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"extended_speech":true`) {
+			t.Fatalf("call %d is missing the server-derived extended-speech flag", index)
+		}
+	}
+}
+
 func TestSystemInstructionKeepsProactiveConversationLowPressureAndNonDependent(
 	t *testing.T,
 ) {
@@ -1437,6 +1543,12 @@ func TestForegroundTechnicalFastPathRejectsMandatoryPrecisionBoundaries(t *testi
 			name: "research action",
 			configure: func(_ *VoiceTurn, plan *modelPlan) {
 				plan.ResearchAction = "recent_papers"
+			},
+		},
+		{
+			name: "extended speech",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.ExtendedSpeech = true
 			},
 		},
 	}

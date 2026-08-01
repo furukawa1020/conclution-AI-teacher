@@ -58,6 +58,9 @@ func main() {
 	var voiceRateLimiter guard.Limiter
 	var voiceAppRateLimiter guard.Limiter
 	var voiceLiveLeaseManager guard.VoiceLiveLeaseManager
+	voiceLiveHandshakeGate := httpapi.NewVoiceLiveHandshakeGate(
+		httpapi.DefaultVoiceLiveHandshakeLimit,
+	)
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
 	var passkeyService *passkey.Service
@@ -291,6 +294,7 @@ func main() {
 			RateLimiter:          voiceRateLimiter,
 			AppRateLimiter:       voiceAppRateLimiter,
 			LiveLeaseManager:     voiceLiveLeaseManager,
+			LiveHandshakeGate:    voiceLiveHandshakeGate,
 			RequestTimeout:       cfg.VoiceTimeout,
 			MaxRequestBytes:      cfg.MaxVoiceBytes,
 			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,

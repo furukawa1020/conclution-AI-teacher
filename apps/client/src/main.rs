@@ -6,8 +6,8 @@ use serde::Deserialize;
 const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
 const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
 const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
-const RETURNING_PASSKEY_ACTION: &str = "登録済みパスキーで戻る";
-const NEW_PASSKEY_ACCOUNT_ACTION: &str = "新しい仮名アカウントを作る";
+const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
+const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　パスキーを登録する";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
 const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
@@ -2658,11 +2658,12 @@ mod tests {
 
     #[test]
     fn passkey_entry_copy_separates_returning_authentication_from_new_registration() {
-        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済みパスキーで戻る");
-        assert_eq!(NEW_PASSKEY_ACCOUNT_ACTION, "新しい仮名アカウントを作る");
+        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済みの方　同じパスキーで戻る");
+        assert_eq!(NEW_PASSKEY_ACCOUNT_ACTION, "初めての方　パスキーを登録する");
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("既存の仮名アカウントとは別"));
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("自動登録はしません"));
         assert!(!RETURNING_PASSKEY_ACTION.contains("登録する"));
+        assert!(NEW_PASSKEY_ACCOUNT_ACTION.starts_with("初めての方"));
     }
 
     #[test]

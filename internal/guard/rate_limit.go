@@ -16,12 +16,20 @@ import (
 )
 
 const (
-	DefaultPerMinute = 5
-	DefaultPerDay    = 40
-	MinPerMinute     = 1
-	MaxPerMinute     = 20
-	MinPerDay        = 1
-	MaxPerDay        = 200
+	DefaultPerMinute                     = 5
+	DefaultPerDay                        = 40
+	MinPerMinute                         = 1
+	MaxPerMinute                         = 20
+	MinPerDay                            = 1
+	MaxPerDay                            = 200
+	MaxPasskeyAppCircuitBreakerPerMinute = 300
+	MaxPasskeyAppCircuitBreakerPerDay    = 20_000
+	evaluationRateLimitCollection        = "evaluationRateLimits"
+	voiceRateLimitCollection             = "voiceRateLimits"
+	passkeyClientRateLimitCollection     = "passkeyClientRateLimits"
+	passkeyAppRateLimitCollection        = "passkeyAppRateLimits"
+	rateLimitTTLField                    = "expiresAt"
+	rateLimitDocumentTTL                 = 48 * time.Hour
 )
 
 var ErrRateLimitExceeded = errors.New("evaluation rate limit exceeded")
@@ -37,6 +45,27 @@ func (l Limits) Validate() error {
 	}
 	if l.PerDay < MinPerDay || l.PerDay > MaxPerDay {
 		return fmt.Errorf("daily limit must be between %d and %d", MinPerDay, MaxPerDay)
+	}
+	return nil
+}
+
+// ValidatePasskeyAppCircuitBreaker validates only the application-wide
+// passkey safety ceiling. The ordinary per-client limits intentionally keep
+// their much lower MaxPerMinute and MaxPerDay bounds.
+func (l Limits) ValidatePasskeyAppCircuitBreaker() error {
+	if l.PerMinute < MinPerMinute || l.PerMinute > MaxPasskeyAppCircuitBreakerPerMinute {
+		return fmt.Errorf(
+			"per-minute limit must be between %d and %d",
+			MinPerMinute,
+			MaxPasskeyAppCircuitBreakerPerMinute,
+		)
+	}
+	if l.PerDay < MinPerDay || l.PerDay > MaxPasskeyAppCircuitBreakerPerDay {
+		return fmt.Errorf(
+			"daily limit must be between %d and %d",
+			MinPerDay,
+			MaxPasskeyAppCircuitBreakerPerDay,
+		)
 	}
 	return nil
 }
@@ -113,20 +142,48 @@ func NewFirestoreLimiterForScope(
 	limits Limits,
 	scope string,
 ) (*FirestoreLimiter, error) {
-	if client == nil {
-		return nil, errors.New("firestore client is required")
-	}
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
 	collection := ""
 	switch scope {
 	case "evaluation":
-		collection = "evaluationRateLimits"
+		collection = evaluationRateLimitCollection
 	case "voice":
-		collection = "voiceRateLimits"
+		collection = voiceRateLimitCollection
 	default:
 		return nil, errors.New("unsupported rate-limit scope")
+	}
+	return newFirestoreLimiter(client, limits, collection)
+}
+
+func NewFirestorePasskeyClientLimiter(
+	client *firestore.Client,
+	limits Limits,
+) (*FirestoreLimiter, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
+	return newFirestoreLimiter(client, limits, passkeyClientRateLimitCollection)
+}
+
+func NewFirestorePasskeyAppLimiter(
+	client *firestore.Client,
+	limits Limits,
+) (*FirestoreLimiter, error) {
+	if err := limits.ValidatePasskeyAppCircuitBreaker(); err != nil {
+		return nil, err
+	}
+	return newFirestoreLimiter(client, limits, passkeyAppRateLimitCollection)
+}
+
+func newFirestoreLimiter(
+	client *firestore.Client,
+	limits Limits,
+	collection string,
+) (*FirestoreLimiter, error) {
+	if client == nil {
+		return nil, errors.New("firestore client is required")
 	}
 	return &FirestoreLimiter{
 		client:     client,
@@ -159,15 +216,7 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 		if advanceErr := state.advance(now, l.limits); advanceErr != nil {
 			return advanceErr
 		}
-		return tx.Set(ref, map[string]any{
-			"minuteStart":   state.MinuteStart,
-			"minuteCount":   state.MinuteCount,
-			"dayStart":      state.DayStart,
-			"dayCount":      state.DayCount,
-			"schemaVersion": 1,
-			"updatedAt":     firestore.ServerTimestamp,
-			"expiresAt":     now.UTC().Add(48 * time.Hour),
-		})
+		return tx.Set(ref, firestoreCounterDocument(state, now))
 	})
 	if errors.Is(err, ErrRateLimitExceeded) {
 		return ErrRateLimitExceeded
@@ -176,6 +225,18 @@ func (l *FirestoreLimiter) Consume(ctx context.Context, uid string, now time.Tim
 		return fmt.Errorf("consume request quota: %w", err)
 	}
 	return nil
+}
+
+func firestoreCounterDocument(state counterState, now time.Time) map[string]any {
+	return map[string]any{
+		"minuteStart":     state.MinuteStart,
+		"minuteCount":     state.MinuteCount,
+		"dayStart":        state.DayStart,
+		"dayCount":        state.DayCount,
+		"schemaVersion":   1,
+		"updatedAt":       firestore.ServerTimestamp,
+		rateLimitTTLField: now.UTC().Add(rateLimitDocumentTTL),
+	}
 }
 
 type MemoryLimiter struct {
@@ -188,10 +249,28 @@ func NewMemoryLimiter(limits Limits) (*MemoryLimiter, error) {
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
+	return newMemoryLimiter(limits), nil
+}
+
+func NewMemoryPasskeyClientLimiter(limits Limits) (*MemoryLimiter, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
+	return newMemoryLimiter(limits), nil
+}
+
+func NewMemoryPasskeyAppLimiter(limits Limits) (*MemoryLimiter, error) {
+	if err := limits.ValidatePasskeyAppCircuitBreaker(); err != nil {
+		return nil, err
+	}
+	return newMemoryLimiter(limits), nil
+}
+
+func newMemoryLimiter(limits Limits) *MemoryLimiter {
 	return &MemoryLimiter{
 		limits:   limits,
 		counters: make(map[string]counterState),
-	}, nil
+	}
 }
 
 func (l *MemoryLimiter) Consume(ctx context.Context, uid string, now time.Time) error {

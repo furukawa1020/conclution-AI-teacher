@@ -2,9 +2,9 @@ import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebase
 import {
   browserSessionPersistence,
   getIdToken,
-  GoogleAuthProvider,
+  getIdTokenResult,
   initializeAuth,
-  signInWithPopup,
+  signInWithCustomToken,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 import {
   getToken as getAppCheckToken,
@@ -51,6 +51,15 @@ import {
   shouldAbortVoiceTransportOnInterrupt,
   VOICE_STREAM_LIMITS,
 } from "./voice-stream-policy.mjs";
+import {
+  decidePasskeyAction,
+  decodeAuthenticationBegin,
+  decodeRegistrationBegin,
+  encodeAuthenticationCredential,
+  encodeRegistrationCredential,
+  isPasskeyCancellation,
+  parsePasskeyFinish,
+} from "./passkey-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
@@ -66,6 +75,17 @@ const VOICE_LIVE_ENDPOINT =
 const PCM_CAPTURE_WORKLET_URL = "/pcm-capture-worklet.js";
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
 const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/health`;
+const PASSKEY_REGISTRATION_BEGIN_ENDPOINT =
+  "/api/v1/passkeys/registration:begin";
+const PASSKEY_REGISTRATION_FINISH_ENDPOINT =
+  "/api/v1/passkeys/registration:finish";
+const PASSKEY_AUTHENTICATION_BEGIN_ENDPOINT =
+  "/api/v1/passkeys/authentication:begin";
+const PASSKEY_AUTHENTICATION_FINISH_ENDPOINT =
+  "/api/v1/passkeys/authentication:finish";
+// The server caps finish bodies at 256 KiB. JSON produced here is ASCII-only,
+// so a character limit is also a byte-safe upper bound before fetch.
+const PASSKEY_JSON_MAX_CHARS = 255 * 1024;
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
@@ -104,6 +124,8 @@ const MAX_STOPPED_SESSION_CODES = 8;
 const stoppedSessionCodes = new Map();
 const beginGate = createTurnGate();
 const finishGate = createTurnGate();
+const passkeyGate = createTurnGate();
+let activePasskeyController;
 const sessionClock = createSessionClock({
   now: () => performance.now(),
 });
@@ -269,39 +291,315 @@ function verifiedAccountUser(user) {
   );
 }
 
-async function accountUser(interactive) {
-  const { auth } = await firebaseAuth();
-  if (verifiedAccountUser(auth.currentUser)) {
+function customTokenCandidateUser(user) {
+  return Boolean(
+    user &&
+      !user.isAnonymous &&
+      Array.isArray(user.providerData) &&
+      user.providerData.length === 0,
+  );
+}
+
+function currentAccountUser(auth) {
+  if (
+    verifiedAccountUser(auth.currentUser) ||
+    customTokenCandidateUser(auth.currentUser)
+  ) {
     return auth.currentUser;
   }
-  if (!interactive) {
-    fail("identity_required");
-  }
-
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
-  let credential;
-  try {
-    credential = await signInWithPopup(auth, provider);
-  } catch {
-    fail("identity_required");
-  }
-  if (!verifiedAccountUser(credential?.user)) {
+  if (auth.currentUser) {
     fail("identity_verification_failed");
   }
-  return credential.user;
+  return null;
+}
+
+function passkeySessionSnapshot(user, tokenResult) {
+  const provider =
+    tokenResult?.signInProvider === "google.com"
+      ? "google.com"
+      : tokenResult?.signInProvider === "custom"
+        ? "custom"
+        : "";
+  return Object.freeze({
+    accountVerified:
+      provider === "google.com"
+        ? verifiedAccountUser(user)
+        : tokenResult?.claims?.kotae_account_verified === true,
+    authMethod: tokenResult?.claims?.kotae_authn,
+    passkeyAtSeconds: tokenResult?.claims?.kotae_passkey_at,
+    provider,
+  });
+}
+
+function requirePasskeySupport(operation) {
+  const method = operation === "registration" ? "create" : "get";
+  if (
+    globalThis.isSecureContext !== true ||
+    typeof globalThis.PublicKeyCredential !== "function" ||
+    !navigator.credentials ||
+    typeof navigator.credentials[method] !== "function"
+  ) {
+    fail("passkey_unsupported");
+  }
+}
+
+function passkeyRequestToken(value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 32 * 1024 ||
+    /\s/u.test(value)
+  ) {
+    fail("authentication_failed");
+  }
+  return value;
+}
+
+async function passkeyJSON(
+  endpoint,
+  { appCheckToken, body, failureCode, signal },
+) {
+  const headers = {
+    Accept: "application/json",
+    "X-Firebase-AppCheck": passkeyRequestToken(appCheckToken),
+  };
+  let serializedBody;
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    serializedBody = JSON.stringify(body);
+    if (
+      serializedBody.length === 0 ||
+      serializedBody.length > PASSKEY_JSON_MAX_CHARS
+    ) {
+      fail(failureCode);
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      body: serializedBody,
+      cache: "no-store",
+      credentials: "omit",
+      headers,
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal,
+    });
+  } catch {
+    if (signal?.aborted) fail("passkey_cancelled");
+    fail(failureCode);
+  }
+  if (!response.ok) fail(failureCode);
+  const contentType = response.headers.get("Content-Type") ?? "";
+  if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) fail(failureCode);
+  const encoded = await response.text();
+  if (encoded.length === 0 || encoded.length > PASSKEY_JSON_MAX_CHARS) {
+    fail(failureCode);
+  }
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    fail(failureCode);
+  }
+}
+
+async function runPasskeyOperation(failureCode, operation) {
+  const passkeyToken = passkeyGate.acquire();
+  if (passkeyToken === null) fail(failureCode);
+  const controller = new AbortController();
+  activePasskeyController = controller;
+  try {
+    return await operation(controller.signal);
+  } finally {
+    if (activePasskeyController === controller) {
+      activePasskeyController = undefined;
+    }
+    passkeyGate.release(passkeyToken);
+  }
+}
+
+function finishEndpoint(endpoint, ceremonyId) {
+  return `${endpoint}?ceremonyId=${encodeURIComponent(ceremonyId)}`;
+}
+
+function preservePasskeyBoundaryError(error) {
+  return Boolean(
+    error instanceof Error &&
+      (error.message === "passkey_cancelled" ||
+        error.message === "passkey_unsupported"),
+  );
+}
+
+async function verifyFreshCustomPasskeyUser(user, failureCode) {
+  const tokenResult = await getIdTokenResult(user, true);
+  const action = decidePasskeyAction(
+    passkeySessionSnapshot(user, tokenResult),
+    Math.floor(Date.now() / 1000),
+  );
+  if (action !== "reuse") fail(failureCode);
+  return user;
+}
+
+async function registerPasskey(auth, appCheckToken) {
+  requirePasskeySupport("registration");
+  return runPasskeyOperation("passkey_registration_failed", async (signal) => {
+    let credential;
+    let encodedCredential;
+    try {
+      const begin = decodeRegistrationBegin(
+        await passkeyJSON(PASSKEY_REGISTRATION_BEGIN_ENDPOINT, {
+          appCheckToken,
+          failureCode: "passkey_registration_failed",
+          signal,
+        }),
+      );
+      try {
+        credential = await navigator.credentials.create({
+          ...begin.options,
+          signal,
+        });
+      } catch (error) {
+        if (isPasskeyCancellation(error)) fail("passkey_cancelled");
+        throw error;
+      }
+      if (!credential) fail("passkey_registration_failed");
+      encodedCredential = encodeRegistrationCredential(credential);
+      const finish = parsePasskeyFinish(
+        await passkeyJSON(
+          finishEndpoint(PASSKEY_REGISTRATION_FINISH_ENDPOINT, begin.ceremonyId),
+          {
+            appCheckToken,
+            body: encodedCredential,
+            failureCode: "passkey_registration_failed",
+            signal,
+          },
+        ),
+      );
+      const signedIn = await signInWithCustomToken(auth, finish.customToken);
+      return await verifyFreshCustomPasskeyUser(
+        signedIn.user,
+        "passkey_registration_failed",
+      );
+    } catch (error) {
+      if (preservePasskeyBoundaryError(error)) throw error;
+      fail("passkey_registration_failed");
+    } finally {
+      credential = undefined;
+      encodedCredential = undefined;
+    }
+  });
+}
+
+async function authenticatePasskey(auth, appCheckToken) {
+  requirePasskeySupport("authentication");
+  return runPasskeyOperation("passkey_authentication_failed", async (signal) => {
+    let credential;
+    let encodedCredential;
+    try {
+      const begin = decodeAuthenticationBegin(
+        await passkeyJSON(PASSKEY_AUTHENTICATION_BEGIN_ENDPOINT, {
+          appCheckToken,
+          failureCode: "passkey_authentication_failed",
+          signal,
+        }),
+      );
+      try {
+        credential = await navigator.credentials.get({
+          ...begin.options,
+          signal,
+        });
+      } catch (error) {
+        if (isPasskeyCancellation(error)) fail("passkey_cancelled");
+        throw error;
+      }
+      if (!credential) fail("passkey_authentication_failed");
+      encodedCredential = encodeAuthenticationCredential(credential);
+      const finish = parsePasskeyFinish(
+        await passkeyJSON(
+          finishEndpoint(PASSKEY_AUTHENTICATION_FINISH_ENDPOINT, begin.ceremonyId),
+          {
+            appCheckToken,
+            body: encodedCredential,
+            failureCode: "passkey_authentication_failed",
+            signal,
+          },
+        ),
+      );
+      const signedIn = await signInWithCustomToken(auth, finish.customToken);
+      return await verifyFreshCustomPasskeyUser(
+        signedIn.user,
+        "passkey_authentication_failed",
+      );
+    } catch (error) {
+      if (preservePasskeyBoundaryError(error)) throw error;
+      fail("passkey_authentication_failed");
+    } finally {
+      credential = undefined;
+      encodedCredential = undefined;
+    }
+  });
+}
+
+async function freshPasskeyUser(auth, user, appCheckToken, interactive) {
+  if (!user) {
+    if (!interactive) fail("passkey_required");
+    return authenticatePasskey(auth, appCheckToken);
+  }
+  const tokenResult = await getIdTokenResult(user, false);
+  const action = decidePasskeyAction(
+    passkeySessionSnapshot(user, tokenResult),
+    Math.floor(Date.now() / 1000),
+  );
+  if (action === "reuse") return user;
+  if (action === "reject") fail("identity_verification_failed");
+  if (!interactive) fail("passkey_required");
+  if (action === "registration") {
+    fail("passkey_required");
+  }
+  return authenticatePasskey(auth, appCheckToken);
+}
+
+async function registerPasskeyAccount() {
+  if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
+    fail("passkey_registration_failed");
+  }
+  try {
+    const { appCheck } = await appServices();
+    const { auth } = await firebaseAuth();
+    const appCheckResult = await getAppCheckToken(appCheck, false);
+    const user = currentAccountUser(auth);
+    if (user) {
+      fail("passkey_account_exists");
+    }
+    await registerPasskey(auth, appCheckResult.token);
+    return Object.freeze({ state: "ready" });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message === "passkey_account_exists" ||
+        preservePasskeyBoundaryError(error))
+    ) {
+      throw error;
+    }
+    fail("passkey_registration_failed");
+  }
 }
 
 async function secureCredentials(interactive = false) {
   try {
-    const [{ appCheck }, user] = await Promise.all([
-      appServices(),
-      accountUser(interactive),
-    ]);
-    const [idToken, appCheckResult] = await Promise.all([
-      getIdToken(user, false),
-      getAppCheckToken(appCheck, false),
-    ]);
+    const { appCheck } = await appServices();
+    const { auth } = await firebaseAuth();
+    const appCheckResult = await getAppCheckToken(appCheck, false);
+    const user = currentAccountUser(auth);
+    const authorizedUser = await freshPasskeyUser(
+      auth,
+      user,
+      appCheckResult.token,
+      interactive,
+    );
+    const idToken = await getIdToken(authorizedUser, false);
     return Object.freeze({
       appCheckToken: appCheckResult.token,
       idToken,
@@ -312,6 +610,11 @@ async function secureCredentials(interactive = false) {
         case "app_check_not_configured":
         case "identity_required":
         case "identity_verification_failed":
+        case "passkey_authentication_failed":
+        case "passkey_cancelled":
+        case "passkey_registration_failed":
+        case "passkey_required":
+        case "passkey_unsupported":
           throw error;
         default:
           break;
@@ -368,6 +671,9 @@ async function getStatus() {
   } catch (error) {
     if (error instanceof Error && error.message === "identity_required") {
       return Object.freeze({ state: "identity-required" });
+    }
+    if (error instanceof Error && error.message === "passkey_required") {
+      return Object.freeze({ state: "passkey-required" });
     }
     return Object.freeze({ state: "unavailable" });
   }
@@ -815,7 +1121,7 @@ function resolveRecording(recording, candidate) {
   stopVad(recording);
   setStreamTracksEnabled(recording.stream, false);
   const captured =
-    candidate === undefined
+    candidate === undefined || !recording.fallbackAudioComplete
       ? Object.freeze({ chunks: [], totalBytes: 0 })
       : candidate.captureBuffer.take();
   const mimeType =
@@ -825,7 +1131,7 @@ function resolveRecording(recording, candidate) {
   const confirmedSpeech =
     candidate !== undefined &&
     candidate.confirmed &&
-    captured.totalBytes > 0;
+    (captured.totalBytes > 0 || !recording.fallbackAudioComplete);
   recording.candidate = undefined;
   if (candidate) {
     candidate.discarded = true;
@@ -836,7 +1142,10 @@ function resolveRecording(recording, candidate) {
   recording.resolveEnd(
     Object.freeze({
       blob,
-      hasSpeech: confirmedSpeech && blob.size > 0,
+      fallbackAudioComplete: recording.fallbackAudioComplete,
+      hasSpeech:
+        confirmedSpeech &&
+        (blob.size > 0 || !recording.fallbackAudioComplete),
       mimeType,
       reason: recording.stopReason,
     }),
@@ -894,6 +1203,13 @@ function currentAudioContextFrame(context = audioContext) {
   return Number.isSafeInteger(frame) && frame >= 0 ? frame : null;
 }
 
+function recordingHasLivePrimary(recording) {
+  return (
+    (activeRecording === recording && activeLiveSession !== undefined) ||
+    pendingLiveSession?.recording === recording
+  );
+}
+
 function startCandidateRecorder(
   recording,
   confirmed,
@@ -938,6 +1254,7 @@ function startCandidateRecorder(
     startedAt: confirmed ? null : candidateStartedAt,
     stopReason: "",
   };
+  recording.fallbackAudioComplete = true;
   recording.totalBytes = 0;
   recording.candidate = candidate;
   recorder.addEventListener("dataavailable", (event) => {
@@ -950,9 +1267,23 @@ function startCandidateRecorder(
     ) {
       return;
     }
+    if (!recording.fallbackAudioComplete) {
+      return;
+    }
     const captureState = candidate.captureBuffer.append(event.data);
     recording.totalBytes = captureState.totalBytes;
     if (captureState.tooLarge) {
+      if (recordingHasLivePrimary(recording)) {
+        // The WebSocket PCM stream is the primary path. Once this bounded
+        // MediaRecorder copy overflows it is no longer a complete utterance,
+        // so erase and permanently disable only the HTTP fallback. Keeping
+        // the recorder alive preserves VAD/end-of-turn while later chunks are
+        // dropped instead of extending local audio retention.
+        candidate.captureBuffer.clear();
+        recording.fallbackAudioComplete = false;
+        recording.totalBytes = 0;
+        return;
+      }
       recording.discard = true;
       requestRecordingStop(recording, "too-large");
     }
@@ -1191,6 +1522,7 @@ function createRecordingState(stream) {
     discard: false,
     endPromise,
     expectedEpoch: sessionEpoch,
+    fallbackAudioComplete: true,
     firstVoiceAt: null,
     lastVoiceAt: null,
     liveSpeechConfirmed: false,
@@ -1219,7 +1551,11 @@ function createRecording(stream) {
   return recording;
 }
 
-async function beginTurn(serializedSessionState, turnMode) {
+async function beginTurn(
+  serializedSessionState,
+  turnMode,
+  strictCloudMinimization,
+) {
   if (document.hidden) {
     stopSession("hidden");
     fail("request_cancelled");
@@ -1228,13 +1564,21 @@ async function beginTurn(serializedSessionState, turnMode) {
     typeof serializedSessionState !== "string" ||
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
     !isValidTurnMode(turnMode) ||
+    typeof strictCloudMinimization !== "boolean" ||
     activeRecording ||
     activeLiveSession ||
     pendingLiveSession ||
     beginGate.isBusy() ||
-    finishGate.isBusy()
+    finishGate.isBusy() ||
+    passkeyGate.isBusy()
   ) {
     fail("voice_turn_invalid");
+  }
+  if (
+    strictCloudMinimization &&
+    (serializedSessionState !== "" || pendingDocument)
+  ) {
+    fail("strict_privacy_blocked");
   }
   const beginToken = beginGate.acquire();
   if (beginToken === null) {
@@ -1274,6 +1618,7 @@ async function beginTurn(serializedSessionState, turnMode) {
           expectedEpoch,
           sessionState: serializedSessionState,
           stream,
+          strictCloudMinimization,
           turnMode,
         });
         if (expectedEpoch !== sessionEpoch) {
@@ -1455,8 +1800,11 @@ function armPendingDocumentExpiry(documentForExpiry, attachedAt) {
   }, VOICE_SESSION_LIMITS.pendingDocumentLimitMs);
 }
 
-function safeVoiceResponse(payload) {
-  if (!isPlainRecord(payload)) {
+function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
+  if (
+    !isPlainRecord(payload) ||
+    typeof expectedStrictCloudMinimization !== "boolean"
+  ) {
     fail("voice_response_invalid");
   }
   const hasAudio = payload.audioBase64 !== "";
@@ -1485,6 +1833,11 @@ function safeVoiceResponse(payload) {
     ) ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
+    !["", "blocked", "clear"].includes(payload.privacyStatus) ||
+    (expectedStrictCloudMinimization &&
+      payload.privacyStatus !== "blocked" &&
+      payload.privacyStatus !== "clear") ||
+    (!expectedStrictCloudMinimization && payload.privacyStatus !== "") ||
     (payload.caption !== undefined &&
       payload.caption !== null &&
       !boundedString(payload.caption, 2_000))
@@ -1501,6 +1854,28 @@ function safeVoiceResponse(payload) {
   } catch {
     fail("voice_response_invalid");
   }
+  if (
+    (payload.privacyStatus === "blocked" &&
+      (hasAudio ||
+        payload.audioMimeType !== "" ||
+        payload.caption !== null ||
+        payload.sessionState !== "" ||
+        payload.detectedDomain !== "unknown" ||
+        payload.assistanceTarget !== "assistant" ||
+        payload.respondentStage !== "none" ||
+        payload.coachPhase !== "none" ||
+        payload.coachAction !== "none" ||
+        research.status !== "none" ||
+        research.records.length !== 0 ||
+        payload.route !== "strict-privacy-blocked" ||
+        payload.needsPaper)) ||
+    (payload.privacyStatus === "clear" &&
+      (payload.sessionState !== "" ||
+        research.status !== "none" ||
+        research.records.length !== 0))
+  ) {
+    fail("voice_response_invalid");
+  }
 
   return Object.freeze({
     audioBase64: payload.audioBase64,
@@ -1512,6 +1887,7 @@ function safeVoiceResponse(payload) {
     coachPhase: payload.coachPhase,
     coachAction: payload.coachAction,
     needsPaper: payload.needsPaper,
+    privacyStatus: payload.privacyStatus,
     researchStatus: research.status,
     researchRecords: research.records,
     route: payload.route,
@@ -1572,6 +1948,7 @@ async function startVoiceLiveSession({
   idToken,
   sessionState,
   stream,
+  strictCloudMinimization,
   turnMode,
 }) {
   if (
@@ -1581,6 +1958,7 @@ async function startVoiceLiveSession({
     !liveCredential(idToken) ||
     typeof sessionState !== "string" ||
     sessionState.length > SESSION_STATE_MAX_CHARS ||
+    typeof strictCloudMinimization !== "boolean" ||
     !isValidTurnMode(turnMode) ||
     (captureHandoff !== undefined &&
       (captureHandoff === null ||
@@ -1610,11 +1988,12 @@ async function startVoiceLiveSession({
       idToken,
       appCheckToken,
       sessionState,
+      strictCloudMinimization,
       turnMode,
       sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
     });
     protocol = createVoiceLiveServerProtocol((result) =>
-      safeVoiceResponse(result),
+      safeVoiceResponse(result, strictCloudMinimization),
     );
   } catch {
     socket.close(1000, "http_fallback");
@@ -2230,13 +2609,19 @@ async function startVoiceLiveSession({
         idToken,
         sessionState,
         stream: nextStream,
+        strictCloudMinimization,
         turnMode: "foreground",
       });
     },
-    matches(expectedSessionState, expectedTurnMode) {
+    matches(
+      expectedSessionState,
+      expectedTurnMode,
+      expectedStrictCloudMinimization,
+    ) {
       return (
         expectedSessionState === sessionState &&
-        expectedTurnMode === turnMode
+        expectedTurnMode === turnMode &&
+        expectedStrictCloudMinimization === strictCloudMinimization
       );
     },
     cancel(error = new Error("request_cancelled")) {
@@ -3491,7 +3876,12 @@ async function awaitValidatedPlaybackCompletion(
   }
 }
 
-async function consumeVoiceStream(response, playback, expectedEpoch) {
+async function consumeVoiceStream(
+  response,
+  playback,
+  expectedEpoch,
+  expectedStrictCloudMinimization,
+) {
   if (
     !isNdjsonContentType(response.headers.get("Content-Type")) ||
     !response.body ||
@@ -3509,7 +3899,7 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
   }
 
   const parser = createVoiceStreamParser((result) =>
-    safeVoiceResponse(result),
+    safeVoiceResponse(result, expectedStrictCloudMinimization),
   );
   const decoder = new TextDecoder("utf-8", {
     fatal: true,
@@ -3570,7 +3960,11 @@ async function consumeVoiceStream(response, playback, expectedEpoch) {
   }
 }
 
-async function finishTurn(serializedSessionState, turnMode) {
+async function finishTurn(
+  serializedSessionState,
+  turnMode,
+  strictCloudMinimization,
+) {
   const recording = activeRecording;
   if (!recording || finishGate.isBusy()) {
     fail("voice_turn_invalid");
@@ -3578,7 +3972,10 @@ async function finishTurn(serializedSessionState, turnMode) {
   if (
     typeof serializedSessionState !== "string" ||
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
-    !isValidTurnMode(turnMode)
+    !isValidTurnMode(turnMode) ||
+    typeof strictCloudMinimization !== "boolean" ||
+    (strictCloudMinimization &&
+      (serializedSessionState !== "" || pendingDocument))
   ) {
     fail("voice_turn_invalid");
   }
@@ -3645,7 +4042,11 @@ async function finishTurn(serializedSessionState, turnMode) {
     }
     if (
       liveSession &&
-      !liveSession.matches(serializedSessionState, turnMode)
+      !liveSession.matches(
+        serializedSessionState,
+        turnMode,
+        strictCloudMinimization,
+      )
     ) {
       liveSession.cancel(new Error("voice_turn_invalid"));
       fail("voice_turn_invalid");
@@ -3721,6 +4122,12 @@ async function finishTurn(serializedSessionState, turnMode) {
         liveSession = undefined;
       }
     }
+    if (capture.fallbackAudioComplete !== true) {
+      // Never upload an empty suffix or prefix after the bounded recorder
+      // fallback was invalidated. The live primary already had its chance to
+      // finish above; a failed primary now ends explicitly.
+      fail("voice_turn_too_large");
+    }
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
       Promise.all([
         capture.blob.arrayBuffer(),
@@ -3751,6 +4158,7 @@ async function finishTurn(serializedSessionState, turnMode) {
       audioBase64,
       mimeType: capture.mimeType,
       sessionState: serializedSessionState,
+      strictCloudMinimization,
       turnMode,
     };
     if (documentForTurn) {
@@ -3759,7 +4167,6 @@ async function finishTurn(serializedSessionState, turnMode) {
         mimeType: documentForTurn.mimeType,
       };
     }
-
     requestController = new AbortController();
     activeRequestController = requestController;
     const response = await awaitVoiceTurnResult(
@@ -3784,7 +4191,12 @@ async function finishTurn(serializedSessionState, turnMode) {
       fail(mapVoiceResponseError(response.status));
     }
     const completed = await awaitVoiceTurnResult(
-      consumeVoiceStream(response, playback, expectedEpoch),
+      consumeVoiceStream(
+        response,
+        playback,
+        expectedEpoch,
+        strictCloudMinimization,
+      ),
       () => requestController.abort(),
     );
     await awaitValidatedPlaybackCompletion(playback, expectedEpoch);
@@ -3918,6 +4330,10 @@ function stopSession(reason = "request_cancelled") {
   finishGate.reset();
   sessionExpiryWatchdog.disarm();
 
+  if (activePasskeyController) {
+    activePasskeyController.abort();
+  }
+
   if (activeRequestController) {
     activeRequestController.abort();
     activeRequestController = undefined;
@@ -3973,6 +4389,9 @@ function hasActiveVoiceSession() {
 }
 
 document.addEventListener("visibilitychange", () => {
+  if (document.hidden && activePasskeyController) {
+    activePasskeyController.abort();
+  }
   if (
     shouldStopSessionForLifecycle(
       "visibilitychange",
@@ -3984,6 +4403,9 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 globalThis.addEventListener("pagehide", () => {
+  if (activePasskeyController) {
+    activePasskeyController.abort();
+  }
   if (
     shouldStopSessionForLifecycle(
       "pagehide",
@@ -4001,6 +4423,7 @@ const publicBridge = Object.freeze({
   endTurn,
   finishTurn,
   getStatus,
+  registerPasskeyAccount,
   stopSession,
   waitForTurnEnd,
 });

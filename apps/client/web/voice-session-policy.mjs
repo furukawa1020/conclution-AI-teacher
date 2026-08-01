@@ -23,11 +23,18 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   reflectiveEndOfTurnSilenceMs: 2_200,
   softVoiceEndOfTurnSilenceMs: 3_000,
   reflectiveSpeechSpanMs: 1_600,
+  // A sustained monologue gets a wider endpoint window than a short answer.
+  // This does not retain extra audio locally: confirmed PCM continues to flow
+  // through the bounded live transport while only these timestamps are kept.
+  monologueEndOfTurnSilenceMs: 5_000,
+  monologueSpeechSpanMs: 12_000,
   hybridEndpointSilenceMs: 1_200,
   hybridReflectiveEndpointSilenceMs: 2_200,
   hybridSoftVoiceEndpointSilenceMs: 3_000,
+  hybridMonologueEndpointSilenceMs: 5_000,
   hybridEndpointAgreementWindowMs: 2_000,
   hybridSoftVoiceAgreementWindowMs: 3_500,
+  hybridMonologueEndpointAgreementWindowMs: 6_000,
   // A voice candidate must either reach the 120 ms confirmation threshold
   // promptly or be discarded. This also bounds unconfirmed room audio before
   // a fresh candidate and its isolated recorder are created.
@@ -36,8 +43,12 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // confirmed from sustained signal-to-noise and envelope evidence.
   softCandidateCaptureLimitMs: 1_200,
   silentCaptureLimitMs: 30_000,
-  spokenCaptureLimitMs: 55_000,
-  idleSessionLimitMs: 3 * 60_000,
+  // Three minutes of speaking plus bounded lead-in and endpoint headroom.
+  // The server independently stops confirmed live PCM at four minutes.
+  spokenCaptureLimitMs: 3 * 60_000 + 30_000,
+  // Speech confirmations refresh this idle clock. Keep it beyond the longest
+  // single capture so an active monologue cannot be mistaken for abandonment.
+  idleSessionLimitMs: 4 * 60_000,
   maximumSessionMs: 30 * 60_000,
   pendingDocumentLimitMs: 5 * 60_000,
 });
@@ -762,14 +773,20 @@ export function shouldCommitHybridEndpoint({
     lastVoiceAt -
     firstVoiceAt +
     VOICE_SESSION_LIMITS.vadIntervalMs;
-  const requiredSilence = softVoiceConfirmed
-    ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
-    : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
-      ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
-      : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
-  const agreementWindow = softVoiceConfirmed
-    ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
-    : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
+  const monologue =
+    speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
+  const requiredSilence = monologue
+    ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
+    : softVoiceConfirmed
+      ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
+      : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+        ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
+        : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+  const agreementWindow = monologue
+    ? VOICE_SESSION_LIMITS.hybridMonologueEndpointAgreementWindowMs
+    : softVoiceConfirmed
+      ? VOICE_SESSION_LIMITS.hybridSoftVoiceAgreementWindowMs
+      : VOICE_SESSION_LIMITS.hybridEndpointAgreementWindowMs;
   if (now - providerEndpointAt > agreementWindow) return false;
   return now - lastVoiceAt >= requiredSilence;
 }
@@ -804,6 +821,10 @@ export function advanceVad(
       VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
     reflectiveSpeechSpanMs =
       VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs,
+    monologueEndOfTurnSilenceMs =
+      VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    monologueSpeechSpanMs =
+      VOICE_SESSION_LIMITS.monologueSpeechSpanMs,
     silentCaptureLimitMs = VOICE_SESSION_LIMITS.silentCaptureLimitMs,
     spokenCaptureLimitMs = VOICE_SESSION_LIMITS.spokenCaptureLimitMs,
   } = {},
@@ -945,6 +966,23 @@ export function advanceVad(
         0,
         clearVoiceRunMs - intervalMs * 0.5,
       );
+      // A confirmed quiet voice often alternates between a relative-SNR peak
+      // and a softer vowel/consonant valley. Preserve that recent valley only
+      // as envelope evidence; it does not refresh lastVoiceAt by itself. A
+      // later above-floor, voice-shaped sample must still validate the rise,
+      // so stationary low noise cannot keep a turn open indefinitely.
+      if (
+        softVoiceConfirmed &&
+        softVoiceEvidenceAt !== null &&
+        timestamp - softVoiceEvidenceAt <= softVoiceEvidenceLeaseMs &&
+        rms >= softVoiceBootstrapMinimumRms &&
+        hasVoiceShapedPeak
+      ) {
+        softVoiceMinRms =
+          softVoiceMinRms === null
+            ? rms
+            : Math.min(softVoiceMinRms, rms);
+      }
       softVoiceRunMs = Math.max(
         0,
         softVoiceRunMs - intervalMs * 0.5,
@@ -1036,11 +1074,14 @@ export function advanceVad(
     firstVoiceAt === null || lastVoiceAt === null
       ? 0
       : lastVoiceAt - firstVoiceAt + intervalMs;
-  const trailingSilenceMs = softVoiceConfirmed
-    ? softVoiceEndOfTurnSilenceMs
-    : speechSpanMs >= reflectiveSpeechSpanMs
-      ? reflectiveEndOfTurnSilenceMs
-      : endOfTurnSilenceMs;
+  const trailingSilenceMs =
+    speechSpanMs >= monologueSpeechSpanMs
+      ? monologueEndOfTurnSilenceMs
+      : softVoiceConfirmed
+        ? softVoiceEndOfTurnSilenceMs
+        : speechSpanMs >= reflectiveSpeechSpanMs
+          ? reflectiveEndOfTurnSilenceMs
+          : endOfTurnSilenceMs;
   // Keep direct questions fast, while giving a longer, think-aloud utterance
   // enough room for a natural Japanese pause before committing the turn.
   if (

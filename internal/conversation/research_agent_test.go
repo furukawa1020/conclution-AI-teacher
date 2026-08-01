@@ -175,6 +175,38 @@ func TestAgentSpeculativeTurnCannotPerformOutboundResearch(t *testing.T) {
 	}
 }
 
+func TestAgentResearchDisabledCannotMintOutboundCapability(t *testing.T) {
+	t.Parallel()
+	const topic = "量子エラー訂正"
+	plan := recentPapersPlan(topic)
+	generator := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodePlan(t, plan)},
+	}}
+	verifier := &fakeResearchVerifier{}
+	agent := newTestAgent(t, generator)
+	attachResearchVerifier(t, agent, verifier)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-strict-no-research",
+		VoiceTurn{
+			SchemaVersion:    SchemaVersion,
+			Utterance:        japaneseRecentRequest(topic),
+			RequestID:        "fedcba9876543210fedcba98",
+			ResearchDisabled: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if len(verifier.calls) != 0 || result.ResearchStatus != "none" ||
+		len(result.ResearchRecords) != 0 ||
+		result.SpokenReply != "厳格モードでは外部検索を行いません。検索を使わない範囲で、この話を一緒に整理できます。" {
+		t.Fatalf("disabled research escaped boundary: result=%#v calls=%#v", result, verifier.calls)
+	}
+}
+
 func TestAgentResearchUnavailableReturnsNoRecords(t *testing.T) {
 	const topic = "量子エラー訂正"
 	plan := recentPapersPlan(topic)

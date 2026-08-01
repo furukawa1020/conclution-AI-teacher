@@ -27,7 +27,7 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
 
 低圧な会話方針は、厚生労働省の[ひきこもり支援ハンドブック](https://www.mhlw.go.jp/content/12200000/001605332.pdf)にある、何気ない会話、答えやすい問い、本人のペースと自己決定を尊重する原則を参照しています。会話練習への短いフィードバックは[IMBUEのランダム化研究](https://aclanthology.org/2024.acl-long.47/)に近接根拠がありますが、英語テキストの単回練習であり、本製品の対象、音声、長期効果を直接検証したものではありません。
 
-本資料には、現在動くHTTPSターン型MVPと、将来研究するincremental / full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Live、検索、個人適応は設計目標です。
+本資料には、現在動く増分WebSocket主経路と同期圧縮HTTP fallbackを持つターン型MVP、および将来研究するnative full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Vertex Live、検索、個人適応は設計目標です。
 
 ## 対象範囲と非目標
 
@@ -58,7 +58,8 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
   │ Rust / Dioxus / Wasm UI
   │ JavaScript境界: MediaRecorder + Web Audio VAD
   ▼
-同一Origin HTTPS / Firebase Auth + App Check
+固定run.app WebSocket / HTTPS fallback
+  │ Firebase Auth + App Check + exact Hosting Origin
   ▼
 Cloud Run / Go（asia-northeast1）
   ├─ raw audio → Cloud STT V2（asia-northeast1）
@@ -81,12 +82,15 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 ブラウザだけで高精度な日本語ASR、意味推論、自然なfull-duplex音声をすべて端末内処理するのは、対応端末、電力、モデル配布量の面でまだ不安定です。そのため現在のMVPは次の境界です。
 
 - 利用者が最初にタップして開始したsession中だけマイクを使う。
-- 端末VADで一発話を区切り、一発話ごとのHTTPS requestとして東京リージョンSTTへ送る。
+- 端末VADで一発話を区切る。クライアントcaptureは最大3分30秒で、長い独話では最後の音声から5秒の無音を待つ。
+- 主経路は認証付きWebSocketへ20 ms PCM frameを増分送信する。サーバーは最大4分または12,000 frameでcaptureを止め、live / HTTP turn全体を最大6分で終了する。
+- 同期圧縮HTTP fallbackの音声上限は2 MiBであり、3分級の長時間音声を処理できるとは保証しない。
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
 - raw audioをVertex AIへ送らず、STTで得た文字列と明示添付PDFだけを`global`のVertex AIへ送る。
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
-- 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
-- AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、3分無発話、30分経過でsessionを止める。
+- Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
+- AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、4分無発話、30分経過でsessionを止める。
+- 確定文字起こしが160 rune以上の時だけ、現在turnを`extended speech`として主点の反射と回答構成へ使う。この分類と本文はcross-turn stateへ残さず、長期効果を示す指標にはしない。
 - PDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。
 
 将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
@@ -697,7 +701,9 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 ### A. Voice-first MVP — 実装済み
 
 - 明示開始されたブラウザsessionと端末側VAD
-- 一発話ごとのHTTPS request、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
+- 20 ms PCMの認証付き増分WebSocket主経路と2 MiB上限の同期圧縮HTTP fallback、Firebase Auth、App Check、完全一致Origin、明示`turnMode`検証
+- クライアント3分30秒、サーバー4分または12,000 frame、live / HTTP 6分の多層上限と、長い独話向け5秒無音判定
+- 確定文字起こし160 rune以上に限定した現在turnだけの`extended speech`構成
 - 東京リージョンSTT → `global` Vertex AI structured reasoner → 東京リージョンTTS
 - raw audio、文字起こし、応答文、PDFをアプリ側で永続化しない
 - AES-256-GCM、UID-bound、15分TTL、自由文要約なしのフィルタ済み意味状態
@@ -720,12 +726,14 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 一般会話、研究、技術、高リスク領域ごとの誤修復率と過剰介入率
 - model-only、固定prompt、LACなしEVIとのablation
 
-### C. Privacy Sentinel拡張 — 未実装
+### C. Privacy Sentinel — 一部実装
 
-- Rust/WasmへVADと短いring bufferの責務をさらに移す
+- 利用者が明示選択する厳格request型を実装し、PDF・外部検索・cross-turn stateを受理前に拒否する
+- regional STT後の文字起こしとモデル応答を、ローカル決定論検査と東京リージョンDLPの両方へ通す。`clear`以外、timeout、権限エラー、応答不整合は後段へ進めない
+- 厳格streamingでは合成音声をrequest-bound bufferへ保持し、検査済みresultとmodeが一致した後だけ送信する。blocked/error時は送信せずbufferを消去する
+- 原音はregional STT、文字列はCloud Run・DLP・Vertex AI、応答はTTSが平文で扱う。このためE2EEでも完全PII除去でもなく、そのようには表示しない
+- Rust/WasmへVADと短いring bufferの責務をさらに移す作業、local transcript path、話者本人認証は未実装
 - TEN VAD、VAP、Moonshine等はライセンス、配布量、日本語精度、Web性能を実測してから採用する
-- 対応端末ではlocal transcript pathを追加する
-- regional STT path、native audio path、privacy-first pathをUI上で区別する
 
 ### D. Research Verifier — 一部実装
 
@@ -747,6 +755,13 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - score、レベル、streak、順位をUIへ表示しない
 - 暗黙feedbackだけで自動的に性格・健康状態を推定しない
 - 十分な同意データが集まるまではオンライン強化学習を行わない
+
+### F. アカウント操作確認と個人内長期測定 — 実装済み、効果未実証
+
+- WebAuthnのresident credential、user verification、exact origin、RP ID、5分期限、単回ceremony、署名counterの競合検査を実装し、仮名Firebase accountの登録・再認証へ使う
+- Passkeyが確認するのは登録済みauthenticatorによるアカウント操作であり、法的身元や現在マイクで話す人ではない。声紋は収集しない
+- 明示opt-in後だけ、開始時・4週・8週・追跡時点の固定未見質問について有限分類と1〜5の自己評価を端末内へ保存する。音声、文字起こし、自由文、Firebase UID、時刻、応答時間は保存しない
+- 撤回、再同意、別tab競合時のgeneration fence、全削除、期限外・重複・形式不整合時のfail-closedを実装した。全削除後は回答の復活を防ぐ固定markerだけを残し、個人ID・同意epoch・回答は残さない。ただしlocalStorageは署名付き監査台帳ではなく、整形式データを開発者ツールで作り直す改変までは防がない。これは個人内測定であり、比較試験、因果効果、有効性の証明ではない
 
 ## セキュリティ継承
 

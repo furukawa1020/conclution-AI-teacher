@@ -190,6 +190,7 @@ function Assert-HostingArtifact {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "passkey-policy.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-stream-policy.mjs",
@@ -222,6 +223,7 @@ function Assert-HostingArtifact {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "passkey-policy.mjs",
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-stream-policy.mjs",
@@ -264,6 +266,9 @@ function Assert-HostingArtifact {
     }
     if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice stream policy module."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./passkey-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited passkey policy module."
     }
     if (
         $bridge -notmatch [regex]::Escape("const EXPECTED_PROJECT_ID = `"$expectedProjectId`";") -or

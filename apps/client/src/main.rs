@@ -1,10 +1,17 @@
+mod longitudinal;
+
 use dioxus::prelude::*;
 use serde::Deserialize;
 
 const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
 const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
 const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
-const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手な場面を勝手に練習させません。頼んだ練習の後は、会話内容を含まない短期の目印だけで通常会話の質問量を調整し、点数は表示しません。";
+const RETURNING_PASSKEY_ACTION: &str = "登録済みパスキーで戻る";
+const NEW_PASSKEY_ACCOUNT_ACTION: &str = "新しい仮名アカウントを作る";
+const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
+    "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
+const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。";
+const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoiceState {
@@ -15,6 +22,12 @@ enum VoiceState {
     Speaking,
     Paused,
     Error(&'static str),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvaluationStep {
+    Prompt,
+    SelfReport,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -100,7 +113,7 @@ impl CoachState {
     const fn hint(self) -> &'static str {
         match (self.phase, self.action) {
             (CoachPhase::Blocked, CoachAction::Release) => "この続きでも、別の話でも大丈夫",
-            (CoachPhase::None, _) => "質問でも、ぼやきでも、短い声でも、そのままどうぞ",
+            (CoachPhase::None, _) => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
             (CoachPhase::AwaitingAnswer, _) => {
                 "わからない、まだ決めていない、でも会話は続けられます"
             }
@@ -144,9 +157,9 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "質問でも、ぼやきでも、まとまらなくても、小さな声のままどうぞ",
+            Self::Ready => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
-            Self::Listening => "話し終えて約一秒　そのまま自動で返す",
+            Self::Listening => "話し終わりの間を見て自動で返す　長い話は急いで切らない",
             Self::Thinking => {
                 "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
             }
@@ -213,6 +226,7 @@ enum CloudState {
     Connecting,
     Ready,
     IdentityRequired,
+    PasskeyRequired,
     ConfigurationRequired,
     Unavailable,
 }
@@ -222,7 +236,8 @@ impl CloudState {
         match self {
             Self::Connecting => "SECURE LINK / …",
             Self::Ready => "SECURE LINK / READY",
-            Self::IdentityRequired => "IDENTITY / REQUIRED",
+            Self::IdentityRequired => "ACCOUNT / REQUIRED",
+            Self::PasskeyRequired => "PASSKEY / REQUIRED",
             Self::ConfigurationRequired => "SECURE LINK / SETUP",
             Self::Unavailable => "SECURE LINK / OFFLINE",
         }
@@ -230,9 +245,10 @@ impl CloudState {
 
     const fn class_name(self) -> &'static str {
         match self {
-            Self::Connecting | Self::IdentityRequired | Self::ConfigurationRequired => {
-                "cloud-pill is-pending"
-            }
+            Self::Connecting
+            | Self::IdentityRequired
+            | Self::PasskeyRequired
+            | Self::ConfigurationRequired => "cloud-pill is-pending",
             Self::Ready => "cloud-pill is-ready",
             Self::Unavailable => "cloud-pill is-offline",
         }
@@ -257,6 +273,8 @@ struct VoiceTurnResult {
     needs_paper: bool,
     research_status: ResearchStatus,
     research_records: Vec<ResearchRecord>,
+    #[serde(default)]
+    privacy_status: String,
     #[serde(default)]
     caption: Option<String>,
 }
@@ -344,9 +362,10 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        BridgeStatus, CloudState, DocumentInfo, FinishTurnError, TurnEnd, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code,
-        recoverable_wait_turn_code, session_stop_pauses, valid_voice_pause_metadata,
+        BridgeStatus, CloudState, DocumentInfo, FinishTurnError, STRICT_PRIVACY_BLOCKED_COPY,
+        TurnEnd, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
+        recoverable_finish_turn_code, recoverable_wait_turn_code, session_stop_pauses,
+        valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -414,14 +433,25 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = getStatus)]
         async fn get_status_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = registerPasskeyAccount)]
+        async fn register_passkey_account_js() -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = beginTurn)]
-        async fn begin_turn_js(session_state: &str, turn_mode: &str) -> Result<JsValue, JsValue>;
+        async fn begin_turn_js(
+            session_state: &str,
+            turn_mode: &str,
+            strict_cloud_minimization: bool,
+        ) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = waitForTurnEnd)]
         async fn wait_for_turn_end_js() -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = finishTurn)]
-        async fn finish_turn_js(session_state: &str, turn_mode: &str) -> Result<JsValue, JsValue>;
+        async fn finish_turn_js(
+            session_state: &str,
+            turn_mode: &str,
+            strict_cloud_minimization: bool,
+        ) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = attachDocument)]
         async fn attach_document_js(input_id: &str) -> Result<JsValue, JsValue>;
@@ -440,16 +470,25 @@ mod cloud {
         match status.state.as_str() {
             "ready" => CloudState::Ready,
             "identity-required" => CloudState::IdentityRequired,
+            "passkey-required" => CloudState::PasskeyRequired,
             "configuration-required" => CloudState::ConfigurationRequired,
             _ => CloudState::Unavailable,
         }
     }
 
+    pub async fn register_passkey_account() -> Result<(), &'static str> {
+        register_passkey_account_js()
+            .await
+            .map(|_| ())
+            .map_err(user_message)
+    }
+
     pub async fn begin_turn(
         session_state: &str,
         turn_mode: VoiceTurnMode,
+        strict_cloud_minimization: bool,
     ) -> Result<(), &'static str> {
-        begin_turn_js(session_state, turn_mode.as_str())
+        begin_turn_js(session_state, turn_mode.as_str(), strict_cloud_minimization)
             .await
             .map(|_| ())
             .map_err(user_message)
@@ -475,8 +514,15 @@ mod cloud {
     pub async fn finish_turn(
         session_state: &str,
         turn_mode: VoiceTurnMode,
+        strict_cloud_minimization: bool,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
-        let value = match finish_turn_js(session_state, turn_mode.as_str()).await {
+        let value = match finish_turn_js(
+            session_state,
+            turn_mode.as_str(),
+            strict_cloud_minimization,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) if error_code(error.clone()).as_deref() == Some("voice_interrupted") => {
                 return Err(FinishTurnError::Interrupted);
@@ -637,11 +683,25 @@ mod cloud {
             }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
             Some("identity_required") | Some("identity_verification_failed") => {
-                "話し始める前にGoogleアカウントの本人確認を終えてください"
+                "アカウント状態を安全に確認できませんでした　マイクは開いていません"
+            }
+            Some("passkey_required") => {
+                "話し始めるを押して　パスキーでアカウント操作を確認してください"
+            }
+            Some("passkey_cancelled") => "パスキー確認は完了しませんでした　マイクは開いていません",
+            Some("passkey_unsupported") => {
+                "このブラウザではパスキーを確認できません　マイクは開いていません"
+            }
+            Some("passkey_registration_failed") | Some("passkey_authentication_failed") => {
+                "パスキーを安全に確認できませんでした　マイクは開いていません"
+            }
+            Some("passkey_account_exists") => {
+                "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした"
             }
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
             Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
+            Some("strict_privacy_blocked") => STRICT_PRIVACY_BLOCKED_COPY,
             Some("rate_limited") => {
                 "いま少し混み合っています　会話は開いたままです　そのまま続けられます"
             }
@@ -657,6 +717,9 @@ mod cloud {
 
     fn document_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
+            Some("document_privacy_blocked") => {
+                "厳格モードではPDFを端末で読み込まず送信もしません　標準モードなら次の応答だけに添付できます"
+            }
             Some("document_not_selected") => "PDFを選んでみて",
             Some("document_type_invalid") => "ここではPDFだけを読める",
             Some("document_too_large") => "PDFは7MBまで",
@@ -681,9 +744,14 @@ mod cloud {
         CloudState::Unavailable
     }
 
+    pub async fn register_passkey_account() -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
     pub async fn begin_turn(
         _session_state: &str,
         _turn_mode: VoiceTurnMode,
+        _strict_cloud_minimization: bool,
     ) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
@@ -695,6 +763,7 @@ mod cloud {
     pub async fn finish_turn(
         _session_state: &str,
         _turn_mode: VoiceTurnMode,
+        _strict_cloud_minimization: bool,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
         Err(FinishTurnError::Message("WebAssembly版で使ってみて"))
     }
@@ -751,14 +820,20 @@ fn arm_listening(
     research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
+    strict_cloud_minimization: Signal<bool>,
 ) {
     if announce_permission {
         voice_state.set(VoiceState::RequestingPermission);
     }
 
     spawn(async move {
-        let state_snapshot = session_state.peek().clone();
-        if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode).await {
+        let strict_snapshot = *strict_cloud_minimization.peek();
+        let state_snapshot = if strict_snapshot {
+            String::new()
+        } else {
+            session_state.peek().clone()
+        };
+        if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode, strict_snapshot).await {
             if *generation.peek() == operation {
                 cloud::stop_session();
                 document_info.set(None);
@@ -795,6 +870,7 @@ fn arm_listening(
                         research_records,
                         document_info,
                         caption,
+                        strict_cloud_minimization,
                     );
                 }
                 return;
@@ -825,6 +901,7 @@ fn arm_listening(
                     research_records,
                     document_info,
                     caption,
+                    strict_cloud_minimization,
                 );
             } else {
                 // A silent bounded window carries no speech and consumes no
@@ -847,6 +924,7 @@ fn arm_listening(
                     research_records,
                     document_info,
                     caption,
+                    strict_cloud_minimization,
                 );
             }
         }
@@ -867,6 +945,7 @@ fn resume_foreground_interruption(
     research_records: Signal<Vec<ResearchRecord>>,
     document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
+    strict_cloud_minimization: Signal<bool>,
 ) {
     voice_state.set(VoiceState::Listening);
     spawn(async move {
@@ -890,6 +969,7 @@ fn resume_foreground_interruption(
                         research_records,
                         document_info,
                         caption,
+                        strict_cloud_minimization,
                     );
                 }
                 return;
@@ -922,6 +1002,7 @@ fn resume_foreground_interruption(
                 research_records,
                 document_info,
                 caption,
+                strict_cloud_minimization,
             );
         } else {
             arm_listening(
@@ -939,6 +1020,7 @@ fn resume_foreground_interruption(
                 research_records,
                 document_info,
                 caption,
+                strict_cloud_minimization,
             );
         }
     });
@@ -959,19 +1041,25 @@ fn submit_turn(
     mut research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
+    strict_cloud_minimization: Signal<bool>,
 ) {
     if *generation.peek() != operation || *voice_state.peek() != VoiceState::Listening {
         return;
     }
 
-    let state_snapshot = session_state.peek().clone();
-    let consumed_document = document_info.peek().is_some();
+    let strict_snapshot = *strict_cloud_minimization.peek();
+    let state_snapshot = if strict_snapshot {
+        String::new()
+    } else {
+        session_state.peek().clone()
+    };
+    let consumed_document = !strict_snapshot && document_info.peek().is_some();
     research_status.set(ResearchStatus::None);
     research_records.set(Vec::new());
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
-        let result = cloud::finish_turn(&state_snapshot, turn_mode).await;
+        let result = cloud::finish_turn(&state_snapshot, turn_mode, strict_snapshot).await;
         if *generation.peek() != operation {
             return;
         }
@@ -995,6 +1083,7 @@ fn submit_turn(
                     research_records,
                     document_info,
                     caption,
+                    strict_cloud_minimization,
                 );
                 return;
             }
@@ -1024,6 +1113,7 @@ fn submit_turn(
                     research_records,
                     document_info,
                     caption,
+                    strict_cloud_minimization,
                 );
                 return;
             }
@@ -1036,6 +1126,50 @@ fn submit_turn(
                 return;
             }
         };
+
+        if !valid_voice_privacy_metadata(
+            strict_snapshot,
+            &result.privacy_status,
+            &result.session_state,
+            result.research_status,
+            result.research_records.len(),
+        ) {
+            cloud::stop_session();
+            voice_state.set(VoiceState::Error(
+                "プライバシー境界を確認できないため停止しました",
+            ));
+            return;
+        }
+
+        if result.privacy_status == "blocked" {
+            session_state.set(String::new());
+            detected_domain.set(String::new());
+            route.set(result.route.clone());
+            coach_state.set(CoachState::NONE);
+            needs_paper.set(false);
+            research_status.set(ResearchStatus::None);
+            research_records.set(Vec::new());
+            document_info.set(None);
+            caption.set(Some(STRICT_PRIVACY_BLOCKED_COPY.to_string()));
+            arm_listening(
+                operation,
+                false,
+                VoiceTurnMode::Foreground,
+                voice_state,
+                generation,
+                session_state,
+                detected_domain,
+                route,
+                coach_state,
+                needs_paper,
+                research_status,
+                research_records,
+                document_info,
+                caption,
+                strict_cloud_minimization,
+            );
+            return;
+        }
 
         if !valid_streamed_audio_metadata(
             &result.audio_base64,
@@ -1079,6 +1213,7 @@ fn submit_turn(
                 research_records,
                 document_info,
                 caption,
+                strict_cloud_minimization,
             );
             return;
         }
@@ -1102,6 +1237,7 @@ fn submit_turn(
                 research_records,
                 document_info,
                 caption,
+                strict_cloud_minimization,
             );
             return;
         }
@@ -1128,6 +1264,7 @@ fn submit_turn(
             research_records,
             document_info,
             caption,
+            strict_cloud_minimization,
         );
     });
 }
@@ -1145,6 +1282,7 @@ fn start_or_resume(
     research_records: Signal<Vec<ResearchRecord>>,
     document_info: Signal<Option<DocumentInfo>>,
     caption: Signal<Option<String>>,
+    strict_cloud_minimization: Signal<bool>,
 ) {
     let operation = generation.peek().wrapping_add(1);
     generation.set(operation);
@@ -1163,6 +1301,7 @@ fn start_or_resume(
         research_records,
         document_info,
         caption,
+        strict_cloud_minimization,
     );
 }
 
@@ -1208,6 +1347,470 @@ fn valid_streamed_audio_metadata(
     audio_base64.is_empty() && audio_mime_type == if streamed_audio { "audio/L16" } else { "" }
 }
 
+const fn valid_voice_privacy_metadata(
+    expected_strict: bool,
+    privacy_status: &str,
+    session_state: &str,
+    research_status: ResearchStatus,
+    research_record_count: usize,
+) -> bool {
+    if expected_strict {
+        matches!(privacy_status.as_bytes(), b"clear" | b"blocked")
+            && session_state.is_empty()
+            && matches!(research_status, ResearchStatus::None)
+            && research_record_count == 0
+    } else {
+        privacy_status.is_empty()
+    }
+}
+
+#[component]
+fn LongitudinalPanel() -> Element {
+    let mut evaluation_state = use_signal(longitudinal::EvaluationState::default);
+    let mut evaluation_step = use_signal(|| EvaluationStep::Prompt);
+    let mut evaluation_outcome = use_signal(|| None::<longitudinal::EvaluationOutcome>);
+    let mut enjoyment = use_signal(|| None::<longitudinal::OptionalRating>);
+    let mut agency = use_signal(|| None::<longitudinal::OptionalRating>);
+    let mut burden = use_signal(|| None::<longitudinal::OptionalRating>);
+    let mut evaluation_notice = use_signal(|| None::<&'static str>);
+    let mut delete_armed = use_signal(|| false);
+
+    let view = evaluation_state.read().view();
+    let observations = evaluation_state.read().observations();
+    let schedule = longitudinal::schedule(&evaluation_state.read());
+    let step = *evaluation_step.read();
+    let selected_outcome = *evaluation_outcome.read();
+    let selected_enjoyment = *enjoyment.read();
+    let selected_agency = *agency.read();
+    let selected_burden = *burden.read();
+    let delete_is_armed = *delete_armed.read();
+    let can_save = selected_outcome.is_some()
+        && selected_enjoyment.is_some()
+        && selected_agency.is_some()
+        && selected_burden.is_some();
+
+    let body = match view {
+        longitudinal::EvaluationView::Dormant => rsx! {
+            p {
+                "開始を押すまで保存領域を読みません。通常会話とは別の任意測定で、集団データの送信はありません。"
+            }
+            nav { class: "session-controls", aria_label: "任意測定を開始",
+                button {
+                    class: "control-button",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let next = longitudinal::opt_in_and_start();
+                        let notice = match next.view() {
+                            longitudinal::EvaluationView::Active { .. } => {
+                                "端末内測定を開始しました。"
+                            }
+                            longitudinal::EvaluationView::Invalid => {
+                                "端末内記録を検証できないため、開始しませんでした。"
+                            }
+                            _ => "端末内保存を安全に使えないため、開始しませんでした。",
+                        };
+                        evaluation_state.set(next);
+                        evaluation_step.set(EvaluationStep::Prompt);
+                        evaluation_outcome.set(None);
+                        enjoyment.set(None);
+                        agency.set(None);
+                        burden.set(None);
+                        evaluation_notice.set(Some(notice));
+                    },
+                    "説明に同意して任意測定を開始"
+                }
+            }
+        },
+        longitudinal::EvaluationView::Active { event_count } => {
+            let schedule_body = match schedule {
+                longitudinal::ScheduleView::Due {
+                    timepoint,
+                    question,
+                    days_remaining,
+                    completed,
+                } => {
+                    if step == EvaluationStep::Prompt {
+                        rsx! {
+                            p { role: "status",
+                                strong { "{timepoint}の固定質問" }
+                                " / 記録済み {completed} 回 / あと {days_remaining} 日"
+                            }
+                            p { "{question}" }
+                            p {
+                                "この測定ではマイクを開きません。質問を見て声に出して答え、答え文を入力せず次へ進んでください。"
+                            }
+                            nav { class: "session-controls", aria_label: "固定質問への回答",
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    onclick: move |_| {
+                                        evaluation_step.set(EvaluationStep::SelfReport);
+                                        evaluation_notice.set(None);
+                                    },
+                                    "声で答え終わった"
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            p { strong { "答え方を自分で分類" } }
+                            div { class: "session-controls", role: "group", aria_label: "答え方",
+                                for outcome in longitudinal::EvaluationOutcome::ALL {
+                                    button {
+                                        class: if selected_outcome == Some(outcome) {
+                                            "control-button is-active"
+                                        } else {
+                                            "control-button"
+                                        },
+                                        r#type: "button",
+                                        aria_pressed: selected_outcome == Some(outcome),
+                                        onclick: move |_| evaluation_outcome.set(Some(outcome)),
+                                        {outcome.label()}
+                                    }
+                                }
+                            }
+                            p { strong { "楽しさ　1（低い）〜5（高い）" } }
+                            div { class: "session-controls", role: "group", aria_label: "楽しさ",
+                                for rating in longitudinal::OptionalRating::ALL {
+                                    button {
+                                        class: if selected_enjoyment == Some(rating) {
+                                            "control-button is-active"
+                                        } else {
+                                            "control-button"
+                                        },
+                                        r#type: "button",
+                                        aria_pressed: selected_enjoyment == Some(rating),
+                                        onclick: move |_| enjoyment.set(Some(rating)),
+                                        {rating.label()}
+                                    }
+                                }
+                            }
+                            p { strong { "自分で答えた感覚　1（低い）〜5（高い）" } }
+                            div { class: "session-controls", role: "group", aria_label: "自分で答えた感覚",
+                                for rating in longitudinal::OptionalRating::ALL {
+                                    button {
+                                        class: if selected_agency == Some(rating) {
+                                            "control-button is-active"
+                                        } else {
+                                            "control-button"
+                                        },
+                                        r#type: "button",
+                                        aria_pressed: selected_agency == Some(rating),
+                                        onclick: move |_| agency.set(Some(rating)),
+                                        {rating.label()}
+                                    }
+                                }
+                            }
+                            p { strong { "負担　1（低い）〜5（高い）" } }
+                            div { class: "session-controls", role: "group", aria_label: "負担",
+                                for rating in longitudinal::OptionalRating::ALL {
+                                    button {
+                                        class: if selected_burden == Some(rating) {
+                                            "control-button is-active"
+                                        } else {
+                                            "control-button"
+                                        },
+                                        r#type: "button",
+                                        aria_pressed: selected_burden == Some(rating),
+                                        onclick: move |_| burden.set(Some(rating)),
+                                        {rating.label()}
+                                    }
+                                }
+                            }
+                            nav { class: "session-controls", aria_label: "自己記録を保存",
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    disabled: !can_save,
+                                    onclick: move |_| {
+                                        let (
+                                            Some(outcome),
+                                            Some(enjoyment_rating),
+                                            Some(agency_rating),
+                                            Some(burden_rating),
+                                        ) = (
+                                            *evaluation_outcome.read(),
+                                            *enjoyment.read(),
+                                            *agency.read(),
+                                            *burden.read(),
+                                        ) else {
+                                            evaluation_notice.set(Some("4項目を選んでから保存してください。"));
+                                            return;
+                                        };
+                                        let current = evaluation_state.read().clone();
+                                        match longitudinal::record_due(
+                                            &current,
+                                            outcome,
+                                            enjoyment_rating,
+                                            agency_rating,
+                                            burden_rating,
+                                        ) {
+                                            Ok(next) => {
+                                                evaluation_state.set(next);
+                                                evaluation_step.set(EvaluationStep::Prompt);
+                                                evaluation_outcome.set(None);
+                                                enjoyment.set(None);
+                                                agency.set(None);
+                                                burden.set(None);
+                                                evaluation_notice.set(Some(
+                                                    "有限分類・1〜5・日単位の測定情報を端末内に保存しました。",
+                                                ));
+                                            }
+                                            Err(error) => evaluation_notice.set(Some(error.message())),
+                                        }
+                                    },
+                                    "端末内に記録"
+                                }
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    onclick: move |_| {
+                                        evaluation_step.set(EvaluationStep::Prompt);
+                                        evaluation_outcome.set(None);
+                                        enjoyment.set(None);
+                                        agency.set(None);
+                                        burden.set(None);
+                                        evaluation_notice.set(None);
+                                    },
+                                    "質問へ戻る"
+                                }
+                            }
+                        }
+                    }
+                }
+                longitudinal::ScheduleView::Waiting {
+                    next_timepoint,
+                    days_until,
+                    completed,
+                    missed,
+                } => rsx! {
+                    p { role: "status",
+                        "記録済み {completed} 回 / 期限を過ぎた回 {missed} 回"
+                    }
+                    p {
+                        "次は{next_timepoint}。あと {days_until} 日で、未使用の固定質問を表示します。期限外の記録は受け付けません。"
+                    }
+                },
+                longitudinal::ScheduleView::Complete { completed, missed } => rsx! {
+                    p { role: "status", "測定期間は終了しました。記録済み {completed} 回 / 未記録 {missed} 回" }
+                    p { "これは個人内の記録で、改善や因果効果を証明する結果ではありません。" }
+                },
+                longitudinal::ScheduleView::ClockUnavailable => rsx! {
+                    p { role: "alert", "端末の日付を安全に確認できないため、測定は記録しません。" }
+                },
+                longitudinal::ScheduleView::NotActive => rsx! {},
+            };
+
+            rsx! {
+                {schedule_body}
+                nav { class: "session-controls", aria_label: "測定の同意を管理",
+                    button {
+                        class: "control-button control-button--end",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let next = longitudinal::withdraw();
+                            let notice = if next.view()
+                                == longitudinal::EvaluationView::Withdrawn
+                            {
+                                "測定を停止しました。記録は送信されず、再開または全削除を選べます。"
+                            } else {
+                                "停止状態を端末内に保存できませんでした。追加記録は行わず、もう一度確認してください。"
+                            };
+                            evaluation_state.set(next);
+                            evaluation_step.set(EvaluationStep::Prompt);
+                            evaluation_notice.set(Some(notice));
+                        },
+                        "測定を撤回・停止"
+                    }
+                }
+                p { "端末内の記録件数: {event_count}" }
+                if observations.len() >= 2 {
+                    section { aria_label: "時点ごとの測定記録",
+                        h3 { "時点ごとの記録" }
+                        p {
+                            "保存された有限分類をそのまま表示します。時点間の差の自動判定は行いません。"
+                        }
+                        table {
+                            thead {
+                                tr {
+                                    th { scope: "col", "時点" }
+                                    th { scope: "col", "答え方" }
+                                    th { scope: "col", "楽しさ" }
+                                    th { scope: "col", "自分で答えた感覚" }
+                                    th { scope: "col", "負担" }
+                                }
+                            }
+                            tbody {
+                                for observation in observations {
+                                    tr {
+                                        th { scope: "row", {observation.timepoint} }
+                                        td { {observation.outcome} }
+                                        td { {observation.enjoyment} }
+                                        td { {observation.agency} }
+                                        td { {observation.burden} }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        longitudinal::EvaluationView::Withdrawn => rsx! {
+            p { "測定は撤回・停止中です。停止中は新しい記録を作りません。" }
+            nav { class: "session-controls", aria_label: "任意測定を再開",
+                button {
+                    class: "control-button",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let next = longitudinal::opt_in_and_start();
+                        let notice = if matches!(
+                            next.view(),
+                            longitudinal::EvaluationView::Active { .. }
+                        ) {
+                            "新しい同意で端末内測定を再開しました。"
+                        } else {
+                            "端末内保存を安全に確認できないため、再開しませんでした。"
+                        };
+                        evaluation_state.set(next);
+                        evaluation_step.set(EvaluationStep::Prompt);
+                        evaluation_notice.set(Some(notice));
+                    },
+                    "説明に再同意して任意測定を再開"
+                }
+            }
+        },
+        longitudinal::EvaluationView::Deleted => rsx! {
+            p { "端末内の測定台帳を削除しました。削除した回答記録は復元できません。" }
+            nav { class: "session-controls", aria_label: "新しい任意測定",
+                button {
+                    class: "control-button",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let next = longitudinal::opt_in_and_start();
+                        let notice = if matches!(
+                            next.view(),
+                            longitudinal::EvaluationView::Active { .. }
+                        ) {
+                            "新しい端末内測定を開始しました。"
+                        } else {
+                            "端末内保存を安全に確認できないため、開始しませんでした。"
+                        };
+                        evaluation_state.set(next);
+                        evaluation_step.set(EvaluationStep::Prompt);
+                        evaluation_notice.set(Some(notice));
+                    },
+                    "説明に同意して新しく開始"
+                }
+            }
+        },
+        longitudinal::EvaluationView::Invalid => rsx! {
+            p { role: "alert",
+                "端末内記録の形式または同意状態を検証できません。安全のため読まず、追加記録もしません。"
+            }
+        },
+        longitudinal::EvaluationView::StorageUnavailable => rsx! {
+            p { role: "alert",
+                "端末の保存領域を安全に使えないため、測定は開始・記録されていません。"
+            }
+            nav { class: "session-controls", aria_label: "端末内測定を再試行",
+                button {
+                    class: "control-button",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let next = longitudinal::opt_in_and_start();
+                        let notice = if matches!(
+                            next.view(),
+                            longitudinal::EvaluationView::Active { .. }
+                        ) {
+                            "端末内保存を確認し、測定を開始または再開しました。"
+                        } else {
+                            "端末内保存を安全に使えないため、測定しません。"
+                        };
+                        evaluation_state.set(next);
+                        evaluation_notice.set(Some(notice));
+                    },
+                    "もう一度確認"
+                }
+            }
+        },
+    };
+
+    rsx! {
+        section {
+            class: "paper-drop",
+            aria_label: "個人内の推移を測る任意機能",
+            div { class: "paper-drop__heading",
+                span { class: "utility-index", "02" }
+                div {
+                    h2 { "個人内の推移を測る機能は実装" }
+                    p { "長期効果は未実証・比較試験ではない" }
+                }
+            }
+            p {
+                "開始時・4週目・8週目・終了4週後・終了12週後の固定質問を、各期限内に一度だけ自己記録します。"
+            }
+            p {
+                "録音・文字起こし・自由記述・Firebase UID・時刻・応答時間は保存しません。有限分類、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionに168日の期限を付け、次回アクセス時に期限切れを削除します。外部へは送信しません。"
+            }
+            p {
+                "全削除後は別タブから回答が復活しないよう、個人IDや回答を含まない固定削除マーカーだけを端末へ残します。この自己記録は暗号署名された研究台帳ではありません。"
+            }
+            {body}
+            if let Some(message) = *evaluation_notice.read() {
+                p { role: "status", aria_live: "polite", {message} }
+            }
+            if view != longitudinal::EvaluationView::Deleted {
+                nav { class: "session-controls", aria_label: "端末内測定記録を全削除",
+                    if delete_is_armed {
+                        button {
+                            class: "control-button control-button--end",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let next = longitudinal::delete();
+                                let notice = if next.view()
+                                    == longitudinal::EvaluationView::Deleted
+                                {
+                                    "端末内の測定台帳を全削除しました。"
+                                } else {
+                                    "端末内の測定台帳を全削除できませんでした。ブラウザの保存設定を確認してください。"
+                                };
+                                evaluation_state.set(next);
+                                evaluation_step.set(EvaluationStep::Prompt);
+                                evaluation_outcome.set(None);
+                                enjoyment.set(None);
+                                agency.set(None);
+                                burden.set(None);
+                                delete_armed.set(false);
+                                evaluation_notice.set(Some(notice));
+                            },
+                            "本当に端末内記録を全削除"
+                        }
+                        button {
+                            class: "control-button",
+                            r#type: "button",
+                            onclick: move |_| delete_armed.set(false),
+                            "削除をやめる"
+                        }
+                    } else {
+                        button {
+                            class: "control-button control-button--end",
+                            r#type: "button",
+                            onclick: move |_| {
+                                delete_armed.set(true);
+                                evaluation_notice.set(Some(
+                                    "全削除すると、この端末の測定回答は復元できません。",
+                                ));
+                            },
+                            "端末内記録を全削除"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn App() -> Element {
     let mut voice_state = use_signal(|| VoiceState::Ready);
@@ -1223,6 +1826,9 @@ fn App() -> Element {
     let mut document_error = use_signal(|| None::<&'static str>);
     let mut caption = use_signal(|| None::<String>);
     let mut captions_visible = use_signal(|| false);
+    let mut strict_cloud_minimization = use_signal(|| false);
+    let mut passkey_setup_busy = use_signal(|| false);
+    let mut passkey_setup_notice = use_signal(|| None::<&'static str>);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
     let _first_audio_listener = use_hook(|| cloud::install_first_audio_listener(voice_state));
@@ -1230,18 +1836,21 @@ fn App() -> Element {
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
     let _voice_session_paused_listener =
         use_hook(|| cloud::install_voice_session_paused_listener(voice_state, generation));
-    let cloud_status = use_resource(|| async { cloud::status().await });
+    let mut cloud_status = use_resource(|| async { cloud::status().await });
 
     let state_snapshot = *voice_state.read();
     let coach_snapshot = *coach_state.read();
     let captions_are_visible = *captions_visible.read();
+    let strict_mode = *strict_cloud_minimization.read();
     let document_snapshot = document_info.read().clone();
     let research_status_snapshot = *research_status.read();
     let research_snapshot = research_records.read().clone();
-    let document_is_busy = matches!(
-        state_snapshot,
-        VoiceState::RequestingPermission | VoiceState::Thinking | VoiceState::Speaking
-    );
+    let passkey_setup_is_busy = *passkey_setup_busy.read();
+    let document_is_busy = strict_mode
+        || matches!(
+            state_snapshot,
+            VoiceState::RequestingPermission | VoiceState::Thinking | VoiceState::Speaking
+        );
     let prepared_cloud_state = cloud_status
         .read()
         .as_ref()
@@ -1279,10 +1888,27 @@ fn App() -> Element {
                     "data-voice-state": state_snapshot.class_name(),
 
                     div { class: "context-line", aria_live: "polite",
-                        if prepared_cloud_state == CloudState::IdentityRequired {
+                        if matches!(
+                            prepared_cloud_state,
+                            CloudState::IdentityRequired | CloudState::PasskeyRequired
+                        ) {
                             span {
                                 class: "context-chip",
-                                "最初の一回だけ　Googleアカウントを確認"
+                                "パスキーでアカウント操作を確認"
+                            }
+                            span {
+                                class: "context-chip context-chip--quiet",
+                                "声の本人確認ではない"
+                            }
+                        }
+                        if strict_mode {
+                            span {
+                                class: "context-chip",
+                                "STRICT / FAIL-CLOSED"
+                            }
+                            span {
+                                class: "context-chip context-chip--quiet",
+                                "PDF・検索・会話状態なし"
                             }
                         }
                         if !detected_domain.read().is_empty() {
@@ -1338,6 +1964,7 @@ fn App() -> Element {
                                             research_records,
                                             document_info,
                                             caption,
+                                            strict_cloud_minimization,
                                         );
                                     }
                                     VoiceState::Listening | VoiceState::Paused => {}
@@ -1411,6 +2038,85 @@ fn App() -> Element {
                             }
                     }
 
+                    if matches!(
+                        prepared_cloud_state,
+                        CloudState::IdentityRequired | CloudState::PasskeyRequired
+                    ) && matches!(state_snapshot, VoiceState::Ready | VoiceState::Error(_)) {
+                        section {
+                            class: "passkey-entry",
+                            aria_label: "パスキーで仮名アカウントへ接続",
+                            p { class: "passkey-entry__lead",
+                                "登録済みなら同じパスキーで戻れます。初めて使う時だけ、新しい仮名アカウントを作ってください。"
+                            }
+                            nav { class: "passkey-entry__actions", aria_label: "パスキー接続を選ぶ",
+                                button {
+                                    class: "control-button is-active",
+                                    r#type: "button",
+                                    disabled: passkey_setup_is_busy,
+                                    onclick: move |_| {
+                                        if *passkey_setup_busy.peek() {
+                                            return;
+                                        }
+                                        passkey_setup_notice.set(None);
+                                        start_or_resume(
+                                            voice_state,
+                                            generation,
+                                            session_state,
+                                            detected_domain,
+                                            route,
+                                            coach_state,
+                                            needs_paper,
+                                            research_status,
+                                            research_records,
+                                            document_info,
+                                            caption,
+                                            strict_cloud_minimization,
+                                        );
+                                    },
+                                    span { aria_hidden: "true", "↻" }
+                                    {RETURNING_PASSKEY_ACTION}
+                                }
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    disabled: passkey_setup_is_busy,
+                                    onclick: move |_| {
+                                        if *passkey_setup_busy.peek() {
+                                            return;
+                                        }
+                                        passkey_setup_busy.set(true);
+                                        passkey_setup_notice.set(None);
+                                        spawn(async move {
+                                            let result = cloud::register_passkey_account().await;
+                                            passkey_setup_busy.set(false);
+                                            match result {
+                                                Ok(()) => {
+                                                    passkey_setup_notice.set(Some(
+                                                        "新しい仮名アカウントを作りました　マイクはまだ開いていません",
+                                                    ));
+                                                    cloud_status.restart();
+                                                }
+                                                Err(message) => passkey_setup_notice.set(Some(message)),
+                                            }
+                                        });
+                                    },
+                                    span { aria_hidden: "true", "+" }
+                                    if passkey_setup_is_busy {
+                                        "パスキーを登録中"
+                                    } else {
+                                        {NEW_PASSKEY_ACCOUNT_ACTION}
+                                    }
+                                }
+                            }
+                            p { class: "passkey-entry__warning",
+                                {SEPARATE_PASSKEY_ACCOUNT_WARNING}
+                            }
+                            if let Some(message) = *passkey_setup_notice.read() {
+                                p { class: "passkey-entry__notice", role: "status", {message} }
+                            }
+                        }
+                    }
+
                     section {
                         class: if state_snapshot.session_active() {
                             "capability-strip is-collapsed"
@@ -1438,7 +2144,11 @@ fn App() -> Element {
                     if *needs_paper.read() && document_snapshot.is_none() {
                         p { class: "paper-request", role: "status",
                             span { "↳" }
-                            "論文の中身まで読むなら　下からPDFを今回だけ"
+                            if strict_mode {
+                                "厳格モードではPDFを送りません　標準モードへ戻すと今回だけ添付できます"
+                            } else {
+                                "論文の中身まで読むなら　下からPDFを今回だけ"
+                            }
                         }
                     }
 
@@ -1462,6 +2172,7 @@ fn App() -> Element {
                                             research_records,
                                             document_info,
                                             caption,
+                                            strict_cloud_minimization,
                                         );
                                     } else {
                                         let next = generation.peek().wrapping_add(1);
@@ -1581,50 +2292,137 @@ fn App() -> Element {
                             }
                         }
                     }
+                    section {
+                        class: "paper-drop",
+                        aria_label: "クラウド最小化モード",
+                        div { class: "paper-drop__heading",
+                            span { class: "utility-index", "MODE" }
+                            div {
+                                h2 {
+                                    if strict_mode {
+                                        "厳格モード ON"
+                                    } else {
+                                        "標準モード"
+                                    }
+                                }
+                                p {
+                                    if strict_mode {
+                                        "検査不能も停止 / PDF・外部検索・会話状態なし"
+                                    } else {
+                                        "PDF・外部検索・会話の続きが使えます"
+                                    }
+                                }
+                            }
+                        }
+                        p {
+                            if strict_mode {
+                                "原音はSpeech-to-Textへ送ります。その後の文字起こしと返答を端末内検査とregional DLPの両方で検査し、検出・障害・時間切れならVertex AI・TTS・会話状態へ進めません。"
+                            } else {
+                                "通常の会話機能を使うモードです。処理中はSpeech-to-Text・Cloud Run・Vertex AI・TTSが平文を扱います。"
+                            }
+                        }
+                        p {
+                            "どちらもE2EEや完全なPII除去ではありません。厳格モードもDLPの検出漏れまでは保証できません。"
+                        }
+                        nav { class: "session-controls", aria_label: "クラウド最小化モードを切り替え",
+                            button {
+                                class: if strict_mode {
+                                    "control-button is-active"
+                                } else {
+                                    "control-button"
+                                },
+                                r#type: "button",
+                                aria_pressed: strict_mode,
+                                disabled: state_snapshot != VoiceState::Ready,
+                                onclick: move |_| {
+                                    let next = !*strict_cloud_minimization.peek();
+                                    cloud::stop_session();
+                                    session_state.set(String::new());
+                                    detected_domain.set(String::new());
+                                    route.set(String::new());
+                                    coach_state.set(CoachState::NONE);
+                                    needs_paper.set(false);
+                                    research_status.set(ResearchStatus::None);
+                                    research_records.set(Vec::new());
+                                    document_info.set(None);
+                                    document_error.set(None);
+                                    caption.set(None);
+                                    strict_cloud_minimization.set(next);
+                                },
+                                if strict_mode {
+                                    "厳格モードを切る"
+                                } else {
+                                    "厳格モードを使う"
+                                }
+                            }
+                        }
+                        if state_snapshot != VoiceState::Ready {
+                            p { "切り替えるには、いったん会話を終了してください。" }
+                        }
+                    }
+
                     section { class: "paper-drop",
                         div { class: "paper-drop__heading",
                             span { class: "utility-index", "01" }
                             div {
                                 h2 { "論文を、今回だけ" }
-                                p { "PDF / 最大7MB / 次の応答後に参照を解除" }
+                                p {
+                                    if strict_mode {
+                                        "厳格モードでは選択・読込・送信しません"
+                                    } else {
+                                        "PDF / 最大7MB / 次の応答後に参照を解除"
+                                    }
+                                }
                             }
                         }
-                        input {
-                            id: "paper-input",
-                            class: "sr-only",
-                            r#type: "file",
-                            accept: "application/pdf,.pdf",
-                            disabled: document_is_busy,
-                            onchange: move |_| {
-                                document_error.set(None);
-                                spawn(async move {
-                                    match cloud::attach_document("paper-input").await {
-                                        Ok(info) => {
-                                            document_info.set(Some(info));
-                                            needs_paper.set(false);
-                                        }
-                                        Err(message) => document_error.set(Some(message)),
-                                    }
-                                });
-                            },
-                        }
-                        label {
-                            class: if document_is_busy {
-                                "paper-picker is-disabled"
-                            } else {
-                                "paper-picker"
-                            },
-                            r#for: "paper-input",
-                            span { class: "paper-picker__icon", aria_hidden: "true", "＋" }
-                            if let Some(info) = document_snapshot.as_ref() {
+                        if strict_mode {
+                            div {
+                                class: "paper-picker is-disabled",
+                                aria_disabled: "true",
+                                span { class: "paper-picker__icon", aria_hidden: "true", "—" }
                                 span {
-                                    strong { {info.name.clone()} }
-                                    small { "{human_file_size(info.size_bytes)} / 次の応答だけに使用" }
+                                    strong { "厳格モードではPDFを送らない" }
+                                    small { "標準モードへ戻すと、次の応答だけに添付できます" }
                                 }
-                            } else {
-                                span {
-                                    strong { "PDFを渡す" }
-                                    small { "保存せず、文脈を読む" }
+                            }
+                        } else {
+                            input {
+                                id: "paper-input",
+                                class: "sr-only",
+                                r#type: "file",
+                                accept: "application/pdf,.pdf",
+                                disabled: document_is_busy,
+                                onchange: move |_| {
+                                    document_error.set(None);
+                                    spawn(async move {
+                                        match cloud::attach_document("paper-input").await {
+                                            Ok(info) => {
+                                                document_info.set(Some(info));
+                                                needs_paper.set(false);
+                                            }
+                                            Err(message) => document_error.set(Some(message)),
+                                        }
+                                    });
+                                },
+                            }
+                            label {
+                                class: if document_is_busy {
+                                    "paper-picker is-disabled"
+                                } else {
+                                    "paper-picker"
+                                },
+                                r#for: "paper-input",
+                                span { class: "paper-picker__icon", aria_hidden: "true", "＋" }
+                                if let Some(info) = document_snapshot.as_ref() {
+                                    span {
+                                        strong { {info.name.clone()} }
+                                        small { "{human_file_size(info.size_bytes)} / 次の応答だけに使用" }
+                                    }
+                                } else {
+                                    span {
+                                        strong { "PDFを渡す" }
+                                        small { "保存せず、文脈を読む" }
+                                    }
                                 }
                             }
                         }
@@ -1633,9 +2431,11 @@ fn App() -> Element {
                         }
                     }
 
+                    LongitudinalPanel {}
+
                     details { class: "privacy-fold", open: true,
                         summary {
-                            span { class: "utility-index", "02" }
+                            span { class: "utility-index", "03" }
                             span {
                                 strong { "VOICE PRIVACY" }
                                 small { "いま何が送られるか" }
@@ -1645,15 +2445,23 @@ fn App() -> Element {
                         div { class: "privacy-fold__body",
                             p {
                                 strong { "音声" }
-                                "発話ごとにTLSで送り　アプリの履歴には残さない。会話中は、考え中と返答再生中も訂正を受けるため端末内VADがマイクを使い、確認した割り込みだけを送ります。処理中はCloud Run・Speech-to-Text・Vertex AIが内容を扱うため、E2EEではありません。"
+                                if strict_mode {
+                                    "原音はTLSでSpeech-to-Textへ送ります。文字起こしと返答は端末内検査とregional DLPの両方がclearの時だけ次へ進み、検出・障害・時間切れでは停止します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
+                                } else {
+                                    "発話ごとにTLSでCloud RunとSpeech-to-Textへ送り、文字起こしをVertex AI、返答をText-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
+                                }
                             }
                             p {
                                 strong { "PDF" }
-                                "選んだときだけ次の応答へ添付し、応答後にブラウザ上の参照を解除します。処理中はサーバーとVertex AIが内容を扱います。"
+                                if strict_mode {
+                                    "厳格モードでは端末で選択・読込・送信しません。"
+                                } else {
+                                    "自分で選んだ時だけ次の応答へ添付し、応答後にブラウザ上の参照を解除します。処理中はCloud RunとVertex AIが本文を扱います。"
+                                }
                             }
                             p {
                                 strong { "接続" }
-                                "確認済みGoogleアカウントと正規アプリからのリクエストか毎回たしかめる。メールアドレスはKOTAEの画面・ログ・会話状態へ保存しません。"
+                                "初めて使う時は専用操作でパスキーを登録し、次回から音声開始前に同じパスキーでこの仮名アカウントの操作を確認します。KOTAEのブラウザコードとサーバーへ秘密鍵は送りません。これは法的身元確認でも、現在マイクで話す人の認証でもありません。Firebase Authの認証セッション情報をSDKがタブ内storageに保持します。"
                             }
                             p {
                                 strong { "会話支援" }
@@ -1661,11 +2469,19 @@ fn App() -> Element {
                             }
                             p {
                                 strong { "話者" }
-                                "アカウントの本人確認と、いまマイクで話す人の識別は別です。声紋は収集せず、話者本人の認証はしていません。相手の質問はあなた自身が言い直してから答えてください。"
+                                "パスキーは声の本人確認ではないため、いまマイクで話す人がアカウントの持ち主かは認証していません。声紋は収集せず、周囲の声を自動採用しません。"
                             }
                             p {
                                 strong { "外部検索" }
-                                "「外部検索で、テーマは何々の最新論文を探して」と発話全体で明示したときだけ、その検索語をCrossrefへ送ります。通常の会話やPDFからは検索しません。氏名・連絡先・症例は検索語に入れないでください。"
+                                if strict_mode {
+                                    "厳格モードではResearch機能を呼び出しません。"
+                                } else {
+                                    "「外部検索で、テーマは何々の最新論文を探して」と発話全体で明示したときだけ、その検索語をCrossrefへ送ります。通常の会話やPDFからは検索しません。氏名・連絡先・症例は検索語に入れないでください。"
+                                }
+                            }
+                            p {
+                                strong { "限界" }
+                                "現在のクラウド音声処理はE2EEではありません。DLPにも検出漏れがあり得るため、完全なPII除去とも表示しません。"
                             }
                             p { class: "privacy-fold__stop",
                                 "一時停止・終了で　マイクと再生をすぐ止める"
@@ -1687,10 +2503,12 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSWER_SUPPORT_COPY, CoachAction, CoachPhase, CoachState, ORDINARY_CHAT_COPY,
+        ANSWER_SUPPORT_COPY, CoachAction, CoachPhase, CoachState, NEW_PASSKEY_ACCOUNT_ACTION,
+        ORDINARY_CHAT_COPY, RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING,
         SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState, VoiceTurnMode,
         recoverable_wait_turn_code, session_stop_pauses, silent_recognition_miss,
         turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
+        valid_voice_privacy_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -1777,14 +2595,25 @@ mod tests {
 
         for boundary in [
             "診断や治療ではなく",
-            "苦手な場面を勝手に練習させません",
+            "苦手さを測ったり課題を課したりしません",
+            "会話を楽しめることを優先",
+            "頼まれた時だけ短く支えます",
             "会話内容を含まない短期の目印",
-            "通常会話の質問量を調整",
+            "質問量を控えめに調整",
             "点数は表示しません",
         ] {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }
         assert!(!SUPPORT_BOUNDARY_COPY.contains("曝露"));
+    }
+
+    #[test]
+    fn passkey_entry_copy_separates_returning_authentication_from_new_registration() {
+        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済みパスキーで戻る");
+        assert_eq!(NEW_PASSKEY_ACCOUNT_ACTION, "新しい仮名アカウントを作る");
+        assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("既存の仮名アカウントとは別"));
+        assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("自動登録はしません"));
+        assert!(!RETURNING_PASSKEY_ACTION.contains("登録する"));
     }
 
     #[test]
@@ -1851,6 +2680,52 @@ mod tests {
         assert!(!valid_streamed_audio_metadata("", "audio/L16", false));
         assert!(!valid_streamed_audio_metadata("", "", true));
         assert!(!valid_streamed_audio_metadata("YQ==", "audio/L16", true));
+    }
+
+    #[test]
+    fn privacy_status_is_bound_to_the_selected_mode() {
+        assert!(valid_voice_privacy_metadata(
+            false,
+            "",
+            "ordinary-state",
+            super::ResearchStatus::NeedsPrimaryEvidence,
+            1,
+        ));
+        assert!(valid_voice_privacy_metadata(
+            true,
+            "clear",
+            "",
+            super::ResearchStatus::None,
+            0,
+        ));
+        assert!(valid_voice_privacy_metadata(
+            true,
+            "blocked",
+            "",
+            super::ResearchStatus::None,
+            0,
+        ));
+        assert!(!valid_voice_privacy_metadata(
+            true,
+            "",
+            "",
+            super::ResearchStatus::None,
+            0,
+        ));
+        assert!(!valid_voice_privacy_metadata(
+            true,
+            "clear",
+            "leaked-state",
+            super::ResearchStatus::None,
+            0,
+        ));
+        assert!(!valid_voice_privacy_metadata(
+            false,
+            "clear",
+            "",
+            super::ResearchStatus::None,
+            0,
+        ));
     }
 
     #[test]

@@ -550,6 +550,147 @@ func TestPipelineLiveNeverAdoptsMatchingSpeculationWithLowFinalConfidence(t *tes
 	}
 }
 
+func TestPipelineLiveForegroundLowConfidenceDiscardsSpeculationSilently(t *testing.T) {
+	t.Parallel()
+	const utterance = "この小声の質問を詳しく説明して"
+	finalGate := make(chan struct{})
+	synthesisGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.91,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.94,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:       speechio.StreamingTranscriptionFinal,
+			Text:       utterance,
+			Confidence: 0.40,
+		},
+	)
+	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	speech := &scriptedLiveSpeech{
+		fakeSpeech: fakeSpeech{},
+		session:    session,
+		scripts: []scriptedSynthesis{
+			{
+				chunks:       [][]byte{{7, 0}},
+				beforeReturn: synthesisGate,
+			},
+		},
+		chunkStarted: make(chan synthesisChunkEvent, 1),
+		completed:    make(chan int, 1),
+		returned:     make(chan int, 1),
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("先読みした回答", "spec-state"),
+		normalResult:      liveTestDecision("must not run", "normal-state"),
+		started:           make(chan struct{}),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(175, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	type liveOutcome struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}
+	var delivered []byte
+	done := make(chan liveOutcome, 1)
+	go func() {
+		result, processErr := pipeline.ProcessLive(
+			context.Background(),
+			"uid-low-confidence-foreground",
+			httpapi.VoiceTurnInput{
+				Ambient:    true,
+				Foreground: true,
+				StateToken: "existing-state",
+			},
+			audio,
+			func(chunk []byte) error {
+				delivered = append(delivered, chunk...)
+				return nil
+			},
+		)
+		done <- liveOutcome{result: result, err: processErr}
+	}()
+
+	select {
+	case <-agent.started:
+	case <-time.After(time.Second):
+		t.Fatal("foreground speculation did not start")
+	}
+	select {
+	case event := <-speech.chunkStarted:
+		if event.call != 0 || event.chunk != 0 {
+			t.Fatalf("speculative synthesis event=%+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("foreground speculative synthesis did not start")
+	}
+	select {
+	case call := <-speech.completed:
+		if call != 0 {
+			t.Fatalf("completed synthesis call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("foreground speculative synthesis did not finish buffering")
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("speculative foreground audio escaped before final confidence: %v", delivered)
+	}
+	close(finalGate)
+
+	var outcome liveOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("foreground low-confidence final did not finish")
+	}
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	select {
+	case call := <-speech.returned:
+		if call != 0 {
+			t.Fatalf("returned synthesis call=%d", call)
+		}
+	default:
+		t.Fatal("discarded speculative synthesis did not observe cancellation")
+	}
+
+	turns := agent.recordedTurns()
+	texts := speech.synthesisTexts()
+	if len(turns) != 1 || !turns[0].Speculative ||
+		len(texts) != 1 || texts[0] != "先読みした回答" {
+		t.Fatalf("turns=%+v synthesis=%q", turns, texts)
+	}
+	if outcome.result.Route != routeSilentLowConfidence ||
+		outcome.result.Caption != "" ||
+		outcome.result.StateToken != "existing-state" ||
+		outcome.result.LiveTimings.SpecHit != 0 ||
+		outcome.result.LiveTimings.SpecMiss != 1 ||
+		outcome.result.LiveTimings.SpecCancel != 1 ||
+		outcome.result.LiveTimings.TTSPrestarted != 1 ||
+		outcome.result.LiveTimings.TTSBufferedBytes != 2 ||
+		outcome.result.LiveTimings.TTSReleaseMS != -1 ||
+		len(delivered) != 0 {
+		t.Fatalf("delivered=%v result=%+v", delivered, outcome.result)
+	}
+}
+
 func TestPipelineLiveExposesPostCommitDeadlineToAgent(t *testing.T) {
 	session := newFakeLiveTranscriptionSession(
 		speechio.StreamingTranscriptionEvent{

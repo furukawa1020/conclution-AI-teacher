@@ -4,6 +4,7 @@
 .tmp/
 .gocache/
 .gocache-*/
+.tmp-gocache-*/
 .tmp-go-cache-*/
 bin/
 coverage.out

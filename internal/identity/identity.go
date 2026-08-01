@@ -3,11 +3,21 @@ package identity
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
+	"time"
 
 	"firebase.google.com/go/v4/appcheck"
 	"firebase.google.com/go/v4/auth"
 	"golang.org/x/sync/errgroup"
+)
+
+const (
+	passkeyAuthMethod            = "passkey-v1"
+	passkeyAtClaim               = "kotae_passkey_at"
+	passkeyTimestampClockSkew    = 30 * time.Second
+	maxPasskeyTokenExchangeDelay = time.Hour
+	maxExactJSONInteger          = int64(1<<53 - 1)
 )
 
 var ErrUnauthenticated = errors.New("unauthenticated")
@@ -16,12 +26,19 @@ type Principal struct {
 	UID             string
 	AppID           string
 	Provider        string
+	AuthMethod      string
+	AuthTime        time.Time
+	PasskeyAt       time.Time
 	AccountVerified bool
 	Roles           map[string]bool
 }
 
 type Verifier interface {
 	Verify(ctx context.Context, idToken, appCheckToken string) (Principal, error)
+}
+
+type AppVerifier interface {
+	VerifyApp(context.Context, string) (string, error)
 }
 
 type authTokenVerifier interface {
@@ -112,13 +129,80 @@ func (v *FirebaseVerifier) Verify(ctx context.Context, idToken, appCheckToken st
 		return Principal{}, ErrUnauthenticated
 	}
 
+	authMethod := provider
+	var passkeyAt time.Time
+	if provider == "custom" {
+		authMethod, _ = authToken.Claims["kotae_authn"].(string)
+		authMethod = strings.TrimSpace(authMethod)
+		var ok bool
+		passkeyAt, ok = verifiedPasskeyTimestamp(authToken, authMethod)
+		if !ok {
+			return Principal{}, ErrUnauthenticated
+		}
+	}
 	return Principal{
 		UID:             authToken.UID,
 		AppID:           appToken.AppID,
 		Provider:        provider,
+		AuthMethod:      authMethod,
+		AuthTime:        time.Unix(authToken.AuthTime, 0).UTC(),
+		PasskeyAt:       passkeyAt,
 		AccountVerified: true,
 		Roles:           extractRoles(authToken.Claims),
 	}, nil
+}
+
+func verifiedPasskeyTimestamp(token *auth.Token, authMethod string) (time.Time, bool) {
+	if token == nil || authMethod != passkeyAuthMethod ||
+		!validUnixTimestamp(token.AuthTime) || !validUnixTimestamp(token.IssuedAt) {
+		return time.Time{}, false
+	}
+	seconds, ok := exactUnixSeconds(token.Claims[passkeyAtClaim])
+	if !ok || !validUnixTimestamp(seconds) {
+		return time.Time{}, false
+	}
+
+	skewSeconds := int64(passkeyTimestampClockSkew / time.Second)
+	if seconds > token.AuthTime+skewSeconds || seconds > token.IssuedAt+skewSeconds {
+		return time.Time{}, false
+	}
+	maxExchangeSeconds := int64((maxPasskeyTokenExchangeDelay + passkeyTimestampClockSkew) / time.Second)
+	if token.AuthTime > seconds && token.AuthTime-seconds > maxExchangeSeconds {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0).UTC(), true
+}
+
+func exactUnixSeconds(value any) (int64, bool) {
+	secondsJSON, ok := value.(float64)
+	if !ok || math.IsNaN(secondsJSON) || math.IsInf(secondsJSON, 0) ||
+		math.Trunc(secondsJSON) != secondsJSON || secondsJSON < 0 ||
+		secondsJSON > float64(maxExactJSONInteger) {
+		return 0, false
+	}
+	seconds := int64(secondsJSON)
+	if float64(seconds) != secondsJSON {
+		return 0, false
+	}
+	return seconds, seconds >= 0 && seconds <= maxExactJSONInteger
+}
+
+func validUnixTimestamp(seconds int64) bool {
+	return seconds > 0 && seconds <= maxExactJSONInteger
+}
+
+func (v *FirebaseVerifier) VerifyApp(ctx context.Context, appCheckToken string) (string, error) {
+	if strings.TrimSpace(appCheckToken) == "" {
+		return "", ErrUnauthenticated
+	}
+	token, err := v.appCheckClient.VerifyToken(ctx, appCheckToken)
+	if err != nil || token == nil {
+		return "", ErrUnauthenticated
+	}
+	if _, allowed := v.allowedAppIDs[token.AppID]; !allowed {
+		return "", ErrUnauthenticated
+	}
+	return token.AppID, nil
 }
 
 func verifiedAccountToken(token *auth.Token, provider string) bool {
@@ -133,8 +217,9 @@ func verifiedAccountToken(token *auth.Token, provider string) bool {
 		verified, _ := token.Claims["email_verified"].(bool)
 		return verified
 	case "custom":
-		// Reserved for a future server-verified WebAuthn or external identity
-		// ceremony. Minting an ordinary Firebase custom token is insufficient:
+		// Issued only after this service has verified a WebAuthn ceremony and
+		// exchanged its short-lived custom token through Firebase Auth. Minting
+		// an ordinary Firebase custom token is insufficient:
 		// the issuer must add this explicit, namespaced assurance claim.
 		verified, _ := token.Claims["kotae_account_verified"].(bool)
 		return verified
@@ -167,7 +252,13 @@ func (DevelopmentVerifier) Verify(_ context.Context, _, _ string) (Principal, er
 		UID:             "local-development-user",
 		AppID:           "local-development-app",
 		Provider:        "development",
+		AuthMethod:      "development",
+		AuthTime:        time.Now().UTC(),
 		AccountVerified: true,
 		Roles:           map[string]bool{"user": true},
 	}, nil
+}
+
+func (DevelopmentVerifier) VerifyApp(_ context.Context, _ string) (string, error) {
+	return "local-development-app", nil
 }

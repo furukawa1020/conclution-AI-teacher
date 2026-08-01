@@ -448,6 +448,35 @@ func TestRegionalEndpoint(t *testing.T) {
 	}
 }
 
+func TestDefaultInfoTypesReturnsIndependentReviewedPolicy(t *testing.T) {
+	first := DefaultInfoTypes()
+	second := DefaultInfoTypes()
+	if len(first) == 0 || len(first) != len(second) {
+		t.Fatalf("DefaultInfoTypes() lengths = %d, %d", len(first), len(second))
+	}
+	first[0] = "MUTATED"
+	if second[0] == "MUTATED" {
+		t.Fatal("DefaultInfoTypes() returned shared mutable storage")
+	}
+	for _, required := range []string{
+		"EMAIL_ADDRESS",
+		"JAPAN_INDIVIDUAL_NUMBER",
+		"PERSON_NAME",
+		"PHONE_NUMBER",
+	} {
+		found := false
+		for _, infoType := range second {
+			if infoType == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("DefaultInfoTypes() missing %q", required)
+		}
+	}
+}
+
 func infoTypeNames(infoTypes []*dlp.GooglePrivacyDlpV2InfoType) []string {
 	names := make([]string, 0, len(infoTypes))
 	for _, infoType := range infoTypes {

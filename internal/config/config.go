@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -13,42 +14,54 @@ import (
 )
 
 const (
-	defaultPort           = "8080"
-	defaultVertexLocation = "global"
-	defaultFastModel      = "vertexai/gemini-3.6-flash"
-	defaultPrecisionModel = "vertexai/gemini-3.1-pro-preview"
-	defaultSpeechLocation = "asia-northeast1"
-	defaultSpeechModel    = "long"
-	defaultSpeechVoice    = "ja-JP-Chirp3-HD-Kore"
-	minVoiceTimeout       = 15 * time.Second
+	defaultPort                   = "8080"
+	defaultVertexLocation         = "global"
+	defaultFastModel              = "vertexai/gemini-3.6-flash"
+	defaultPrecisionModel         = "vertexai/gemini-3.1-pro-preview"
+	defaultSpeechLocation         = "asia-northeast1"
+	defaultSpeechModel            = "long"
+	defaultSpeechVoice            = "ja-JP-Chirp3-HD-Kore"
+	defaultPasskeyRPID            = "kotae-ai.web.app"
+	defaultPasskeyOrigin          = "https://kotae-ai.web.app"
+	defaultPasskeyClientPerMinute = 10
+	defaultPasskeyClientPerDay    = 100
+	minVoiceTimeout               = 15 * time.Second
 )
 
 type Config struct {
-	AppEnv                  string
-	Port                    string
-	ProjectID               string
-	AllowedAppIDs           []string
-	VertexLocation          string
-	FastModel               string
-	PrecisionModel          string
-	VertexPriority          bool
-	CoachRestatementBinding bool
-	StateV2Writes           bool
-	SpeechLocation          string
-	SpeechModel             string
-	SpeechVoice             string
-	StateKey                []byte
-	RequestTimeout          time.Duration
-	VoiceTimeout            time.Duration
-	MaxRequestBytes         int64
-	MaxVoiceBytes           int64
-	RateLimits              guard.Limits
-	VoiceRateLimits         guard.Limits
-	VoiceAppRateLimits      guard.Limits
-	AllowInsecureDev        bool
+	AppEnv                       string
+	Port                         string
+	ProjectID                    string
+	AllowedAppIDs                []string
+	VertexLocation               string
+	FastModel                    string
+	PrecisionModel               string
+	VertexPriority               bool
+	CoachRestatementBinding      bool
+	StateV2Writes                bool
+	SpeechLocation               string
+	SpeechModel                  string
+	SpeechVoice                  string
+	StateKey                     []byte
+	RequestTimeout               time.Duration
+	VoiceTimeout                 time.Duration
+	MaxRequestBytes              int64
+	MaxVoiceBytes                int64
+	RateLimits                   guard.Limits
+	VoiceRateLimits              guard.Limits
+	VoiceAppRateLimits           guard.Limits
+	PasskeyClientRateLimits      guard.Limits
+	PasskeyAppCircuitBreaker     guard.Limits
+	PasskeyRPID                  string
+	PasskeyOrigin                string
+	RequireRecentPasskeyForVoice bool
+	AllowInsecureDev             bool
 }
 
 func Load() (Config, error) {
+	if err := rejectLegacyPasskeyRateLimitEnvironment(); err != nil {
+		return Config{}, err
+	}
 	perMinute, err := envBoundedInt(
 		"KOTAE_RATE_LIMIT_PER_MINUTE",
 		guard.DefaultPerMinute,
@@ -103,7 +116,42 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-
+	passkeyClientPerMinute, err := envBoundedInt(
+		"KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE",
+		defaultPasskeyClientPerMinute,
+		guard.MinPerMinute,
+		guard.MaxPerMinute,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	passkeyClientPerDay, err := envBoundedInt(
+		"KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY",
+		defaultPasskeyClientPerDay,
+		guard.MinPerDay,
+		guard.MaxPerDay,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	passkeyAppPerMinute, err := envBoundedInt(
+		"KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE",
+		guard.MaxPasskeyAppCircuitBreakerPerMinute,
+		guard.MinPerMinute,
+		guard.MaxPasskeyAppCircuitBreakerPerMinute,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	passkeyAppPerDay, err := envBoundedInt(
+		"KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY",
+		guard.MaxPasskeyAppCircuitBreakerPerDay,
+		guard.MinPerDay,
+		guard.MaxPasskeyAppCircuitBreakerPerDay,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	stateKey, err := decodeStateKey(os.Getenv("KOTAE_STATE_KEY_BASE64"))
 	if err != nil {
 		return Config{}, err
@@ -123,7 +171,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-
+	allowInsecureDev := envBool("KOTAE_ALLOW_INSECURE_DEV")
+	requireRecentPasskey, err := envStrictBool(
+		"KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE",
+		!allowInsecureDev,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:                  envOr("KOTAE_ENV", "production"),
 		Port:                    envOr("PORT", defaultPort),
@@ -149,7 +204,18 @@ func Load() (Config, error) {
 			PerMinute: voiceAppPerMinute,
 			PerDay:    voiceAppPerDay,
 		},
-		AllowInsecureDev: envBool("KOTAE_ALLOW_INSECURE_DEV"),
+		PasskeyClientRateLimits: guard.Limits{
+			PerMinute: passkeyClientPerMinute,
+			PerDay:    passkeyClientPerDay,
+		},
+		PasskeyAppCircuitBreaker: guard.Limits{
+			PerMinute: passkeyAppPerMinute,
+			PerDay:    passkeyAppPerDay,
+		},
+		PasskeyRPID:                  envOr("KOTAE_PASSKEY_RP_ID", defaultPasskeyRPID),
+		PasskeyOrigin:                envOr("KOTAE_PASSKEY_ORIGIN", defaultPasskeyOrigin),
+		RequireRecentPasskeyForVoice: requireRecentPasskey,
+		AllowInsecureDev:             allowInsecureDev,
 	}
 
 	if strings.TrimSpace(cfg.Port) == "" {
@@ -209,8 +275,61 @@ func Load() (Config, error) {
 	if err := cfg.VoiceAppRateLimits.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid voice app rate limits: %w", err)
 	}
-
+	if err := cfg.PasskeyClientRateLimits.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid passkey client rate limits: %w", err)
+	}
+	if err := cfg.PasskeyAppCircuitBreaker.ValidatePasskeyAppCircuitBreaker(); err != nil {
+		return Config{}, fmt.Errorf("invalid passkey app circuit breaker: %w", err)
+	}
+	if err := validatePasskeyOrigin(cfg.PasskeyRPID, cfg.PasskeyOrigin, cfg.AllowInsecureDev); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func rejectLegacyPasskeyRateLimitEnvironment() error {
+	legacy := []struct {
+		old string
+		new string
+	}{
+		{
+			old: "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE",
+			new: "KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE and KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE",
+		},
+		{
+			old: "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY",
+			new: "KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY and KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY",
+		},
+	}
+	for _, migration := range legacy {
+		if _, set := os.LookupEnv(migration.old); set {
+			return fmt.Errorf(
+				"%s is no longer supported; unset it and configure %s",
+				migration.old,
+				migration.new,
+			)
+		}
+	}
+	return nil
+}
+
+func validatePasskeyOrigin(rpID, origin string, allowInsecureDev bool) error {
+	rpID = strings.TrimSpace(rpID)
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return errors.New("KOTAE_PASSKEY_ORIGIN must be one exact origin")
+	}
+	if parsed.Hostname() != rpID || strings.Contains(rpID, ":") || strings.Contains(rpID, "/") {
+		return errors.New("KOTAE_PASSKEY_RP_ID must exactly match the passkey origin hostname")
+	}
+	if parsed.Scheme != "https" && !(allowInsecureDev && parsed.Scheme == "http") {
+		return errors.New("KOTAE_PASSKEY_ORIGIN must use https")
+	}
+	if !allowInsecureDev && parsed.Port() != "" {
+		return errors.New("KOTAE_PASSKEY_ORIGIN must not include a production port")
+	}
+	return nil
 }
 
 func decodeStateKey(raw string) ([]byte, error) {

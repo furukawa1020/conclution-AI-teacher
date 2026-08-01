@@ -297,6 +297,62 @@ func TestVoiceStreamRejectsTheChunkAfterTheSharedCeiling(t *testing.T) {
 	}
 }
 
+func TestStrictVoiceStreamNeverReleasesAudioBeforeResultValidation(t *testing.T) {
+	t.Parallel()
+	blocked := VoiceTurnResult{
+		DetectedDomain:   "unknown",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		PrivacyStatus:    "blocked",
+		Route:            "strict-privacy-blocked",
+	}
+	for _, test := range []struct {
+		name   string
+		result VoiceTurnResult
+		err    error
+	}{
+		{name: "blocked result after callback", result: blocked},
+		{name: "service error after callback", err: errors.New("private provider failure")},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeStreamingVoiceService{
+				audio:  [][]byte{{4, 0, 5, 0}},
+				result: test.result,
+				err:    test.err,
+			}
+			handler := testStreamingVoiceHandler(
+				service,
+				&fakeLimiter{},
+				&fakeLimiter{wantKey: "app:app-123"},
+			)
+			request := authenticatedRequest(
+				http.MethodPost,
+				voiceStreamPath,
+				`{"audioBase64":"YQ==","mimeType":"audio/webm",`+
+					`"sessionState":"","turnMode":"intentional",`+
+					`"strictCloudMinimization":true}`,
+			)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Sec-Fetch-Site", "cross-site")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			body := response.Body.String()
+			if response.Code != http.StatusOK ||
+				strings.Contains(body, `"type":"audio"`) ||
+				!strings.Contains(body, `"type":"error"`) ||
+				strings.Contains(body, "private provider failure") {
+				t.Fatalf("strict stream leaked before validation: %s", body)
+			}
+		})
+	}
+}
+
 func TestVoiceStreamCORSPreflightIsExact(t *testing.T) {
 	t.Parallel()
 

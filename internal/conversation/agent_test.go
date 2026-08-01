@@ -1113,6 +1113,55 @@ func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
 	}
 }
 
+func TestExtendedSpeechUsesNaturalGroundedImmediateScaffolding(t *testing.T) {
+	for _, required := range []string{
+		"conversation_data.extended_speech=true",
+		"発話内で明示された中心点",
+		"利用者へ「要約」「結論」「練習」「採点」と説明せず",
+		"言い直しや反復を求めない",
+		"長期的な改善や治療効果を示すものとして話さない",
+	} {
+		if !strings.Contains(systemInstruction, required) {
+			t.Fatalf("extended-speech instruction is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"extended_speech=trueの通常会話",
+		"中心点、条件、確実性を安全に一意化できなければ",
+		"機微情報を第一文へ復唱しない",
+	} {
+		if !strings.Contains(lacCriticSystemInstruction, required) {
+			t.Fatalf("extended-speech critic is missing %q", required)
+		}
+	}
+
+	plan := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+	_, err := agent.infer(
+		context.Background(),
+		agent.fastModel,
+		genai.ThinkingLevelLow,
+		VoiceTurn{
+			SchemaVersion:  SchemaVersion,
+			Utterance:      strings.Repeat("長い話です。", 30),
+			ExtendedSpeech: true,
+		},
+		conversationState{},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("infer extended speech: %v", err)
+	}
+	if len(fake.calls) != 1 ||
+		!strings.Contains(fake.calls[0].prompt, `"extended_speech":true`) {
+		t.Fatalf("server-derived extended-speech flag missing from prompt: %#v", fake.calls)
+	}
+}
+
 func TestSystemInstructionKeepsProactiveConversationLowPressureAndNonDependent(
 	t *testing.T,
 ) {
@@ -1149,6 +1198,13 @@ func TestCriticPolicyUsesTurnPlanAndRouteRisk(t *testing.T) {
 	}{
 		{name: "ordinary fast"},
 		{name: "precision route", route: "precision", highRisk: true},
+		{
+			name: "extended speech",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.ExtendedSpeech = true
+			},
+			highRisk: true,
+		},
 		{
 			name: "PDF",
 			configure: func(turn *VoiceTurn, _ *modelPlan) {

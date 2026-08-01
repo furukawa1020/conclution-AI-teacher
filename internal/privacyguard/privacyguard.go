@@ -25,6 +25,42 @@ const (
 	DefaultTimeout = 5 * time.Second
 )
 
+// defaultInfoTypes is deliberately explicit. Sensitive Data Protection does
+// not assume a useful policy when no infoTypes are supplied, and adding new
+// provider detectors must be reviewed rather than silently changing behavior.
+var defaultInfoTypes = []string{
+	"AUTH_TOKEN",
+	"CREDIT_CARD_DATA",
+	"DATE_OF_BIRTH",
+	"DRIVERS_LICENSE_NUMBER",
+	"EMAIL_ADDRESS",
+	"ENCRYPTION_KEY",
+	"FINANCIAL_ACCOUNT_NUMBER",
+	"GCP_API_KEY",
+	"GENERIC_ID",
+	"GEOGRAPHIC_DATA",
+	"IP_ADDRESS",
+	"JAPAN_BANK_ACCOUNT",
+	"JAPAN_DRIVERS_LICENSE_NUMBER",
+	"JAPAN_INDIVIDUAL_NUMBER",
+	"JAPAN_PASSPORT",
+	"JSON_WEB_TOKEN",
+	"MEDICAL_RECORD_NUMBER",
+	"OAUTH_CLIENT_SECRET",
+	"OPENAI_API_KEY",
+	"PASSPORT",
+	"PERSON_NAME",
+	"PHONE_NUMBER",
+	"STORAGE_SIGNED_URL",
+	"STREET_ADDRESS",
+	"USER_NAME",
+}
+
+// DefaultInfoTypes returns a copy of the reviewed production detector policy.
+func DefaultInfoTypes() []string {
+	return append([]string(nil), defaultInfoTypes...)
+}
+
 var (
 	ErrInvalidConfiguration  = errors.New("privacy guard configuration is invalid")
 	ErrInputTooLarge         = errors.New("privacy guard input exceeds the direct-content limit")
@@ -382,21 +418,23 @@ func screenDeterministic(text string) (string, bool) {
 		}
 	}
 
-	next := phonePattern.ReplaceAllStringFunc(text, func(candidate string) string {
-		if countDigits(candidate) < 10 {
-			return candidate
-		}
-		redacted = true
-		return phoneReplacement
-	})
-	text = next
-
+	// Long identifiers are handled before the deliberately broad phone pattern
+	// so UUIDs and long numeric account identifiers retain the safer, stable ID
+	// placeholder instead of being classified as telephone-like digit strings.
 	text = longIDPattern.ReplaceAllStringFunc(text, func(candidate string) string {
 		if countDigits(candidate) == 0 {
 			return candidate
 		}
 		redacted = true
 		return longIDReplacement
+	})
+
+	text = phonePattern.ReplaceAllStringFunc(text, func(candidate string) string {
+		if countDigits(candidate) < 10 {
+			return candidate
+		}
+		redacted = true
+		return phoneReplacement
 	})
 	return text, redacted
 }

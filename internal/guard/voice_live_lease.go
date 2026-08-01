@@ -58,6 +58,54 @@ func (state voiceLiveLeaseState) validate() error {
 	return nil
 }
 
+// validateVoiceLiveLeaseForAcquire decides whether an existing Firestore
+// document may be replaced. Expiry is intentionally checked before the legacy
+// schema fields: an unambiguously expired lease cannot still own the slot, but
+// an active lease must have the complete current schema before it can safely be
+// treated as held.
+func validateVoiceLiveLeaseForAcquire(data map[string]any, now time.Time) error {
+	expiresValue, ok := data["expiresAt"]
+	if !ok {
+		return errors.New("voice live lease expiry is missing")
+	}
+	expired, expiresAt, err := voiceLiveLeaseExpiry(expiresValue, now)
+	if err != nil {
+		return err
+	}
+	if expired {
+		return nil
+	}
+
+	holder, ok := data["holder"].(string)
+	if !ok {
+		return errors.New("invalid voice live lease holder")
+	}
+	schema, ok := data["schemaVersion"].(int64)
+	if !ok || schema != voiceLiveLeaseSchema {
+		return errors.New("unsupported voice live lease schema")
+	}
+	persisted := voiceLiveLeaseState{
+		Holder:    holder,
+		ExpiresAt: expiresAt,
+		Schema:    int(schema),
+	}
+	if err := persisted.validate(); err != nil {
+		return err
+	}
+	return ErrVoiceLiveLeaseHeld
+}
+
+func voiceLiveLeaseExpiry(
+	expiresValue any,
+	now time.Time,
+) (bool, time.Time, error) {
+	expiresAt, ok := expiresValue.(time.Time)
+	if !ok || expiresAt.IsZero() {
+		return false, time.Time{}, errors.New("invalid voice live lease expiry")
+	}
+	return !expiresAt.After(now.UTC()), expiresAt, nil
+}
+
 func newVoiceLiveLeaseState(now time.Time, ttl time.Duration) (voiceLiveLeaseState, error) {
 	if ttl <= 0 {
 		return voiceLiveLeaseState{}, errors.New("voice live lease TTL must be positive")
@@ -105,18 +153,14 @@ func (manager *FirestoreVoiceLiveLeaseManager) Acquire(
 		ctx context.Context,
 		tx *firestore.Transaction,
 	) error {
-		persisted := voiceLiveLeaseState{}
 		snapshot, getErr := tx.Get(ref)
 		switch {
 		case getErr == nil:
-			if decodeErr := snapshot.DataTo(&persisted); decodeErr != nil {
-				return fmt.Errorf("decode voice live lease: %w", decodeErr)
-			}
-			if validateErr := persisted.validate(); validateErr != nil {
+			if validateErr := validateVoiceLiveLeaseForAcquire(
+				snapshot.Data(),
+				now,
+			); validateErr != nil {
 				return validateErr
-			}
-			if persisted.ExpiresAt.After(now.UTC()) {
-				return ErrVoiceLiveLeaseHeld
 			}
 		case status.Code(getErr) != codes.NotFound:
 			return fmt.Errorf("read voice live lease: %w", getErr)
@@ -213,12 +257,22 @@ func (manager *MemoryVoiceLiveLeaseManager) Acquire(
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if persisted, ok := manager.leases[documentID]; ok {
+		expired, _, expiryErr := voiceLiveLeaseExpiry(persisted.ExpiresAt, now)
+		if expiryErr != nil {
+			return nil, expiryErr
+		}
+		if expired {
+			manager.leases[documentID] = requested
+			return &memoryVoiceLiveLease{
+				manager:    manager,
+				documentID: documentID,
+				holder:     requested.Holder,
+			}, nil
+		}
 		if err := persisted.validate(); err != nil {
 			return nil, err
 		}
-		if persisted.ExpiresAt.After(now.UTC()) {
-			return nil, ErrVoiceLiveLeaseHeld
-		}
+		return nil, ErrVoiceLiveLeaseHeld
 	}
 	manager.leases[documentID] = requested
 	return &memoryVoiceLiveLease{

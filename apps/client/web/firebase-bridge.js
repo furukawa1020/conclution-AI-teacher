@@ -812,7 +812,7 @@ function resolveRecording(recording, candidate) {
   stopVad(recording);
   setStreamTracksEnabled(recording.stream, false);
   const captured =
-    candidate === undefined
+    candidate === undefined || !recording.fallbackAudioComplete
       ? Object.freeze({ chunks: [], totalBytes: 0 })
       : candidate.captureBuffer.take();
   const mimeType =
@@ -822,7 +822,7 @@ function resolveRecording(recording, candidate) {
   const confirmedSpeech =
     candidate !== undefined &&
     candidate.confirmed &&
-    captured.totalBytes > 0;
+    (captured.totalBytes > 0 || !recording.fallbackAudioComplete);
   recording.candidate = undefined;
   if (candidate) {
     candidate.discarded = true;
@@ -833,7 +833,10 @@ function resolveRecording(recording, candidate) {
   recording.resolveEnd(
     Object.freeze({
       blob,
-      hasSpeech: confirmedSpeech && blob.size > 0,
+      fallbackAudioComplete: recording.fallbackAudioComplete,
+      hasSpeech:
+        confirmedSpeech &&
+        (blob.size > 0 || !recording.fallbackAudioComplete),
       mimeType,
       reason: recording.stopReason,
     }),
@@ -891,6 +894,13 @@ function currentAudioContextFrame(context = audioContext) {
   return Number.isSafeInteger(frame) && frame >= 0 ? frame : null;
 }
 
+function recordingHasLivePrimary(recording) {
+  return (
+    (activeRecording === recording && activeLiveSession !== undefined) ||
+    pendingLiveSession?.recording === recording
+  );
+}
+
 function startCandidateRecorder(
   recording,
   confirmed,
@@ -935,6 +945,7 @@ function startCandidateRecorder(
     startedAt: confirmed ? null : candidateStartedAt,
     stopReason: "",
   };
+  recording.fallbackAudioComplete = true;
   recording.totalBytes = 0;
   recording.candidate = candidate;
   recorder.addEventListener("dataavailable", (event) => {
@@ -947,9 +958,23 @@ function startCandidateRecorder(
     ) {
       return;
     }
+    if (!recording.fallbackAudioComplete) {
+      return;
+    }
     const captureState = candidate.captureBuffer.append(event.data);
     recording.totalBytes = captureState.totalBytes;
     if (captureState.tooLarge) {
+      if (recordingHasLivePrimary(recording)) {
+        // The WebSocket PCM stream is the primary path. Once this bounded
+        // MediaRecorder copy overflows it is no longer a complete utterance,
+        // so erase and permanently disable only the HTTP fallback. Keeping
+        // the recorder alive preserves VAD/end-of-turn while later chunks are
+        // dropped instead of extending local audio retention.
+        candidate.captureBuffer.clear();
+        recording.fallbackAudioComplete = false;
+        recording.totalBytes = 0;
+        return;
+      }
       recording.discard = true;
       requestRecordingStop(recording, "too-large");
     }
@@ -1188,6 +1213,7 @@ function createRecordingState(stream) {
     discard: false,
     endPromise,
     expectedEpoch: sessionEpoch,
+    fallbackAudioComplete: true,
     firstVoiceAt: null,
     lastVoiceAt: null,
     liveSpeechConfirmed: false,
@@ -3669,6 +3695,12 @@ async function finishTurn(serializedSessionState, turnMode) {
         }
         liveSession = undefined;
       }
+    }
+    if (capture.fallbackAudioComplete !== true) {
+      // Never upload an empty suffix or prefix after the bounded recorder
+      // fallback was invalidated. The live primary already had its chance to
+      // finish above; a failed primary now ends explicitly.
+      fail("voice_turn_too_large");
     }
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
       Promise.all([

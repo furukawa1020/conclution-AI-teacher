@@ -22,7 +22,11 @@ const (
 	minSpeculativeStability       = 0.85
 	minSpeculativeCandidateRunes  = 8
 	minSpeculativeStableDuration  = 160 * time.Millisecond
-	maxSpeculativeTTSBufferBytes  = 24_000
+	// This is a semantic-content threshold, not a score. It marks a finalized
+	// transcript as extended only when there is enough recognized material to
+	// ground a same-turn main-point reflection safely.
+	extendedSpeechMinRunes       = 160
+	maxSpeculativeTTSBufferBytes = 24_000
 	voiceSynthesisReserve         = 5 * time.Second
 	lowConfidencePrompt           = "急がなくて大丈夫です。こちらから小さな話題を一つ置きます。音がない時間と、何か流れている時間では、どちらが少し楽ですか。答えは一語でも、聞いているだけでも大丈夫です。"
 	routeClarifyNoSpeech          = "stt-clarify-no-speech"
@@ -1670,7 +1674,9 @@ func conversationTurn(
 		RequestID:     input.RequestID,
 		Ambient:       input.Ambient,
 		Foreground:    input.Foreground,
-		Speculative:   speculative,
+		ExtendedSpeech: !speculative &&
+			utf8.RuneCountInString(transcript) >= extendedSpeechMinRunes,
+		Speculative: speculative,
 	}
 }
 

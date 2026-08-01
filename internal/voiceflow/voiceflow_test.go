@@ -22,6 +22,23 @@ type fakeSpeech struct {
 	synthesizedText string
 }
 
+func TestConversationTurnMarksOnlyFinalizedExtendedSpeech(t *testing.T) {
+	t.Parallel()
+	input := httpapi.VoiceTurnInput{RequestID: "request-long-form"}
+	final := conversationTurn(input, strings.Repeat("界", extendedSpeechMinRunes), false)
+	if !final.ExtendedSpeech {
+		t.Fatal("bounded finalized long-form transcript was not marked")
+	}
+	short := conversationTurn(input, strings.Repeat("界", extendedSpeechMinRunes-1), false)
+	if short.ExtendedSpeech {
+		t.Fatal("short transcript was marked as extended speech")
+	}
+	speculative := conversationTurn(input, strings.Repeat("界", extendedSpeechMinRunes), true)
+	if speculative.ExtendedSpeech {
+		t.Fatal("provisional transcript received finalized long-form authority")
+	}
+}
+
 type deadlineBlockingSpeech struct {
 	fakeSpeech
 	transcriptionBudget time.Duration

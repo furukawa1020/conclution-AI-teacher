@@ -55,6 +55,45 @@ func TestVoiceLiveBudgetsSupportThreeMinuteMonologueBelowProviderLimit(
 	if VoiceLiveConnectionTimeout <= minimumConnectionBudget {
 		t.Fatal(`HTTP connection timeout has no cleanup margin`)
 	}
+	if voiceLiveFirstFrameTimeout <= 0 ||
+		voiceLiveFirstFrameTimeout > 2*time.Second {
+		t.Fatal(`unauthenticated first-frame window is not tightly bounded`)
+	}
+	if DefaultVoiceLiveHandshakeLimit != 2 {
+		t.Fatal(`default gate must reserve capacity for authenticated and HTTPS work`)
+	}
+}
+
+func TestVoiceLiveHandshakeGateBoundsBurstAtDefaultCapacity(t *testing.T) {
+	t.Parallel()
+	gate := NewVoiceLiveHandshakeGate(DefaultVoiceLiveHandshakeLimit)
+
+	releaseFirst, admitted := gate.tryAcquire()
+	if !admitted {
+		t.Fatal("first handshake was not admitted")
+	}
+	releaseSecond, admitted := gate.tryAcquire()
+	if !admitted {
+		t.Fatal("second handshake was not admitted")
+	}
+	if releaseUnexpected, admitted := gate.tryAcquire(); admitted {
+		releaseUnexpected()
+		t.Fatal("third handshake exceeded the bounded default capacity")
+	}
+
+	releaseFirst()
+	releaseFirst()
+	releaseReplacement, admitted := gate.tryAcquire()
+	if !admitted {
+		t.Fatal("released handshake slot was not reusable")
+	}
+	if releaseUnexpected, admitted := gate.tryAcquire(); admitted {
+		releaseUnexpected()
+		t.Fatal("replacement handshake allowed a burst above capacity")
+	}
+
+	releaseSecond()
+	releaseReplacement()
 }
 
 func liveTestPCMFrame() []byte {
@@ -66,6 +105,7 @@ func liveTestPCMFrame() []byte {
 
 type liveTestVerifier struct {
 	mu            sync.Mutex
+	calls         int
 	idToken       string
 	appCheckToken string
 	err           error
@@ -151,6 +191,7 @@ func (verifier *liveTestVerifier) Verify(
 	appCheckToken string,
 ) (identity.Principal, error) {
 	verifier.mu.Lock()
+	verifier.calls++
 	verifier.idToken = idToken
 	verifier.appCheckToken = appCheckToken
 	verifier.mu.Unlock()
@@ -165,20 +206,66 @@ func (verifier *liveTestVerifier) Verify(
 }
 
 type liveTestVoiceService struct {
-	mu              sync.Mutex
-	input           VoiceTurnInput
-	audio           [][]byte
-	output          [][]byte
-	result          VoiceTurnResult
-	err             error
-	waitForCancel   bool
-	cancelObserved  chan struct{}
-	cancelSignalOne sync.Once
+	mu               sync.Mutex
+	processLiveCalls int
+	input            VoiceTurnInput
+	audio            [][]byte
+	output           [][]byte
+	result           VoiceTurnResult
+	err              error
+	waitForCancel    bool
+	cancelObserved   chan struct{}
+	cancelSignalOne  sync.Once
 }
 
 type liveEndpointTestService struct {
 	liveTestVoiceService
 	endpointOnce sync.Once
+}
+
+type liveLifecycleTestService struct {
+	started     chan struct{}
+	canceled    chan struct{}
+	allowReturn <-chan struct{}
+	done        chan struct{}
+}
+
+func (*liveLifecycleTestService) Process(
+	context.Context,
+	string,
+	VoiceTurnInput,
+) (VoiceTurnResult, error) {
+	return VoiceTurnResult{}, errors.New("buffered voice method called")
+}
+
+func (service *liveLifecycleTestService) ProcessLive(
+	ctx context.Context,
+	_ string,
+	_ VoiceTurnInput,
+	audio <-chan []byte,
+	_ func([]byte) error,
+) (VoiceTurnResult, error) {
+	close(service.started)
+	defer close(service.done)
+	for {
+		select {
+		case <-ctx.Done():
+			close(service.canceled)
+			if service.allowReturn != nil {
+				<-service.allowReturn
+			}
+			return VoiceTurnResult{}, ctx.Err()
+		case _, open := <-audio:
+			if !open {
+				<-ctx.Done()
+				close(service.canceled)
+				if service.allowReturn != nil {
+					<-service.allowReturn
+				}
+				return VoiceTurnResult{}, ctx.Err()
+			}
+		}
+	}
 }
 
 func (service *liveEndpointTestService) ProcessLiveWithEndpoint(
@@ -193,6 +280,7 @@ func (service *liveEndpointTestService) ProcessLiveWithEndpoint(
 		return VoiceTurnResult{}, errors.New("unexpected uid")
 	}
 	service.mu.Lock()
+	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
 	for {
@@ -237,6 +325,7 @@ func (service *liveTestVoiceService) ProcessLive(
 		return VoiceTurnResult{}, errors.New("unexpected uid")
 	}
 	service.mu.Lock()
+	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
 	for {
@@ -292,6 +381,31 @@ func newVoiceLiveTestServer(
 	if len(leaseManagers) > 0 {
 		leaseManager = leaseManagers[0]
 	}
+	return newVoiceLiveControlledTestServer(
+		t,
+		service,
+		verifier,
+		uidLimiter,
+		appLimiter,
+		leaseManager,
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		nil,
+	)
+}
+
+func newVoiceLiveControlledTestServer(
+	t *testing.T,
+	service VoiceTurnService,
+	verifier identity.Verifier,
+	uidLimiter guard.Limiter,
+	appLimiter guard.Limiter,
+	leaseManager guard.VoiceLiveLeaseManager,
+	handshakeGate *VoiceLiveHandshakeGate,
+	pipelineJoinTimeout time.Duration,
+	handlerReturned chan<- struct{},
+) *httptest.Server {
+	t.Helper()
 	handler := NewWithVoice(
 		slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		verifier,
@@ -301,14 +415,26 @@ func newVoiceLiveTestServer(
 		time.Second,
 		4*1024,
 		VoiceOptions{
-			Service:          service,
-			RateLimiter:      uidLimiter,
-			AppRateLimiter:   appLimiter,
-			LiveLeaseManager: leaseManager,
-			RequestTimeout:   2 * time.Second,
-			MaxRequestBytes:  13 * 1024 * 1024,
+			Service:                 service,
+			RateLimiter:             uidLimiter,
+			AppRateLimiter:          appLimiter,
+			LiveLeaseManager:        leaseManager,
+			LiveHandshakeGate:       handshakeGate,
+			RequestTimeout:          2 * time.Second,
+			MaxRequestBytes:         13 * 1024 * 1024,
+			livePipelineJoinTimeout: pipelineJoinTimeout,
 		},
 	)
+	if handlerReturned != nil {
+		inner := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inner.ServeHTTP(w, r)
+			select {
+			case handlerReturned <- struct{}{}:
+			default:
+			}
+		})
+	}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	return server
@@ -472,11 +598,12 @@ func TestVoiceLiveDeadlineFailureFailsClosedBeforeUpgrade(t *testing.T) {
 	server := &Server{
 		verifier: &liveTestVerifier{},
 		voice: VoiceOptions{
-			Service:          &liveTestVoiceService{},
-			RateLimiter:      &fakeLimiter{},
-			AppRateLimiter:   &fakeLimiter{wantKey: "app:app-123"},
-			LiveLeaseManager: leaseManager,
-			RequestTimeout:   time.Second,
+			Service:           &liveTestVoiceService{},
+			RateLimiter:       &fakeLimiter{},
+			AppRateLimiter:    &fakeLimiter{wantKey: "app:app-123"},
+			LiveLeaseManager:  leaseManager,
+			LiveHandshakeGate: NewVoiceLiveHandshakeGate(1),
+			RequestTimeout:    time.Second,
 		},
 	}
 	request := httptest.NewRequest(http.MethodGet, voiceLivePath, nil)
@@ -497,6 +624,157 @@ func TestVoiceLiveDeadlineFailureFailsClosedBeforeUpgrade(t *testing.T) {
 	if acquireCalls != 0 {
 		t.Fatalf("lease acquisitions before failed upgrade = %d; want 0", acquireCalls)
 	}
+}
+
+func TestVoiceLiveNilHandshakeGateFailsClosedBeforeUpgrade(t *testing.T) {
+	t.Parallel()
+	verifier := &liveTestVerifier{}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{wantKey: "app:app-123"}
+	leaseManager := &liveTestLeaseManager{}
+	handler := NewWithVoice(
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		verifier,
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:          &liveTestVoiceService{},
+			RateLimiter:      uidLimiter,
+			AppRateLimiter:   appLimiter,
+			LiveLeaseManager: leaseManager,
+			RequestTimeout:   time.Second,
+		},
+	)
+	request := httptest.NewRequest(http.MethodGet, voiceLivePath, nil)
+	request.Header.Set("Origin", allowedWebOrigin)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	verifier.mu.Lock()
+	verifyCalls := verifier.calls
+	verifier.mu.Unlock()
+	leaseManager.mu.Lock()
+	leaseCalls := leaseManager.acquireCalls
+	leaseManager.mu.Unlock()
+	if verifyCalls != 0 || uidLimiter.calls != 0 ||
+		appLimiter.calls != 0 || leaseCalls != 0 {
+		t.Fatalf(
+			"nil-gate work verifier:%d uid:%d app:%d lease:%d; want zero",
+			verifyCalls,
+			uidLimiter.calls,
+			appLimiter.calls,
+			leaseCalls,
+		)
+	}
+}
+
+func TestVoiceLiveHandshakeGateRejectsBeforeUpgradeAndReleasesAfterAuth(
+	t *testing.T,
+) {
+	t.Parallel()
+	gate := NewVoiceLiveHandshakeGate(DefaultVoiceLiveHandshakeLimit)
+	verifier := &liveTestVerifier{}
+	uidLimiter := &fakeLimiter{}
+	appLimiter := &fakeLimiter{wantKey: "app:app-123"}
+	leaseManager := &liveTestLeaseManager{}
+	service := &liveTestVoiceService{}
+	server := newVoiceLiveControlledTestServer(
+		t,
+		service,
+		verifier,
+		uidLimiter,
+		appLimiter,
+		leaseManager,
+		gate,
+		0,
+		nil,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	firstSlowConn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstSlowConn.CloseNow()
+	secondSlowConn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondSlowConn.CloseNow()
+
+	blockedConn, blockedResponse, blockedErr := dialVoiceLive(
+		ctx,
+		server.URL,
+		nil,
+	)
+	if blockedErr == nil || blockedConn != nil || blockedResponse == nil ||
+		blockedResponse.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf(
+			"full gate conn=%v response=%v err=%v",
+			blockedConn,
+			blockedResponse,
+			blockedErr,
+		)
+	}
+	blockedResponse.Body.Close()
+	verifier.mu.Lock()
+	verifyCalls := verifier.calls
+	verifier.mu.Unlock()
+	leaseManager.mu.Lock()
+	leaseCalls := leaseManager.acquireCalls
+	leaseManager.mu.Unlock()
+	service.mu.Lock()
+	serviceCalls := service.processLiveCalls
+	service.mu.Unlock()
+	if verifyCalls != 0 || uidLimiter.calls != 0 || appLimiter.calls != 0 ||
+		leaseCalls != 0 || serviceCalls != 0 {
+		t.Fatalf(
+			"full-gate work verifier:%d uid:%d app:%d lease:%d service:%d; want zero",
+			verifyCalls,
+			uidLimiter.calls,
+			appLimiter.calls,
+			leaseCalls,
+			serviceCalls,
+		)
+	}
+	firstSlowConn.CloseNow()
+
+	var authenticatedConn *websocket.Conn
+	deadline := time.Now().Add(time.Second)
+	for authenticatedConn == nil && time.Now().Before(deadline) {
+		candidate, response, dialErr := dialVoiceLive(ctx, server.URL, nil)
+		if response != nil && dialErr != nil {
+			response.Body.Close()
+		}
+		if dialErr == nil {
+			authenticatedConn = candidate
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if authenticatedConn == nil {
+		t.Fatal("gate slot was not released after the slow connection ended")
+	}
+	defer authenticatedConn.CloseNow()
+	writeVoiceLiveStart(t, ctx, authenticatedConn)
+	if ready := readVoiceLiveJSON(t, ctx, authenticatedConn); ready["type"] != "ready" {
+		t.Fatalf("ready = %#v", ready)
+	}
+
+	// Authentication released the gate even though this long session remains.
+	nextConn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatalf("authenticated session retained handshake gate: %v", err)
+	}
+	nextConn.CloseNow()
 }
 
 func TestVoiceLiveLeaseBackendFailureFailsClosedAfterQuota(t *testing.T) {
@@ -616,6 +894,182 @@ func TestVoiceLiveReleasesLeaseAfterConnectionEnds(t *testing.T) {
 			t.Fatalf("release calls = %d; want 1", releaseCalls)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestVoiceLiveLeaseReleasesImmediatelyBeforePipelineStarts(t *testing.T) {
+	t.Parallel()
+	lease := &liveTestLease{}
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &Server{
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		voice: VoiceOptions{
+			livePipelineJoinTimeout: 20 * time.Millisecond,
+		},
+	}
+
+	server.finishVoiceLiveLease("request-before-worker", cancel, lease, nil)
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("live context was not canceled")
+	}
+	lease.mu.Lock()
+	releaseCalls := lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 1 {
+		t.Fatalf("release calls = %d; want 1", releaseCalls)
+	}
+}
+
+func TestVoiceLiveDisconnectWaitsForPipelineBeforeLeaseRelease(t *testing.T) {
+	t.Parallel()
+	allowReturn := make(chan struct{})
+	service := &liveLifecycleTestService{
+		started:     make(chan struct{}),
+		canceled:    make(chan struct{}),
+		allowReturn: allowReturn,
+		done:        make(chan struct{}),
+	}
+	lease := &liveTestLease{}
+	leaseManager := &liveTestLeaseManager{lease: lease}
+	handlerReturned := make(chan struct{}, 1)
+	server := newVoiceLiveControlledTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		leaseManager,
+		NewVoiceLiveHandshakeGate(1),
+		500*time.Millisecond,
+		handlerReturned,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVoiceLiveStart(t, ctx, conn)
+	if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+		t.Fatalf("ready = %#v", ready)
+	}
+	select {
+	case <-service.started:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not start")
+	}
+	conn.CloseNow()
+	select {
+	case <-service.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not observe cancellation")
+	}
+	select {
+	case <-handlerReturned:
+		t.Fatal("handler returned before the pipeline stopped")
+	case <-time.After(40 * time.Millisecond):
+	}
+	lease.mu.Lock()
+	releaseCalls := lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 0 {
+		t.Fatalf("lease released while worker was running: %d", releaseCalls)
+	}
+
+	close(allowReturn)
+	select {
+	case <-service.done:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not stop")
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after pipeline stopped")
+	}
+	lease.mu.Lock()
+	releaseCalls = lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 1 {
+		t.Fatalf("release calls after worker exit = %d; want 1", releaseCalls)
+	}
+}
+
+func TestVoiceLivePipelineShutdownTimeoutIsBoundedAndKeepsLease(t *testing.T) {
+	t.Parallel()
+	allowReturn := make(chan struct{})
+	service := &liveLifecycleTestService{
+		started:     make(chan struct{}),
+		canceled:    make(chan struct{}),
+		allowReturn: allowReturn,
+		done:        make(chan struct{}),
+	}
+	lease := &liveTestLease{}
+	leaseManager := &liveTestLeaseManager{lease: lease}
+	handlerReturned := make(chan struct{}, 1)
+	server := newVoiceLiveControlledTestServer(
+		t,
+		service,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		leaseManager,
+		NewVoiceLiveHandshakeGate(1),
+		50*time.Millisecond,
+		handlerReturned,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVoiceLiveStart(t, ctx, conn)
+	if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+		t.Fatalf("ready = %#v", ready)
+	}
+	select {
+	case <-service.started:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not start")
+	}
+	closedAt := time.Now()
+	conn.CloseNow()
+	select {
+	case <-service.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not observe cancellation")
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("pipeline shutdown wait was not bounded")
+	}
+	if elapsed := time.Since(closedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("handler shutdown took %s; want at most 500ms", elapsed)
+	}
+	lease.mu.Lock()
+	releaseCalls := lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 0 {
+		t.Fatalf("timed-out worker released lease: %d", releaseCalls)
+	}
+
+	close(allowReturn)
+	select {
+	case <-service.done:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not stop after test release")
+	}
+	time.Sleep(20 * time.Millisecond)
+	lease.mu.Lock()
+	releaseCalls = lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 0 {
+		t.Fatalf("expired cleanup later released lease: %d", releaseCalls)
 	}
 }
 

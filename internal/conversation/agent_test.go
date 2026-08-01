@@ -1113,6 +1113,161 @@ func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
 	}
 }
 
+func TestExtendedSpeechUsesNaturalGroundedImmediateScaffolding(t *testing.T) {
+	for _, required := range []string{
+		"conversation_data.extended_speech=true",
+		"発話内で明示された中心点",
+		"利用者へ「要約」「結論」「練習」「採点」と説明せず",
+		"言い直しや反復を求めない",
+		"長期的な改善や治療効果を示すものとして話さない",
+	} {
+		if !strings.Contains(systemInstruction, required) {
+			t.Fatalf("extended-speech instruction is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"extended_speech=trueの通常会話",
+		"中心点、条件、確実性を安全に一意化できなければ",
+		"機微情報を第一文へ復唱しない",
+	} {
+		if !strings.Contains(lacCriticSystemInstruction, required) {
+			t.Fatalf("extended-speech critic is missing %q", required)
+		}
+	}
+
+	plan := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{{
+		body: encodePlan(t, plan),
+	}}}
+	agent := newTestAgent(t, fake)
+	_, err := agent.infer(
+		context.Background(),
+		agent.fastModel,
+		genai.ThinkingLevelLow,
+		VoiceTurn{
+			SchemaVersion:  SchemaVersion,
+			Utterance:      strings.Repeat("長い話です。", 30),
+			ExtendedSpeech: true,
+		},
+		conversationState{},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("infer extended speech: %v", err)
+	}
+	if len(fake.calls) != 1 ||
+		!strings.Contains(fake.calls[0].prompt, `"extended_speech":true`) {
+		t.Fatalf("server-derived extended-speech flag missing from prompt: %#v", fake.calls)
+	}
+}
+
+func TestOrdinaryExtendedSpeechUsesFastPlannerAndIndependentHighThinkingCritic(
+	t *testing.T,
+) {
+	fast := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, fast)},
+		{body: encodeContract(t, validCriticContract(fast.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	utterance := strings.Repeat(
+		"While considering a community garden project, I keep returning to how shared goals, available time, seasonal limits, and a small reversible next step fit together. ",
+		3,
+	)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-ordinary-extended-speech",
+		VoiceTurn{
+			SchemaVersion:  SchemaVersion,
+			Utterance:      utterance,
+			ExtendedSpeech: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process extended speech: %v", err)
+	}
+	if result.Route != "fast" {
+		t.Fatalf("ordinary extended speech route = %q, want fast", result.Route)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("calls = %d, want fast planner and critic", len(fake.calls))
+	}
+	if fake.calls[0].model != DefaultFastModel ||
+		fake.calls[0].thinkingLevel != genai.ThinkingLevelLow {
+		t.Fatalf("unexpected fast planner call: %#v", fake.calls[0])
+	}
+	if fake.calls[1].model != DefaultFastModel ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[1].prompt, "<lac_critic_data>") {
+		t.Fatalf("extended speech did not use an independent high-thinking critic: %#v", fake.calls[1])
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"extended_speech":true`) {
+			t.Fatalf("call %d is missing the server-derived extended-speech flag", index)
+		}
+	}
+}
+
+func TestForegroundTechnicalExtendedSpeechRunsPrecisionAndIndependentHighThinkingCritic(
+	t *testing.T,
+) {
+	fast := validModelPlan()
+	fast.Domain = "technical"
+	precision := validModelPlan()
+	precision.Domain = "technical"
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, fast)},
+		{body: encodePlan(t, precision)},
+		{body: encodeContract(t, validCriticContract(precision.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	utterance := strings.Repeat(
+		"While considering the implementation, I keep returning to how the technical constraints and a small reversible next step fit together. ",
+		3,
+	)
+
+	result, err := agent.Process(
+		context.Background(),
+		"uid-foreground-technical-extended-speech",
+		VoiceTurn{
+			SchemaVersion:  SchemaVersion,
+			Utterance:      utterance,
+			Ambient:        true,
+			Foreground:     true,
+			ExtendedSpeech: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Process foreground technical extended speech: %v", err)
+	}
+	if result.Route != "precision" {
+		t.Fatalf("foreground technical extended speech route = %q, want precision", result.Route)
+	}
+	if len(fake.calls) != 3 {
+		t.Fatalf("calls = %d, want fast planner, precision planner, and critic", len(fake.calls))
+	}
+	if fake.calls[0].model != DefaultFastModel ||
+		fake.calls[0].thinkingLevel != genai.ThinkingLevelLow {
+		t.Fatalf("unexpected fast planner call: %#v", fake.calls[0])
+	}
+	if fake.calls[1].model != DefaultPrecisionModel ||
+		fake.calls[1].thinkingLevel != genai.ThinkingLevelHigh {
+		t.Fatalf("foreground technical extended speech did not reach precision planner: %#v", fake.calls[1])
+	}
+	if fake.calls[2].model != DefaultFastModel ||
+		fake.calls[2].thinkingLevel != genai.ThinkingLevelHigh ||
+		!strings.Contains(fake.calls[2].prompt, "<lac_critic_data>") {
+		t.Fatalf("foreground technical extended speech did not use an independent high-thinking critic: %#v", fake.calls[2])
+	}
+	for index, call := range fake.calls {
+		if !strings.Contains(call.prompt, `"extended_speech":true`) {
+			t.Fatalf("call %d is missing the server-derived extended-speech flag", index)
+		}
+	}
+}
+
 func TestSystemInstructionKeepsProactiveConversationLowPressureAndNonDependent(
 	t *testing.T,
 ) {
@@ -1149,6 +1304,13 @@ func TestCriticPolicyUsesTurnPlanAndRouteRisk(t *testing.T) {
 	}{
 		{name: "ordinary fast"},
 		{name: "precision route", route: "precision", highRisk: true},
+		{
+			name: "extended speech",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.ExtendedSpeech = true
+			},
+			highRisk: true,
+		},
 		{
 			name: "PDF",
 			configure: func(turn *VoiceTurn, _ *modelPlan) {
@@ -1381,6 +1543,12 @@ func TestForegroundTechnicalFastPathRejectsMandatoryPrecisionBoundaries(t *testi
 			name: "research action",
 			configure: func(_ *VoiceTurn, plan *modelPlan) {
 				plan.ResearchAction = "recent_papers"
+			},
+		},
+		{
+			name: "extended speech",
+			configure: func(turn *VoiceTurn, _ *modelPlan) {
+				turn.ExtendedSpeech = true
 			},
 		},
 	}

@@ -45,9 +45,13 @@ STT、DLP、TTSは`asia-northeast1`のリージョナルAPIエンドポイント
 
 STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 
-Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEはその境界まで使わず、端末の音声ありcaptureを3分30秒、Cloud Runの受信を4分（20 ms PCMを最大12,000 frame、7,680,000 byte）で止めます。約3分の独話を通しつつ、provider上限まで60秒を残すためです。providerのendpoint通知は助言に留め、端末VADとの一致なしにcommitしません。
+Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEはその境界まで使わず、端末では録音開始から最大3分30秒、Cloud Runでは受信開始から4分（20 ms PCMを最大12,000 frame、7,680,000 byte）で止めます。録音開始後に発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めた場合にも残りは約3分あります。ただし、無音や間も端末の3分30秒へ含まれ、3分30秒の実発話を保証するものではありません。provider上限まで60秒を残し、providerのendpoint通知は助言に留め、端末VADとの一致なしにcommitしません。commit後に得た最終文字起こし全体が160 Unicode code point以上の場合だけ、PII検査後の現在turn内で意味を変えない中心点の足場を使えます。これは長期効果や技能を判定する機能ではなく、途中候補、過去turn、保存済み本文から中心点を作りません。
 
-認証後のlive WebSocketには6分の外側deadlineを置きます。4分のcapture deadlineと、commit時点から始まる最大50秒のモデル・TTS処理deadlineは別です。長く話した時間をモデル処理時間へ加算せず、逆に長いcaptureでcommit後の処理枠を先食いもしません。Goの`ReadTimeout`、`WriteTimeout`、`IdleTimeout`も6分です。Cloud RunではWebSocketもrequest timeoutの対象なので、service側も`--timeout=360s`以上を必須とします。既定の300秒は理論上限に近すぎるため採用しません。
+live WebSocketには、WebSocket upgrade前からGo側で6分の外側deadlineを置きます。4分のcapture deadlineと、commit時点から始まる最大50秒のモデル・TTS処理deadlineは別です。長く話した時間をモデル処理時間へ加算せず、逆に長いcaptureでcommit後の処理枠を先食いもしません。Cloud RunではWebSocketもrequest timeoutの対象なので、service側はGoの6分より1分長い`--timeout=420s`へ固定します。アプリがdeadline処理する前に基盤側が接続を切る競合を避けるためです。
+
+未認証のlive handshakeが長時間resourceを占有しないよう、Cloud Run instanceごとにnon-blockingな2 slotのgateをWebSocket upgrade前に置きます。2 slotが使用中ならupgradeせずHTTP 429を返し、受け入れた接続もupgrade後の最初のframeを2秒以内に要求します。Firebase ID tokenとApp Check tokenの検証が完了した直後に、成功・失敗を問わずslotを解放するため、通常の長いlive sessionはこのslotを保持しません。`--concurrency=4`に対し、gateが待機を許す未認証handshakeは最大2 request、つまりinstance内concurrencyの最大1/2です。これにより未認証handshakeだけでは残り2 request slotを占有できません。これはinstance内のresource占有を制限する層であり、Cloud Run前段のedge DDoS防御でも、credentialを一回しか使えないticketへ変える仕組みでもありません。
+
+UID leaseを取得してpipelineを開始した後に接続切断やdeadlineへ達した場合は、まずpipelineのcontextをcancelし、終了signalを最大5秒待ちます。終了を確認できた時だけ所有者照合付きtransactionでleaseを解放します。5秒以内に終了しない時は即時解放せず、7分の`expiresAt`までleaseを保持して、停止確認できない旧pipelineと同じUIDの新pipelineを重ねにくくします。これはprovider側の停止を暗号学的に証明する仕組みではなく、instance消失、Firestore障害、ネットワーク攻撃を完全に防ぐ保証でもありません。
 
 ## マイクとセッション制御
 
@@ -56,10 +60,10 @@ Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEは�
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
 - AI処理中と合成音声の再生中も、利用者が開始した会話セッション内では訂正・割り込みを受けるためマイクトラックを有効にする。端末内VADが確認する前の音声は送信せず、確認した割り込みだけをForeground turnとして送る
 - 確認前PCMはAudioWorklet内だけに保持し、通常発話は最大25 frame、割り込みは最大20 frameに固定する。VAD確認後はAudioContextのsample-clock cutoff、session generation、連続sequenceを検証し、credit制御でMessagePortの未処理数も固定する。turn確定は全PCMの`sealed`確認後だけ許可する
-- 割り込み待機を含むセッション全体を4分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。idle時計は発話確認時に更新されるため、3分30秒の単一captureと5秒の終端待ちより後へ固定する。ただし検証済み応答の生成・再生中は4分のidle判定だけを保留し、30分の絶対上限は維持する
+- 割り込み待機を含むセッション全体を4分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。idle時計は発話確認時に更新されるため、録音開始から最大3分30秒の単一turn captureと5秒の終端待ちより後へ固定する。ただし検証済み応答の生成・再生中は4分のidle判定だけを保留し、30分の絶対上限は維持する
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
 - 応答を最後まで再生した時点から次の4分を数え直す。ページ非表示、`pagehide`、マイク喪失は応答中でも直ちに停止する
-- 一発話は端末側で音声あり最大3分30秒、無音最大30秒とする。live PCMはCloud Run側で4分・12,000 frame・7,680,000 byteを上限とし、圧縮音声fallbackは2 MiB、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする。document fieldはモデル推論前に拒否する
+- 一turnは端末側で録音開始から最大3分30秒とし、発話が確定しないままの無音候補は最大30秒とする。30秒の上限直前から話し始めても約3分は残るが、無音や間も3分30秒へ含まれるため、3分30秒の実発話を保証しない。live PCMはCloud Run側で4分・12,000 frame・7,680,000 byteを上限とし、Base64・状態token・JSONを含むrequest envelopeは13 MiBを上限にする。圧縮音声のHTTPS fallbackは2 MiBで、codecとbitrateがブラウザごとに異なるため長時間発話を通せる保証はない。2 MiBを超えた時は保持中の全chunkを破棄し、先頭だけのpartial audioをuploadしない。document fieldはモデル推論前に拒否する
 - 会話状態はJavaScript変数にだけ保持し、localStorageへ保存しない。確認済みGoogleアカウントのFirebase Authだけは`browserSessionPersistence`を使う
 
 JavaScriptのガベージコレクションや文字列の複製は完全には制御できません。クライアントは使用後に参照を解放し、Go側は受信byte sliceを可能な範囲でclearしますが、これを暗号学的なRAM消去保証とは表現しません。
@@ -115,6 +119,7 @@ Firebase Authでは、`google.com` providerと`email_verified=true`を持つID t
 - schema、長さ、turn数を復号後にも検証
 - 暗号鍵は32 byteで、Cloud RunへSecret Managerから注入
 - tokenへ逐語録、会話・資料の自由文要約、PDF本文、モデルのchain-of-thoughtを入れない
+- `extended_speech`の今回限りの判定値と逐語録・発話本文はtokenへ入れない。一方、長い発話も通常会話と同じ状態更新の対象であり、PII検査と決定論的フィルタを通した抽象化済み・件数と長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionは15分tokenへ残り得る
 - graph nodeはemail、電話番号、長い数列、credentialらしいtokenを含む場合、または現在発話との4-gram重複が高い場合にnodeごと破棄する
 - 本人へ一度だけ言い直しを頼んだ場合は、target evidenceを含む正規化意味節本文ではなく、状態暗号鍵から用途分離して導出した秘密鍵によるHMAC-SHA-256の128 bit tagだけをtokenへ入れる。MAC inputを暗号化session IDへも束縛する。tagは`awaiting_restatement`以外では拒否し、planner、critic、TTS、response metadata、ログへ渡さない
 - 次のtarget evidenceがtagと一致しなければ、plannerとcriticが成功を申告しても完了扱いにしない。再回答を強制せず、保留scopeを消して通常会話へ戻す
@@ -197,13 +202,17 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - draft自身のLACを偽装しても、独立監査と決定論的判定を迂回できない
 - plannerとcriticが別のAを成功と申告しても、言い直し前のserver-only HMAC tagと不一致なら完了できない。tag自体が両model promptへ入らない
 - AI自身の任意質問から、利用者が頼んでいない採点scopeを作らない
+- 160 Unicode code point未満の最終文字起こしや途中候補から長い独話用の中心点足場を作らない。160以上でも中心点の足場は現在turnの意味保存にだけ使い、`extended_speech`の判定値、逐語録・発話本文、技能判定をcross-turn stateへ残さない。ただし、通常会話と同じ状態更新により、検査・フィルタ後の抽象化済み・有限化されたgoal、claim、open loopなどは暗号化された15分stateへ残り得る
 - PDFを付けたrequestではモデルを呼ばない。高リスク発話で精密経路が停止しても、高速draftの実質回答を返さない
 - 自己修正中と介入価値が低い発話では沈黙する
 - タブ非表示、pagehide、4分の無発話、30分の絶対上限、マイクtrack喪失で直ちにマイクを解放し、内容を含まない固定理由だけを通知してPausedへ移る。Rust側は固定reason・version以外の通知を拒否し、通知を受けても停止処理を冪等に再実行してからPausedを表示する
 - Pausedでは暗号化済みsession stateを消さず、明示的な再開操作だけがIntentionalとなる。Foreground再待受は既存のlive trackだけを再利用し、別マイクを自動取得しない
 - 30秒の空captureと認証済みSTT no-speechはForegroundで再待受し、Intentional権限を継承しない。確定発話の送信失敗を自動再送しない
-- 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待つ。12秒以上続いた明確な独話だけ5秒へ延ばし、短い質問の確定待ちは増やさない。約3分の連続発話を端末の3分30秒上限とserverの4分上限の内側で処理する
-- 4分のcaptureとcommit後最大50秒の処理がGo HTTP 6分deadline内に収まり、Cloud Run request timeoutも360秒以上である
+- 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待つ。12秒以上続いた明確な独話だけ5秒へ延ばし、短い質問の確定待ちは増やさない。約3分の連続発話を、録音開始から最大3分30秒という端末上限とserverの4分上限の内側で処理する
+- 圧縮音声fallbackが2 MiBを超えた時は全chunkを破棄し、切れた音声をuploadしない。fallbackを約3分の長時間保証として扱わない
+- 4分のcaptureとcommit後最大50秒の処理がGo live 6分deadline内に収まり、Cloud Run request timeoutが420秒である
+- 未認証live handshakeはinstanceごとのnon-blockingな2 slotだけへ入り、満杯時はupgrade前に429となる。`--concurrency=4`の最大1/2に抑え、受け入れ後も最初のframeを2秒で打ち切り、認証検証完了時にslotを解放する
+- 接続終了時はpipelineをcancelして終了を最大5秒待ち、終了を確認した時だけUID leaseを解放する。終了未確認時は7分TTLまで保持する
 - ログ、Firestore、Cloud Storageへ音声、逐語録、PDF本文が作られない
 
 参考:

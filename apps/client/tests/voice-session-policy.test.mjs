@@ -4125,6 +4125,35 @@ test("VAD keeps a three-minute monologue open through a natural pause", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
+test("cold-start changing quiet speech remains open for a three-minute monologue", () => {
+  let now = 0;
+  let state = createVadState(now);
+  const speechFrames =
+    (3 * 60_000) / VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 1; frame <= speechFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.009;
+    state = advanceVad(state, { now, peak: rms * 2, rms });
+    assert.equal(state.action, null, `quiet speech ended at frame ${frame}`);
+  }
+  assert.equal(state.hasSpeech, true);
+  assert.equal(state.softVoiceConfirmed, true);
+  assert.ok(state.lastVoiceAt >= now - VOICE_SESSION_LIMITS.vadIntervalMs);
+  const lastVoiceAt = state.lastVoiceAt;
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
 test("VAD refreshes the trailing-silence clock as soon as confirmed speech resumes", () => {
   const startedAt = 30_000;
   let state = createVadState(startedAt);
@@ -4258,6 +4287,184 @@ test("capture buffer clears the complete payload at its byte ceiling", () => {
   assert.equal(overflow.totalBytes, 0);
   assert.deepEqual(capture.take(), { chunks: [], totalBytes: 0 });
   assert.equal(capture.snapshot().totalBytes, 0);
+});
+
+test("live PCM keeps recording when the bounded HTTP fallback overflows", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const recorderSource = executableBridgeFunction(
+    bridge,
+    "function recordingHasLivePrimary(",
+    "function confirmLiveSpeech(",
+  );
+
+  class FakeMediaRecorder {
+    constructor() {
+      this.listeners = new Map();
+      this.mimeType = "audio/webm";
+      this.state = "inactive";
+      this.stopCalls = 0;
+    }
+
+    addEventListener(type, listener) {
+      this.listeners.set(type, listener);
+    }
+
+    emitData(size) {
+      this.listeners.get("dataavailable")?.({
+        data: { size, type: this.mimeType },
+      });
+    }
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      this.stopCalls += 1;
+      this.state = "inactive";
+    }
+  }
+
+  const factory = new Function(
+    "dependencies",
+    `"use strict";
+let activeLiveSession;
+let activeRecording;
+let pendingLiveSession;
+const AUDIO_MAX_BYTES = dependencies.maximumBytes;
+const MediaRecorder = dependencies.MediaRecorder;
+const createCaptureBuffer = dependencies.createCaptureBuffer;
+const recorderOptions = () => ({});
+const armCandidateDeadline = () => true;
+const resolveRecording = () => {};
+const rejectRecording = (recording, code) => {
+  recording.rejectedWith = code;
+};
+const candidateEventIsCurrent = (recording, candidate) =>
+  !recording.settled &&
+  !candidate.discarded &&
+  recording.candidate === candidate;
+const requestRecordingStop = (recording, reason) => {
+  recording.stopRequests.push(reason);
+  recording.candidate?.recorder.stop();
+};
+
+${recorderSource}
+
+return Object.freeze({
+  clearLive(recording) {
+    activeRecording = recording;
+    activeLiveSession = undefined;
+    pendingLiveSession = undefined;
+  },
+  setLive(recording) {
+    activeRecording = recording;
+    activeLiveSession = Object.freeze({});
+    pendingLiveSession = undefined;
+  },
+  start(recording) {
+    return startCandidateRecorder(recording, true, 0, null, undefined);
+  },
+});`,
+  );
+  const runtime = factory({
+    createCaptureBuffer,
+    maximumBytes: 100,
+    MediaRecorder: FakeMediaRecorder,
+  });
+  const createRecording = () => ({
+    candidate: undefined,
+    discard: false,
+    fallbackAudioComplete: true,
+    settled: false,
+    stopLatch: { isRequested: () => false },
+    stopRequests: [],
+    stream: Object.freeze({}),
+    totalBytes: 0,
+  });
+
+  const liveRecording = createRecording();
+  runtime.setLive(liveRecording);
+  assert.equal(runtime.start(liveRecording), true);
+  const liveRecorder = liveRecording.candidate.recorder;
+  liveRecorder.emitData(100);
+  liveRecorder.emitData(1);
+
+  assert.equal(liveRecording.discard, false);
+  assert.equal(liveRecording.fallbackAudioComplete, false);
+  assert.equal(liveRecording.totalBytes, 0);
+  assert.deepEqual(liveRecording.stopRequests, []);
+  assert.equal(liveRecorder.state, "recording");
+  assert.equal(liveRecorder.stopCalls, 0);
+  assert.deepEqual(liveRecording.candidate.captureBuffer.snapshot(), {
+    retainedBytes: 0,
+    retainedChunks: 0,
+    tooLarge: false,
+    totalBytes: 0,
+  });
+
+  // Later recorder events are dropped; they can neither rebuild a partial
+  // fallback nor grow local audio retention while live PCM continues.
+  liveRecorder.emitData(75);
+  assert.equal(liveRecording.totalBytes, 0);
+  assert.equal(
+    liveRecording.candidate.captureBuffer.snapshot().retainedBytes,
+    0,
+  );
+
+  const fallbackOnlyRecording = createRecording();
+  runtime.clearLive(fallbackOnlyRecording);
+  assert.equal(runtime.start(fallbackOnlyRecording), true);
+  const fallbackOnlyRecorder = fallbackOnlyRecording.candidate.recorder;
+  fallbackOnlyRecorder.emitData(100);
+  fallbackOnlyRecorder.emitData(1);
+  assert.equal(fallbackOnlyRecording.discard, true);
+  assert.deepEqual(fallbackOnlyRecording.stopRequests, ["too-large"]);
+  assert.equal(fallbackOnlyRecorder.stopCalls, 1);
+});
+
+test("an incomplete recorder fallback can never be uploaded after live fails", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const resolveStart = bridge.indexOf("function resolveRecording(");
+  const resolveEnd = bridge.indexOf(
+    "\n}\n\nfunction requestRecordingStop",
+    resolveStart,
+  );
+  const finishStart = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction stopSession",
+    finishStart,
+  );
+  assert.notEqual(resolveStart, -1);
+  assert.notEqual(resolveEnd, -1);
+  assert.notEqual(finishStart, -1);
+  assert.notEqual(finishEnd, -1);
+  const resolve = bridge.slice(resolveStart, resolveEnd);
+  const finish = bridge.slice(finishStart, finishEnd);
+
+  assert.match(resolve, /fallbackAudioComplete: recording\.fallbackAudioComplete/u);
+  assert.match(
+    resolve,
+    /captured\.totalBytes > 0 \|\| !recording\.fallbackAudioComplete/u,
+  );
+  const liveCommitAt = finish.indexOf("liveSession.commit(");
+  const fallbackGuardAt = finish.indexOf(
+    "capture.fallbackAudioComplete !== true",
+  );
+  const uploadReadAt = finish.indexOf("capture.blob.arrayBuffer()");
+  assert.ok(liveCommitAt >= 0);
+  assert.ok(fallbackGuardAt > liveCommitAt);
+  assert.ok(uploadReadAt > fallbackGuardAt);
+  assert.match(
+    finish.slice(fallbackGuardAt, uploadReadAt),
+    /fail\("voice_turn_too_large"\)/u,
+  );
 });
 
 test("an 80 ms noise candidate is discarded before a fresh capture starts", () => {

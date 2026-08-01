@@ -670,9 +670,9 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"uid":   principal.UID,
-		"appId": principal.AppID,
-		"roles": principal.Roles,
+		"authLevel":      "account",
+		"accountVerified": principal.AccountVerified,
+		"provider":        principal.Provider,
 	})
 }
 

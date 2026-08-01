@@ -2,8 +2,9 @@ import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebase
 import {
   browserSessionPersistence,
   getIdToken,
+  GoogleAuthProvider,
   initializeAuth,
-  signInAnonymously,
+  signInWithPopup,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 import {
   getToken as getAppCheckToken,
@@ -242,31 +243,60 @@ async function initializeAppServices() {
 
 const appServices = createRetryableInitializer(initializeAppServices);
 
-async function initializeAuthenticatedUser() {
+async function initializeFirebaseAuth() {
   const { app, appCheck } = await appServices();
   // Authentication has App Check enforcement enabled in production. Prime the
-  // attestation token before the first anonymous sign-in so a fresh browser
-  // never races Auth with the reCAPTCHA Enterprise exchange.
+  // attestation token before Auth exchanges so a fresh browser never races the
+  // identity provider with the reCAPTCHA Enterprise exchange.
   await getAppCheckToken(appCheck, false);
   authInstance ??= initializeAuth(app, {
     persistence: browserSessionPersistence,
   });
   const auth = authInstance;
-  const credential = auth.currentUser
-    ? { user: auth.currentUser }
-    : await signInAnonymously(auth);
-  return Object.freeze({ user: credential.user });
+  await auth.authStateReady();
+  return Object.freeze({ auth });
 }
 
-const authenticatedUser = createRetryableInitializer(
-  initializeAuthenticatedUser,
-);
+const firebaseAuth = createRetryableInitializer(initializeFirebaseAuth);
 
-async function secureCredentials() {
+function verifiedAccountUser(user) {
+  return Boolean(
+    user &&
+      !user.isAnonymous &&
+      user.emailVerified === true &&
+      Array.isArray(user.providerData) &&
+      user.providerData.some((profile) => profile?.providerId === "google.com"),
+  );
+}
+
+async function accountUser(interactive) {
+  const { auth } = await firebaseAuth();
+  if (verifiedAccountUser(auth.currentUser)) {
+    return auth.currentUser;
+  }
+  if (!interactive) {
+    fail("identity_required");
+  }
+
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  let credential;
   try {
-    const [{ appCheck }, { user }] = await Promise.all([
+    credential = await signInWithPopup(auth, provider);
+  } catch {
+    fail("identity_required");
+  }
+  if (!verifiedAccountUser(credential?.user)) {
+    fail("identity_verification_failed");
+  }
+  return credential.user;
+}
+
+async function secureCredentials(interactive = false) {
+  try {
+    const [{ appCheck }, user] = await Promise.all([
       appServices(),
-      authenticatedUser(),
+      accountUser(interactive),
     ]);
     const [idToken, appCheckResult] = await Promise.all([
       getIdToken(user, false),
@@ -277,8 +307,15 @@ async function secureCredentials() {
       idToken,
     });
   } catch (error) {
-    if (error instanceof Error && error.message === "app_check_not_configured") {
-      throw error;
+    if (error instanceof Error) {
+      switch (error.message) {
+        case "app_check_not_configured":
+        case "identity_required":
+        case "identity_verification_failed":
+          throw error;
+        default:
+          break;
+      }
     }
     fail("authentication_failed");
   }
@@ -328,7 +365,10 @@ async function getStatus() {
       fail("voice_api_unavailable");
     }
     return Object.freeze({ state: "ready" });
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "identity_required") {
+      return Object.freeze({ state: "identity-required" });
+    }
     return Object.freeze({ state: "unavailable" });
   }
 }
@@ -1215,7 +1255,7 @@ async function beginTurn(serializedSessionState, turnMode) {
     }
     return await initializeWithCleanup(
       async () => {
-        const credentials = await secureCredentials();
+        const credentials = await secureCredentials(true);
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
         }

@@ -13,9 +13,11 @@ import (
 var ErrUnauthenticated = errors.New("unauthenticated")
 
 type Principal struct {
-	UID   string
-	AppID string
-	Roles map[string]bool
+	UID             string
+	AppID           string
+	Provider        string
+	AccountVerified bool
+	Roles           map[string]bool
 }
 
 type Verifier interface {
@@ -103,12 +105,42 @@ func (v *FirebaseVerifier) Verify(ctx context.Context, idToken, appCheckToken st
 	if _, allowed := v.allowedAppIDs[appToken.AppID]; !allowed {
 		return Principal{}, ErrUnauthenticated
 	}
+	provider := strings.TrimSpace(authToken.Firebase.SignInProvider)
+	if !verifiedAccountToken(authToken, provider) {
+		// Anonymous Auth proves only possession of a temporary Firebase session.
+		// It must never be promoted to an assertion about the account holder.
+		return Principal{}, ErrUnauthenticated
+	}
 
 	return Principal{
-		UID:   authToken.UID,
-		AppID: appToken.AppID,
-		Roles: extractRoles(authToken.Claims),
+		UID:             authToken.UID,
+		AppID:           appToken.AppID,
+		Provider:        provider,
+		AccountVerified: true,
+		Roles:           extractRoles(authToken.Claims),
 	}, nil
+}
+
+func verifiedAccountToken(token *auth.Token, provider string) bool {
+	if token == nil || strings.TrimSpace(token.UID) == "" {
+		return false
+	}
+	switch provider {
+	case "google.com":
+		// Google is authoritative for Google-hosted email identities. Keep the
+		// email itself out of Principal and application logs; only the boolean
+		// ownership assertion crosses this boundary.
+		verified, _ := token.Claims["email_verified"].(bool)
+		return verified
+	case "custom":
+		// Reserved for a future server-verified WebAuthn or external identity
+		// ceremony. Minting an ordinary Firebase custom token is insufficient:
+		// the issuer must add this explicit, namespaced assurance claim.
+		verified, _ := token.Claims["kotae_account_verified"].(bool)
+		return verified
+	default:
+		return false
+	}
 }
 
 func extractRoles(claims map[string]any) map[string]bool {
@@ -132,8 +164,10 @@ type DevelopmentVerifier struct{}
 
 func (DevelopmentVerifier) Verify(_ context.Context, _, _ string) (Principal, error) {
 	return Principal{
-		UID:   "local-development-user",
-		AppID: "local-development-app",
-		Roles: map[string]bool{"user": true},
+		UID:             "local-development-user",
+		AppID:           "local-development-app",
+		Provider:        "development",
+		AccountVerified: true,
+		Roles:           map[string]bool{"user": true},
 	}, nil
 }

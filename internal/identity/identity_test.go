@@ -43,6 +43,16 @@ func testFirebaseVerifier(
 	}
 }
 
+func verifiedGoogleToken(uid string) *auth.Token {
+	return &auth.Token{
+		UID: uid,
+		Firebase: auth.FirebaseInfo{
+			SignInProvider: "google.com",
+		},
+		Claims: map[string]any{"email_verified": true},
+	}
+}
+
 func TestFirebaseVerifierRunsTokenChecksConcurrently(t *testing.T) {
 	t.Parallel()
 
@@ -63,10 +73,9 @@ func TestFirebaseVerifierRunsTokenChecksConcurrently(t *testing.T) {
 			close(authStarted)
 			select {
 			case <-release:
-				return &auth.Token{
-					UID:    "user-123",
-					Claims: map[string]any{"roles": []any{"evaluator"}},
-				}, nil
+				token := verifiedGoogleToken("user-123")
+				token.Claims["roles"] = []any{"evaluator"}
+				return token, nil
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -117,12 +126,111 @@ func TestFirebaseVerifierRunsTokenChecksConcurrently(t *testing.T) {
 		}
 		if verified.principal.UID != "user-123" ||
 			verified.principal.AppID != "app-123" ||
+			verified.principal.Provider != "google.com" ||
+			!verified.principal.AccountVerified ||
 			!verified.principal.Roles["user"] ||
 			!verified.principal.Roles["evaluator"] {
 			t.Fatalf("principal = %+v", verified.principal)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("verification did not finish")
+	}
+}
+
+func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		token *auth.Token
+	}{
+		{
+			name: "anonymous Firebase session",
+			token: &auth.Token{
+				UID:      "temporary-user",
+				Firebase: auth.FirebaseInfo{SignInProvider: "anonymous"},
+			},
+		},
+		{
+			name: "Google account without verified ownership claim",
+			token: &auth.Token{
+				UID:      "google-user",
+				Firebase: auth.FirebaseInfo{SignInProvider: "google.com"},
+				Claims:   map[string]any{"email_verified": false},
+			},
+		},
+		{
+			name: "custom token without server assurance",
+			token: &auth.Token{
+				UID:      "custom-user",
+				Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
+				Claims:   map[string]any{},
+			},
+		},
+		{
+			name: "unsupported password provider",
+			token: &auth.Token{
+				UID:      "password-user",
+				Firebase: auth.FirebaseInfo{SignInProvider: "password"},
+				Claims:   map[string]any{"email_verified": true},
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			verifier := testFirebaseVerifier(
+				authTokenVerifierFunc(func(context.Context, string) (*auth.Token, error) {
+					return test.token, nil
+				}),
+				appCheckTokenVerifierFunc(func(context.Context, string) (*appcheck.DecodedAppCheckToken, error) {
+					return &appcheck.DecodedAppCheckToken{AppID: "app-123"}, nil
+				}),
+			)
+			principal, err := verifier.Verify(
+				context.Background(),
+				"id-token",
+				"app-check-token",
+			)
+			if !errors.Is(err, ErrUnauthenticated) {
+				t.Fatalf("error = %v; want ErrUnauthenticated", err)
+			}
+			if principal.UID != "" || principal.AppID != "" ||
+				principal.Provider != "" || principal.AccountVerified ||
+				len(principal.Roles) != 0 {
+				t.Fatalf("principal = %+v; want empty", principal)
+			}
+		})
+	}
+}
+
+func TestFirebaseVerifierAcceptsExplicitVerifiedCustomIdentity(t *testing.T) {
+	t.Parallel()
+
+	verifier := testFirebaseVerifier(
+		authTokenVerifierFunc(func(context.Context, string) (*auth.Token, error) {
+			return &auth.Token{
+				UID:      "passkey-user",
+				Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
+				Claims:   map[string]any{"kotae_account_verified": true},
+			}, nil
+		}),
+		appCheckTokenVerifierFunc(func(context.Context, string) (*appcheck.DecodedAppCheckToken, error) {
+			return &appcheck.DecodedAppCheckToken{AppID: "app-123"}, nil
+		}),
+	)
+
+	principal, err := verifier.Verify(
+		context.Background(),
+		"id-token",
+		"app-check-token",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.Provider != "custom" || !principal.AccountVerified {
+		t.Fatalf("principal = %+v", principal)
 	}
 }
 

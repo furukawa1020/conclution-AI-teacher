@@ -73,6 +73,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
 - 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する
 - 3分級の独話は認証付きWebSocketの増分PCM経路で扱う。クライアントcaptureは最大3分30秒、サーバーcaptureは最大4分または20 ms PCM 12,000 frame、live / HTTP turn全体は最大6分で、長い独話の終端は5秒の無音を待つ。同期圧縮HTTP fallbackは2 MiB上限のため長時間処理を保証しない
+- live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。Cloud Run request timeoutはアプリの6分境界より長い420秒とする
 - 確定文字起こしが160 rune以上なら、現在turnだけを`extended speech`として主点の反射と回答構成へ使う。この分類と本文は次turnへ残さず、3分の入力を受けられること自体を長期効果の証拠にはしない
 - opt-in、固定測定窓、未見質問への有限回答、端末内保存、時点別の生観測表示、撤回・全削除を備えた個人内長期測定は実装した。有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionだけを扱い、音声、文字起こし、自由文、Firebase UID、時刻は保存しない。別tab競合はgeneration fenceで停止し、全削除後は個人情報を含まない固定markerだけを残す。ただし署名付き研究台帳や比較試験ではなく、長期効果は未実証である
 

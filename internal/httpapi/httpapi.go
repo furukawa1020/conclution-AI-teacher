@@ -168,6 +168,7 @@ type VoiceOptions struct {
 	Service              VoiceTurnService
 	RateLimiter          guard.Limiter
 	AppRateLimiter       guard.Limiter
+	LiveLeaseManager     guard.VoiceLiveLeaseManager
 	RequestTimeout       time.Duration
 	MaxRequestBytes      int64
 	RequireRecentPasskey bool

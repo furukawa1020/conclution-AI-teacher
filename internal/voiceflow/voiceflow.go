@@ -27,6 +27,7 @@ const (
 	// ground a same-turn main-point reflection safely.
 	extendedSpeechMinRunes       = 160
 	maxSpeculativeTTSBufferBytes = 24_000
+	voiceSynthesisReserve        = 5 * time.Second
 	lowConfidencePrompt          = "急がなくて大丈夫です。こちらから小さな話題を一つ置きます。音がない時間と、何か流れている時間では、どちらが少し楽ですか。答えは一語でも、聞いているだけでも大丈夫です。"
 	routeClarifyNoSpeech         = "stt-clarify-no-speech"
 	routeClarifyLowConfidence    = "stt-clarify-low-confidence"
@@ -313,6 +314,9 @@ func (p *Pipeline) processLive(
 		clearDocument(input.Document)
 		return strictPrivacyBlockedResult(), nil
 	}
+	if input.Document != nil {
+		defer clearDocument(input.Document)
+	}
 	streamingSpeech, ok := p.speech.(liveStreamingSpeech)
 	if !ok {
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
@@ -345,7 +349,7 @@ func (p *Pipeline) processLive(
 	}
 	armTranscriptionReserve := func(deadline time.Time) *time.Timer {
 		reserveDelay := time.Until(
-			deadline.Add(-conversation.VoiceResponseReserve),
+			deadline.Add(-p.preInferenceReserve(input)),
 		)
 		if reserveDelay <= 0 {
 			cancelTranscription(errTranscriptionResponseReserve)
@@ -1425,8 +1429,11 @@ func (p *Pipeline) prepareTurn(
 		clearDocument(input.Document)
 		return strictPrivacyBlockedResult(), "", nil
 	}
+	if input.Document != nil {
+		defer clearDocument(input.Document)
+	}
 	transcriptionCtx, cancelTranscription, hasTranscriptionBudget :=
-		transcriptionContextWithResponseReserve(ctx)
+		transcriptionContextWithResponseReserve(ctx, p.preInferenceReserve(input))
 	if !hasTranscriptionBudget {
 		return httpapi.VoiceTurnResult{}, "",
 			httpapi.NewVoicePipelineFailure(
@@ -1496,8 +1503,9 @@ func (p *Pipeline) prepareTurn(
 
 func transcriptionContextWithResponseReserve(
 	ctx context.Context,
+	reserve time.Duration,
 ) (context.Context, context.CancelFunc, bool) {
-	if ctx == nil {
+	if ctx == nil || reserve <= 0 {
 		return nil, func() {}, false
 	}
 	deadline, hasDeadline := ctx.Deadline()
@@ -1505,12 +1513,43 @@ func transcriptionContextWithResponseReserve(
 		transcriptionCtx, cancel := context.WithCancel(ctx)
 		return transcriptionCtx, cancel, true
 	}
-	budget := time.Until(deadline) - conversation.VoiceResponseReserve
+	budget := time.Until(deadline) - reserve
 	if budget <= 0 {
 		return nil, func() {}, false
 	}
 	transcriptionCtx, cancel := context.WithTimeout(ctx, budget)
 	return transcriptionCtx, cancel, true
+}
+
+func (p *Pipeline) preInferenceReserve(input httpapi.VoiceTurnInput) time.Duration {
+	reserve := conversation.VoiceResponseReserve
+	if input.StrictCloudMinimization {
+		// Strict turns inspect both finalized STT text and the model reply. Leave
+		// both bounded checks outside the transcription budget so a slow DLP
+		// response cannot consume the model/TTS reserve.
+		reserve += 2 * privacyguard.DefaultStrictInspectionTimeout
+	}
+	return reserve
+}
+
+func contextWithReserve(
+	ctx context.Context,
+	reserve time.Duration,
+) (context.Context, context.CancelFunc, bool) {
+	if ctx == nil || reserve < 0 {
+		return nil, func() {}, false
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		reservedCtx, cancel := context.WithCancel(ctx)
+		return reservedCtx, cancel, true
+	}
+	budget := time.Until(deadline) - reserve
+	if budget <= 0 {
+		return nil, func() {}, false
+	}
+	reservedCtx, cancel := context.WithTimeout(ctx, budget)
+	return reservedCtx, cancel, true
 }
 
 func (p *Pipeline) prepareRecognizedTurn(
@@ -1576,11 +1615,26 @@ func (p *Pipeline) prepareRecognizedTurn(
 	}
 	if input.StrictCloudMinimization {
 		if decision.ResearchStatus != "none" ||
-			len(decision.ResearchRecords) != 0 ||
-			(decision.SpokenReply != "" &&
-				(p.strictBoundary == nil ||
-					p.strictBoundary.Check(ctx, decision.SpokenReply) != nil)) {
+			len(decision.ResearchRecords) != 0 {
 			return strictPrivacyBlockedResult(), "", nil
+		}
+		if decision.SpokenReply != "" {
+			protectionCtx, cancelProtection, hasProtectionBudget :=
+				contextWithReserve(ctx, voiceSynthesisReserve)
+			if !hasProtectionBudget {
+				return strictPrivacyBlockedResult(), "", nil
+			}
+			protectionBlocked := p.strictBoundary == nil
+			if !protectionBlocked {
+				protectionBlocked = p.strictBoundary.Check(
+					protectionCtx,
+					decision.SpokenReply,
+				) != nil
+			}
+			cancelProtection()
+			if protectionBlocked {
+				return strictPrivacyBlockedResult(), "", nil
+			}
 		}
 		// Strict turns never publish cross-turn semantic state, even after a
 		// clear output inspection. The encrypted token is server-readable and

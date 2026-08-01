@@ -234,8 +234,8 @@ func TestStateCodecDoesNotClassifyUnauthenticatedTokensAsExpired(t *testing.T) {
 		t.Fatalf("NewStateCodec: %v", err)
 	}
 	for name, token := range map[string]string{
-		"malformed": "v1.not-base64!",
-		"truncated": "v1." + base64.RawURLEncoding.EncodeToString(
+		"malformed": stateTokenPrefix + "not-base64!",
+		"truncated": stateTokenPrefix + base64.RawURLEncoding.EncodeToString(
 			bytes.Repeat([]byte{0x24}, 8),
 		),
 	} {
@@ -248,6 +248,51 @@ func TestStateCodecDoesNotClassifyUnauthenticatedTokensAsExpired(t *testing.T) {
 				t.Fatalf("unauthenticated token classified as expired: %v", openErr)
 			}
 		})
+	}
+}
+
+func TestStateCodecRejectsPrePrivacyEpochToken(t *testing.T) {
+	const uid = "uid-pre-privacy-epoch"
+	key := bytes.Repeat([]byte{0x53}, 32)
+	codec, err := NewStateCodec(key)
+	if err != nil {
+		t.Fatalf("NewStateCodec: %v", err)
+	}
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	codec.now = func() time.Time { return now }
+	legacy := conversationState{
+		Version:   SchemaVersion,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(stateTokenTTL).Unix(),
+		Turn:      1,
+		Graph: ThoughtStateGraph{
+			Goals:          []string{},
+			Claims:         []string{"pre-boundary content"},
+			Grounds:        []string{},
+			Assumptions:    []string{},
+			Constraints:    []string{},
+			OpenLoops:      []string{},
+			Contradictions: []string{},
+			Decisions:      []string{},
+		},
+		PendingAnswer: PendingAnswerFrame{
+			RequiredSlots: []answercontract.RequiredSlot{},
+		},
+		LastIntervention: ArbiterDecision{Act: "silent"},
+	}
+	plaintext, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy state: %v", err)
+	}
+	nonce := bytes.Repeat([]byte{0x29}, codec.aead.NonceSize())
+	legacyAAD := append([]byte("kotae-conversation-state-v1\x00"), []byte(uid)...)
+	sealed := codec.aead.Seal(nil, nonce, plaintext, legacyAAD)
+	raw := append(append([]byte(nil), nonce...), sealed...)
+	legacyToken := "v1." + base64.RawURLEncoding.EncodeToString(raw)
+
+	if _, err := codec.open(uid, legacyToken); !errors.Is(err, ErrInvalidStateToken) ||
+		errors.Is(err, ErrExpiredStateToken) {
+		t.Fatalf("pre-privacy epoch token error = %v", err)
 	}
 }
 

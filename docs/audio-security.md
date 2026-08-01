@@ -14,7 +14,7 @@
 マイク
   │ 端末RAM: MediaRecorder + VAD
   ▼
-Firebase Hosting /api rewrite
+Firebase Hosting /api rewrite または固定run.appへのCORS/TLS
   ▼
 Cloud Run kotae-api（asia-northeast1）
   ├─ raw audio ──→ Cloud Speech-to-Text V2（asia-northeast1）
@@ -45,10 +45,15 @@ Cloud Run kotae-api（asia-northeast1）
 | 長期測定 | 明示参加した端末のlocalStorage | 端末内のみ | 有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema version。会話本文・音声・Firebase UID・自由文・時刻は含めず、168日期限を次回アクセス時にprune。全削除後は回答復活防止用の固定markerだけを残す |
 | 音声レート制限 | Firestore | 48時間TTL | UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻 |
 | Passkeyレート制限 | Firestore | 48時間TTL | App Check tokenまたは仮名UID由来のclient digestと、App ID由来の高位circuit-breaker digest、回数・時刻。raw token、UID、IPは保存しない |
+| live接続lease | Firestore | 最長7分TTL | SHA-256化UID、ランダム所有者、期限だけ。同じ仮名アカウントのlive接続を1本へ制限し、音声・文字起こし・raw UIDは保存しない |
 
 STT、DLP、TTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、意味推論に使うVertex AIのロケーションは`global`です。したがって、raw audioはSTT境界では東京リージョンで処理されますが、検査・置換後の文字列と応答文まで日本国内に限定されるとは保証しません。
 
 STTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
+
+Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEはその境界まで使わず、端末の音声ありcaptureを3分30秒、Cloud Runの受信を4分（20 ms PCMを最大12,000 frame、7,680,000 byte）で止めます。約3分の独話を通しつつ、provider上限まで60秒を残すためです。providerのendpoint通知は助言に留め、端末VADとの一致なしにcommitしません。
+
+認証後のlive WebSocketには6分の外側deadlineを置きます。4分のcapture deadlineと、commit時点から始まる最大50秒のモデル・TTS処理deadlineは別です。長く話した時間をモデル処理時間へ加算せず、逆に長いcaptureでcommit後の処理枠を先食いもしません。検証済みlive routeだけGo HTTPの接続deadlineを6分へ延長し、通常routeはread/write/idle各120秒を維持します。Cloud RunではWebSocketもrequest timeoutの対象なので、service側はアプリ境界より1分長い`--timeout=420`へ固定します。
 
 ## マイクとセッション制御
 
@@ -101,7 +106,7 @@ Passkey登録・認証では、WebAuthnのresident credentialとuser verificatio
 - `application/json`と許可済み音声MIME
 - サイズ上限、strict Base64、未知JSON fieldの拒否
 - JSON本文とBase64を読む前に消費するUID単位とFirebase App単位の二段階レート制限
-- request timeout
+- buffered requestは個別のrequest timeout、live WebSocketは6分の外側deadlineを持つ。liveのモデル処理deadlineはcommit時点から別に開始する
 
 レスポンスの`caption`は、実際にTTSへ渡した最終`SpokenReply`だけです。文字起こし、内部推論、LAC本文は返しません。意図的な沈黙では音声を空、`caption`を`null`にします。
 
@@ -207,11 +212,14 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - 30秒の空captureと認証済みSTT no-speechはForegroundで再待受し、Intentional権限を継承しない。確定発話の送信失敗を自動再送しない
 - 通常発話は1.2秒、1.6秒以上の発話は2.2秒、長い独話は5秒の間を待つ。クライアントのcaptureは最大3分30秒、live serverは最大4分または20 ms PCM 12,000 frame、live / HTTP turn全体は最大6分で必ず停止する
 - 確定文字起こしが160 rune以上の時だけ、`extended speech`を現在turnの主点反射・構成に使う。分類も本文もcross-turn stateへ残さず、3分話せることを長期的な会話能力向上の証拠とは扱わない
+- 同じFirebase UIDのlive接続は、音声受信前にFirestoreの短命leaseを取得して同時に1本へ制限し、正常終了・切断では所有者を照合して解放し、instance消失時も7分で期限切れになる
+- 4分のcaptureとcommit後最大50秒の処理がGo HTTP 6分deadline内に収まり、Cloud Run request timeoutが420秒である
 - ログ、Firestore、Cloud Storageへ音声、逐語録、PDF本文が作られない
 
 参考:
 
 - [Cloud Speech-to-Text V2の対応モデルと地域](https://cloud.google.com/speech-to-text/docs/speech-to-text-supported-languages)
+- [Cloud Speech-to-Textのquotaと5分streaming上限](https://cloud.google.com/speech-to-text/docs/quotas)
 - [Speech-to-Text data usage FAQ](https://cloud.google.com/speech-to-text/docs/data-usage-faq)
 - [Cloud Text-to-Speech Chirp 3 HD](https://cloud.google.com/text-to-speech/docs/chirp3-hd)
 - [Text-to-Speech regional endpoints](https://cloud.google.com/text-to-speech/docs/endpoints)
@@ -224,3 +232,5 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - [Firebase App Check custom backend](https://firebase.google.com/docs/app-check/custom-resource-backend)
 - [Secret Manager access control](https://cloud.google.com/secret-manager/docs/access-control)
 - [Cloud Run service identity](https://cloud.google.com/run/docs/securing/service-identity)
+- [Cloud RunのWebSocketとrequest timeout](https://cloud.google.com/run/docs/triggering/websockets)
+- [Cloud Run request timeoutの設定](https://cloud.google.com/run/docs/configuring/request-timeout)

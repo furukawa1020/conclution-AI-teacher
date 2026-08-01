@@ -161,11 +161,11 @@ func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
 			},
 		},
 		{
-			name: "custom token without server assurance",
+			name: "custom token even with an assurance-shaped claim",
 			token: &auth.Token{
 				UID:      "custom-user",
 				Firebase: auth.FirebaseInfo{SignInProvider: "custom"},
-				Claims:   map[string]any{},
+				Claims:   map[string]any{"kotae_account_verified": true},
 			},
 		},
 		{

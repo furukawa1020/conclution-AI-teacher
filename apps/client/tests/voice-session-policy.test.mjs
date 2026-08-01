@@ -2979,7 +2979,10 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
   assert.match(bridge, /fail\(stoppedSessionCode\(expectedEpoch\)\)/u);
   const finishAt = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishAt,
+  );
   const finish = bridge.slice(finishAt, finishEnd);
   assert.doesNotMatch(
     finish,
@@ -3087,7 +3090,10 @@ test("network keeps one finite deadline while validated playback drains separate
     /const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;/u,
   );
   const finishAt = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishAt);
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishAt,
+  );
   const finish = bridge.slice(finishAt, finishEnd);
   assert.match(
     finish,
@@ -3424,7 +3430,7 @@ test("voice session pause reasons are finite and contain no user content", () =>
   });
 });
 
-test("the dormant document deadline remains bounded if a future safe path uses it", () => {
+test("the pending document deadline remains bounded", () => {
   const attachedAt = 50_000;
   assert.equal(
     isPendingDocumentExpired(
@@ -4088,11 +4094,13 @@ test("VAD keeps a three-minute clear monologue open through a natural pause", ()
   assert.ok(
     VOICE_SESSION_LIMITS.spokenCaptureLimitMs >=
       VOICE_SESSION_LIMITS.silentCaptureLimitMs + 3 * 60_000,
+    "a slow start must still leave three full minutes of capture",
   );
   assert.ok(
     VOICE_SESSION_LIMITS.idleSessionLimitMs >
       VOICE_SESSION_LIMITS.spokenCaptureLimitMs +
         VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    "the idle watchdog must not terminate an active bounded monologue",
   );
   const startedAt = 60_000;
   let state = createVadState(startedAt);
@@ -4115,6 +4123,15 @@ test("VAD keeps a three-minute clear monologue open through a natural pause", ()
   const lastVoiceAt = state.lastVoiceAt;
   state = advanceVad(state, {
     now: lastVoiceAt + VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    peak: 0.004,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now:
+      lastVoiceAt +
+      VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs -
+      1,
     peak: 0.004,
     rms: 0.003,
   });

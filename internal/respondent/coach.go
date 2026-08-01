@@ -273,7 +273,7 @@ func guideAttempt(
 		reply := expansionPrompt(operator)
 		if gate.OriginalCommitmentPosition == PositionLater ||
 			critic.Metrics.CommitmentFrontPosition == answercontract.PositionLater {
-			reply = "今の話には支えの核があります。その一文を最初にして、あなたの言葉でもう一度どうぞ。"
+			reply = "今の話には支えの核があります。もし話しやすければ、その一文から続きを聞かせてください。"
 		}
 		return CoachDecision{
 			Phase:       CoachPhaseExpanding,
@@ -326,7 +326,7 @@ func guideAttempt(
 	return CoachDecision{
 		Phase:       CoachPhaseBlocked,
 		Action:      CoachActionRetry,
-		SpokenReply: "そこまで聞けています。もう少しだけ、続けてもらえますか？",
+		SpokenReply: "そこまで聞けています。浮かんだ続きがあれば、そのまま聞かせてください。",
 		Attempts:    nextAttempts,
 		KeepPending: true,
 	}
@@ -334,7 +334,7 @@ func guideAttempt(
 
 func gentleReaskPrompt(operator Operator) string {
 	_ = operator
-	return "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から、もう一度だけ話してみますか？"
+	return "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から続けても大丈夫です。"
 }
 
 // ExpansionOperator chooses one bounded follow-up question. It is structural,

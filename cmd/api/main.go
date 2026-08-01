@@ -30,9 +30,9 @@ func newAPIServer(addr string, handler http.Handler) *http.Server {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       httpapi.VoiceLiveConnectionTimeout,
-		WriteTimeout:      httpapi.VoiceLiveConnectionTimeout,
-		IdleTimeout:       httpapi.VoiceLiveConnectionTimeout,
+		ReadTimeout:       120 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}
 }
@@ -57,6 +57,7 @@ func main() {
 	var rateLimiter guard.Limiter
 	var voiceRateLimiter guard.Limiter
 	var voiceAppRateLimiter guard.Limiter
+	var voiceLiveLeaseManager guard.VoiceLiveLeaseManager
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
 	var passkeyService *passkey.Service
@@ -96,6 +97,7 @@ func main() {
 			logger.Error("initialize development passkeys", "error", err)
 			os.Exit(1)
 		}
+		voiceLiveLeaseManager = guard.NewMemoryVoiceLiveLeaseManager()
 		closeFirestore = func() error { return nil }
 		closeSpeech = func() error { return nil }
 	} else {
@@ -106,6 +108,12 @@ func main() {
 		})
 		if protectorErr != nil {
 			logger.Error("initialize fail-closed privacy boundary", "error", protectorErr)
+			os.Exit(1)
+		}
+		// A fixed non-user probe proves regional API/IAM readiness. A broken
+		// privacy boundary must prevent this revision from accepting traffic.
+		if _, protectorErr = protector.Protect(ctx, "KOTAE privacy readiness"); protectorErr != nil {
+			logger.Error("verify fail-closed privacy boundary", "error", protectorErr)
 			os.Exit(1)
 		}
 		privacyInspector, protectorErr := privacyguard.NewGoogleDLPInspector(protector)
@@ -215,6 +223,13 @@ func main() {
 			logger.Error("initialize voice app rate limiter", "error", err)
 			os.Exit(1)
 		}
+		voiceLiveLeaseManager, err = guard.NewFirestoreVoiceLiveLeaseManager(
+			firestoreClient,
+		)
+		if err != nil {
+			logger.Error("initialize voice live lease manager", "error", err)
+			os.Exit(1)
+		}
 		conversationAgent, err := conversation.NewVertexAgent(
 			ctx,
 			cfg.ProjectID,
@@ -275,6 +290,7 @@ func main() {
 			Service:              voiceService,
 			RateLimiter:          voiceRateLimiter,
 			AppRateLimiter:       voiceAppRateLimiter,
+			LiveLeaseManager:     voiceLiveLeaseManager,
 			RequestTimeout:       cfg.VoiceTimeout,
 			MaxRequestBytes:      cfg.MaxVoiceBytes,
 			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,
@@ -294,7 +310,7 @@ func main() {
 			"vertex_priority", cfg.VertexPriority,
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
-			"privacy_boundary", "strict-opt-in-regional-inspect-fail-closed",
+			"privacy_boundary", "evaluation-deidentify-and-strict-voice-inspect-fail-closed",
 		)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server stopped unexpectedly", "error", err)

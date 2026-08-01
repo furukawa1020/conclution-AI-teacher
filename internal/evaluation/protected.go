@@ -52,7 +52,6 @@ func (e *ProtectedEvaluator) Evaluate(
 	if e == nil || e.delegate == nil || e.protector == nil {
 		return contracts.EvaluationResult{}, ErrInvalidPrivacyBoundary
 	}
-
 	question, err := e.protector.Protect(ctx, input.Question)
 	if err != nil {
 		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
@@ -61,7 +60,6 @@ func (e *ProtectedEvaluator) Evaluate(
 	if err != nil {
 		return contracts.EvaluationResult{}, ErrEvaluationProtectionFailed
 	}
-
 	protectedInput := input
 	protectedInput.Question = question.Text
 	protectedInput.Answer = answer.Text

@@ -523,105 +523,38 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	}
 }
 
-func TestPipelineKeepsPlannerFallbackConversationalAndRequestsPDFReattach(
-	t *testing.T,
-) {
+func TestPipelinePassesPDFToPlannerInStandardMode(t *testing.T) {
 	t.Parallel()
-
-	for _, test := range []struct {
-		name             string
-		route            string
-		spokenReply      string
-		needsClarify     bool
-		ambient          bool
-		foreground       bool
-		wantSynthesized  int
-		wantIntervention string
-	}{
-		{
-			name:             "intentional",
-			route:            "planner-unavailable",
-			spokenReply:      "今の話は聞き取れています。もう一度聞かせてください。",
-			needsClarify:     true,
-			wantSynthesized:  1,
-			wantIntervention: "clarify",
-		},
-		{
-			name:             "ambient",
-			route:            "planner-unavailable",
-			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
-			needsClarify:     true,
-			ambient:          true,
-			wantSynthesized:  1,
-			wantIntervention: "clarify",
-		},
-		{
-			name:             "foreground",
-			route:            "planner-unavailable",
-			spokenReply:      "今の話は聞き取れています。ただ、返事を安全に組み立てられなかったので、大事なところだけもう一度聞かせてください。",
-			needsClarify:     true,
-			ambient:          true,
-			foreground:       true,
-			wantSynthesized:  1,
-			wantIntervention: "clarify",
-		},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			speech := &fakeSpeech{
-				transcript: "この内容に答えてください",
-				confidence: 0.95,
-			}
-			agent := &fakeAgent{result: conversation.VoiceTurnResult{
-				Domain:             "other",
-				AssistanceTarget:   "assistant",
-				RespondentStage:    "none",
-				ResearchStatus:     "none",
-				ResearchRecords:    []conversation.ResearchRecord{},
-				Route:              test.route,
-				StateToken:         "fresh-encrypted-state",
-				SpokenReply:        test.spokenReply,
-				NeedsClarification: test.needsClarify,
-				InterventionPolicy: "clarify",
-				Intervention: conversation.ArbiterDecision{
-					Act: test.wantIntervention,
-				},
-			}}
-			pipeline, err := New(speech, agent)
-			if err != nil {
-				t.Fatal(err)
-			}
-			result, err := pipeline.Process(
-				context.Background(),
-				"uid",
-				httpapi.VoiceTurnInput{
-					Audio:      []byte("audio"),
-					MIMEType:   "audio/webm",
-					Ambient:    test.ambient,
-					Foreground: test.foreground,
-					Document: &httpapi.VoiceDocument{
-						MIMEType: "application/pdf",
-						Data:     []byte("%PDF"),
-					},
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.Route != test.route ||
-				result.StateToken != "fresh-encrypted-state" ||
-				result.Caption != test.spokenReply ||
-				!result.NeedsPaper ||
-				speech.synthesizeCalls != test.wantSynthesized {
-				t.Fatalf("planner fallback result = %+v", result)
-			}
-			if test.wantSynthesized > 0 &&
-				speech.synthesizedText != test.spokenReply {
-				t.Fatalf("synthesized text = %q", speech.synthesizedText)
-			}
-		})
+	speech := &fakeSpeech{transcript: "この内容に答えてください", confidence: 0.95}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		Route:       "fast",
+		StateToken:  "next-state",
+		SpokenReply: "PDFの内容に沿った返答",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := &httpapi.VoiceDocument{
+		MIMEType: "application/pdf",
+		Data:     []byte("%PDF standard-mode bytes"),
+	}
+	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio:    []byte("audio"),
+		MIMEType: "audio/webm",
+		Document: document,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Route != "fast" || result.StateToken != "next-state" ||
+		result.Caption != "PDFの内容に沿った返答" || result.NeedsPaper ||
+		agent.calls != 1 || agent.turn.PDF == nil ||
+		agent.turn.PDF.MIMEType != "application/pdf" ||
+		speech.synthesizeCalls != 1 ||
+		speech.synthesizedText != "PDFの内容に沿った返答" ||
+		len(document.Data) != 0 {
+		t.Fatalf("standard PDF result=%+v agent=%d turn=%+v synth=%d text=%q doc=%d", result, agent.calls, agent.turn, speech.synthesizeCalls, speech.synthesizedText, len(document.Data))
 	}
 }
 

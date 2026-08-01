@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
 	dlp "google.golang.org/api/dlp/v2"
 	"google.golang.org/api/option"
 )
@@ -30,6 +31,8 @@ const (
 // provider detectors must be reviewed rather than silently changing behavior.
 var defaultInfoTypes = []string{
 	"AUTH_TOKEN",
+	"AWS_CREDENTIALS",
+	"BASIC_AUTH_HEADER",
 	"CREDIT_CARD_DATA",
 	"DATE_OF_BIRTH",
 	"DRIVERS_LICENSE_NUMBER",
@@ -37,8 +40,10 @@ var defaultInfoTypes = []string{
 	"ENCRYPTION_KEY",
 	"FINANCIAL_ACCOUNT_NUMBER",
 	"GCP_API_KEY",
+	"GCP_CREDENTIALS",
 	"GENERIC_ID",
 	"GEOGRAPHIC_DATA",
+	"HTTP_COOKIE",
 	"IP_ADDRESS",
 	"JAPAN_BANK_ACCOUNT",
 	"JAPAN_DRIVERS_LICENSE_NUMBER",
@@ -49,11 +54,14 @@ var defaultInfoTypes = []string{
 	"OAUTH_CLIENT_SECRET",
 	"OPENAI_API_KEY",
 	"PASSPORT",
+	"PASSWORD",
 	"PERSON_NAME",
 	"PHONE_NUMBER",
+	"SECURITY_DATA",
 	"STORAGE_SIGNED_URL",
 	"STREET_ADDRESS",
 	"USER_NAME",
+	"XSRF_TOKEN",
 }
 
 // DefaultInfoTypes returns a copy of the reviewed production detector policy.
@@ -197,6 +205,9 @@ func (p *DLPProtector) Protect(
 	}
 
 	screened, locallyRedacted := screenDeterministic(text)
+	if len(screened) > MaxInputBytes {
+		return Result{}, ErrInputTooLarge
+	}
 	request := p.deidentifyRequest(screened)
 
 	callContext, cancel := context.WithTimeout(ctx, p.timeout)
@@ -359,6 +370,9 @@ const (
 	longIDReplacement     = "[ID]"
 	credentialReplacement = "[SECRET]"
 	urlReplacement        = "[URL]"
+
+	credentialLabelPattern = `(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|pwd|secret|authorization)\b|APIキー|アクセストークン|認証トークン|パスワード|秘密鍵)`
+	credentialSeparator    = `\s*(?:[:=：]|は|\bis\b)\s*`
 )
 
 var deterministicRules = []struct {
@@ -374,15 +388,15 @@ var deterministicRules = []struct {
 		urlReplacement,
 	},
 	{
-		regexp.MustCompile(`(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|pwd|secret|authorization)\b|APIキー|アクセストークン|認証トークン|パスワード|秘密鍵)\s*[:=：]\s*"[^"\r\n]{4,}"`),
+		regexp.MustCompile(credentialLabelPattern + credentialSeparator + `"[^"\r\n]{4,}"`),
 		credentialReplacement,
 	},
 	{
-		regexp.MustCompile(`(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|pwd|secret|authorization)\b|APIキー|アクセストークン|認証トークン|パスワード|秘密鍵)\s*[:=：]\s*'[^'\r\n]{4,}'`),
+		regexp.MustCompile(credentialLabelPattern + credentialSeparator + `'[^'\r\n]{4,}'`),
 		credentialReplacement,
 	},
 	{
-		regexp.MustCompile(`(?i)(?:\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|pwd|secret|authorization)\b|APIキー|アクセストークン|認証トークン|パスワード|秘密鍵)\s*[:=：]\s*(?:bearer[ \t]+)?[^\s,;，；、。]{4,}`),
+		regexp.MustCompile(credentialLabelPattern + credentialSeparator + `(?:bearer[ \t]+)?[^\s,;，；、。]{4,}`),
 		credentialReplacement,
 	},
 	{
@@ -409,7 +423,7 @@ var (
 )
 
 func screenDeterministic(text string) (string, bool) {
-	redacted := false
+	text, redacted := normalizeForScreening(text)
 	for _, rule := range deterministicRules {
 		next := rule.pattern.ReplaceAllString(text, rule.replacement)
 		if next != text {
@@ -437,6 +451,27 @@ func screenDeterministic(text string) (string, bool) {
 		return phoneReplacement
 	})
 	return text, redacted
+}
+
+// normalizeForScreening closes common Unicode evasion paths before any regular
+// expression or managed detector sees the text. Compatibility variants are
+// canonicalized and invisible format controls are removed. A changed value is
+// reported as redacted so callers can discard conversation state derived from
+// the pre-normalized text.
+func normalizeForScreening(text string) (string, bool) {
+	normalized := norm.NFKC.String(text)
+	changed := normalized != text
+
+	var builder strings.Builder
+	builder.Grow(len(normalized))
+	for _, character := range normalized {
+		if unicode.Is(unicode.Cf, character) {
+			changed = true
+			continue
+		}
+		builder.WriteRune(character)
+	}
+	return builder.String(), changed
 }
 
 func countDigits(value string) int {

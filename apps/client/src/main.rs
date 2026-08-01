@@ -10,7 +10,7 @@ const RETURNING_PASSKEY_ACTION: &str = "登録済みパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
-const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。";
+const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
 const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -714,7 +714,6 @@ mod cloud {
             _ => "音声エージェントにつながらない　もう一度ためしてみて",
         }
     }
-
     fn document_message(error: JsValue) -> &'static str {
         match error_code(error).as_deref() {
             Some("document_privacy_blocked") => {
@@ -738,7 +737,7 @@ mod cloud {
     use dioxus::prelude::Signal;
 
     #[derive(Clone)]
-    pub struct DocumentClearListener;
+    pub struct Listener;
 
     pub async fn status() -> CloudState {
         CloudState::Unavailable
@@ -774,26 +773,24 @@ mod cloud {
 
     pub fn install_document_clear_listener(
         _document_info: Signal<Option<DocumentInfo>>,
-    ) -> Option<DocumentClearListener> {
+    ) -> Option<Listener> {
         None
     }
 
-    pub fn install_first_audio_listener(
-        _voice_state: Signal<VoiceState>,
-    ) -> Option<DocumentClearListener> {
+    pub fn install_first_audio_listener(_voice_state: Signal<VoiceState>) -> Option<Listener> {
         None
     }
 
     pub fn install_voice_interrupted_listener(
         _voice_state: Signal<VoiceState>,
-    ) -> Option<DocumentClearListener> {
+    ) -> Option<Listener> {
         None
     }
 
     pub fn install_voice_session_paused_listener(
         _voice_state: Signal<VoiceState>,
         _generation: Signal<u64>,
-    ) -> Option<DocumentClearListener> {
+    ) -> Option<Listener> {
         None
     }
 
@@ -2141,7 +2138,7 @@ fn App() -> Element {
                         }
                     }
 
-                    if *needs_paper.read() && document_snapshot.is_none() {
+                    if *needs_paper.read() {
                         p { class: "paper-request", role: "status",
                             span { "↳" }
                             if strict_mode {
@@ -2178,8 +2175,6 @@ fn App() -> Element {
                                         let next = generation.peek().wrapping_add(1);
                                         generation.set(next);
                                         voice_state.set(VoiceState::Paused);
-                                        document_info.set(None);
-                                        document_error.set(None);
                                         cloud::stop_session();
                                     }
                                 },
@@ -2204,8 +2199,8 @@ fn App() -> Element {
                                     research_status.set(ResearchStatus::None);
                                     research_records.set(Vec::new());
                                     document_info.set(None);
-                                    caption.set(None);
                                     document_error.set(None);
+                                    caption.set(None);
                                     cloud::stop_session();
                                 },
                                 span { aria_hidden: "true", "×" }
@@ -2426,9 +2421,6 @@ fn App() -> Element {
                                 }
                             }
                         }
-                        if let Some(message) = *document_error.read() {
-                            p { class: "document-error", role: "alert", {message} }
-                        }
                     }
 
                     LongitudinalPanel {}
@@ -2464,12 +2456,20 @@ fn App() -> Element {
                                 "初めて使う時は専用操作でパスキーを登録し、次回から音声開始前に同じパスキーでこの仮名アカウントの操作を確認します。KOTAEのブラウザコードとサーバーへ秘密鍵は送りません。これは法的身元確認でも、現在マイクで話す人の認証でもありません。Firebase Authの認証セッション情報をSDKがタブ内storageに保持します。"
                             }
                             p {
+                                strong { "個人情報" }
+                                "メール・電話・長い識別子・credentialをCloud Runの決定論的規則とSensitive Data Protectionで置換し、検査不能ならVertex AIを呼びません。ただし検出器には漏れがあり得るため、完全PII除去とは表示しません。"
+                            }
+                            p {
                                 strong { "会話支援" }
                                 {SUPPORT_BOUNDARY_COPY}
                             }
                             p {
                                 strong { "話者" }
                                 "パスキーは声の本人確認ではないため、いまマイクで話す人がアカウントの持ち主かは認証していません。声紋は収集せず、周囲の声を自動採用しません。"
+                            }
+                            p {
+                                strong { "長期効果" }
+                                "長期的に話す力が上がるかは未実証です。追跡期間と比較条件を備えた本人参加の研究が終わるまで、効果ありとは表示しません。"
                             }
                             p {
                                 strong { "外部検索" }
@@ -2601,6 +2601,7 @@ mod tests {
             "会話内容を含まない短期の目印",
             "質問量を控えめに調整",
             "点数は表示しません",
+            "長期効果はまだ実証していません",
         ] {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }

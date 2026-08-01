@@ -6,8 +6,8 @@ use serde::Deserialize;
 const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
 const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
 const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
-const RETURNING_PASSKEY_ACTION: &str = "登録済みパスキーで戻る";
-const NEW_PASSKEY_ACCOUNT_ACTION: &str = "新しい仮名アカウントを作る";
+const RETURNING_PASSKEY_ACTION: &str = "登録済み　同じパスキーで戻る";
+const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めて使う　仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
 const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
@@ -688,7 +688,9 @@ mod cloud {
             Some("passkey_required") => {
                 "話し始めるを押して　パスキーでアカウント操作を確認してください"
             }
-            Some("passkey_cancelled") => "パスキー確認は完了しませんでした　マイクは開いていません",
+            Some("passkey_cancelled") => {
+                "登録済みパスキーが見つからないか　確認が完了しませんでした　初めてなら「仮名アカウントを作る」を選んでください　マイクは開いていません"
+            }
             Some("passkey_unsupported") => {
                 "このブラウザではパスキーを確認できません　マイクは開いていません"
             }
@@ -726,6 +728,13 @@ mod cloud {
             _ => "PDFを添付できなかった",
         }
     }
+}
+
+fn requires_passkey_choice(cloud_state: CloudState, voice_state: VoiceState) -> bool {
+    matches!(
+        cloud_state,
+        CloudState::IdentityRequired | CloudState::PasskeyRequired
+    ) && matches!(voice_state, VoiceState::Ready | VoiceState::Error(_))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1853,6 +1862,22 @@ fn App() -> Element {
         .as_ref()
         .copied()
         .unwrap_or(CloudState::Connecting);
+    let passkey_gate_visible = requires_passkey_choice(prepared_cloud_state, state_snapshot);
+    let voice_space_class = if passkey_gate_visible {
+        "voice-space voice-space--passkey"
+    } else {
+        "voice-space"
+    };
+    let stage_class = if passkey_gate_visible {
+        "conversation-stage conversation-stage--passkey"
+    } else {
+        "conversation-stage"
+    };
+    let voice_heading_id = if passkey_gate_visible {
+        "passkey-entry-heading"
+    } else {
+        "voice-heading"
+    };
     let orb_class = format!("voice-orb {}", state_snapshot.class_name());
 
     rsx! {
@@ -1878,10 +1903,10 @@ fn App() -> Element {
                 }
             }
 
-            main { id: "conversation", class: "conversation-stage",
+            main { id: "conversation", class: stage_class,
                 section {
-                    class: "voice-space",
-                    aria_labelledby: "voice-heading",
+                    class: voice_space_class,
+                    aria_labelledby: voice_heading_id,
                     "data-voice-state": state_snapshot.class_name(),
 
                     div { class: "context-line", aria_live: "polite",
@@ -1933,6 +1958,7 @@ fn App() -> Element {
                         }
                     }
 
+                    if !passkey_gate_visible {
                     div { class: "orb-field",
                         div { class: "orb-orbit orb-orbit--outer", aria_hidden: "true" }
                         div { class: "orb-orbit orb-orbit--inner", aria_hidden: "true" }
@@ -2034,86 +2060,98 @@ fn App() -> Element {
                             p { class: "voice-status__transport", {state_snapshot.hint()} }
                             }
                     }
+                    }
 
-                    if matches!(
-                        prepared_cloud_state,
-                        CloudState::IdentityRequired | CloudState::PasskeyRequired
-                    ) && matches!(state_snapshot, VoiceState::Ready | VoiceState::Error(_)) {
-                        section {
-                            class: "passkey-entry",
-                            aria_label: "パスキーで仮名アカウントへ接続",
-                            p { class: "passkey-entry__lead",
-                                "登録済みなら同じパスキーで戻れます。初めて使う時だけ、新しい仮名アカウントを作ってください。"
-                            }
-                            nav { class: "passkey-entry__actions", aria_label: "パスキー接続を選ぶ",
-                                button {
-                                    class: "control-button is-active",
-                                    r#type: "button",
-                                    disabled: passkey_setup_is_busy,
-                                    onclick: move |_| {
-                                        if *passkey_setup_busy.peek() {
-                                            return;
-                                        }
-                                        passkey_setup_notice.set(None);
-                                        start_or_resume(
-                                            voice_state,
-                                            generation,
-                                            session_state,
-                                            detected_domain,
-                                            route,
-                                            coach_state,
-                                            needs_paper,
-                                            research_status,
-                                            research_records,
-                                            document_info,
-                                            caption,
-                                            strict_cloud_minimization,
-                                        );
-                                    },
-                                    span { aria_hidden: "true", "↻" }
-                                    {RETURNING_PASSKEY_ACTION}
+                    if passkey_gate_visible {
+                        div { class: "passkey-gate",
+                            section {
+                                class: "passkey-entry",
+                                role: "dialog",
+                                aria_modal: "true",
+                                aria_labelledby: "passkey-entry-heading",
+                                p { class: "passkey-entry__eyebrow", "マイクはまだ開きません" }
+                                h1 { id: "passkey-entry-heading", "最初にパスキーを選ぶ" }
+                                if let VoiceState::Error(message) = state_snapshot {
+                                    p { class: "passkey-entry__error", role: "alert", {message} }
                                 }
-                                button {
-                                    class: "control-button",
-                                    r#type: "button",
-                                    disabled: passkey_setup_is_busy,
-                                    onclick: move |_| {
-                                        if *passkey_setup_busy.peek() {
-                                            return;
-                                        }
-                                        passkey_setup_busy.set(true);
-                                        passkey_setup_notice.set(None);
-                                        spawn(async move {
-                                            let result = cloud::register_passkey_account().await;
-                                            passkey_setup_busy.set(false);
-                                            match result {
-                                                Ok(()) => {
-                                                    passkey_setup_notice.set(Some(
-                                                        "新しい仮名アカウントを作りました　マイクはまだ開いていません",
-                                                    ));
-                                                    cloud_status.restart();
-                                                }
-                                                Err(message) => passkey_setup_notice.set(Some(message)),
+                                p { class: "passkey-entry__lead",
+                                    "初めて使う方は新しいパスキーを登録してください。登録済みなら同じパスキーで戻れます。"
+                                }
+                                nav { class: "passkey-entry__actions", aria_label: "パスキー接続を選ぶ",
+                                    button {
+                                        class: "control-button is-active",
+                                        r#type: "button",
+                                        autofocus: true,
+                                        aria_describedby: "new-passkey-account-warning",
+                                        disabled: passkey_setup_is_busy,
+                                        onclick: move |_| {
+                                            if *passkey_setup_busy.peek() {
+                                                return;
                                             }
-                                        });
-                                    },
-                                    span { aria_hidden: "true", "+" }
-                                    if passkey_setup_is_busy {
-                                        "パスキーを登録中"
-                                    } else {
-                                        {NEW_PASSKEY_ACCOUNT_ACTION}
+                                            passkey_setup_busy.set(true);
+                                            passkey_setup_notice.set(None);
+                                            spawn(async move {
+                                                let result = cloud::register_passkey_account().await;
+                                                passkey_setup_busy.set(false);
+                                                match result {
+                                                    Ok(()) => {
+                                                        passkey_setup_notice.set(Some(
+                                                            "新しい仮名アカウントを作りました　マイクはまだ開いていません",
+                                                        ));
+                                                        cloud_status.restart();
+                                                    }
+                                                    Err(message) => passkey_setup_notice.set(Some(message)),
+                                                }
+                                            });
+                                        },
+                                        span { aria_hidden: "true", "+" }
+                                        if passkey_setup_is_busy {
+                                            "パスキーを登録中"
+                                        } else {
+                                            {NEW_PASSKEY_ACCOUNT_ACTION}
+                                        }
+                                    }
+                                    button {
+                                        class: "control-button",
+                                        r#type: "button",
+                                        disabled: passkey_setup_is_busy,
+                                        onclick: move |_| {
+                                            if *passkey_setup_busy.peek() {
+                                                return;
+                                            }
+                                            passkey_setup_notice.set(None);
+                                            start_or_resume(
+                                                voice_state,
+                                                generation,
+                                                session_state,
+                                                detected_domain,
+                                                route,
+                                                coach_state,
+                                                needs_paper,
+                                                research_status,
+                                                research_records,
+                                                document_info,
+                                                caption,
+                                                strict_cloud_minimization,
+                                            );
+                                        },
+                                        span { aria_hidden: "true", "↻" }
+                                        {RETURNING_PASSKEY_ACTION}
                                     }
                                 }
-                            }
-                            p { class: "passkey-entry__warning",
-                                {SEPARATE_PASSKEY_ACCOUNT_WARNING}
-                            }
-                            if let Some(message) = *passkey_setup_notice.read() {
-                                p { class: "passkey-entry__notice", role: "status", {message} }
+                                p {
+                                    id: "new-passkey-account-warning",
+                                    class: "passkey-entry__warning",
+                                    {SEPARATE_PASSKEY_ACCOUNT_WARNING}
+                                }
+                                if let Some(message) = *passkey_setup_notice.read() {
+                                    p { class: "passkey-entry__notice", role: "status", {message} }
+                                }
                             }
                         }
                     }
 
+                    if !passkey_gate_visible {
                     section {
                         class: if state_snapshot.session_active() {
                             "capability-strip is-collapsed"
@@ -2238,6 +2276,7 @@ fn App() -> Element {
                                 }
                             }
                         }
+                    }
                     }
                 }
 
@@ -2510,12 +2549,12 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSWER_SUPPORT_COPY, CoachAction, CoachPhase, CoachState, NEW_PASSKEY_ACCOUNT_ACTION,
-        ORDINARY_CHAT_COPY, RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING,
-        SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState, VoiceTurnMode,
-        recoverable_wait_turn_code, session_stop_pauses, silent_recognition_miss,
-        turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
-        valid_voice_privacy_metadata,
+        ANSWER_SUPPORT_COPY, CloudState, CoachAction, CoachPhase, CoachState,
+        NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, RETURNING_PASSKEY_ACTION,
+        SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState,
+        VoiceTurnMode, recoverable_wait_turn_code, requires_passkey_choice, session_stop_pauses,
+        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
+        valid_voice_pause_metadata, valid_voice_privacy_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -2617,11 +2656,35 @@ mod tests {
 
     #[test]
     fn passkey_entry_copy_separates_returning_authentication_from_new_registration() {
-        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済みパスキーで戻る");
-        assert_eq!(NEW_PASSKEY_ACCOUNT_ACTION, "新しい仮名アカウントを作る");
+        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済み　同じパスキーで戻る");
+        assert_eq!(
+            NEW_PASSKEY_ACCOUNT_ACTION,
+            "初めて使う　仮名アカウントを作る"
+        );
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("既存の仮名アカウントとは別"));
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("自動登録はしません"));
         assert!(!RETURNING_PASSKEY_ACTION.contains("登録する"));
+        assert!(NEW_PASSKEY_ACCOUNT_ACTION.starts_with("初めて使う"));
+    }
+
+    #[test]
+    fn passkey_choice_blocks_voice_until_account_access_is_confirmed() {
+        assert!(requires_passkey_choice(
+            CloudState::IdentityRequired,
+            VoiceState::Ready
+        ));
+        assert!(requires_passkey_choice(
+            CloudState::PasskeyRequired,
+            VoiceState::Error("cancelled")
+        ));
+        assert!(!requires_passkey_choice(
+            CloudState::Ready,
+            VoiceState::Ready
+        ));
+        assert!(!requires_passkey_choice(
+            CloudState::PasskeyRequired,
+            VoiceState::Listening
+        ));
     }
 
     #[test]

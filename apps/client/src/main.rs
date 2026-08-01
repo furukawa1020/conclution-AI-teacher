@@ -10,6 +10,8 @@ const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキー�
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
+const PASSKEY_AUTHENTICATION_FAILED_COPY: &str = "このパスキーでは戻れませんでした　初めて使う方や登録が未完了の方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません";
+const PASSKEY_REGISTRATION_FAILED_COPY: &str = "新しいパスキーを登録できませんでした　端末のパスキー設定を確認してもう一度ためしてください　マイクは開いていません";
 const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
 const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
 
@@ -362,10 +364,11 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        BridgeStatus, CloudState, DocumentInfo, FinishTurnError, STRICT_PRIVACY_BLOCKED_COPY,
-        TurnEnd, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
-        recoverable_finish_turn_code, recoverable_wait_turn_code, session_stop_pauses,
-        valid_voice_pause_metadata,
+        BridgeStatus, CloudState, DocumentInfo, FinishTurnError,
+        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
+        STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceState, VoiceTurnMode, VoiceTurnResult,
+        WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
+        session_stop_pauses, valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -694,9 +697,8 @@ mod cloud {
             Some("passkey_unsupported") => {
                 "このブラウザではパスキーを確認できません　マイクは開いていません"
             }
-            Some("passkey_registration_failed") | Some("passkey_authentication_failed") => {
-                "パスキーを安全に確認できませんでした　マイクは開いていません"
-            }
+            Some("passkey_authentication_failed") => PASSKEY_AUTHENTICATION_FAILED_COPY,
+            Some("passkey_registration_failed") => PASSKEY_REGISTRATION_FAILED_COPY,
             Some("passkey_account_exists") => {
                 "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした"
             }
@@ -2552,7 +2554,8 @@ fn App() -> Element {
 mod tests {
     use super::{
         ANSWER_SUPPORT_COPY, CloudState, CoachAction, CoachPhase, CoachState,
-        NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, RETURNING_PASSKEY_ACTION,
+        NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
+        PASSKEY_REGISTRATION_FAILED_COPY, RETURNING_PASSKEY_ACTION,
         SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState,
         VoiceTurnMode, recoverable_wait_turn_code, requires_passkey_choice, session_stop_pauses,
         silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
@@ -2666,6 +2669,13 @@ mod tests {
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("既存の仮名アカウントとは別"));
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("自動登録はしません"));
         assert!(!RETURNING_PASSKEY_ACTION.contains("登録する"));
+        assert!(PASSKEY_AUTHENTICATION_FAILED_COPY.contains("登録が未完了"));
+        assert!(PASSKEY_AUTHENTICATION_FAILED_COPY.contains("新しい仮名アカウントを作る"));
+        assert!(PASSKEY_REGISTRATION_FAILED_COPY.contains("端末のパスキー設定"));
+        assert_ne!(
+            PASSKEY_AUTHENTICATION_FAILED_COPY,
+            PASSKEY_REGISTRATION_FAILED_COPY
+        );
         assert!(NEW_PASSKEY_ACCOUNT_ACTION.starts_with("初めての方"));
     }
 

@@ -399,6 +399,18 @@ test("voice startup awaits fresh passkey credentials before microphone or AudioC
   assert.match(main, /登録済みの方　同じパスキーで戻る/u);
   assert.match(main, /初めての方　新しい仮名アカウントを作る/u);
   assert.match(main, /既存の仮名アカウントとは別/u);
+  assert.match(
+    main,
+    /Some\("passkey_authentication_failed"\) => PASSKEY_AUTHENTICATION_FAILED_COPY/u,
+  );
+  assert.match(
+    main,
+    /Some\("passkey_registration_failed"\) => PASSKEY_REGISTRATION_FAILED_COPY/u,
+  );
+  assert.doesNotMatch(
+    main,
+    /Some\("passkey_registration_failed"\) \| Some\("passkey_authentication_failed"\)/u,
+  );
   assert.match(main, /声の本人確認ではない/u);
   assert.match(main, /長期効果は未実証/u);
 

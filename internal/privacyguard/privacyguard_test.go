@@ -224,7 +224,7 @@ func TestDeterministicScreeningCoverage(t *testing.T) {
 		{"uuid", "IDは 550e8400-e29b-41d4-a716-446655440000", longIDReplacement},
 		{"labeled credential", "APIキー：abcd-efgh-1234-5678", credentialReplacement},
 		{"bearer", "Bearer abcdefghijklmnop1234", credentialReplacement},
-		{"known credential", "AIza12345678901234567890123456789012345", credentialReplacement},
+		{"known credential", "AI" + "za" + strings.Repeat("A", 35), credentialReplacement},
 		{"JWT", "eyJabcdefghijk.abcdefghijkl.abcdefghijk", credentialReplacement},
 		{"URL", "https://example.jp/private/path?q=secret", urlReplacement},
 		{

@@ -2066,6 +2066,7 @@ fn App() -> Element {
                         div { class: "passkey-gate",
                             section {
                                 class: "passkey-entry",
+                                role: "region",
                                 aria_labelledby: "passkey-entry-heading",
                                 p { class: "passkey-entry__eyebrow", "マイクはまだ開きません" }
                                 h1 { id: "passkey-entry-heading", "最初にパスキーを選ぶ" }
@@ -2073,9 +2074,12 @@ fn App() -> Element {
                                     p { class: "passkey-entry__error", role: "alert", {message} }
                                 }
                                 p { class: "passkey-entry__lead",
-                                    "初めて使う方は新しいパスキーを登録してください。登録済みなら同じパスキーで戻れます。"
+                                    "初めて使う方は新しい仮名アカウントとパスキーを作ります。登録済みの方は同じパスキーで戻れます。"
                                 }
-                                nav { class: "passkey-entry__actions", aria_label: "パスキー接続を選ぶ",
+                                div {
+                                    class: "passkey-entry__actions",
+                                    role: "group",
+                                    aria_label: "パスキー接続を選ぶ",
                                     button {
                                         class: "control-button is-active",
                                         r#type: "button",
@@ -2654,15 +2658,11 @@ mod tests {
 
     #[test]
     fn passkey_entry_copy_separates_returning_authentication_from_new_registration() {
-        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済み　同じパスキーで戻る");
-        assert_eq!(
-            NEW_PASSKEY_ACCOUNT_ACTION,
-            "初めて使う　仮名アカウントを作る"
-        );
+        assert_eq!(RETURNING_PASSKEY_ACTION, "登録済みパスキーで戻る");
+        assert_eq!(NEW_PASSKEY_ACCOUNT_ACTION, "新しい仮名アカウントを作る");
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("既存の仮名アカウントとは別"));
         assert!(SEPARATE_PASSKEY_ACCOUNT_WARNING.contains("自動登録はしません"));
         assert!(!RETURNING_PASSKEY_ACTION.contains("登録する"));
-        assert!(NEW_PASSKEY_ACCOUNT_ACTION.starts_with("初めて使う"));
     }
 
     #[test]

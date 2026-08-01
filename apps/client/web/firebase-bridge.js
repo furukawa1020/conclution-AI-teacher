@@ -1,5 +1,6 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import {
+  browserPopupRedirectResolver,
   browserSessionPersistence,
   getIdToken,
   GoogleAuthProvider,
@@ -246,6 +247,7 @@ async function initializeFirebaseAuth() {
   await getAppCheckToken(appCheck, false);
   authInstance ??= initializeAuth(app, {
     persistence: browserSessionPersistence,
+    popupRedirectResolver: browserPopupRedirectResolver,
   });
   const auth = authInstance;
   await auth.authStateReady();

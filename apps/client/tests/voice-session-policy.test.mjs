@@ -512,8 +512,45 @@ test("bridge requires a verified provider account and never creates anonymous id
   assert.match(bridge, /providerId === "google\.com"/u);
   assert.match(bridge, /if \(!interactive\) \{\s*fail\("identity_required"\)/u);
   assert.match(bridge, /await signInWithPopup\(auth, provider\)/u);
+  assert.match(
+    initializeUser,
+    /popupRedirectResolver:\s*browserPopupRedirectResolver/u,
+  );
   assert.match(bridge, /secureCredentials\(true\)/u);
   assert.match(bridge, /state: "identity-required"/u);
+});
+
+test("hosting headers preserve Google sign-in popup communication", async () => {
+  const firebaseConfig = JSON.parse(
+    await readFile(new URL("../../../firebase.json", import.meta.url), "utf8"),
+  );
+  const globalHeaders = firebaseConfig.hosting.headers.find(
+    (entry) => entry.source === "**",
+  );
+  const headers = Object.fromEntries(
+    globalHeaders.headers.map(({ key, value }) => [key, value]),
+  );
+  assert.equal(
+    headers["Cross-Origin-Opener-Policy"],
+    "same-origin-allow-popups",
+  );
+  assert.match(
+    headers["Content-Security-Policy"],
+    /frame-src[^;]*https:\/\/kotae-ai-u22-2026\.firebaseapp\.com/u,
+  );
+
+  const deployScript = await readFile(
+    new URL("../../../scripts/deploy-hosting.ps1", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    deployScript,
+    /"Cross-Origin-Opener-Policy"\s*=\s*"same-origin-allow-popups"/u,
+  );
+  assert.match(
+    deployScript,
+    /frame-src https:\/\/kotae-ai-u22-2026\.firebaseapp\.com/u,
+  );
 });
 
 test("PDF is blocked before file bytes are read or serialized", async () => {

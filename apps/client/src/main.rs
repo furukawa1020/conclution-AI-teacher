@@ -6,8 +6,8 @@ use serde::Deserialize;
 const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
 const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
 const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
-const RETURNING_PASSKEY_ACTION: &str = "登録済み　同じパスキーで戻る";
-const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めて使う　仮名アカウントを作る";
+const RETURNING_PASSKEY_ACTION: &str = "登録済みパスキーで戻る";
+const NEW_PASSKEY_ACCOUNT_ACTION: &str = "新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
 const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
@@ -689,7 +689,7 @@ mod cloud {
                 "話し始めるを押して　パスキーでアカウント操作を確認してください"
             }
             Some("passkey_cancelled") => {
-                "登録済みパスキーが見つからないか　確認が完了しませんでした　初めてなら「仮名アカウントを作る」を選んでください　マイクは開いていません"
+                "パスキー確認は完了しませんでした　初めて使う方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません"
             }
             Some("passkey_unsupported") => {
                 "このブラウザではパスキーを確認できません　マイクは開いていません"
@@ -2066,8 +2066,6 @@ fn App() -> Element {
                         div { class: "passkey-gate",
                             section {
                                 class: "passkey-entry",
-                                role: "dialog",
-                                aria_modal: "true",
                                 aria_labelledby: "passkey-entry-heading",
                                 p { class: "passkey-entry__eyebrow", "マイクはまだ開きません" }
                                 h1 { id: "passkey-entry-heading", "最初にパスキーを選ぶ" }

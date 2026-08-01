@@ -1149,6 +1149,10 @@
       min-height: min(720px, calc(100svh - 128px));
     }
 
+    .voice-space--passkey {
+      min-height: 0;
+    }
+
     .utility-dock {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-self: auto;
@@ -1179,6 +1183,22 @@
 
     .voice-space {
       min-height: calc(100svh - 112px);
+    }
+
+    .voice-space--passkey {
+      min-height: 0;
+    }
+
+    .conversation-stage--passkey {
+      padding-top: 14px;
+    }
+
+    .passkey-gate {
+      margin-top: 10px;
+    }
+
+    .passkey-entry {
+      padding: 16px 14px;
     }
 
     .passkey-entry__actions {
@@ -1247,12 +1267,50 @@
       min-height: 590px;
     }
 
+    .voice-space--passkey {
+      min-height: 0;
+    }
+
     .orb-field {
       width: min(43vw, 340px);
     }
 
     .voice-status h1 {
       font-size: clamp(1.65rem, 2.7vw, 2.65rem);
+    }
+  }
+
+  @media (max-height: 540px) {
+    .conversation-stage--passkey {
+      padding-block: 10px;
+    }
+
+    .conversation-stage--passkey .context-line {
+      display: none;
+    }
+
+    .passkey-gate {
+      margin-top: 0;
+    }
+
+    .passkey-entry {
+      padding-block: 12px;
+    }
+
+    .passkey-entry__eyebrow {
+      display: none;
+    }
+
+    .passkey-entry__lead,
+    .passkey-entry__warning,
+    .passkey-entry__notice {
+      margin-top: 6px;
+      line-height: 1.45;
+    }
+
+    .passkey-entry__actions {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 8px;
     }
   }
 }

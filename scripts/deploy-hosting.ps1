@@ -206,8 +206,17 @@ function Invoke-GcloudJson {
         [string] $Operation
     )
 
-    $jsonLines = @(& $gcloud @CommandArguments 2>$null)
-    $commandExitCode = $LASTEXITCODE
+    # Windows PowerShell treats native stderr as PowerShell errors. gcloud can
+    # write successful progress messages there, so inspect its native exit code
+    # instead of letting ErrorActionPreference=Stop terminate this preflight.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $jsonLines = @(& $gcloud @CommandArguments 2>$null)
+        $commandExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($commandExitCode -ne 0) {
         throw "Google Cloud CLI failed while $Operation."
     }
@@ -216,10 +225,14 @@ function Invoke-GcloudJson {
         throw "Google Cloud CLI returned no JSON while $Operation."
     }
     try {
-        return ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
+        # Windows PowerShell 5.1 preserves a top-level JSON array as one
+        # non-enumerated pipeline object when ConvertFrom-Json is returned
+        # directly. Materialize it first so callers receive every TTL policy.
+        $decoded = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
     } catch {
         throw "Google Cloud CLI returned invalid JSON while $Operation."
     }
+    return @($decoded)
 }
 
 function Assert-PromotedBackendBoundary {

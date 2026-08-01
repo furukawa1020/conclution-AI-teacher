@@ -550,13 +550,16 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     width: 100%;
+    min-width: 0;
+    max-width: 100%;
     place-items: start center;
     margin-top: clamp(14px, 4svh, 40px);
   }
 
   .passkey-entry {
-    width: min(580px, 100%);
+    width: 100%;
     min-width: 0;
+    max-width: 580px;
     margin: 0;
     padding: clamp(18px, 3.5svh, 26px) clamp(16px, 4vw, 26px);
     border: 1px solid oklch(84% 0.16 190 / 32%);
@@ -1199,6 +1202,11 @@
 
     .conversation-stage--passkey {
       padding-top: 14px;
+    }
+
+    .conversation-stage--passkey .context-line {
+      flex-wrap: wrap;
+      width: 100%;
     }
 
     .passkey-gate {

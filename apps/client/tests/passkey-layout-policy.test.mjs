@@ -56,9 +56,16 @@ test("passkey choices replace the voice UI inside the first viewport", async () 
   assert.ok(panelStart >= 0);
   assert.ok(entryStart > panelStart);
   assert.match(panel, /grid-template-columns:\s*minmax\(0, 1fr\)/u);
+  assert.match(panel, /min-width:\s*0/u);
+  assert.match(panel, /max-width:\s*100%/u);
   assert.match(panel, /place-items:\s*start center/u);
   assert.match(panel, /margin-top:\s*clamp\(/u);
   assert.doesNotMatch(panel, /position:\s*(?:absolute|fixed)/u);
+
+  const entryEnd = css.indexOf(".passkey-entry__eyebrow {", entryStart);
+  const entry = css.slice(entryStart, entryEnd);
+  assert.match(entry, /width:\s*100%/u);
+  assert.match(entry, /max-width:\s*580px/u);
 
   assert.match(
     css,
@@ -71,6 +78,10 @@ test("passkey choices replace the voice UI inside the first viewport", async () 
   assert.match(
     css,
     /@media \(max-width: 620px\)[\s\S]*\.passkey-entry__actions \{[\s\S]*grid-template-columns:\s*1fr/u,
+  );
+  assert.match(
+    css,
+    /@media \(max-width: 620px\)[\s\S]*\.conversation-stage--passkey \.context-line \{[\s\S]*flex-wrap:\s*wrap/u,
   );
   assert.match(
     css,

@@ -10,6 +10,11 @@ const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキー�
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
+const PASSKEY_REQUIRED_COPY: &str =
+    "話し始めるを押して　パスキーでアカウント操作を確認してください";
+const PASSKEY_CANCELLED_COPY: &str = "パスキー確認は完了しませんでした　初めて使う方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません";
+const PASSKEY_UNSUPPORTED_COPY: &str =
+    "このブラウザではパスキーを確認できません　マイクは開いていません";
 const PASSKEY_AUTHENTICATION_FAILED_COPY: &str = "このパスキーでは戻れませんでした　初めて使う方や登録が未完了の方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません";
 const PASSKEY_REGISTRATION_FAILED_COPY: &str = "新しいパスキーを登録できませんでした　端末のパスキー設定を確認してもう一度ためしてください　マイクは開いていません";
 const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
@@ -365,7 +370,8 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 mod cloud {
     use super::{
         BridgeStatus, CloudState, DocumentInfo, FinishTurnError,
-        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
+        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY,
         STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceState, VoiceTurnMode, VoiceTurnResult,
         WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
         session_stop_pauses, valid_voice_pause_metadata,
@@ -688,15 +694,9 @@ mod cloud {
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
             }
-            Some("passkey_required") => {
-                "話し始めるを押して　パスキーでアカウント操作を確認してください"
-            }
-            Some("passkey_cancelled") => {
-                "パスキー確認は完了しませんでした　初めて使う方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません"
-            }
-            Some("passkey_unsupported") => {
-                "このブラウザではパスキーを確認できません　マイクは開いていません"
-            }
+            Some("passkey_required") => PASSKEY_REQUIRED_COPY,
+            Some("passkey_cancelled") => PASSKEY_CANCELLED_COPY,
+            Some("passkey_unsupported") => PASSKEY_UNSUPPORTED_COPY,
             Some("passkey_authentication_failed") => PASSKEY_AUTHENTICATION_FAILED_COPY,
             Some("passkey_registration_failed") => PASSKEY_REGISTRATION_FAILED_COPY,
             Some("passkey_account_exists") => {
@@ -733,10 +733,24 @@ mod cloud {
 }
 
 fn requires_passkey_choice(cloud_state: CloudState, voice_state: VoiceState) -> bool {
+    if !matches!(voice_state, VoiceState::Ready | VoiceState::Error(_)) {
+        return false;
+    }
+
     matches!(
         cloud_state,
         CloudState::IdentityRequired | CloudState::PasskeyRequired
-    ) && matches!(voice_state, VoiceState::Ready | VoiceState::Error(_))
+    ) || matches!(
+        voice_state,
+        VoiceState::Error(message)
+            if [
+                PASSKEY_REQUIRED_COPY,
+                PASSKEY_CANCELLED_COPY,
+                PASSKEY_UNSUPPORTED_COPY,
+                PASSKEY_AUTHENTICATION_FAILED_COPY,
+            ]
+            .contains(&message)
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2555,11 +2569,12 @@ mod tests {
     use super::{
         ANSWER_SUPPORT_COPY, CloudState, CoachAction, CoachPhase, CoachState,
         NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
-        PASSKEY_REGISTRATION_FAILED_COPY, RETURNING_PASSKEY_ACTION,
-        SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceState,
-        VoiceTurnMode, recoverable_wait_turn_code, requires_passkey_choice, session_stop_pauses,
-        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_streamed_audio_metadata,
-        valid_voice_pause_metadata, valid_voice_privacy_metadata,
+        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REQUIRED_COPY,
+        RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY,
+        TALK_ONLY_COPY, VoiceState, VoiceTurnMode, recoverable_wait_turn_code,
+        requires_passkey_choice, session_stop_pauses, silent_recognition_miss,
+        turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
+        valid_voice_privacy_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -2692,6 +2707,22 @@ mod tests {
         assert!(!requires_passkey_choice(
             CloudState::Ready,
             VoiceState::Ready
+        ));
+        assert!(requires_passkey_choice(
+            CloudState::Ready,
+            VoiceState::Error(PASSKEY_CANCELLED_COPY)
+        ));
+        assert!(requires_passkey_choice(
+            CloudState::Ready,
+            VoiceState::Error(PASSKEY_AUTHENTICATION_FAILED_COPY)
+        ));
+        assert!(requires_passkey_choice(
+            CloudState::Ready,
+            VoiceState::Error(PASSKEY_REQUIRED_COPY)
+        ));
+        assert!(!requires_passkey_choice(
+            CloudState::Ready,
+            VoiceState::Error("マイクが許可されていない")
         ));
         assert!(!requires_passkey_choice(
             CloudState::PasskeyRequired,

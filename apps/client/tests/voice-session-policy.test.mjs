@@ -1246,10 +1246,55 @@ test("finite lifecycle stops pause Rust while preserving opaque session state", 
   assert.match(listener, /generation\.set\(next\)/u);
   assert.match(listener, /voice_state\.set\(VoiceState::Paused\)/u);
   assert.doesNotMatch(listener, /session_state\.set|String::new\(\)/u);
+  const setupStart = client.indexOf(
+    "let result = cloud::register_passkey_account().await;",
+  );
+  const setupReady = client.indexOf(
+    "voice_state.set(VoiceState::Ready);",
+    setupStart,
+  );
+  const setupError = client.indexOf("Err(message) =>", setupReady);
+  assert.ok(setupStart >= 0);
+  assert.ok(setupReady > setupStart);
+  assert.ok(setupError > setupReady);
+  const setupSuccess = client.slice(setupStart, setupError);
+  for (const reset of [
+    /generation\.set\(next\)/u,
+    /session_state\.set\(String::new\(\)\)/u,
+    /detected_domain\.set\(String::new\(\)\)/u,
+    /route\.set\(String::new\(\)\)/u,
+    /coach_state\.set\(CoachState::NONE\)/u,
+    /needs_paper\.set\(false\)/u,
+    /research_status\.set\(ResearchStatus::None\)/u,
+    /research_records\.set\(Vec::new\(\)\)/u,
+    /document_info\.set\(None\)/u,
+    /document_error\.set\(None\)/u,
+    /caption\.set\(None\)/u,
+    /cloud::stop_session\(\)/u,
+  ]) {
+    assert.match(setupSuccess, reset);
+  }
+  const generationAt = setupSuccess.indexOf("generation.set(next)");
+  const stopAt = setupSuccess.indexOf("cloud::stop_session()");
+  const sessionClearAt = setupSuccess.indexOf(
+    "session_state.set(String::new())",
+  );
+  const statusRefreshAt = setupSuccess.indexOf("cloud_status.restart()");
+  const readyAt = setupSuccess.indexOf("voice_state.set(VoiceState::Ready)");
+  assert.ok(generationAt >= 0);
+  assert.ok(stopAt > generationAt);
+  assert.ok(sessionClearAt > stopAt);
+  assert.ok(statusRefreshAt > sessionClearAt);
+  assert.ok(readyAt > statusRefreshAt);
+  const setupReadyStatement = "voice_state.set(VoiceState::Ready);";
+  const sessionLifecycleClient =
+    client.slice(0, setupReady) +
+    client.slice(setupReady + setupReadyStatement.length);
   assert.equal(
-    client.match(/voice_state\.set\(VoiceState::Ready\)/gu)?.length,
+    sessionLifecycleClient.match(/voice_state\.set\(VoiceState::Ready\)/gu)
+      ?.length,
     1,
-    "Ready must remain explicit End only",
+    "outside completed account setup, Ready must remain explicit End only",
   );
 });
 

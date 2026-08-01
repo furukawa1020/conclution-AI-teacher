@@ -307,9 +307,26 @@
 
   .context-line {
     display: flex;
+    flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
     min-height: 30px;
+  }
+
+  .passkey-setup-status {
+    display: inline-flex;
+    flex: 0 0 0;
+    min-width: 0;
+  }
+
+  .passkey-setup-status:not(:empty) {
+    flex-basis: 100%;
+    justify-content: center;
+    color: var(--cyan);
+    font: 650 0.68rem/1.55 var(--mono);
+    letter-spacing: 0.04em;
+    overflow-wrap: anywhere;
+    text-align: center;
   }
 
   .context-chip,
@@ -613,6 +630,8 @@
     justify-content: center;
     min-width: 0;
     min-height: 48px;
+    font-size: 0.75rem;
+    line-height: 1.45;
     text-align: center;
     white-space: normal;
   }
@@ -620,7 +639,7 @@
   .passkey-entry__warning,
   .passkey-entry__notice {
     margin-top: 11px;
-    font-size: 0.66rem;
+    font-size: 0.75rem;
     line-height: 1.75;
     overflow-wrap: anywhere;
   }
@@ -738,7 +757,7 @@
       translate 180ms ease;
   }
 
-  .control-button:hover {
+  .control-button:not(:disabled):hover {
     translate: 0 -2px;
     border-color: var(--line-strong);
     color: var(--white);
@@ -750,7 +769,16 @@
     color: var(--cyan);
   }
 
-  .control-button--end:hover {
+  .control-button:disabled {
+    translate: none;
+    border-color: var(--line);
+    background: oklch(18% 0.02 258 / 34%);
+    color: var(--white-faint);
+    cursor: not-allowed;
+    opacity: 0.52;
+  }
+
+  .control-button--end:not(:disabled):hover {
     border-color: oklch(66% 0.23 25 / 58%);
     color: var(--danger);
   }
@@ -1302,7 +1330,17 @@
     }
 
     .conversation-stage--passkey .context-line {
-      display: none;
+      gap: 4px;
+      min-height: 0;
+    }
+
+    .conversation-stage--passkey .context-chip {
+      min-height: 24px;
+      padding: 4px 7px;
+      font-size: 0.6rem;
+      line-height: 1.25;
+      text-align: center;
+      white-space: normal;
     }
 
     .passkey-gate {
@@ -1310,11 +1348,11 @@
     }
 
     .passkey-entry {
+      max-height: calc(100svh - 148px);
       padding-block: 12px;
-    }
-
-    .passkey-entry__eyebrow {
-      display: none;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
     }
 
     .passkey-entry__lead,
@@ -1325,7 +1363,6 @@
     }
 
     .passkey-entry__actions {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
       margin-top: 8px;
     }
   }

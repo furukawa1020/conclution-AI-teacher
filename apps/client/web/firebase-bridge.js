@@ -53,6 +53,8 @@ import {
 } from "./voice-stream-policy.mjs";
 import {
   decidePasskeyAction,
+  createPasskeyRegistrationRecoveryLatch,
+  decidePasskeyRegistrationRecoveryAction,
   decodeAuthenticationBegin,
   decodeRegistrationBegin,
   encodeAuthenticationCredential,
@@ -86,6 +88,9 @@ const PASSKEY_AUTHENTICATION_FINISH_ENDPOINT =
 // The server caps finish bodies at 256 KiB. JSON produced here is ASCII-only,
 // so a character limit is also a byte-safe upper bound before fetch.
 const PASSKEY_JSON_MAX_CHARS = 255 * 1024;
+const passkeyRegistrationRecovery = createPasskeyRegistrationRecoveryLatch(
+  () => globalThis.sessionStorage,
+);
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
@@ -103,6 +108,7 @@ const ALLOWED_CONFIG_KEYS = Object.freeze([
 ]);
 
 let authInstance;
+let verifiedAccountUid;
 let mediaStream;
 let mediaStreamLossBinding;
 let audioContext;
@@ -313,6 +319,14 @@ function currentAccountUser(auth) {
   return null;
 }
 
+function passkeyAccountUid(user) {
+  const uid = user?.uid;
+  if (typeof uid !== "string" || !/^pk_[A-Za-z0-9_-]{32}$/u.test(uid)) {
+    fail("identity_verification_failed");
+  }
+  return uid;
+}
+
 function passkeySessionSnapshot(user, tokenResult) {
   const provider =
     tokenResult?.signInProvider === "google.com"
@@ -357,7 +371,7 @@ function passkeyRequestToken(value) {
 
 async function passkeyJSON(
   endpoint,
-  { appCheckToken, body, failureCode, signal },
+  { appCheckToken, beforeRequest, body, failureCode, signal },
 ) {
   const headers = {
     Accept: "application/json",
@@ -373,6 +387,10 @@ async function passkeyJSON(
     ) {
       fail(failureCode);
     }
+  }
+  if (beforeRequest !== undefined) {
+    if (typeof beforeRequest !== "function") fail(failureCode);
+    beforeRequest();
   }
 
   let response;
@@ -428,6 +446,8 @@ function preservePasskeyBoundaryError(error) {
   return Boolean(
     error instanceof Error &&
       (error.message === "passkey_cancelled" ||
+        error.message === "passkey_registration_cancelled" ||
+        error.message === "passkey_registration_recovery_required" ||
         error.message === "passkey_unsupported"),
   );
 }
@@ -447,6 +467,7 @@ async function registerPasskey(auth, appCheckToken) {
   return runPasskeyOperation("passkey_registration_failed", async (signal) => {
     let credential;
     let encodedCredential;
+    let registrationFinishStarted = false;
     try {
       const begin = decodeRegistrationBegin(
         await passkeyJSON(PASSKEY_REGISTRATION_BEGIN_ENDPOINT, {
@@ -461,7 +482,9 @@ async function registerPasskey(auth, appCheckToken) {
           signal,
         });
       } catch (error) {
-        if (isPasskeyCancellation(error)) fail("passkey_cancelled");
+        if (isPasskeyCancellation(error)) {
+          fail("passkey_registration_cancelled");
+        }
         throw error;
       }
       if (!credential) fail("passkey_registration_failed");
@@ -471,18 +494,38 @@ async function registerPasskey(auth, appCheckToken) {
           finishEndpoint(PASSKEY_REGISTRATION_FINISH_ENDPOINT, begin.ceremonyId),
           {
             appCheckToken,
+            beforeRequest: () => {
+              if (
+                !passkeyRegistrationRecovery.mark(
+                  begin.options.publicKey.user.name,
+                )
+              ) {
+                fail("passkey_registration_failed");
+              }
+              registrationFinishStarted = true;
+            },
             body: encodedCredential,
-            failureCode: "passkey_registration_failed",
+            failureCode: "passkey_registration_recovery_required",
             signal,
           },
         ),
       );
       const signedIn = await signInWithCustomToken(auth, finish.customToken);
-      return await verifyFreshCustomPasskeyUser(
+      const verified = await verifyFreshCustomPasskeyUser(
         signedIn.user,
-        "passkey_registration_failed",
+        "passkey_registration_recovery_required",
       );
+      if (!passkeyRegistrationRecovery.clear(passkeyAccountUid(verified))) {
+        fail("passkey_registration_recovery_required");
+      }
+      return verified;
     } catch (error) {
+      if (registrationFinishStarted) {
+        fail("passkey_registration_recovery_required");
+      }
+      if (error instanceof Error && error.message === "passkey_cancelled") {
+        fail("passkey_registration_cancelled");
+      }
       if (preservePasskeyBoundaryError(error)) throw error;
       fail("passkey_registration_failed");
     } finally {
@@ -528,10 +571,11 @@ async function authenticatePasskey(auth, appCheckToken) {
         ),
       );
       const signedIn = await signInWithCustomToken(auth, finish.customToken);
-      return await verifyFreshCustomPasskeyUser(
+      const verified = await verifyFreshCustomPasskeyUser(
         signedIn.user,
         "passkey_authentication_failed",
       );
+      return verified;
     } catch (error) {
       if (preservePasskeyBoundaryError(error)) throw error;
       fail("passkey_authentication_failed");
@@ -562,6 +606,9 @@ async function freshPasskeyUser(auth, user, appCheckToken, interactive) {
 }
 
 async function registerPasskeyAccount() {
+  if (passkeyRegistrationRecovery.isPending()) {
+    fail("passkey_registration_recovery_required");
+  }
   if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
     fail("passkey_registration_failed");
   }
@@ -569,11 +616,33 @@ async function registerPasskeyAccount() {
     const { appCheck } = await appServices();
     const { auth } = await firebaseAuth();
     const appCheckResult = await getAppCheckToken(appCheck, false);
-    const user = currentAccountUser(auth);
+    let user;
+    try {
+      user = currentAccountUser(auth);
+      if (user) {
+        const tokenResult = await getIdTokenResult(user, false);
+        const action = decidePasskeyAction(
+          passkeySessionSnapshot(user, tokenResult),
+          Math.floor(Date.now() / 1000),
+        );
+        if (action === "reject") {
+          fail("identity_verification_failed");
+        }
+      }
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.message !== "identity_verification_failed"
+      ) {
+        throw error;
+      }
+      user = null;
+    }
     if (user) {
       fail("passkey_account_exists");
     }
-    await registerPasskey(auth, appCheckResult.token);
+    const registeredUser = await registerPasskey(auth, appCheckResult.token);
+    verifiedAccountUid = passkeyAccountUid(registeredUser);
     return Object.freeze({ state: "ready" });
   } catch (error) {
     if (
@@ -592,14 +661,73 @@ async function secureCredentials(interactive = false) {
     const { appCheck } = await appServices();
     const { auth } = await firebaseAuth();
     const appCheckResult = await getAppCheckToken(appCheck, false);
-    const user = currentAccountUser(auth);
-    const authorizedUser = await freshPasskeyUser(
-      auth,
-      user,
-      appCheckResult.token,
-      interactive,
-    );
+    const registrationRecoveryPending =
+      passkeyRegistrationRecovery.isPending();
+    let user;
+    try {
+      user = currentAccountUser(auth);
+    } catch (error) {
+      if (
+        !interactive ||
+        !(error instanceof Error) ||
+        error.message !== "identity_verification_failed"
+      ) {
+        throw error;
+      }
+      user = null;
+    }
+    const currentUserMatchesRecovery =
+      user !== null && passkeyRegistrationRecovery.matches(user.uid);
+    const registrationRecoveryAction =
+      decidePasskeyRegistrationRecoveryAction({
+        currentAccountMatches: currentUserMatchesRecovery,
+        interactive,
+        pending: registrationRecoveryPending,
+      });
+    if (registrationRecoveryAction === "block") {
+      fail("passkey_registration_recovery_required");
+    }
+    let authorizedUser;
+    try {
+      authorizedUser =
+        registrationRecoveryAction === "authenticate"
+          ? await authenticatePasskey(auth, appCheckResult.token)
+          : await freshPasskeyUser(
+              auth,
+              user,
+              appCheckResult.token,
+              interactive,
+            );
+    } catch (error) {
+      if (
+        !interactive ||
+        !(error instanceof Error) ||
+        error.message !== "identity_verification_failed"
+      ) {
+        throw error;
+      }
+      authorizedUser = await authenticatePasskey(auth, appCheckResult.token);
+    }
     const idToken = await getIdToken(authorizedUser, false);
+    const accountUid = passkeyAccountUid(authorizedUser);
+    const accountBoundaryChanged =
+      verifiedAccountUid !== undefined && verifiedAccountUid !== accountUid;
+    verifiedAccountUid = accountUid;
+    const registrationRecoveryConfirmed =
+      !registrationRecoveryPending ||
+      passkeyRegistrationRecovery.clear(accountUid);
+    if (accountBoundaryChanged) {
+      globalThis.dispatchEvent(new Event("kotae:account-boundary-changed"));
+      fail("account_boundary_changed");
+    }
+    if (!registrationRecoveryConfirmed) {
+      fail("passkey_registration_recovery_required");
+    }
+    if (interactive) {
+      // This event requests a fresh status read in Rust. It carries no
+      // authorization and is never itself accepted as account proof.
+      globalThis.dispatchEvent(new Event("kotae:account-access-confirmed"));
+    }
     return Object.freeze({
       appCheckToken: appCheckResult.token,
       idToken,
@@ -608,11 +736,14 @@ async function secureCredentials(interactive = false) {
     if (error instanceof Error) {
       switch (error.message) {
         case "app_check_not_configured":
+        case "account_boundary_changed":
         case "identity_required":
         case "identity_verification_failed":
         case "passkey_authentication_failed":
         case "passkey_cancelled":
+        case "passkey_registration_cancelled":
         case "passkey_registration_failed":
+        case "passkey_registration_recovery_required":
         case "passkey_required":
         case "passkey_unsupported":
           throw error;
@@ -653,6 +784,11 @@ async function getStatus() {
   }
   try {
     const { appCheckToken, idToken } = await secureCredentials();
+    if (passkeyRegistrationRecovery.isPending()) {
+      return Object.freeze({
+        state: "passkey-registration-recovery-required",
+      });
+    }
     const response = await fetch("/api/v1/me", {
       method: "GET",
       cache: "no-store",
@@ -669,7 +805,16 @@ async function getStatus() {
     }
     return Object.freeze({ state: "ready" });
   } catch (error) {
-    if (error instanceof Error && error.message === "identity_required") {
+    if (passkeyRegistrationRecovery.isPending()) {
+      return Object.freeze({
+        state: "passkey-registration-recovery-required",
+      });
+    }
+    if (
+      error instanceof Error &&
+      (error.message === "identity_required" ||
+        error.message === "identity_verification_failed")
+    ) {
       return Object.freeze({ state: "identity-required" });
     }
     if (error instanceof Error && error.message === "passkey_required") {

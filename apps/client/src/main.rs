@@ -12,13 +12,27 @@ const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
 const PASSKEY_REQUIRED_COPY: &str =
     "話し始めるを押して　パスキーでアカウント操作を確認してください";
-const PASSKEY_CANCELLED_COPY: &str = "パスキー確認は完了しませんでした　初めて使う方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません";
+const PASSKEY_CANCELLED_COPY: &str = "パスキーで戻る操作は完了しませんでした　戻る場合はもう一度「登録済みの方　同じパスキーで戻る」を選んでください　マイクは開いていません";
 const PASSKEY_UNSUPPORTED_COPY: &str =
     "このブラウザではパスキーを確認できません　マイクは開いていません";
 const PASSKEY_AUTHENTICATION_FAILED_COPY: &str = "このパスキーでは戻れませんでした　初めて使う方や登録が未完了の方は「新しい仮名アカウントを作る」を選んでください　マイクは開いていません";
+const PASSKEY_REGISTRATION_CANCELLED_COPY: &str = "新しいパスキーの登録は完了しませんでした　登録する場合はもう一度「新しい仮名アカウントを作る」を選んでください　マイクは開いていません";
 const PASSKEY_REGISTRATION_FAILED_COPY: &str = "新しいパスキーを登録できませんでした　端末のパスキー設定を確認してもう一度ためしてください　マイクは開いていません";
+const PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY: &str = "登録結果を安全に確認できませんでした　新規登録を繰り返さず「登録済みの方　同じパスキーで戻る」を選び　いま作成したパスキーを使ってください　マイクは開いていません";
+const PASSKEY_REGISTRATION_SUCCESS_COPY: &str =
+    "新しい仮名アカウントを作りました　マイクはまだ開いていません";
+const PASSKEY_ACCOUNT_EXISTS_COPY: &str =
+    "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした";
+const ACCOUNT_BOUNDARY_CHANGED_COPY: &str =
+    "別の仮名アカウントへ切り替わったため　前の会話を閉じました　もう一度話し始めてください";
 const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
 const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasskeySetupFeedback {
+    Success(&'static str),
+    Error(&'static str),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoiceState {
@@ -228,12 +242,13 @@ impl VoiceState {
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloudState {
     Connecting,
     Ready,
     IdentityRequired,
     PasskeyRequired,
+    PasskeyRegistrationRecoveryRequired,
     ConfigurationRequired,
     Unavailable,
 }
@@ -245,6 +260,7 @@ impl CloudState {
             Self::Ready => "SECURE LINK / READY",
             Self::IdentityRequired => "ACCOUNT / REQUIRED",
             Self::PasskeyRequired => "PASSKEY / REQUIRED",
+            Self::PasskeyRegistrationRecoveryRequired => "PASSKEY / RECOVERY",
             Self::ConfigurationRequired => "SECURE LINK / SETUP",
             Self::Unavailable => "SECURE LINK / OFFLINE",
         }
@@ -255,6 +271,7 @@ impl CloudState {
             Self::Connecting
             | Self::IdentityRequired
             | Self::PasskeyRequired
+            | Self::PasskeyRegistrationRecoveryRequired
             | Self::ConfigurationRequired => "cloud-pill is-pending",
             Self::Ready => "cloud-pill is-ready",
             Self::Unavailable => "cloud-pill is-offline",
@@ -369,11 +386,13 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        BridgeStatus, CloudState, DocumentInfo, FinishTurnError,
-        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
-        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY,
-        STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceState, VoiceTurnMode, VoiceTurnResult,
-        WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
+        ACCOUNT_BOUNDARY_CHANGED_COPY, BridgeStatus, CloudState, CoachState, DocumentInfo,
+        FinishTurnError, PASSKEY_ACCOUNT_EXISTS_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
+        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
+        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
+        ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceState, VoiceTurnMode,
+        VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
         session_stop_pauses, valid_voice_pause_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
@@ -390,6 +409,34 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:document-cleared",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    pub(super) struct AccountAccessRefreshListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    pub(super) struct AccountBoundaryChangedListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    impl Drop for AccountAccessRefreshListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:account-access-confirmed",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for AccountBoundaryChangedListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:account-boundary-changed",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -480,6 +527,9 @@ mod cloud {
             "ready" => CloudState::Ready,
             "identity-required" => CloudState::IdentityRequired,
             "passkey-required" => CloudState::PasskeyRequired,
+            "passkey-registration-recovery-required" => {
+                CloudState::PasskeyRegistrationRecoveryRequired
+            }
             "configuration-required" => CloudState::ConfigurationRequired,
             _ => CloudState::Unavailable,
         }
@@ -570,6 +620,82 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(DocumentClearListener { window, callback }))
+    }
+
+    pub fn install_account_access_refresh_listener(
+        mut cloud_status_refresh: Signal<u64>,
+    ) -> Option<Rc<AccountAccessRefreshListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            let next = cloud_status_refresh.peek().wrapping_add(1);
+            cloud_status_refresh.set(next);
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:account-access-confirmed",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(AccountAccessRefreshListener { window, callback }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_account_boundary_changed_listener(
+        mut voice_state: Signal<VoiceState>,
+        mut generation: Signal<u64>,
+        mut session_state: Signal<String>,
+        mut detected_domain: Signal<String>,
+        mut route: Signal<String>,
+        mut coach_state: Signal<CoachState>,
+        mut needs_paper: Signal<bool>,
+        mut research_status: Signal<ResearchStatus>,
+        mut research_records: Signal<Vec<ResearchRecord>>,
+        mut document_info: Signal<Option<DocumentInfo>>,
+        mut document_error: Signal<Option<&'static str>>,
+        mut caption: Signal<Option<String>>,
+        mut passkey_setup_feedback: Signal<Option<PasskeySetupFeedback>>,
+        mut cloud_status_refresh: Signal<u64>,
+    ) -> Option<Rc<AccountBoundaryChangedListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            let next = generation.peek().wrapping_add(1);
+            generation.set(next);
+            let _ = stop_session_js();
+            session_state.set(String::new());
+            detected_domain.set(String::new());
+            route.set(String::new());
+            coach_state.set(CoachState::NONE);
+            needs_paper.set(false);
+            research_status.set(ResearchStatus::None);
+            research_records.set(Vec::new());
+            document_info.set(None);
+            document_error.set(None);
+            caption.set(None);
+            passkey_setup_feedback.set(None);
+            let next_refresh = cloud_status_refresh.peek().wrapping_add(1);
+            cloud_status_refresh.set(next_refresh);
+            voice_state.set(VoiceState::Error(ACCOUNT_BOUNDARY_CHANGED_COPY));
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:account-boundary-changed",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(AccountBoundaryChangedListener { window, callback }))
+    }
+
+    pub fn focus_element(element_id: &str) {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(element) = document.get_element_by_id(element_id) else {
+            return;
+        };
+        let Ok(element) = element.dyn_into::<web_sys::HtmlElement>() else {
+            return;
+        };
+        let _ = element.focus();
     }
 
     pub fn install_first_audio_listener(
@@ -691,6 +817,7 @@ mod cloud {
                 "声を待っています　言い直そうとせず　続きや別のひと言をそのままどうぞ"
             }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
+            Some("account_boundary_changed") => ACCOUNT_BOUNDARY_CHANGED_COPY,
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
             }
@@ -698,10 +825,12 @@ mod cloud {
             Some("passkey_cancelled") => PASSKEY_CANCELLED_COPY,
             Some("passkey_unsupported") => PASSKEY_UNSUPPORTED_COPY,
             Some("passkey_authentication_failed") => PASSKEY_AUTHENTICATION_FAILED_COPY,
+            Some("passkey_registration_cancelled") => PASSKEY_REGISTRATION_CANCELLED_COPY,
             Some("passkey_registration_failed") => PASSKEY_REGISTRATION_FAILED_COPY,
-            Some("passkey_account_exists") => {
-                "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした"
+            Some("passkey_registration_recovery_required") => {
+                PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY
             }
+            Some("passkey_account_exists") => PASSKEY_ACCOUNT_EXISTS_COPY,
             Some("app_check_not_configured") => "App Check の公開サイトキーがまだない",
             Some("voice_turn_too_large") => "少し長すぎた　短く区切ってみて",
             Some("voice_turn_invalid") => "音声を確認できない　もう一度ためしてみて",
@@ -739,7 +868,9 @@ fn requires_passkey_choice(cloud_state: CloudState, voice_state: VoiceState) -> 
 
     matches!(
         cloud_state,
-        CloudState::IdentityRequired | CloudState::PasskeyRequired
+        CloudState::IdentityRequired
+            | CloudState::PasskeyRequired
+            | CloudState::PasskeyRegistrationRecoveryRequired
     ) || matches!(
         voice_state,
         VoiceState::Error(message)
@@ -748,16 +879,94 @@ fn requires_passkey_choice(cloud_state: CloudState, voice_state: VoiceState) -> 
                 PASSKEY_CANCELLED_COPY,
                 PASSKEY_UNSUPPORTED_COPY,
                 PASSKEY_AUTHENTICATION_FAILED_COPY,
+                PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
             ]
             .contains(&message)
     )
 }
 
+fn requires_passkey_registration_recovery(
+    cloud_state: CloudState,
+    voice_state: VoiceState,
+    feedback: Option<PasskeySetupFeedback>,
+) -> bool {
+    cloud_state == CloudState::PasskeyRegistrationRecoveryRequired
+        || matches!(
+            voice_state,
+            VoiceState::Error(PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY)
+        )
+        || matches!(
+            feedback,
+            Some(PasskeySetupFeedback::Error(
+                PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY
+            ))
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasskeyFocusTarget {
+    NewAccount,
+    ReturningAccount,
+    VoiceStart,
+}
+
+impl PasskeyFocusTarget {
+    const fn element_id(self) -> &'static str {
+        match self {
+            Self::NewAccount => "new-passkey-account-action",
+            Self::ReturningAccount => "returning-passkey-account-action",
+            Self::VoiceStart => "voice-start-action",
+        }
+    }
+}
+
+fn passkey_focus_target(
+    voice_state: VoiceState,
+    feedback: Option<PasskeySetupFeedback>,
+    cloud_state: CloudState,
+) -> Option<PasskeyFocusTarget> {
+    match feedback {
+        Some(PasskeySetupFeedback::Error(message)) => {
+            if [
+                PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
+                PASSKEY_ACCOUNT_EXISTS_COPY,
+            ]
+            .contains(&message)
+            {
+                Some(PasskeyFocusTarget::ReturningAccount)
+            } else {
+                Some(PasskeyFocusTarget::NewAccount)
+            }
+        }
+        Some(PasskeySetupFeedback::Success(_)) => Some(PasskeyFocusTarget::VoiceStart),
+        None if cloud_state == CloudState::PasskeyRegistrationRecoveryRequired => {
+            Some(PasskeyFocusTarget::ReturningAccount)
+        }
+        None if requires_passkey_choice(cloud_state, voice_state)
+            && matches!(voice_state, VoiceState::Error(_)) =>
+        {
+            Some(PasskeyFocusTarget::ReturningAccount)
+        }
+        None => None,
+    }
+}
+
+const fn cloud_state_for_display(
+    cloud_state: CloudState,
+    passkey_gate_visible: bool,
+) -> CloudState {
+    if passkey_gate_visible && matches!(cloud_state, CloudState::Ready) {
+        CloudState::PasskeyRequired
+    } else {
+        cloud_state
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
     use super::{
-        CloudState, DocumentInfo, FinishTurnError, VoiceState, VoiceTurnMode, VoiceTurnResult,
-        WaitTurnError,
+        CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeySetupFeedback,
+        ResearchRecord, ResearchStatus, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -802,6 +1011,34 @@ mod cloud {
         None
     }
 
+    pub fn install_account_access_refresh_listener(
+        _cloud_status_refresh: Signal<u64>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_account_boundary_changed_listener(
+        _voice_state: Signal<VoiceState>,
+        _generation: Signal<u64>,
+        _session_state: Signal<String>,
+        _detected_domain: Signal<String>,
+        _route: Signal<String>,
+        _coach_state: Signal<CoachState>,
+        _needs_paper: Signal<bool>,
+        _research_status: Signal<ResearchStatus>,
+        _research_records: Signal<Vec<ResearchRecord>>,
+        _document_info: Signal<Option<DocumentInfo>>,
+        _document_error: Signal<Option<&'static str>>,
+        _caption: Signal<Option<String>>,
+        _passkey_setup_feedback: Signal<Option<PasskeySetupFeedback>>,
+        _cloud_status_refresh: Signal<u64>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn focus_element(_element_id: &str) {}
+
     pub fn install_first_audio_listener(_voice_state: Signal<VoiceState>) -> Option<Listener> {
         None
     }
@@ -832,14 +1069,14 @@ fn arm_listening(
     announce_permission: bool,
     turn_mode: VoiceTurnMode,
     mut voice_state: Signal<VoiceState>,
-    generation: Signal<u64>,
-    session_state: Signal<String>,
-    detected_domain: Signal<String>,
-    route: Signal<String>,
-    coach_state: Signal<CoachState>,
-    needs_paper: Signal<bool>,
-    research_status: Signal<ResearchStatus>,
-    research_records: Signal<Vec<ResearchRecord>>,
+    mut generation: Signal<u64>,
+    mut session_state: Signal<String>,
+    mut detected_domain: Signal<String>,
+    mut route: Signal<String>,
+    mut coach_state: Signal<CoachState>,
+    mut needs_paper: Signal<bool>,
+    mut research_status: Signal<ResearchStatus>,
+    mut research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
     strict_cloud_minimization: Signal<bool>,
@@ -857,6 +1094,22 @@ fn arm_listening(
         };
         if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode, strict_snapshot).await {
             if *generation.peek() == operation {
+                if message == ACCOUNT_BOUNDARY_CHANGED_COPY {
+                    let next = generation.peek().wrapping_add(1);
+                    generation.set(next);
+                    cloud::stop_session();
+                    session_state.set(String::new());
+                    detected_domain.set(String::new());
+                    route.set(String::new());
+                    coach_state.set(CoachState::NONE);
+                    needs_paper.set(false);
+                    research_status.set(ResearchStatus::None);
+                    research_records.set(Vec::new());
+                    document_info.set(None);
+                    caption.set(None);
+                    voice_state.set(VoiceState::Error(ACCOUNT_BOUNDARY_CHANGED_COPY));
+                    return;
+                }
                 cloud::stop_session();
                 document_info.set(None);
                 voice_state.set(VoiceState::Error(message));
@@ -1849,16 +2102,55 @@ fn App() -> Element {
     let mut caption = use_signal(|| None::<String>);
     let mut captions_visible = use_signal(|| false);
     let mut strict_cloud_minimization = use_signal(|| false);
+    let cloud_status_refresh = use_signal(|| 0_u64);
     let mut passkey_setup_busy = use_signal(|| false);
-    let mut passkey_setup_notice = use_signal(|| None::<&'static str>);
+    let mut passkey_setup_feedback = use_signal(|| None::<PasskeySetupFeedback>);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
+    let _account_access_refresh_listener =
+        use_hook(|| cloud::install_account_access_refresh_listener(cloud_status_refresh));
+    let _account_boundary_changed_listener = use_hook(|| {
+        cloud::install_account_boundary_changed_listener(
+            voice_state,
+            generation,
+            session_state,
+            detected_domain,
+            route,
+            coach_state,
+            needs_paper,
+            research_status,
+            research_records,
+            document_info,
+            document_error,
+            caption,
+            passkey_setup_feedback,
+            cloud_status_refresh,
+        )
+    });
     let _first_audio_listener = use_hook(|| cloud::install_first_audio_listener(voice_state));
     let _voice_interrupted_listener =
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
     let _voice_session_paused_listener =
         use_hook(|| cloud::install_voice_session_paused_listener(voice_state, generation));
-    let mut cloud_status = use_resource(|| async { cloud::status().await });
+    let mut cloud_status = use_resource(move || {
+        let _refresh = *cloud_status_refresh.read();
+        async move { cloud::status().await }
+    });
+
+    use_effect(move || {
+        let current_voice_state = *voice_state.read();
+        let current_feedback = *passkey_setup_feedback.read();
+        let current_cloud_state = cloud_status
+            .read()
+            .as_ref()
+            .copied()
+            .unwrap_or(CloudState::Connecting);
+        if let Some(target) =
+            passkey_focus_target(current_voice_state, current_feedback, current_cloud_state)
+        {
+            cloud::focus_element(target.element_id());
+        }
+    });
 
     let state_snapshot = *voice_state.read();
     let coach_snapshot = *coach_state.read();
@@ -1868,6 +2160,7 @@ fn App() -> Element {
     let research_status_snapshot = *research_status.read();
     let research_snapshot = research_records.read().clone();
     let passkey_setup_is_busy = *passkey_setup_busy.read();
+    let passkey_setup_feedback_snapshot = *passkey_setup_feedback.read();
     let document_is_busy = strict_mode
         || matches!(
             state_snapshot,
@@ -1878,7 +2171,15 @@ fn App() -> Element {
         .as_ref()
         .copied()
         .unwrap_or(CloudState::Connecting);
-    let passkey_gate_visible = requires_passkey_choice(prepared_cloud_state, state_snapshot);
+    let effective_cloud_state = prepared_cloud_state;
+    let passkey_gate_visible = requires_passkey_choice(effective_cloud_state, state_snapshot);
+    let passkey_registration_recovery_required = requires_passkey_registration_recovery(
+        effective_cloud_state,
+        state_snapshot,
+        passkey_setup_feedback_snapshot,
+    );
+    let displayed_cloud_state =
+        cloud_state_for_display(effective_cloud_state, passkey_gate_visible);
     let voice_space_class = if passkey_gate_visible {
         "voice-space voice-space--passkey"
     } else {
@@ -1913,9 +2214,9 @@ fn App() -> Element {
                         small { "話す / 考える / 伝わる" }
                     }
                 }
-                div { class: prepared_cloud_state.class_name(),
+                div { class: displayed_cloud_state.class_name(),
                     span { class: "cloud-pill__dot", aria_hidden: "true" }
-                    {prepared_cloud_state.label()}
+                    {displayed_cloud_state.label()}
                 }
             }
 
@@ -1925,11 +2226,18 @@ fn App() -> Element {
                     aria_labelledby: voice_heading_id,
                     "data-voice-state": state_snapshot.class_name(),
 
-                    div { class: "context-line", aria_live: "polite",
-                        if matches!(
-                            prepared_cloud_state,
-                            CloudState::IdentityRequired | CloudState::PasskeyRequired
-                        ) {
+                    div { class: "context-line",
+                        span {
+                            id: "passkey-setup-status",
+                            class: "passkey-setup-status",
+                            role: "status",
+                            aria_live: "polite",
+                            aria_atomic: "true",
+                            if let Some(PasskeySetupFeedback::Success(message)) = passkey_setup_feedback_snapshot {
+                                {message}
+                            }
+                        }
+                        if passkey_gate_visible {
                             span {
                                 class: "context-chip",
                                 "パスキーでアカウント操作を確認"
@@ -1979,6 +2287,7 @@ fn App() -> Element {
                         div { class: "orb-orbit orb-orbit--outer", aria_hidden: "true" }
                         div { class: "orb-orbit orb-orbit--inner", aria_hidden: "true" }
                         button {
+                            id: "voice-start-action",
                             class: orb_class,
                             r#type: "button",
                             aria_label: state_snapshot.orb_action(),
@@ -1991,6 +2300,7 @@ fn App() -> Element {
                                 let current_state = *voice_state.peek();
                                 match current_state {
                                     VoiceState::Ready | VoiceState::Error(_) => {
+                                        passkey_setup_feedback.set(None);
                                         start_or_resume(
                                             voice_state,
                                             generation,
@@ -2080,14 +2390,20 @@ fn App() -> Element {
 
                     if passkey_gate_visible {
                         div { class: "passkey-gate",
-                            section {
+                            div {
                                 class: "passkey-entry",
-                                role: "region",
-                                aria_labelledby: "passkey-entry-heading",
                                 p { class: "passkey-entry__eyebrow", "マイクはまだ開きません" }
                                 h1 { id: "passkey-entry-heading", "最初にパスキーを選ぶ" }
-                                if let VoiceState::Error(message) = state_snapshot {
-                                    p { class: "passkey-entry__error", role: "alert", {message} }
+                                if passkey_registration_recovery_required {
+                                    p {
+                                        class: "passkey-entry__error",
+                                        role: "alert",
+                                        {PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY}
+                                    }
+                                } else if !passkey_setup_is_busy && passkey_setup_feedback_snapshot.is_none() {
+                                    if let VoiceState::Error(message) = state_snapshot {
+                                        p { class: "passkey-entry__error", role: "alert", {message} }
+                                    }
                                 }
                                 p { class: "passkey-entry__lead",
                                     "初めて使う方は新しい仮名アカウントとパスキーを作ります。登録済みの方は同じパスキーで戻れます。"
@@ -2097,28 +2413,48 @@ fn App() -> Element {
                                     role: "group",
                                     aria_label: "パスキー接続を選ぶ",
                                     button {
+                                        id: "new-passkey-account-action",
                                         class: "control-button is-active",
                                         r#type: "button",
-                                        autofocus: true,
                                         aria_describedby: "new-passkey-account-warning",
-                                        disabled: passkey_setup_is_busy,
+                                        disabled: passkey_setup_is_busy || passkey_registration_recovery_required,
                                         onclick: move |_| {
-                                            if *passkey_setup_busy.peek() {
+                                            if *passkey_setup_busy.peek()
+                                                || passkey_registration_recovery_required
+                                            {
                                                 return;
                                             }
                                             passkey_setup_busy.set(true);
-                                            passkey_setup_notice.set(None);
+                                            passkey_setup_feedback.set(None);
                                             spawn(async move {
                                                 let result = cloud::register_passkey_account().await;
                                                 passkey_setup_busy.set(false);
                                                 match result {
                                                     Ok(()) => {
-                                                        passkey_setup_notice.set(Some(
-                                                            "新しい仮名アカウントを作りました　マイクはまだ開いていません",
+                                                        let next = generation.peek().wrapping_add(1);
+                                                        generation.set(next);
+                                                        cloud::stop_session();
+                                                        session_state.set(String::new());
+                                                        detected_domain.set(String::new());
+                                                        route.set(String::new());
+                                                        coach_state.set(CoachState::NONE);
+                                                        needs_paper.set(false);
+                                                        research_status.set(ResearchStatus::None);
+                                                        research_records.set(Vec::new());
+                                                        document_info.set(None);
+                                                        document_error.set(None);
+                                                        caption.set(None);
+                                                        passkey_setup_feedback.set(Some(
+                                                            PasskeySetupFeedback::Success(
+                                                                PASSKEY_REGISTRATION_SUCCESS_COPY,
+                                                            ),
                                                         ));
                                                         cloud_status.restart();
+                                                        voice_state.set(VoiceState::Ready);
                                                     }
-                                                    Err(message) => passkey_setup_notice.set(Some(message)),
+                                                    Err(message) => passkey_setup_feedback.set(Some(
+                                                        PasskeySetupFeedback::Error(message),
+                                                    )),
                                                 }
                                             });
                                         },
@@ -2130,6 +2466,7 @@ fn App() -> Element {
                                         }
                                     }
                                     button {
+                                        id: "returning-passkey-account-action",
                                         class: "control-button",
                                         r#type: "button",
                                         disabled: passkey_setup_is_busy,
@@ -2137,7 +2474,7 @@ fn App() -> Element {
                                             if *passkey_setup_busy.peek() {
                                                 return;
                                             }
-                                            passkey_setup_notice.set(None);
+                                            passkey_setup_feedback.set(None);
                                             start_or_resume(
                                                 voice_state,
                                                 generation,
@@ -2162,8 +2499,10 @@ fn App() -> Element {
                                     class: "passkey-entry__warning",
                                     {SEPARATE_PASSKEY_ACCOUNT_WARNING}
                                 }
-                                if let Some(message) = *passkey_setup_notice.read() {
-                                    p { class: "passkey-entry__notice", role: "status", {message} }
+                                if !passkey_registration_recovery_required {
+                                    if let Some(PasskeySetupFeedback::Error(message)) = passkey_setup_feedback_snapshot {
+                                        p { class: "passkey-entry__error", role: "alert", {message} }
+                                    }
                                 }
                             }
                         }
@@ -2569,10 +2908,13 @@ mod tests {
     use super::{
         ANSWER_SUPPORT_COPY, CloudState, CoachAction, CoachPhase, CoachState,
         NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
-        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REQUIRED_COPY,
+        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
+        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, VoiceState, VoiceTurnMode, recoverable_wait_turn_code,
-        requires_passkey_choice, session_stop_pauses, silent_recognition_miss,
+        TALK_ONLY_COPY, VoiceState, VoiceTurnMode, cloud_state_for_display, passkey_focus_target,
+        recoverable_wait_turn_code, requires_passkey_choice,
+        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
         turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
         valid_voice_privacy_metadata,
     };
@@ -2687,6 +3029,10 @@ mod tests {
         assert!(PASSKEY_AUTHENTICATION_FAILED_COPY.contains("登録が未完了"));
         assert!(PASSKEY_AUTHENTICATION_FAILED_COPY.contains("新しい仮名アカウントを作る"));
         assert!(PASSKEY_REGISTRATION_FAILED_COPY.contains("端末のパスキー設定"));
+        assert!(PASSKEY_REGISTRATION_CANCELLED_COPY.contains("登録は完了しませんでした"));
+        assert!(PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY.contains("新規登録を繰り返さず"));
+        assert!(PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY.contains(RETURNING_PASSKEY_ACTION));
+        assert!(!PASSKEY_CANCELLED_COPY.contains(NEW_PASSKEY_ACCOUNT_ACTION));
         assert_ne!(
             PASSKEY_AUTHENTICATION_FAILED_COPY,
             PASSKEY_REGISTRATION_FAILED_COPY
@@ -2728,6 +3074,106 @@ mod tests {
             CloudState::PasskeyRequired,
             VoiceState::Listening
         ));
+        assert!(requires_passkey_choice(
+            CloudState::PasskeyRegistrationRecoveryRequired,
+            VoiceState::Ready
+        ));
+        assert!(requires_passkey_choice(
+            CloudState::Ready,
+            VoiceState::Error(PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY)
+        ));
+        assert!(requires_passkey_registration_recovery(
+            CloudState::Ready,
+            VoiceState::Error(PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY),
+            None,
+        ));
+        assert!(requires_passkey_registration_recovery(
+            CloudState::PasskeyRegistrationRecoveryRequired,
+            VoiceState::Ready,
+            None,
+        ));
+        assert!(requires_passkey_registration_recovery(
+            CloudState::Ready,
+            VoiceState::Ready,
+            Some(PasskeySetupFeedback::Error(
+                PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY
+            )),
+        ));
+        assert!(!requires_passkey_registration_recovery(
+            CloudState::Ready,
+            VoiceState::Ready,
+            None,
+        ));
+        assert_eq!(
+            cloud_state_for_display(CloudState::Ready, true),
+            CloudState::PasskeyRequired
+        );
+        assert_eq!(
+            cloud_state_for_display(CloudState::Ready, false),
+            CloudState::Ready
+        );
+        assert_eq!(
+            passkey_focus_target(
+                VoiceState::Error(PASSKEY_AUTHENTICATION_FAILED_COPY),
+                None,
+                CloudState::Ready,
+            ),
+            Some(PasskeyFocusTarget::ReturningAccount)
+        );
+        assert_eq!(
+            passkey_focus_target(
+                VoiceState::Error(PASSKEY_UNSUPPORTED_COPY),
+                None,
+                CloudState::Ready,
+            ),
+            Some(PasskeyFocusTarget::ReturningAccount)
+        );
+        for feedback in [
+            PASSKEY_REGISTRATION_FAILED_COPY,
+            PASSKEY_REGISTRATION_CANCELLED_COPY,
+            PASSKEY_UNSUPPORTED_COPY,
+        ] {
+            assert_eq!(
+                passkey_focus_target(
+                    VoiceState::Ready,
+                    Some(PasskeySetupFeedback::Error(feedback)),
+                    CloudState::PasskeyRequired,
+                ),
+                Some(PasskeyFocusTarget::NewAccount)
+            );
+        }
+        assert_eq!(
+            passkey_focus_target(
+                VoiceState::Ready,
+                Some(PasskeySetupFeedback::Error(
+                    PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY
+                )),
+                CloudState::PasskeyRequired,
+            ),
+            Some(PasskeyFocusTarget::ReturningAccount)
+        );
+        assert_eq!(
+            passkey_focus_target(
+                VoiceState::Ready,
+                Some(PasskeySetupFeedback::Success(
+                    PASSKEY_REGISTRATION_FAILED_COPY
+                )),
+                CloudState::Ready,
+            ),
+            Some(PasskeyFocusTarget::VoiceStart)
+        );
+        assert_eq!(
+            passkey_focus_target(
+                VoiceState::Ready,
+                None,
+                CloudState::PasskeyRegistrationRecoveryRequired,
+            ),
+            Some(PasskeyFocusTarget::ReturningAccount)
+        );
+        assert_eq!(
+            passkey_focus_target(VoiceState::Ready, None, CloudState::Ready),
+            None
+        );
     }
 
     #[test]

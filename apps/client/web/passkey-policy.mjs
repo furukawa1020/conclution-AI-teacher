@@ -7,6 +7,109 @@ const BASE64URL_INDEX = new Map(
 export const PASSKEY_AUTH_METHOD = "passkey-v1";
 export const PASSKEY_FRESHNESS_SECONDS = 5 * 60;
 
+const REGISTRATION_FINISH_PENDING_KEY =
+  "kotae.passkey-registration-finish-pending.v1";
+
+function validPasskeyAccountId(value) {
+  return typeof value === "string" && /^pk_[A-Za-z0-9_-]{32}$/u.test(value);
+}
+
+export function createPasskeyRegistrationRecoveryLatch(storageProvider) {
+  if (typeof storageProvider !== "function") invalid();
+  let pendingAccountIdInMemory = null;
+
+  const storage = () => {
+    const candidate = storageProvider();
+    if (
+      !candidate ||
+      typeof candidate.getItem !== "function" ||
+      typeof candidate.removeItem !== "function" ||
+      typeof candidate.setItem !== "function"
+    ) {
+      invalid();
+    }
+    return candidate;
+  };
+
+  return Object.freeze({
+    clear(accountId) {
+      if (!validPasskeyAccountId(accountId)) return false;
+      try {
+        const target = storage();
+        const pendingAccountId =
+          pendingAccountIdInMemory ??
+          target.getItem(REGISTRATION_FINISH_PENDING_KEY);
+        if (pendingAccountId !== accountId) return false;
+        target.removeItem(REGISTRATION_FINISH_PENDING_KEY);
+        if (target.getItem(REGISTRATION_FINISH_PENDING_KEY) !== null) {
+          return false;
+        }
+        pendingAccountIdInMemory = null;
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    isPending() {
+      if (pendingAccountIdInMemory !== null) return true;
+      try {
+        const stored = storage().getItem(REGISTRATION_FINISH_PENDING_KEY);
+        if (stored === null) return false;
+        pendingAccountIdInMemory = stored;
+        return true;
+      } catch {
+        // Without readable per-tab state, another registration cannot be
+        // proven distinct from an earlier finish whose response was lost.
+        return true;
+      }
+    },
+    matches(accountId) {
+      if (!validPasskeyAccountId(accountId)) return false;
+      try {
+        const pendingAccountId =
+          pendingAccountIdInMemory ??
+          storage().getItem(REGISTRATION_FINISH_PENDING_KEY);
+        return pendingAccountId === accountId;
+      } catch {
+        return false;
+      }
+    },
+    mark(accountId) {
+      if (!validPasskeyAccountId(accountId)) return false;
+      if (pendingAccountIdInMemory !== null) {
+        return pendingAccountIdInMemory === accountId;
+      }
+      try {
+        const target = storage();
+        if (target.getItem(REGISTRATION_FINISH_PENDING_KEY) !== null) return false;
+        target.setItem(REGISTRATION_FINISH_PENDING_KEY, accountId);
+        if (target.getItem(REGISTRATION_FINISH_PENDING_KEY) !== accountId) return false;
+        pendingAccountIdInMemory = accountId;
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+}
+
+export function decidePasskeyRegistrationRecoveryAction({
+  currentAccountMatches,
+  interactive,
+  pending,
+}) {
+  if (
+    typeof currentAccountMatches !== "boolean" ||
+    typeof interactive !== "boolean" ||
+    typeof pending !== "boolean"
+  ) {
+    invalid();
+  }
+  if (!pending) return "normal";
+  if (currentAccountMatches) return "verify-current";
+  return interactive ? "authenticate" : "block";
+}
+
 const MAX_CHALLENGE_BYTES = 1024;
 const MAX_CREDENTIAL_ID_BYTES = 1024;
 const MAX_CREDENTIAL_RESPONSE_BYTES = 256 * 1024;

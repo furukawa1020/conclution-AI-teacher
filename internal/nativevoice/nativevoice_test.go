@@ -40,8 +40,8 @@ func TestOpenUsesReviewedNativeAudioConfiguration(t *testing.T) {
 	if config == nil {
 		t.Fatal("Connect() config is nil")
 	}
-	if got := config.ResponseModalities; len(got) != 2 ||
-		got[0] != genai.ModalityAudio || got[1] != genai.ModalityText {
+	if got := config.ResponseModalities; len(got) != 1 ||
+		got[0] != genai.ModalityAudio {
 		t.Fatalf("ResponseModalities = %#v", got)
 	}
 	if config.SystemInstruction == nil || len(config.SystemInstruction.Parts) != 1 ||
@@ -577,10 +577,10 @@ func TestConfigurationRejectsUnreviewedRoutes(t *testing.T) {
 	_, err = NewWithDialer(Config{
 		ProjectID:    "project",
 		SystemPrompt: "prompt",
-		Location:     "us-central1",
+		Location:     "global",
 	}, dialer)
 	if err == nil {
-		t.Fatal("NewWithDialer accepted a non-global location")
+		t.Fatal("NewWithDialer accepted an unsupported native-audio location")
 	}
 }
 

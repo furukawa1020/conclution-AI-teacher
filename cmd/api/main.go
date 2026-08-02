@@ -260,7 +260,7 @@ func main() {
 			}
 			nativeOpener, nativeErr := nativevoice.New(ctx, nativevoice.Config{
 				ProjectID:      cfg.ProjectID,
-				Location:       cfg.VertexLocation,
+				Location:       cfg.NativeAudioLocation,
 				Model:          cfg.NativeAudioModel,
 				VoiceName:      cfg.NativeAudioVoice,
 				SystemPrompt:   nativeflow.DefaultSystemPrompt,
@@ -362,6 +362,7 @@ func main() {
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
 			"native_audio_enabled", cfg.NativeAudioEnabled,
+			"native_audio_location", cfg.NativeAudioLocation,
 			"privacy_boundary", "evaluation-deidentify-and-strict-voice-inspect-fail-closed",
 		)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {

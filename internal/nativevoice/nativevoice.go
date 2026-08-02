@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultModel     = "gemini-live-2.5-flash-native-audio"
-	DefaultLocation  = "global"
+	DefaultLocation  = "us-central1"
 	DefaultVoice     = "Aoede"
 	APIVersion       = "v1"
 	RouteNativeAudio = "native_audio"
@@ -69,7 +69,7 @@ var (
 
 // Config bounds one native-audio session. Zero-valued optional fields receive
 // conservative defaults. Model and Location, when supplied, must name the
-// reviewed GA native-audio route and global Vertex endpoint.
+// reviewed GA native-audio route and its supported us-central1 endpoint.
 type Config struct {
 	ProjectID    string
 	Location     string
@@ -181,7 +181,8 @@ func (d genaiDialer) Connect(
 	return d.live.Connect(ctx, model, config)
 }
 
-// New initializes a Vertex AI client using ADC and the global v1 Live endpoint.
+// New initializes a Vertex AI client using ADC and the us-central1 v1 Live
+// endpoint.
 func New(ctx context.Context, config Config) (*Service, error) {
 	config, err := normalizeConfig(config)
 	if err != nil {
@@ -232,7 +233,7 @@ func normalizeConfig(config Config) (Config, error) {
 		config.Location = DefaultLocation
 	}
 	if config.Location != DefaultLocation {
-		return Config{}, errors.New("native voice location must be global")
+		return Config{}, errors.New("native voice location must be us-central1")
 	}
 	if config.Model == "" {
 		config.Model = DefaultModel
@@ -298,10 +299,9 @@ func applyIntDefault(target *int, value int) {
 
 func (s *Service) connectConfig() *genai.LiveConnectConfig {
 	return &genai.LiveConnectConfig{
-		ResponseModalities: []genai.Modality{
-			genai.ModalityAudio,
-			genai.ModalityText,
-		},
+		// The GA Live endpoint accepts one response modality. Input and output
+		// captions are enabled independently by the transcription configs below.
+		ResponseModalities: []genai.Modality{genai.ModalityAudio},
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{{Text: s.config.SystemPrompt}},
 		},

@@ -28,13 +28,17 @@ export const VOICE_PLAYBACK_LIMITS = Object.freeze({
 });
 
 export const INTERRUPT_VAD_LIMITS = Object.freeze({
-  // Four required voiced frames may each be separated by at most two 40 ms
-  // gaps. Keep the recorder watchdog finite while allowing that full path.
-  candidateCaptureLimitMs: 400,
+  // Keep every provisional candidate local for a finite window. A short
+  // acknowledgement, cough, or mutter is discarded without stopping the
+  // reply; sustained speech can still survive a few natural gaps.
+  candidateCaptureLimitMs: 800,
   candidateGapMs: 120,
-  // Four 40 ms voiced frames confirm after 120 ms wall-clock from the first
-  // detected frame while still requiring 160 ms of sampled speech.
-  confirmationMs: 160,
+  // Four voiced frames only enter a reversible, local provisional state and
+  // do not change playback. Ten voiced frames plus a density check are
+  // required before the current response is actually interrupted.
+  provisionalMs: 160,
+  confirmationMs: 400,
+  minimumVoiceDensity: 0.65,
   guardMs: 320,
   intervalMs: 40,
   maximumCaptureMs: 3 * 60_000 + 30_000,
@@ -62,13 +66,12 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
 
 export const BARGE_PCM_LIMITS = Object.freeze({
   frameDurationMs: 20,
-  // The slowest valid gapped confirmation arrives 360 ms after onset. Keep
-  // that complete candidate plus the requested 100 ms pre-roll in a fixed
-  // 23-frame (14,720 byte) local ring.
-  historyMs: 460,
+  // Cover the complete finite provisional window plus 100 ms of pre-roll.
+  // Unconfirmed PCM never leaves the device and is zeroized on discard.
+  historyMs: 900,
   leadInMs: 100,
-  maximumBytes: 14_720,
-  maximumFrames: 23,
+  maximumBytes: 28_800,
+  maximumFrames: 45,
 });
 
 export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
@@ -547,6 +550,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     !hasExactKeys(startFrame, [
       "appCheckToken",
       "idToken",
+      "nativeAudio",
       "sampleRateHz",
       "sessionState",
       "strictCloudMinimization",
@@ -560,6 +564,8 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     startFrame.idToken.length === 0 ||
     typeof startFrame.appCheckToken !== "string" ||
     startFrame.appCheckToken.length === 0 ||
+    typeof startFrame.nativeAudio !== "boolean" ||
+    (startFrame.nativeAudio && startFrame.strictCloudMinimization) ||
     typeof startFrame.sessionState !== "string" ||
     typeof startFrame.strictCloudMinimization !== "boolean" ||
     !["ambient", "foreground", "intentional"].includes(startFrame.turnMode) ||
@@ -690,12 +696,39 @@ const LIVE_SERVER_ERROR_CODES = Object.freeze([
   "no_speech",
   "rate_limited",
   "voice_api_unavailable",
+  "voice_native_fallback",
   "voice_response_invalid",
   "voice_turn_invalid",
   "voice_turn_too_large",
   "voice_turn_timeout",
   "voice_turn_unavailable",
 ]);
+
+export function shouldReplayCommittedNativeTurn({
+  audioEventCount,
+  code,
+  committed,
+  interrupted,
+  nativeAudio,
+}) {
+  if (
+    !Number.isSafeInteger(audioEventCount) ||
+    audioEventCount < 0 ||
+    typeof code !== "string" ||
+    typeof committed !== "boolean" ||
+    typeof interrupted !== "boolean" ||
+    typeof nativeAudio !== "boolean"
+  ) {
+    throw new TypeError("native_fallback_state_invalid");
+  }
+  return (
+    code === "voice_native_fallback" &&
+    nativeAudio &&
+    committed &&
+    !interrupted &&
+    audioEventCount === 0
+  );
+}
 
 export function createVoiceLiveServerProtocol(validateFinalResult) {
   if (typeof validateFinalResult !== "function") {
@@ -1098,13 +1131,20 @@ export function advanceInterruptVad(
     !finiteOrNull(state.lastVoiceAt) ||
     (state.phase === "confirmed" &&
       (state.firstVoiceAt === null || state.lastVoiceAt === null)) ||
-    (state.phase === "candidate" && state.candidateStartedAt === null) ||
+    (["candidate", "provisional"].includes(state.phase) &&
+      state.candidateStartedAt === null) ||
     !Number.isFinite(now) ||
     now < state.startedAt ||
     typeof outputActive !== "boolean" ||
     !boundedLevel(peak) ||
     !boundedLevel(rms) ||
-    !["guard", "armed", "candidate", "confirmed"].includes(state.phase)
+    ![
+      "guard",
+      "armed",
+      "candidate",
+      "provisional",
+      "confirmed",
+    ].includes(state.phase)
   ) {
     throw new TypeError("interrupt_vad_state_invalid");
   }
@@ -1123,10 +1163,10 @@ export function advanceInterruptVad(
   // The MediaRecorder watchdog and this deterministic VAD boundary share the
   // same candidate onset. Whichever browser task runs first after a stalled
   // main thread must discard the candidate: otherwise the watchdog can detach
-  // the recorder while this state later advances to `confirmed`, leaving
-  // playback permanently ducked with no interruption audio owner.
+  // the recorder while this state later advances to `confirmed`, leaving no
+  // interruption audio owner.
   if (
-    phase === "candidate" &&
+    ["candidate", "provisional"].includes(phase) &&
     now - candidateStartedAt >=
       INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs
   ) {
@@ -1153,7 +1193,7 @@ export function advanceInterruptVad(
       peak >=
         Math.max(outputActive ? 0.12 : 0.08, noiseFloor * 9);
     if (guardVoiced) {
-      if (phase !== "candidate") {
+      if (!["candidate", "provisional"].includes(phase)) {
         phase = "candidate";
         candidateStartedAt = now;
         candidateSilenceMs = 0;
@@ -1162,7 +1202,14 @@ export function advanceInterruptVad(
       }
       candidateSilenceMs = 0;
       voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
-    } else if (phase === "candidate") {
+      if (
+        phase === "candidate" &&
+        voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
+      ) {
+        phase = "provisional";
+        action = "provisional";
+      }
+    } else if (["candidate", "provisional"].includes(phase)) {
       candidateSilenceMs += INTERRUPT_VAD_LIMITS.intervalMs;
       if (
         candidateSilenceMs >= INTERRUPT_VAD_LIMITS.candidateGapMs
@@ -1219,7 +1266,7 @@ export function advanceInterruptVad(
       action = "end-of-turn";
     }
   } else if (voiced) {
-    if (phase !== "candidate") {
+    if (!["candidate", "provisional"].includes(phase)) {
       phase = "candidate";
       candidateStartedAt = now;
       candidateSilenceMs = 0;
@@ -1228,7 +1275,20 @@ export function advanceInterruptVad(
     }
     candidateSilenceMs = 0;
     voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
-    if (voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs) {
+    if (
+      phase === "candidate" &&
+      voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
+    ) {
+      phase = "provisional";
+      action = "provisional";
+    }
+    const candidateElapsedMs =
+      now - candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs;
+    const voiceDensity = voiceRunMs / candidateElapsedMs;
+    if (
+      voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs &&
+      voiceDensity >= INTERRUPT_VAD_LIMITS.minimumVoiceDensity
+    ) {
       phase = "confirmed";
       firstVoiceAt = candidateStartedAt;
       lastVoiceAt = now;
@@ -1236,7 +1296,7 @@ export function advanceInterruptVad(
     }
   } else {
     noiseFloor = clampNoiseFloor(noiseFloor * 0.92 + rms * 0.08);
-    if (phase === "candidate") {
+    if (["candidate", "provisional"].includes(phase)) {
       candidateSilenceMs += INTERRUPT_VAD_LIMITS.intervalMs;
       if (
         candidateSilenceMs < INTERRUPT_VAD_LIMITS.candidateGapMs

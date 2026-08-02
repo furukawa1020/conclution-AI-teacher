@@ -92,6 +92,7 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
 - raw audioをVertex AIへ送らない。厳格モードはSTT文字列と応答文がCloud Run内の決定論的検査と東京リージョンDLPの両方で`clear`の時だけ後段へ進み、標準モードに同じ保証があるとは表示しない。
 - commit後のfinal transcriptが160 Unicode code point以上の時だけ、サーバーが今回限りの`extended_speech`を導出する。通常会話では現在turnの発話内に明示された中心点を、否定、条件、数値、不確実性を変えず第一文へ置いて内容へ応答する。中心点を一つに安全に定められなければ創作せず、一つだけ低負担に確認する。途中候補、過去turn、保存本文から中心点を作らず、話した時間、能力、心理状態、習熟度の判定にも使わない。
+- 最後のvoiced frameから700 ms無音になった時は、内容非依存の固定表示「ここまで届いています」を出す。発話再開で消し、理解・要約・採点とは扱わない。これはactiveな画面での受領応答budgetであり、意味音声の絶対3秒保証ではない。急ぐ場合は「ここで返して」で長い終端待ちを明示的に終えられる。
 - 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
 - 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
 - AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、4分無発話、30分経過でsessionを止める。

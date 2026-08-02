@@ -262,7 +262,7 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		t.Fatalf("welcome called model %d times, want zero", len(fake.calls))
 	}
 	if phaticLocalSpokenReply !=
-		"こんにちは。今日はこっちから軽い話を振ります。好きなものは、理由をうまく説明できなくても会話の入口になります。最近、少し気になったものはありますか？ 動画でも、音でも、「特にない」でも大丈夫です。" {
+		"こんにちは。今日は私から一つ。音楽は、同じ曲でも朝と夜で印象が変わることがあります。思いつけば一言、聞くだけでも大丈夫です。" {
 		t.Fatalf("unexpected local greeting copy: %q", phaticLocalSpokenReply)
 	}
 	if result.Route != "phatic-local" ||
@@ -276,8 +276,8 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		result.InterventionPolicy != "answer" ||
 		result.NeedsClarification ||
 		result.StateToken == "" ||
-		countQuestions(result.SpokenReply) != 1 ||
-		!strings.Contains(result.SpokenReply, "特にない") {
+		countQuestions(result.SpokenReply) != 0 ||
+		!strings.Contains(result.SpokenReply, "聞くだけ") {
 		t.Fatalf("unexpected welcome result: %#v", result)
 	}
 	for name, value := range map[string]float64{
@@ -294,6 +294,16 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 	} {
 		if mathInvalid(value) {
 			t.Fatalf("%s is not finite and bounded: %v", name, value)
+		}
+	}
+	for turn := 0; turn < 8; turn++ {
+		reply := proactiveTopicReply(turn)
+		for _, forbidden := range []string{
+			"外に出", "学校", "仕事", "就労", "家族", "友人", "頑張", "改善",
+		} {
+			if strings.Contains(reply, forbidden) {
+				t.Fatalf("turn %d contains coercive topic %q: %q", turn, forbidden, reply)
+			}
 		}
 	}
 

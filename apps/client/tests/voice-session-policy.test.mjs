@@ -26,8 +26,10 @@ import {
   isValidTurnMode,
   normalizeResearchDiscovery,
   shouldCommitHybridEndpoint,
+  shouldShowVoiceReceipt,
   shouldStopSessionForLifecycle,
   turnModeForGestureEpoch,
+  VOICE_RECEIPT_LIMITS,
   VOICE_SESSION_LIMITS,
 } from "../web/voice-session-policy.mjs";
 import {
@@ -55,6 +57,51 @@ import {
   VOICE_PLAYBACK_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
+
+test("the content-free receipt stays inside a sub-three-second budget", () => {
+  assert.equal(VOICE_RECEIPT_LIMITS.visibleAfterSilenceMs, 700);
+  assert.equal(
+    shouldShowVoiceReceipt({
+      hasSpeech: true,
+      lastVoiceAt: 1_000,
+      now: 1_699,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldShowVoiceReceipt({
+      hasSpeech: true,
+      lastVoiceAt: 1_000,
+      now: 1_700,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldShowVoiceReceipt({
+      hasSpeech: true,
+      lastVoiceAt: 1_680,
+      now: 1_700,
+    }),
+    false,
+    "resumed speech clears the receipt",
+  );
+  assert.equal(
+    shouldShowVoiceReceipt({
+      hasSpeech: false,
+      lastVoiceAt: null,
+      now: 5_000,
+    }),
+    false,
+  );
+  assert.throws(
+    () =>
+      shouldShowVoiceReceipt(
+        { hasSpeech: true, lastVoiceAt: 0, now: 3_000 },
+        { visibleAfterSilenceMs: 3_000 },
+      ),
+    /voice_receipt_state_invalid/u,
+  );
+});
 
 function executableBridgeFunction(source, signature, nextSignature) {
   const start = source.indexOf(signature);

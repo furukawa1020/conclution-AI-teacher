@@ -3,9 +3,9 @@ mod longitudinal;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-const ORDINARY_CHAT_COPY: &str = "そのままなら普通の雑談";
-const ANSWER_SUPPORT_COPY: &str = "「答え方を一問だけ手伝って」";
-const TALK_ONLY_COPY: &str = "「今日は話すだけ」";
+const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、こちらから話す";
+const ANSWER_SUPPORT_COPY: &str = "受け取った中心を、返事の最初に返す";
+const TALK_ONLY_COPY: &str = "「今日は話すだけ」で、こちらからの質問を止める";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
@@ -43,6 +43,35 @@ enum VoiceState {
     Speaking,
     Paused,
     Error(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceReceipt {
+    Clear,
+    Received,
+}
+
+impl VoiceReceipt {
+    const fn is_visible_for(self, state: VoiceState) -> bool {
+        matches!(self, Self::Received)
+            && matches!(state, VoiceState::Listening | VoiceState::Thinking)
+    }
+
+    const fn eyebrow(self) -> &'static str {
+        "声の受け取り"
+    }
+
+    const fn heading(self) -> &'static str {
+        "ここまで届いています"
+    }
+
+    const fn hint(self, state: VoiceState) -> &'static str {
+        match state {
+            VoiceState::Listening => "まだ続けても大丈夫　話し始めればそのまま聴き続けます",
+            VoiceState::Thinking => "返事を整えています　言い直さなくて大丈夫です",
+            _ => "",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -105,7 +134,7 @@ impl CoachState {
             CoachAction::Elicit => "ひとつだけ聞いています",
             CoachAction::Restate => "少しだけ聞き直します",
             CoachAction::Expand => "もう少し聞かせて",
-            CoachAction::Complete => "ちゃんと届きました",
+            CoachAction::Complete => "聞かれたことへの答えが届きました",
             CoachAction::Retry => "音をもう一度拾います",
             CoachAction::Release => "そのまま続けられます",
             CoachAction::None => match self.phase {
@@ -113,7 +142,7 @@ impl CoachState {
                 CoachPhase::AwaitingAnswer => "ひとつだけ聞いています",
                 CoachPhase::AwaitingRestatement => "少しだけ聞き直します",
                 CoachPhase::Expanding => "もう少し聞かせて",
-                CoachPhase::Complete => "ちゃんと届きました",
+                CoachPhase::Complete => "聞かれたことへの答えが届きました",
                 CoachPhase::Blocked => "そのままで大丈夫",
             },
         }
@@ -126,7 +155,7 @@ impl CoachState {
             (CoachPhase::AwaitingAnswer, _) => "短いひと言だけでも大丈夫",
             (CoachPhase::AwaitingRestatement, _) => "そこまで、ちゃんと聞こえています",
             (CoachPhase::Expanding, _) => "もう少しだけ聞かせてください",
-            (CoachPhase::Complete, _) => "今の言い方で、ちゃんと伝わりました",
+            (CoachPhase::Complete, _) => "今の答えは、聞かれたことに届いています",
             (CoachPhase::Blocked, _) => "急がなくて大丈夫です",
         }
     }
@@ -140,7 +169,9 @@ impl CoachState {
             }
             (CoachPhase::AwaitingRestatement, _) => "聞きたいところを一つだけ小さくしています",
             (CoachPhase::Expanding, _) => "答えなくても大丈夫　話したい方へ続けられます",
-            (CoachPhase::Complete, _) => "今の言葉のまま　その話の中身を続けます",
+            (CoachPhase::Complete, _) => {
+                "今の一回だけの確認です　話し方全体や長期の変化を表すものではありません"
+            }
             (CoachPhase::Blocked, _) => "短くても大丈夫　拾えなければそのまま先へ進めます",
         }
     }
@@ -162,7 +193,7 @@ impl VoiceState {
             Self::Ready => "話しはじめる",
             Self::RequestingPermission => "マイクを準備しています",
             Self::Listening => "聴いています",
-            Self::Thinking => "背景まで読んでいます",
+            Self::Thinking => "返事を整えています",
             Self::Speaking => "言葉で返しています",
             Self::Paused => "会話を止めています",
             Self::Error(message) => message,
@@ -178,9 +209,11 @@ impl VoiceState {
 
     const fn hint(self) -> &'static str {
         match self {
-            Self::Ready => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
+            Self::Ready => {
+                "「こんにちは」だけでも、こちらから話します　聞くだけ、沈黙、途中で終わるのも大丈夫"
+            }
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
-            Self::Listening => "話し終わりの間を見て自動で返す　長い話は急いで切らない",
+            Self::Listening => "話し終わりの間を見て自動で返す　急ぐ時は「ここで返して」を選べます",
             Self::Thinking => {
                 "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
             }
@@ -391,9 +424,10 @@ mod cloud {
         PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
-        ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceState, VoiceTurnMode,
-        VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
-        session_stop_pauses, valid_voice_pause_metadata,
+        ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
+        VoiceTurnMode, VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code,
+        recoverable_wait_turn_code, session_stop_pauses, valid_voice_pause_metadata,
+        valid_voice_receipt_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -447,10 +481,24 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct VoiceReceiptListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     impl Drop for FirstAudioListener {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:first-audio",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for VoiceReceiptListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-receipt",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -501,6 +549,9 @@ mod cloud {
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = waitForTurnEnd)]
         async fn wait_for_turn_end_js() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = endTurn)]
+        fn end_turn_js() -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = finishTurn)]
         async fn finish_turn_js(
@@ -698,11 +749,56 @@ mod cloud {
         let _ = element.focus();
     }
 
+    pub fn install_voice_receipt_listener(
+        mut voice_receipt: Signal<VoiceReceipt>,
+    ) -> Option<Rc<VoiceReceiptListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(phase) = js_sys::Reflect::get(&detail, &JsValue::from_str("phase")) else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(phase) = phase.as_string() else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            if !valid_voice_receipt_metadata(&phase, version, keys.length()) {
+                return;
+            }
+            voice_receipt.set(if phase == "received" {
+                VoiceReceipt::Received
+            } else {
+                VoiceReceipt::Clear
+            });
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:voice-receipt",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(VoiceReceiptListener { window, callback }))
+    }
+
     pub fn install_first_audio_listener(
         mut voice_state: Signal<VoiceState>,
+        mut voice_receipt: Signal<VoiceReceipt>,
     ) -> Option<Rc<FirstAudioListener>> {
         let window = web_sys::window()?;
         let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            voice_receipt.set(VoiceReceipt::Clear);
             if *voice_state.peek() == VoiceState::Thinking {
                 voice_state.set(VoiceState::Speaking);
             }
@@ -714,6 +810,10 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(FirstAudioListener { window, callback }))
+    }
+
+    pub fn end_turn() {
+        let _ = end_turn_js();
     }
 
     pub fn install_voice_interrupted_listener(
@@ -966,7 +1066,8 @@ const fn cloud_state_for_display(
 mod cloud {
     use super::{
         CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeySetupFeedback,
-        ResearchRecord, ResearchStatus, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
+        ResearchRecord, ResearchStatus, VoiceReceipt, VoiceState, VoiceTurnMode, VoiceTurnResult,
+        WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -1039,9 +1140,20 @@ mod cloud {
 
     pub fn focus_element(_element_id: &str) {}
 
-    pub fn install_first_audio_listener(_voice_state: Signal<VoiceState>) -> Option<Listener> {
+    pub fn install_voice_receipt_listener(
+        _voice_receipt: Signal<VoiceReceipt>,
+    ) -> Option<Listener> {
         None
     }
+
+    pub fn install_first_audio_listener(
+        _voice_state: Signal<VoiceState>,
+        _voice_receipt: Signal<VoiceReceipt>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn end_turn() {}
 
     pub fn install_voice_interrupted_listener(
         _voice_state: Signal<VoiceState>,
@@ -1601,6 +1713,10 @@ const fn session_stop_pauses(state: VoiceState) -> bool {
     !matches!(state, VoiceState::Ready | VoiceState::Paused)
 }
 
+fn valid_voice_receipt_metadata(phase: &str, version: f64, field_count: u32) -> bool {
+    field_count == 2 && version == 1.0 && matches!(phase, "received" | "clear")
+}
+
 const fn valid_voice_pause_metadata(reason: &str, version: f64, field_count: u32) -> bool {
     field_count == 2
         && version == 1.0
@@ -2012,72 +2128,75 @@ fn LongitudinalPanel() -> Element {
     };
 
     rsx! {
-        section {
-            class: "paper-drop",
+        details {
+            class: "privacy-fold",
             aria_label: "個人内の推移を測る任意機能",
-            div { class: "paper-drop__heading",
+            summary {
                 span { class: "utility-index", "02" }
-                div {
-                    h2 { "個人内の推移を測る機能は実装" }
-                    p { "長期効果は未実証・比較試験ではない" }
+                span {
+                    strong { "任意の自己記録（会話とは別）" }
+                    small { "開始を押すまで保存領域を読みません" }
                 }
+                i { aria_hidden: "true" }
             }
-            p {
-                "開始時・4週目・8週目・終了4週後・終了12週後の固定質問を、各期限内に一度だけ自己記録します。"
-            }
-            p {
-                "録音・文字起こし・自由記述・Firebase UID・時刻・応答時間は保存しません。有限分類、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionに168日の期限を付け、次回アクセス時に期限切れを削除します。外部へは送信しません。"
-            }
-            p {
-                "全削除後は別タブから回答が復活しないよう、個人IDや回答を含まない固定削除マーカーだけを端末へ残します。この自己記録は暗号署名された研究台帳ではありません。"
-            }
-            {body}
-            if let Some(message) = *evaluation_notice.read() {
-                p { role: "status", aria_live: "polite", {message} }
-            }
-            if view != longitudinal::EvaluationView::Deleted {
-                nav { class: "session-controls", aria_label: "端末内測定記録を全削除",
-                    if delete_is_armed {
-                        button {
-                            class: "control-button control-button--end",
-                            r#type: "button",
-                            onclick: move |_| {
-                                let next = longitudinal::delete();
-                                let notice = if next.view()
-                                    == longitudinal::EvaluationView::Deleted
-                                {
-                                    "端末内の測定台帳を全削除しました。"
-                                } else {
-                                    "端末内の測定台帳を全削除できませんでした。ブラウザの保存設定を確認してください。"
-                                };
-                                evaluation_state.set(next);
-                                evaluation_step.set(EvaluationStep::Prompt);
-                                evaluation_outcome.set(None);
-                                enjoyment.set(None);
-                                agency.set(None);
-                                burden.set(None);
-                                delete_armed.set(false);
-                                evaluation_notice.set(Some(notice));
-                            },
-                            "本当に端末内記録を全削除"
-                        }
-                        button {
-                            class: "control-button",
-                            r#type: "button",
-                            onclick: move |_| delete_armed.set(false),
-                            "削除をやめる"
-                        }
-                    } else {
-                        button {
-                            class: "control-button control-button--end",
-                            r#type: "button",
-                            onclick: move |_| {
-                                delete_armed.set(true);
-                                evaluation_notice.set(Some(
-                                    "全削除すると、この端末の測定回答は復元できません。",
-                                ));
-                            },
-                            "端末内記録を全削除"
+            div { class: "privacy-fold__body",
+                p {
+                    "長期効果は未実証です。開始時・4週目・8週目・終了4週後・終了12週後の固定質問を、各期限内に一度だけ自己記録します。"
+                }
+                p {
+                    "録音・文字起こし・自由記述・Firebase UID・時刻・応答時間は保存しません。有限分類、1〜5、日単位の測定日、無作為な端末内ID、同意・schema versionに168日の期限を付け、次回アクセス時に期限切れを削除します。外部へは送信しません。"
+                }
+                p {
+                    "全削除後は別タブから回答が復活しないよう、個人IDや回答を含まない固定削除マーカーだけを端末へ残します。この自己記録は暗号署名された研究台帳ではありません。"
+                }
+                {body}
+                if let Some(message) = *evaluation_notice.read() {
+                    p { role: "status", aria_live: "polite", {message} }
+                }
+                if view != longitudinal::EvaluationView::Deleted {
+                    nav { class: "session-controls", aria_label: "端末内測定記録を全削除",
+                        if delete_is_armed {
+                            button {
+                                class: "control-button control-button--end",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    let next = longitudinal::delete();
+                                    let notice = if next.view()
+                                        == longitudinal::EvaluationView::Deleted
+                                    {
+                                        "端末内の測定台帳を全削除しました。"
+                                    } else {
+                                        "端末内の測定台帳を全削除できませんでした。ブラウザの保存設定を確認してください。"
+                                    };
+                                    evaluation_state.set(next);
+                                    evaluation_step.set(EvaluationStep::Prompt);
+                                    evaluation_outcome.set(None);
+                                    enjoyment.set(None);
+                                    agency.set(None);
+                                    burden.set(None);
+                                    delete_armed.set(false);
+                                    evaluation_notice.set(Some(notice));
+                                },
+                                "本当に端末内記録を全削除"
+                            }
+                            button {
+                                class: "control-button",
+                                r#type: "button",
+                                onclick: move |_| delete_armed.set(false),
+                                "削除をやめる"
+                            }
+                        } else {
+                            button {
+                                class: "control-button control-button--end",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    delete_armed.set(true);
+                                    evaluation_notice.set(Some(
+                                        "全削除すると、この端末の測定回答は復元できません。",
+                                    ));
+                                },
+                                "端末内記録を全削除"
+                            }
                         }
                     }
                 }
@@ -2089,6 +2208,7 @@ fn LongitudinalPanel() -> Element {
 #[component]
 fn App() -> Element {
     let mut voice_state = use_signal(|| VoiceState::Ready);
+    let voice_receipt = use_signal(|| VoiceReceipt::Clear);
     let mut generation = use_signal(|| 0_u64);
     let mut session_state = use_signal(String::new);
     let mut detected_domain = use_signal(String::new);
@@ -2127,7 +2247,9 @@ fn App() -> Element {
             cloud_status_refresh,
         )
     });
-    let _first_audio_listener = use_hook(|| cloud::install_first_audio_listener(voice_state));
+    let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
+    let _first_audio_listener =
+        use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
     let _voice_interrupted_listener =
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
     let _voice_session_paused_listener =
@@ -2153,6 +2275,8 @@ fn App() -> Element {
     });
 
     let state_snapshot = *voice_state.read();
+    let receipt_snapshot = *voice_receipt.read();
+    let receipt_is_visible = receipt_snapshot.is_visible_for(state_snapshot);
     let coach_snapshot = *coach_state.read();
     let captions_are_visible = *captions_visible.read();
     let strict_mode = *strict_cloud_minimization.read();
@@ -2345,13 +2469,19 @@ fn App() -> Element {
                             VoiceState::RequestingPermission | VoiceState::Thinking
                         ),
                         p { class: "voice-status__eyebrow",
-                            if state_snapshot == VoiceState::Listening {
+                            if state_snapshot == VoiceState::Listening && !receipt_is_visible {
                                 span { class: "live-dot", aria_hidden: "true" }
                             }
-                            {state_snapshot.eyebrow()}
+                            if receipt_is_visible {
+                                {receipt_snapshot.eyebrow()}
+                            } else {
+                                {state_snapshot.eyebrow()}
+                            }
                         }
                         h1 { id: "voice-heading",
-                            if state_snapshot == VoiceState::Ready {
+                            if receipt_is_visible {
+                                {receipt_snapshot.heading()}
+                            } else if state_snapshot == VoiceState::Ready {
                                 "まとまらないまま、"
                                 br {}
                                 "話していい"
@@ -2367,7 +2497,9 @@ fn App() -> Element {
                             }
                         }
                         p { class: "voice-status__hint",
-                            if matches!(
+                            if receipt_is_visible {
+                                {receipt_snapshot.hint(state_snapshot)}
+                            } else if matches!(
                                 state_snapshot,
                                 VoiceState::Ready
                                     | VoiceState::RequestingPermission
@@ -2393,7 +2525,7 @@ fn App() -> Element {
                             div {
                                 class: "passkey-entry",
                                 p { class: "passkey-entry__eyebrow", "マイクはまだ開きません" }
-                                h1 { id: "passkey-entry-heading", "最初にパスキーを選ぶ" }
+                                h1 { id: "passkey-entry-heading", "うまく話す準備はいらない" }
                                 if passkey_registration_recovery_required {
                                     p {
                                         class: "passkey-entry__error",
@@ -2406,7 +2538,7 @@ fn App() -> Element {
                                     }
                                 }
                                 p { class: "passkey-entry__lead",
-                                    "初めて使う方は新しい仮名アカウントとパスキーを作ります。登録済みの方は同じパスキーで戻れます。"
+                                    "一言、沈黙、聞くだけから始められます。名前やメールは入力しません。初めての方は新しい仮名アカウント、登録済みの方は同じパスキーで戻れます。"
                                 }
                                 div {
                                     class: "passkey-entry__actions",
@@ -2517,17 +2649,17 @@ fn App() -> Element {
                         },
                         aria_label: "できること",
                         div { class: "capability",
-                            span { "話す" }
+                            span { "入口" }
                             i { aria_hidden: "true", "→" }
                             strong { {ORDINARY_CHAT_COPY} }
                         }
                         div { class: "capability",
-                            span { "支援" }
+                            span { "長い話" }
                             i { aria_hidden: "true", "→" }
                             strong { {ANSWER_SUPPORT_COPY} }
                         }
                         div { class: "capability",
-                            span { "戻る" }
+                            span { "選べる" }
                             i { aria_hidden: "true", "→" }
                             strong { {TALK_ONLY_COPY} }
                         }
@@ -2546,6 +2678,15 @@ fn App() -> Element {
 
                     nav { class: "session-controls", aria_label: "会話の操作",
                         if state_snapshot.session_active() {
+                            if state_snapshot == VoiceState::Listening {
+                                button {
+                                    class: "control-button is-active",
+                                    r#type: "button",
+                                    onclick: move |_| cloud::end_turn(),
+                                    span { aria_hidden: "true", "↳" }
+                                    "ここで返して"
+                                }
+                            }
                             button {
                                 class: "control-button",
                                 r#type: "button",
@@ -2912,11 +3053,11 @@ mod tests {
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, VoiceState, VoiceTurnMode, cloud_state_for_display, passkey_focus_target,
-        recoverable_wait_turn_code, requires_passkey_choice,
+        TALK_ONLY_COPY, VoiceReceipt, VoiceState, VoiceTurnMode, cloud_state_for_display,
+        passkey_focus_target, recoverable_wait_turn_code, requires_passkey_choice,
         requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
         turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
-        valid_voice_privacy_metadata,
+        valid_voice_privacy_metadata, valid_voice_receipt_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -2966,7 +3107,7 @@ mod tests {
             expanding.hint(),
             "答えなくても大丈夫　話したい方へ続けられます"
         );
-        assert_eq!(complete.status(), "ちゃんと届きました");
+        assert_eq!(complete.status(), "聞かれたことへの答えが届きました");
 
         for copy in [
             awaiting.status(),
@@ -2995,11 +3136,15 @@ mod tests {
     fn visible_copy_keeps_answer_support_optional_unscored_and_non_clinical() {
         let ready_hint = VoiceState::Ready.hint();
 
-        assert!(ready_hint.contains("まとまらなくても"));
-        assert!(ready_hint.contains("小さな声"));
-        assert_eq!(ORDINARY_CHAT_COPY, "そのままなら普通の雑談");
-        assert_eq!(ANSWER_SUPPORT_COPY, "「答え方を一問だけ手伝って」");
-        assert_eq!(TALK_ONLY_COPY, "「今日は話すだけ」");
+        assert!(ready_hint.contains("こんにちは"));
+        assert!(ready_hint.contains("聞くだけ"));
+        assert!(ready_hint.contains("沈黙"));
+        assert_eq!(ORDINARY_CHAT_COPY, "「こんにちは」だけで、こちらから話す");
+        assert_eq!(ANSWER_SUPPORT_COPY, "受け取った中心を、返事の最初に返す");
+        assert_eq!(
+            TALK_ONLY_COPY,
+            "「今日は話すだけ」で、こちらからの質問を止める"
+        );
 
         for boundary in [
             "診断や治療ではなく",
@@ -3014,6 +3159,32 @@ mod tests {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }
         assert!(!SUPPORT_BOUNDARY_COPY.contains("曝露"));
+    }
+
+    #[test]
+    fn voice_receipt_is_content_free_bounded_and_never_claims_understanding() {
+        assert!(valid_voice_receipt_metadata("received", 1.0, 2));
+        assert!(valid_voice_receipt_metadata("clear", 1.0, 2));
+        assert!(!valid_voice_receipt_metadata("understood", 1.0, 2));
+        assert!(!valid_voice_receipt_metadata("received", 2.0, 2));
+        assert!(!valid_voice_receipt_metadata("received", 1.0, 3));
+
+        let receipt = VoiceReceipt::Received;
+        assert!(receipt.is_visible_for(VoiceState::Listening));
+        assert!(receipt.is_visible_for(VoiceState::Thinking));
+        assert!(!receipt.is_visible_for(VoiceState::Speaking));
+        assert_eq!(receipt.heading(), "ここまで届いています");
+        for copy in [
+            receipt.eyebrow(),
+            receipt.heading(),
+            receipt.hint(VoiceState::Listening),
+            receipt.hint(VoiceState::Thinking),
+        ] {
+            assert!(!copy.contains("理解"));
+            assert!(!copy.contains("分かった"));
+            assert!(!copy.contains("伝わった"));
+            assert!(!copy.contains("採点"));
+        }
     }
 
     #[test]

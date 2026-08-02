@@ -1,6 +1,7 @@
 // Package nativeflow adapts bounded native-audio sessions to KOTAE's live
-// voice transport. It keeps a provider session in process for short-lived
-// conversational continuity, but never persists or logs audio or captions.
+// voice transport. Each browser turn owns one provider connection; there is
+// no provider-session resumption, and audio or captions are never persisted
+// or logged.
 package nativeflow
 
 import (

@@ -52,6 +52,7 @@ import {
   shouldStartAmbientLiveHandoff,
   safeLiveCaptureFrame,
   safeLiveCaptureSignal,
+  shouldReplayCommittedNativeTurn,
   validatedPlaybackDrainTimeoutMs,
   VOICE_LIVE_LIMITS,
   VOICE_PLAYBACK_LIMITS,
@@ -664,7 +665,7 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
     "const liveSession = await startVoiceLiveSession(",
   );
   const recordingAt = begin.indexOf(
-    "const recording = createRecording(stream)",
+    "const recording = createRecording(stream, nativeAudio)",
   );
   const assignmentAt = begin.indexOf("activeLiveSession = liveSession");
   assert.ok(liveAt >= 0);
@@ -1719,6 +1720,7 @@ function liveStartFrame() {
     type: "start",
     version: 1,
     idToken: "firebase-id-token",
+    nativeAudio: false,
     appCheckToken: "app-check-token",
     sessionState: "opaque-state",
     strictCloudMinimization: false,
@@ -1859,25 +1861,25 @@ function filledPcmFrame(value) {
   return frame;
 }
 
-test("barge PCM ring retains the slowest candidate and 100 ms pre-roll", () => {
+test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
   assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
-  assert.equal(BARGE_PCM_LIMITS.historyMs, 460);
+  assert.equal(BARGE_PCM_LIMITS.historyMs, 900);
   assert.equal(BARGE_PCM_LIMITS.leadInMs, 100);
-  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 23);
+  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 45);
   assert.equal(
     BARGE_PCM_LIMITS.maximumBytes,
-    23 * VOICE_LIVE_LIMITS.inputFrameBytes,
+    45 * VOICE_LIVE_LIMITS.inputFrameBytes,
   );
 
   const ring = createBargePcmRing();
   const evicted = filledPcmFrame(255);
   ring.push(evicted, 0);
-  for (let index = 1; index <= 23; index += 1) {
+  for (let index = 1; index <= 45; index += 1) {
     ring.push(filledPcmFrame(index), index * 20);
   }
   assert.deepEqual(ring.snapshot(), {
-    frameCount: 23,
-    newestAt: 460,
+    frameCount: 45,
+    newestAt: 900,
     oldestAt: 20,
     totalBytes: BARGE_PCM_LIMITS.maximumBytes,
   });
@@ -1887,13 +1889,13 @@ test("barge PCM ring retains the slowest candidate and 100 ms pre-roll", () => {
     "an evicted microphone frame must be zeroized",
   );
 
-  const candidateStartedAt = 360;
+  const candidateStartedAt = 100;
   const drained = ring.drainSince(
     candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
   );
-  assert.equal(drained[0].capturedAt, 260);
-  assert.equal(drained.at(-1).capturedAt, 460);
-  assert.equal(drained.length, 11);
+  assert.equal(drained[0].capturedAt, 20);
+  assert.equal(drained.at(-1).capturedAt, 900);
+  assert.equal(drained.length, 45);
   assert.deepEqual(ring.snapshot(), {
     frameCount: 0,
     newestAt: null,
@@ -1904,11 +1906,11 @@ test("barge PCM ring retains the slowest candidate and 100 ms pre-roll", () => {
   const expired = filledPcmFrame(91);
   const cleared = filledPcmFrame(92);
   ring.push(expired, 500);
-  ring.push(cleared, 980);
+  ring.push(cleared, 1_420);
   assert.equal(
     new Uint8Array(expired).every((value) => value === 0),
     true,
-    "timestamp eviction must zero audio older than 460 ms",
+    "timestamp eviction must zero audio older than 900 ms",
   );
   ring.clear();
   assert.equal(
@@ -2329,6 +2331,25 @@ test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
   });
 });
 
+test("native audio is explicit and cannot weaken strict mode", () => {
+  const socket = new MockWebSocket();
+  const native = {
+    ...liveStartFrame(),
+    nativeAudio: true,
+  };
+  const transport = createVoiceLiveClientTransport(socket, native);
+  transport.open();
+  assert.deepEqual(JSON.parse(socket.sent[0]), native);
+  assert.throws(
+    () =>
+      createVoiceLiveClientTransport(new MockWebSocket(), {
+        ...native,
+        strictCloudMinimization: true,
+      }),
+    /voice_live_start_invalid/,
+  );
+});
+
 test("live commit preserves exact frames and fails on backpressure", () => {
   const emptySocket = new MockWebSocket();
   const empty = createVoiceLiveClientTransport(
@@ -2447,6 +2468,30 @@ test("live server protocol gates binary on ready and commit", () => {
   );
 });
 
+test("a committed native turn replays only on the reviewed zero-audio sentinel", () => {
+  const eligible = {
+    audioEventCount: 0,
+    code: "voice_native_fallback",
+    committed: true,
+    interrupted: false,
+    nativeAudio: true,
+  };
+  assert.equal(shouldReplayCommittedNativeTurn(eligible), true);
+  for (const unsafe of [
+    { ...eligible, audioEventCount: 1 },
+    { ...eligible, code: "voice_api_unavailable" },
+    { ...eligible, committed: false },
+    { ...eligible, interrupted: true },
+    { ...eligible, nativeAudio: false },
+  ]) {
+    assert.equal(shouldReplayCommittedNativeTurn(unsafe), false);
+  }
+  assert.throws(
+    () => shouldReplayCommittedNativeTurn({ ...eligible, audioEventCount: -1 }),
+    /native_fallback_state_invalid/u,
+  );
+});
+
 test("hybrid endpoint requires provider and local silence agreement", () => {
   const short = {
     firstVoiceAt: 100,
@@ -2461,6 +2506,23 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({ ...short, now: 2_200 }),
     true,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      nativeAudio: true,
+      now: 1_399,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      nativeAudio: true,
+      now: 1_400,
+    }),
+    true,
+    "native input is already streaming and can use a 400 ms agreement",
   );
   assert.equal(
     shouldCommitHybridEndpoint({
@@ -2777,7 +2839,12 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
   const firstVoiceAt = startedAt + 80;
   for (
     let now = firstVoiceAt;
-    now <= startedAt + INTERRUPT_VAD_LIMITS.guardMs;
+    now <=
+    firstVoiceAt +
+      (INTERRUPT_VAD_LIMITS.confirmationMs /
+          INTERRUPT_VAD_LIMITS.intervalMs -
+        1) *
+        INTERRUPT_VAD_LIMITS.intervalMs;
     now += INTERRUPT_VAD_LIMITS.intervalMs
   ) {
     state = advanceInterruptVad(state, {
@@ -2793,7 +2860,7 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
   assert.equal(state.candidateStartedAt, firstVoiceAt);
 });
 
-test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
+test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () => {
   assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 1_200);
   assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 2_200);
   const startedAt = 20_000;
@@ -2808,7 +2875,11 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
   const confirmationFrames =
     INTERRUPT_VAD_LIMITS.confirmationMs /
     INTERRUPT_VAD_LIMITS.intervalMs;
-  assert.equal(confirmationFrames, 4);
+  const provisionalFrames =
+    INTERRUPT_VAD_LIMITS.provisionalMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  assert.equal(provisionalFrames, 4);
+  assert.equal(confirmationFrames, 10);
 
   for (let frame = 0; frame < confirmationFrames; frame += 1) {
     state = advanceInterruptVad(state, {
@@ -2818,13 +2889,18 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
       rms: 0.05,
     });
     if (frame === 0) assert.equal(state.action, "start");
+    if (frame === provisionalFrames - 1) {
+      assert.equal(state.action, "provisional");
+      assert.equal(state.phase, "provisional");
+      assert.equal(state.firstVoiceAt, null);
+    }
   }
   assert.equal(state.action, "confirm");
   assert.equal(state.phase, "confirmed");
   assert.equal(state.firstVoiceAt, firstVoiceAt);
   assert.equal(
     state.lastVoiceAt - state.firstVoiceAt,
-    120,
+    360,
   );
 
   state = advanceInterruptVad(state, {
@@ -2847,13 +2923,14 @@ test("interrupt VAD confirms 160 ms of user voice in 120 ms wall-clock", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("interrupt recorder deadline covers the slowest finite gapped confirmation", () => {
+test("interrupt recorder deadline covers a finite dense gapped confirmation", () => {
   let now = 0;
   let state = createInterruptVadState(now);
   let candidateStartedAt = null;
-  for (let frame = 1; frame <= 10; frame += 1) {
+  const voicedFrames = new Set([1, 2, 4, 5, 7, 8, 10, 11, 13, 15]);
+  for (let frame = 1; frame <= 15; frame += 1) {
     now += INTERRUPT_VAD_LIMITS.intervalMs;
-    const voiced = [1, 4, 7, 10].includes(frame);
+    const voiced = voicedFrames.has(frame);
     state = advanceInterruptVad(state, {
       now,
       outputActive: true,
@@ -2866,20 +2943,85 @@ test("interrupt recorder deadline covers the slowest finite gapped confirmation"
   }
 
   assert.equal(state.action, "confirm");
-  assert.equal(now - candidateStartedAt, 360);
+  assert.equal(now - candidateStartedAt, 560);
+  assert.ok(
+    state.voiceRunMs /
+      (now - candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs) >=
+      INTERRUPT_VAD_LIMITS.minimumVoiceDensity,
+  );
   assert.ok(
     now - candidateStartedAt <
       INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
   );
-  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 400);
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 800);
   assert.equal(
     BARGE_PCM_LIMITS.historyMs,
-    now - candidateStartedAt + BARGE_PCM_LIMITS.leadInMs,
+    INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs +
+      BARGE_PCM_LIMITS.leadInMs,
   );
   assert.equal(
     BARGE_PCM_LIMITS.maximumFrames,
     BARGE_PCM_LIMITS.historyMs / BARGE_PCM_LIMITS.frameDurationMs,
   );
+});
+
+test("a short mutter is only provisional and is discarded without interruption", () => {
+  const startedAt = 40_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  const firstVoiceAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  const provisionalFrames =
+    INTERRUPT_VAD_LIMITS.provisionalMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 0; frame < provisionalFrames; frame += 1) {
+    state = advanceInterruptVad(state, {
+      now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.15,
+      rms: 0.05,
+    });
+  }
+  assert.equal(state.action, "provisional");
+  assert.equal(state.phase, "provisional");
+
+  for (let gap = 1; gap <= 3; gap += 1) {
+    state = advanceInterruptVad(state, {
+      now:
+        firstVoiceAt +
+        (provisionalFrames - 1 + gap) *
+          INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.003,
+      rms: 0.003,
+    });
+  }
+  assert.equal(state.action, "discard");
+  assert.equal(state.phase, "armed");
+  assert.equal(state.firstVoiceAt, null);
+});
+
+test("sparse muttering cannot cross the hard interrupt density gate", () => {
+  let now = 0;
+  let state = createInterruptVadState(now);
+  const voicedFrames = new Set([1, 2, 4, 5, 7, 8, 10, 12, 14, 16]);
+  for (let frame = 1; frame <= 16; frame += 1) {
+    now += INTERRUPT_VAD_LIMITS.intervalMs;
+    const voiced = voicedFrames.has(frame);
+    state = advanceInterruptVad(state, {
+      now,
+      outputActive: true,
+      peak: voiced ? 0.16 : 0.003,
+      rms: voiced ? 0.08 : 0.003,
+    });
+  }
+  assert.equal(state.voiceRunMs, INTERRUPT_VAD_LIMITS.confirmationMs);
+  assert.equal(state.phase, "provisional");
+  assert.notEqual(state.action, "confirm");
 });
 
 test("an overdue interrupt candidate discards before it can confirm without its recorder", async () => {
@@ -3046,12 +3188,28 @@ test("barge-in starts with audible output and preserves foreground response mode
     /claimAmbientLiveHandoff\(/u,
   );
   assert.match(bridge, /getSettings\(\)\.echoCancellation === true/u);
-  assert.match(bridge, /softDuckPlayback\(playback\)/u);
-  assert.match(bridge, /rampPlaybackGain\(playback, 0\.1, 0\.008\)/u);
+  assert.doesNotMatch(bridge, /softDuckPlayback/u);
+  assert.doesNotMatch(bridge, /rampPlaybackGain\(playback, 0\.55/u);
   assert.match(bridge, /rampPlaybackGain\(playback, 1, 0\.02\)/u);
   assert.match(bridge, /source\.connect\(gainNode\)/u);
   const bargeMonitorAt = bridge.indexOf("function startBargeInMonitoring(");
-  const bargeMonitor = bridge.slice(bargeMonitorAt, bargeMonitorAt + 2_000);
+  const bargeMonitor = bridge.slice(bargeMonitorAt, bargeMonitorAt + 3_500);
+  assert.match(
+    bargeMonitor,
+    /vadState\.action === "start"[\s\S]*startCandidateRecorder\([\s\S]*\} else if \(vadState\.action === "provisional"\) \{[\s\S]*hard interruption gate/u,
+  );
+  const provisionalAt = bargeMonitor.indexOf(
+    'vadState.action === "provisional"',
+  );
+  const discardAt = bargeMonitor.indexOf(
+    'vadState.action === "discard"',
+    provisionalAt,
+  );
+  const provisionalBranch = bargeMonitor.slice(provisionalAt, discardAt);
+  assert.doesNotMatch(
+    provisionalBranch,
+    /confirmBargeIn|haltStreamingPlayback|voice-interrupted|abort\(|rampPlaybackGain|restorePlaybackGain/u,
+  );
   assert.ok(
     bargeMonitor.indexOf("sessionClock.check()") <
       bargeMonitor.indexOf("setTracksEnabled(true)"),
@@ -4605,6 +4763,14 @@ test("an incomplete recorder fallback can never be uploaded after live fails", a
     finish.slice(fallbackGuardAt, uploadReadAt),
     /fail\("voice_turn_too_large"\)/u,
   );
+  assert.match(
+    bridge,
+    /nativeFallbackAllowed = shouldReplayCommittedNativeTurn\(\{[\s\S]*audioEventCount: snapshot\.audioEventCount,[\s\S]*code: message\.code,[\s\S]*committed: state === "committed",[\s\S]*interrupted: session\?\.playback\?\.interrupted === true,[\s\S]*nativeAudio,[\s\S]*\}\);/u,
+  );
+  assert.match(
+    bridge,
+    /canFallback\(\) \{\s*return !commitSent \|\| nativeFallbackAllowed;\s*\}/u,
+  );
 });
 
 test("an 80 ms noise candidate is discarded before a fresh capture starts", () => {
@@ -4856,7 +5022,7 @@ test("a clear onset upgrades once to the absolute soft deadline and barge-in rem
       VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
   );
 
-  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 400);
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 800);
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",

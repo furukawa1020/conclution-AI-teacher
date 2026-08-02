@@ -908,6 +908,11 @@ func TestAgentPendingCoachHonorsExplicitOptOutWithoutCallingAModel(t *testing.T)
 			wantReply: "わかりました。今は話さなくて大丈夫です。",
 		},
 		{
+			name:      "wants to listen without answering",
+			utterance: "今日は聞くだけにしたい",
+			wantReply: listenOnlyLocalSpokenReply,
+		},
+		{
 			name:      "wants conversation without correction",
 			utterance: "今日は話すだけにしたい",
 			wantReply: "わかりました。言い直しは求めません。そのまま話してください。",
@@ -956,6 +961,11 @@ func TestAgentPendingCoachHonorsExplicitOptOutWithoutCallingAModel(t *testing.T)
 				result.InterventionPolicy != "wait" ||
 				result.SpokenReply != test.wantReply {
 				t.Fatalf("explicit opt-out was not honored locally: %#v", result)
+			}
+			if test.utterance == "今日は聞くだけにしたい" &&
+				(countQuestions(result.SpokenReply) != 0 ||
+					!strings.Contains(result.SpokenReply, "私から一つ")) {
+				t.Fatalf("listen-only mode did not carry the conversation: %q", result.SpokenReply)
 			}
 			next := openCoachState(t, agent, uid, result.StateToken)
 			if next.PendingAnswer.Active {

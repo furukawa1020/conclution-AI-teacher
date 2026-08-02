@@ -53,6 +53,42 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   pendingDocumentLimitMs: 5 * 60_000,
 });
 
+// A content-free receipt is a separate UX budget from endpointing and the
+// semantic response. It may become visible while a reflective pause is still
+// open, then disappears immediately if speech resumes. This acknowledges
+// presence without pretending that STT or the model understood the utterance.
+export const VOICE_RECEIPT_LIMITS = Object.freeze({
+  visibleAfterSilenceMs: 700,
+});
+
+export function shouldShowVoiceReceipt(
+  { hasSpeech, lastVoiceAt, now },
+  {
+    visibleAfterSilenceMs =
+      VOICE_RECEIPT_LIMITS.visibleAfterSilenceMs,
+  } = {},
+) {
+  if (
+    typeof hasSpeech !== "boolean" ||
+    !Number.isFinite(now) ||
+    now < 0 ||
+    (lastVoiceAt !== null &&
+      (!Number.isFinite(lastVoiceAt) ||
+        lastVoiceAt < 0 ||
+        lastVoiceAt > now)) ||
+    !Number.isFinite(visibleAfterSilenceMs) ||
+    visibleAfterSilenceMs < 0 ||
+    visibleAfterSilenceMs >= 3_000
+  ) {
+    throw new TypeError("voice_receipt_state_invalid");
+  }
+  return (
+    hasSpeech &&
+    lastVoiceAt !== null &&
+    now - lastVoiceAt >= visibleAfterSilenceMs
+  );
+}
+
 const RESEARCH_STATUSES = Object.freeze([
   "none",
   "needs_primary_evidence",

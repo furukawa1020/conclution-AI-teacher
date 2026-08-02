@@ -30,7 +30,7 @@ Rust / Dioxus / Wasm UI
                   └─ Cloud Text-to-Speech（asia-northeast1）
 ```
 
-マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。
+マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。最後の声から700 ms無音になった時点で、内容を理解したとは主張しない「ここまで届いています」を端末上に表示し、発話再開時は即座に消します。これは画面上の受領応答の3秒未満budgetであり、回線・STT・Vertex AI・TTSを含む意味音声の絶対3秒保証ではありません。
 
 標準モードでは、文字起こし、短い暗号化会話状態、利用者が選んだ一ターン限りのPDF、明示したCrossref検索を使えます。厳格モードは別のrequest型として束縛し、raw audioだけを東京リージョンSTTへ渡した後、文字起こしと応答文の両方がCloud Run内の決定論的検査とregional DLPで`clear`になった時だけVertex AIまたはTTSへ進めます。検出、timeout、権限エラー、応答不整合はすべて停止し、PDF、外部検索、cross-turn stateを許可しません。厳格streamingの合成音声も`clear`検証が終わるまでサーバー内に保持します。どちらもE2EEでも完全なPII除去でもありません。
 

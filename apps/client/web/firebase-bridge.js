@@ -28,6 +28,7 @@ import {
   isValidTurnMode,
   normalizeResearchDiscovery,
   shouldCommitHybridEndpoint,
+  shouldShowVoiceReceipt,
   shouldStopSessionForLifecycle,
   VOICE_SESSION_LIMITS,
 } from "./voice-session-policy.mjs";
@@ -123,6 +124,7 @@ let pendingLiveSession;
 let pendingDocument;
 let pendingDocumentTimer;
 let voiceTransportPrimed = false;
+let voiceReceiptVisible = false;
 let sessionEpoch = 0;
 let documentEpoch = 0;
 let pcmCaptureGeneration = 0;
@@ -143,6 +145,31 @@ const sessionExpiryWatchdog = createSessionExpiryWatchdog({
   setTimer: (callback, delay) => setTimeout(callback, delay),
 });
 const pcmCaptureWorkletLoads = new WeakMap();
+
+function setVoiceReceiptVisible(visible) {
+  if (typeof visible !== "boolean" || visible === voiceReceiptVisible) {
+    return;
+  }
+  voiceReceiptVisible = visible;
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-receipt", {
+      detail: Object.freeze({
+        phase: visible ? "received" : "clear",
+        version: 1,
+      }),
+    }),
+  );
+}
+
+function updateVoiceReceipt(recording, now) {
+  setVoiceReceiptVisible(
+    shouldShowVoiceReceipt({
+      hasSpeech: recording.vadHasSpeech,
+      lastVoiceAt: recording.lastVoiceAt,
+      now,
+    }),
+  );
+}
 
 function nextPcmCaptureGeneration() {
   pcmCaptureGeneration =
@@ -890,6 +917,7 @@ function installMediaStreamLossListener(stream, expectedEpoch) {
 }
 
 function releaseMicrophone(code = "request_cancelled") {
+  setVoiceReceiptVisible(false);
   const recording = activeRecording;
   activeRecording = undefined;
   if (recording) {
@@ -1574,6 +1602,7 @@ function armVad(recording) {
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }
+    updateVoiceReceipt(recording, now);
     if (
       vadState.softVoiceCandidate &&
       recording.candidate &&
@@ -1691,6 +1720,7 @@ function createRecordingState(stream) {
 }
 
 function createRecording(stream) {
+  setVoiceReceiptVisible(false);
   const recording = createRecordingState(stream);
   armVad(recording);
   return recording;
@@ -3726,8 +3756,9 @@ function startBargeInMonitoring(playback, expectedEpoch) {
       sumSquares += magnitude * magnitude;
       if (magnitude > peak) peak = magnitude;
     }
+    const now = performance.now();
     vadState = advanceInterruptVad(vadState, {
-      now: performance.now(),
+      now,
       outputActive: playback.sources.size > 0,
       peak,
       rms: Math.sqrt(sumSquares / pcm.length),
@@ -3737,7 +3768,8 @@ function startBargeInMonitoring(playback, expectedEpoch) {
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }
-    if (maybeCommitHybridEndpoint(recording, performance.now())) {
+    updateVoiceReceipt(recording, now);
+    if (maybeCommitHybridEndpoint(recording, now)) {
       return;
     }
 

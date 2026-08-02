@@ -12,7 +12,7 @@
 - Cloud Run実行ID: `kotae-api-runtime@kotae-ai-u22-2026.iam.gserviceaccount.com`
 - Cloud Speech-to-Text V2: `asia-northeast1`、自然会話向け`long`単独、`ja-JP`
 - Cloud Text-to-Speech: `asia-northeast1`、`ja-JP-Chirp3-HD-Kore`
-- Vertex AI: `global`、高速`gemini-3.6-flash`、精密`gemini-3.1-pro-preview`
+- Vertex AI: `global`、標準live音声`gemini-live-2.5-flash-native-audio`、高速`gemini-3.6-flash`、精密`gemini-3.1-pro-preview`
 - Sensitive Data Protection: `asia-northeast1`、厳格音声モードの文字起こし・応答検査
 - Secret Manager: `kotae-conversation-state`
 
@@ -26,13 +26,13 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 |---|---|---|
 | Hosting / API | Hosting / Cloud Run `asia-northeast1` | 静的asset、voice request |
 | Firestore | `asia-northeast1` | TTL付き評価メタデータ・rate counter・live接続lease・Passkeyのpublic credentialと短命ceremony |
-| Speech-to-Text | `asia-northeast1` regional endpoint | raw audio |
+| Speech-to-Text | `asia-northeast1` regional endpoint | 厳格モード、PDF turn、Native Audioを使えないfallbackのraw audio |
 | Sensitive Data Protection | `asia-northeast1` regional endpoint | 厳格モードの文字起こしと応答文 |
-| Vertex AI | `global` | 文字起こし、標準モードの短い状態要約と今回添付したPDF |
-| Text-to-Speech | `asia-northeast1` regional endpoint | 選ばれた短い応答文 |
+| Vertex AI | `global` | 標準liveのraw audioと音声応答、fallbackの文字起こし、標準モードの短い状態要約と今回添付したPDF |
+| Text-to-Speech | `asia-northeast1` regional endpoint | 厳格モード、PDF turn、Native Audioを使えないfallbackで選ばれた短い応答文 |
 | Crossref | Google Cloud外の公開REST API | intentional turnで明示し、tool-policyとPII screenを通過したDOIまたは最小topicだけ |
 
-raw audioをVertex AIへ直接送るVertex Live APIは現在使いません。ただし文字起こしと、標準モードで本人が一ターンだけ明示添付したPDFは`global`のVertex AIへ送られ、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
+標準live会話では、PDFを添付せず厳格モードでもないturnだけ、Cloud Runから`global`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。厳格モード、PDF turn、Native Audioが利用できない接続fallbackに加え、このscreenが不適格としたturnは、まだ応答音声を一切解放していない場合だけ明示sentinelで従来の東京リージョンSTTから文字列推論、東京リージョンTTSの経路へ再送します。したがって、標準liveのraw audio、fallbackの文字起こし、明示添付したPDFは`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
 
 ## 必要なAPI
 
@@ -163,6 +163,9 @@ KOTAE_COACH_RESTATEMENT_BINDING=true
 KOTAE_SPEECH_LOCATION=asia-northeast1
 KOTAE_SPEECH_MODEL=long
 KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore
+KOTAE_NATIVE_AUDIO_ENABLED=true
+KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio
+KOTAE_NATIVE_AUDIO_VOICE=Kore
 KOTAE_REQUEST_TIMEOUT=25s
 KOTAE_VOICE_TIMEOUT=50s
 KOTAE_MAX_REQUEST_BYTES=32768
@@ -213,11 +216,11 @@ gcloud run deploy kotae-api `
   --max-instances=3 `
   --timeout=420 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL,KOTAE_COACHING_ROLLOUT,KOTAE_PRIVACY_LOCATION,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY" `
-  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_REQUEST_TIMEOUT=25s,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_REQUEST_BYTES=32768,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200,KOTAE_PASSKEY_RP_ID=kotae-ai.web.app,KOTAE_PASSKEY_ORIGIN=https://kotae-ai.web.app,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE=10,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY=100,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE=300,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY=20000,KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true" `
+  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_NATIVE_AUDIO_ENABLED=true,KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio,KOTAE_NATIVE_AUDIO_VOICE=Kore,KOTAE_REQUEST_TIMEOUT=25s,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_REQUEST_BYTES=32768,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200,KOTAE_PASSKEY_RP_ID=kotae-ai.web.app,KOTAE_PASSKEY_ORIGIN=https://kotae-ai.web.app,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE=10,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY=100,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE=300,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY=20000,KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true" `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:1"
 ```
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。環境変数として注入するSecretは`latest`ではなく確認済みversionへ固定し、鍵rotate時だけ新versionへ更新します。Cloud Runのtimeoutは、アプリ側の6分live deadlineより1分長い420秒にします。これで最長4分のcapture、認証、終了処理、内部の50秒voice timeoutを収め、アプリがdeadline処理する前に基盤側が接続を切る競合を避けます。Go HTTP serverの通常routeは従来どおりread/write/idle各120秒を維持し、検証済み`/api/v1/voice/live`だけがWebSocket upgrade前に接続deadlineを6分へ延長します。deadline更新不能時はupgrade前にfail-closedで拒否します。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。最小instanceはservice単位で1にし、revision単位の最小instanceは`default`へ戻します。これにより、tag付き旧revisionをすべて常時起動する設定を残しません。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。環境変数として注入するSecretは`latest`ではなく確認済みversionへ固定し、鍵rotate時だけ新versionへ更新します。`KOTAE_NATIVE_AUDIO_ENABLED=true`は本番の高速会話経路を有効にし、modelとvoiceは実装が許可する固定値から変更しません。起動時に内容を含まないNative Audio setup probeを実行するため、modelまたはIAMを利用できないcandidateはreadyにならずtrafficへ昇格できません。Cloud Runのtimeoutは、アプリ側の6分live deadlineより1分長い420秒にします。これで最長4分のcapture、認証、終了処理、内部の50秒voice timeoutを収め、アプリがdeadline処理する前に基盤側が接続を切る競合を避けます。Go HTTP serverの通常routeは従来どおりread/write/idle各120秒を維持し、検証済み`/api/v1/voice/live`だけがWebSocket upgrade前に接続deadlineを6分へ延長します。deadline更新不能時はupgrade前にfail-closedで拒否します。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。最小instanceはservice単位で1にし、revision単位の最小instanceは`default`へ戻します。これにより、tag付き旧revisionをすべて常時起動する設定を残しません。
 
 本番では`KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true`を維持し、未指定でもsecure defaultとして`true`になります。まずcandidate backendを検証し、必須7 collectionのTTLをすべて`ACTIVE`にしてからservice rootへ昇格し、その後にPasskey UIを含むHostingを最終公開します。これにより、短命データを期限管理できないrevisionへ本番trafficを流さず、新しいUIが未対応の旧backendへ接続する時間も作りません。音声APIのbuffered、streaming、WebSocketすべてが、Passkey由来claimと5分以内の署名検証時刻`kotae_passkey_at`を要求します。Firebaseの`auth_time`はcustom token交換時に新しくなり得るため、freshness根拠には使いません。`false`は認証を迂回できるため、明示的なローカル開発以外では使いません。
 
@@ -274,7 +277,7 @@ Passkey、`/me`等の通常APIは`https://kotae-ai.web.app/api/**`を使い、Fi
 
 1. Passkey登録・認証が公開originで成功し、cancel / unsupported時にマイクを取得しないこと
 2. App CheckのWeb App ID、reCAPTCHA Enterprise site key、Passkey ceremonyと独自APIの強制
-3. Cloud Run revisionのruntime service account、専用build service account、Passkey/DLP環境変数、固定Secret version参照、420秒request timeout
+3. Cloud Run revisionのruntime service account、専用build service account、Passkey/DLP環境変数、Native Audioの有効化・固定model・固定voice、固定Secret version参照、420秒request timeout
 4. Speech-to-Text / Text-to-Speech / Vertex AI / DLPのquotaと請求アラート
 5. Firestoreの7つのTTL policyが`ACTIVE`
 6. runtime自身以外へ不要な`serviceAccountTokenCreator`がなく、Secretへruntime以外の不要な`secretAccessor`がないこと

@@ -48,6 +48,10 @@ const (
 var (
 	ErrVoiceNotRecognized = errors.New("voice was not recognized")
 	ErrVoiceStateInvalid  = errors.New("voice state is invalid")
+	// ErrVoiceNativeFallback requests one replay through the staged voice
+	// service. It is valid only for an explicit native live turn before any
+	// response audio crosses the wire.
+	ErrVoiceNativeFallback = errors.New("voice native fallback required")
 )
 
 type VoiceDocument struct {
@@ -75,6 +79,10 @@ type VoiceTurnInput struct {
 	STTLocale               string
 	SchemaVersion           int
 	StrictCloudMinimization bool
+	// NativeAudio is an authenticated, client-selected live-only fast lane.
+	// It is mutually exclusive with strict cloud minimization and is never
+	// inferred for buffered HTTP turns.
+	NativeAudio bool
 	// ProcessingTimeout is server-authored. Live pipelines start this budget
 	// at the audio commit boundary so downstream agents can observe the same
 	// deadline that the transport enforces.
@@ -166,6 +174,7 @@ type VoiceTurnLiveEndpointService interface {
 
 type VoiceOptions struct {
 	Service              VoiceTurnService
+	NativeLiveService    VoiceTurnLiveService
 	RateLimiter          guard.Limiter
 	AppRateLimiter       guard.Limiter
 	LiveLeaseManager     guard.VoiceLiveLeaseManager

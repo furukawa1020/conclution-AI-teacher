@@ -322,6 +322,9 @@ function Assert-PromotedBackendBoundary {
         "KOTAE_STATE_V2_WRITES" = "true"
         "KOTAE_COACH_RESTATEMENT_BINDING" = "true"
         "KOTAE_SPEECH_LOCATION" = $expectedRunRegion
+        "KOTAE_NATIVE_AUDIO_ENABLED" = "true"
+        "KOTAE_NATIVE_AUDIO_MODEL" = "gemini-live-2.5-flash-native-audio"
+        "KOTAE_NATIVE_AUDIO_VOICE" = "Kore"
         "KOTAE_PASSKEY_RP_ID" = $expectedDefaultUrl.Replace("https://", "")
         "KOTAE_PASSKEY_ORIGIN" = $expectedDefaultUrl
         "KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE" = "true"

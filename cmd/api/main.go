@@ -18,6 +18,8 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/nativeflow"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/nativevoice"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/passkey"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
@@ -63,11 +65,13 @@ func main() {
 	)
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
+	var nativeLiveService httpapi.VoiceTurnLiveService
 	var passkeyService *passkey.Service
 	var passkeyClientRateLimiter guard.Limiter
 	var passkeyAppCircuitBreaker guard.Limiter
 	var closeFirestore func() error
 	var closeSpeech func() error
+	closeNative := func() error { return nil }
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
@@ -248,6 +252,43 @@ func main() {
 			logger.Error("initialize conversation agent", "error", err)
 			os.Exit(1)
 		}
+		if cfg.NativeAudioEnabled {
+			stateRefresher, ok := conversationAgent.(conversation.StateTokenRefresher)
+			if !ok {
+				logger.Error("initialize native audio state boundary")
+				os.Exit(1)
+			}
+			nativeOpener, nativeErr := nativevoice.New(ctx, nativevoice.Config{
+				ProjectID:      cfg.ProjectID,
+				Location:       cfg.VertexLocation,
+				Model:          cfg.NativeAudioModel,
+				VoiceName:      cfg.NativeAudioVoice,
+				SystemPrompt:   nativeflow.DefaultSystemPrompt,
+				SessionTimeout: 10 * time.Minute,
+			})
+			if nativeErr != nil {
+				logger.Error("initialize native audio client", "error", nativeErr)
+				os.Exit(1)
+			}
+			// A fixed content-free setup probe verifies model access and IAM before
+			// Cloud Run can route production traffic to this revision.
+			probe, probeErr := nativeOpener.Open(ctx)
+			if probeErr != nil {
+				logger.Error("verify native audio readiness", "error", probeErr)
+				os.Exit(1)
+			}
+			_ = probe.Close()
+			nativeService, nativeErr := nativeflow.New(
+				nativeOpener,
+				stateRefresher,
+			)
+			if nativeErr != nil {
+				logger.Error("initialize native audio flow", "error", nativeErr)
+				os.Exit(1)
+			}
+			nativeLiveService = nativeService
+			closeNative = nativeService.Close
+		}
 		speechService, err := speechio.NewCloudService(
 			ctx,
 			cfg.ProjectID,
@@ -280,6 +321,11 @@ func main() {
 			logger.Error("close regional speech clients", "error", err)
 		}
 	}()
+	defer func() {
+		if err := closeNative(); err != nil {
+			logger.Error("close native audio sessions", "error", err)
+		}
+	}()
 
 	handler := httpapi.NewWithVoiceAndPasskeys(
 		logger,
@@ -291,6 +337,7 @@ func main() {
 		cfg.MaxRequestBytes,
 		httpapi.VoiceOptions{
 			Service:              voiceService,
+			NativeLiveService:    nativeLiveService,
 			RateLimiter:          voiceRateLimiter,
 			AppRateLimiter:       voiceAppRateLimiter,
 			LiveLeaseManager:     voiceLiveLeaseManager,
@@ -314,6 +361,7 @@ func main() {
 			"vertex_priority", cfg.VertexPriority,
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
+			"native_audio_enabled", cfg.NativeAudioEnabled,
 			"privacy_boundary", "evaluation-deidentify-and-strict-voice-inspect-fail-closed",
 		)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {

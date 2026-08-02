@@ -21,6 +21,8 @@ const (
 	defaultSpeechLocation         = "asia-northeast1"
 	defaultSpeechModel            = "long"
 	defaultSpeechVoice            = "ja-JP-Chirp3-HD-Kore"
+	defaultNativeAudioModel       = "gemini-live-2.5-flash-native-audio"
+	defaultNativeAudioVoice       = "Kore"
 	defaultPasskeyRPID            = "kotae-ai.web.app"
 	defaultPasskeyOrigin          = "https://kotae-ai.web.app"
 	defaultPasskeyClientPerMinute = 10
@@ -42,6 +44,9 @@ type Config struct {
 	SpeechLocation               string
 	SpeechModel                  string
 	SpeechVoice                  string
+	NativeAudioEnabled           bool
+	NativeAudioModel             string
+	NativeAudioVoice             string
 	StateKey                     []byte
 	RequestTimeout               time.Duration
 	VoiceTimeout                 time.Duration
@@ -171,6 +176,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	nativeAudioEnabled, err := envStrictBool(
+		"KOTAE_NATIVE_AUDIO_ENABLED",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	allowInsecureDev := envBool("KOTAE_ALLOW_INSECURE_DEV")
 	requireRecentPasskey, err := envStrictBool(
 		"KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE",
@@ -193,6 +205,9 @@ func Load() (Config, error) {
 		SpeechLocation:          envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
 		SpeechModel:             envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
 		SpeechVoice:             envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
+		NativeAudioEnabled:      nativeAudioEnabled,
+		NativeAudioModel:        envOr("KOTAE_NATIVE_AUDIO_MODEL", defaultNativeAudioModel),
+		NativeAudioVoice:        envOr("KOTAE_NATIVE_AUDIO_VOICE", defaultNativeAudioVoice),
 		StateKey:                stateKey,
 		RequestTimeout:          envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
 		VoiceTimeout:            envDurationOr("KOTAE_VOICE_TIMEOUT", 50*time.Second),
@@ -249,6 +264,24 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf(
 			"KOTAE_SPEECH_VOICE must be %s",
 			defaultSpeechVoice,
+		)
+	}
+	if cfg.NativeAudioEnabled && cfg.VertexLocation != defaultVertexLocation {
+		return Config{}, fmt.Errorf(
+			"KOTAE_NATIVE_AUDIO_ENABLED requires GOOGLE_CLOUD_LOCATION=%s",
+			defaultVertexLocation,
+		)
+	}
+	if cfg.NativeAudioModel != defaultNativeAudioModel {
+		return Config{}, fmt.Errorf(
+			"KOTAE_NATIVE_AUDIO_MODEL must be %s",
+			defaultNativeAudioModel,
+		)
+	}
+	if cfg.NativeAudioVoice != defaultNativeAudioVoice {
+		return Config{}, fmt.Errorf(
+			"KOTAE_NATIVE_AUDIO_VOICE must be %s",
+			defaultNativeAudioVoice,
 		)
 	}
 	if cfg.RequestTimeout < time.Second || cfg.RequestTimeout > 50*time.Second {

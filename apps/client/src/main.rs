@@ -3,9 +3,9 @@ mod longitudinal;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、こちらから話す";
-const ANSWER_SUPPORT_COPY: &str = "受け取った中心を、返事の最初に返す";
-const TALK_ONLY_COPY: &str = "「今日は話すだけ」で、こちらからの質問を止める";
+const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、KOTAEが話題を持つ";
+const ANSWER_SUPPORT_COPY: &str = "長くまとまらなくても、中心から返す";
+const TALK_ONLY_COPY: &str = "ぼやきや相づちでは止めず、続けて話すと止める";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
@@ -25,7 +25,7 @@ const PASSKEY_ACCOUNT_EXISTS_COPY: &str =
     "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした";
 const ACCOUNT_BOUNDARY_CHANGED_COPY: &str =
     "別の仮名アカウントへ切り替わったため　前の会話を閉じました　もう一度話し始めてください";
-const SUPPORT_BOUNDARY_COPY: &str = "診断や治療ではなく、苦手さを測ったり課題を課したりしません。会話を楽しめることを優先し、頼まれた時だけ短く支えます。会話内容を含まない短期の目印で質問量を控えめに調整し、点数は表示しません。長期効果はまだ実証していません。";
+const SUPPORT_BOUNDARY_COPY: &str = "話題を用意できない時は「こんにちは」だけでKOTAEが話題を持ち、短い返事・相づち・まとまらない長話を失敗扱いしません。訓練や採点を前面に出さず、返事の中で中心を先に受け取れる形へ整えます。外出・学校・仕事・家族への相談を勝手に目標にしません。診断や治療ではなく、長期効果はまだ実証していません。";
 const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -217,7 +217,7 @@ impl VoiceState {
             Self::Thinking => {
                 "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
             }
-            Self::Speaking => "返事を止めて訂正できる　マイクは端末内で割り込みだけを判定",
+            Self::Speaking => "ぼやきや相づちはそのままで大丈夫　返事を止めたい時は少し続けて話す",
             Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
             Self::Error(_) => "丸いボタンか下の「もう一度接続する」からやり直せる",
         }
@@ -2659,7 +2659,7 @@ fn App() -> Element {
                             strong { {ANSWER_SUPPORT_COPY} }
                         }
                         div { class: "capability",
-                            span { "選べる" }
+                            span { "割り込み" }
                             i { aria_hidden: "true", "→" }
                             strong { {TALK_ONLY_COPY} }
                         }
@@ -2834,14 +2834,14 @@ fn App() -> Element {
                                     if strict_mode {
                                         "厳格モード ON"
                                     } else {
-                                        "標準モード"
+                                        "高速会話モード"
                                     }
                                 }
                                 p {
                                     if strict_mode {
                                         "検査不能も停止 / PDF・外部検索・会話状態なし"
                                     } else {
-                                        "PDF・外部検索・会話の続きが使えます"
+                                        "Native Audioで先に話し始める / PDF時は従来経路"
                                     }
                                 }
                             }
@@ -2850,7 +2850,7 @@ fn App() -> Element {
                             if strict_mode {
                                 "原音はSpeech-to-Textへ送ります。文字起こしの検査に通らなければVertex AIを呼びません。Vertex AIが作った返答も別に検査し、通らなければTTS・画面・音声へ出しません。PDF・外部検索・会話状態は使いません。"
                             } else {
-                                "通常の会話機能を使うモードです。処理中はSpeech-to-Text・Cloud Run・Vertex AI・TTSが平文を扱います。"
+                                "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、音声を直接返します。PDF・接続不能時はSpeech-to-Text・Vertex AI・TTSの従来経路へ戻ります。"
                             }
                         }
                         p {
@@ -2980,7 +2980,7 @@ fn App() -> Element {
                                 if strict_mode {
                                     "原音はTLSでSpeech-to-Textへ送ります。文字起こしはCloud Run内の決定論的検査とregional DLPがclearの時だけVertex AIへ進みます。返答も同じ検査がclearの時だけTTS・画面・音声へ出します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
                                 } else {
-                                    "発話ごとにTLSでCloud RunとSpeech-to-Textへ送り、文字起こしをVertex AI、返答をText-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
+                                    "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、音声応答と字幕を直接生成します。PDF・接続不能時はSpeech-to-Text・Vertex AI・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
                                 }
                             }
                             p {
@@ -3000,7 +3000,7 @@ fn App() -> Element {
                                 if strict_mode {
                                     "文字起こしと返答をCloud Runの決定論的規則とSensitive Data Protectionで検査し、検出・検査不能なら後段へ進めません。検出箇所だけを置換して会話を続ける機能ではなく、検出漏れもあり得ます。"
                                 } else {
-                                    "標準モードの文字起こしは、個人情報を除去せずVertex AIへ送ります。氏名・連絡先・credentialを話さないでください。"
+                                    "高速会話モードの原音と文字起こしは、個人情報を除去せずVertex AIへ送ります。氏名・連絡先・credentialを話さないでください。"
                                 }
                             }
                             p {
@@ -3139,21 +3139,24 @@ mod tests {
         assert!(ready_hint.contains("こんにちは"));
         assert!(ready_hint.contains("聞くだけ"));
         assert!(ready_hint.contains("沈黙"));
-        assert_eq!(ORDINARY_CHAT_COPY, "「こんにちは」だけで、こちらから話す");
-        assert_eq!(ANSWER_SUPPORT_COPY, "受け取った中心を、返事の最初に返す");
+        assert_eq!(
+            ORDINARY_CHAT_COPY,
+            "「こんにちは」だけで、KOTAEが話題を持つ"
+        );
+        assert_eq!(ANSWER_SUPPORT_COPY, "長くまとまらなくても、中心から返す");
         assert_eq!(
             TALK_ONLY_COPY,
-            "「今日は話すだけ」で、こちらからの質問を止める"
+            "ぼやきや相づちでは止めず、続けて話すと止める"
         );
 
         for boundary in [
+            "KOTAEが話題を持ち",
+            "短い返事・相づち・まとまらない長話を失敗扱いしません",
+            "訓練や採点を前面に出さず",
+            "中心を先に",
+            "外出・学校・仕事・家族",
+            "勝手に目標にしません",
             "診断や治療ではなく",
-            "苦手さを測ったり課題を課したりしません",
-            "会話を楽しめることを優先",
-            "頼まれた時だけ短く支えます",
-            "会話内容を含まない短期の目印",
-            "質問量を控えめに調整",
-            "点数は表示しません",
             "長期効果はまだ実証していません",
         ] {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");

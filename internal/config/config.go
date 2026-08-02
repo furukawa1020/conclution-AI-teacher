@@ -21,6 +21,7 @@ const (
 	defaultSpeechLocation         = "asia-northeast1"
 	defaultSpeechModel            = "long"
 	defaultSpeechVoice            = "ja-JP-Chirp3-HD-Kore"
+	defaultNativeAudioLocation    = "us-central1"
 	defaultNativeAudioModel       = "gemini-live-2.5-flash-native-audio"
 	defaultNativeAudioVoice       = "Kore"
 	defaultPasskeyRPID            = "kotae-ai.web.app"
@@ -45,6 +46,7 @@ type Config struct {
 	SpeechModel                  string
 	SpeechVoice                  string
 	NativeAudioEnabled           bool
+	NativeAudioLocation          string
 	NativeAudioModel             string
 	NativeAudioVoice             string
 	StateKey                     []byte
@@ -206,6 +208,7 @@ func Load() (Config, error) {
 		SpeechModel:             envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
 		SpeechVoice:             envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
 		NativeAudioEnabled:      nativeAudioEnabled,
+		NativeAudioLocation:     envOr("KOTAE_NATIVE_AUDIO_LOCATION", defaultNativeAudioLocation),
 		NativeAudioModel:        envOr("KOTAE_NATIVE_AUDIO_MODEL", defaultNativeAudioModel),
 		NativeAudioVoice:        envOr("KOTAE_NATIVE_AUDIO_VOICE", defaultNativeAudioVoice),
 		StateKey:                stateKey,
@@ -266,10 +269,10 @@ func Load() (Config, error) {
 			defaultSpeechVoice,
 		)
 	}
-	if cfg.NativeAudioEnabled && cfg.VertexLocation != defaultVertexLocation {
+	if cfg.NativeAudioLocation != defaultNativeAudioLocation {
 		return Config{}, fmt.Errorf(
-			"KOTAE_NATIVE_AUDIO_ENABLED requires GOOGLE_CLOUD_LOCATION=%s",
-			defaultVertexLocation,
+			"KOTAE_NATIVE_AUDIO_LOCATION must be %s",
+			defaultNativeAudioLocation,
 		)
 	}
 	if cfg.NativeAudioModel != defaultNativeAudioModel {

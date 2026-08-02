@@ -31,6 +31,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "")
+	t.Setenv("KOTAE_NATIVE_AUDIO_LOCATION", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_MODEL", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_VOICE", "")
 	t.Setenv("KOTAE_VERTEX_PRIORITY", "")
@@ -106,10 +107,12 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.NativeAudioEnabled {
 		t.Fatal("native audio must remain an explicit deployment opt-in")
 	}
-	if cfg.NativeAudioModel != "gemini-live-2.5-flash-native-audio" ||
+	if cfg.NativeAudioLocation != "us-central1" ||
+		cfg.NativeAudioModel != "gemini-live-2.5-flash-native-audio" ||
 		cfg.NativeAudioVoice != "Kore" {
 		t.Fatalf(
-			"native audio config = %q / %q",
+			"native audio config = %q / %q / %q",
+			cfg.NativeAudioLocation,
 			cfg.NativeAudioModel,
 			cfg.NativeAudioVoice,
 		)
@@ -253,6 +256,21 @@ func TestLoadParsesNativeAudioGateStrictly(t *testing.T) {
 	if _, err := Load(); err == nil ||
 		!strings.Contains(err.Error(), "KOTAE_NATIVE_AUDIO_ENABLED") {
 		t.Fatalf("malformed native audio gate error = %v", err)
+	}
+}
+
+func TestLoadPinsNativeAudioToItsGARegion(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "true")
+	t.Setenv("KOTAE_NATIVE_AUDIO_LOCATION", "us-central1")
+	if _, err := Load(); err != nil {
+		t.Fatalf("GA native-audio region rejected: %v", err)
+	}
+
+	t.Setenv("KOTAE_NATIVE_AUDIO_LOCATION", "global")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_NATIVE_AUDIO_LOCATION") {
+		t.Fatalf("unsupported native-audio region error = %v", err)
 	}
 }
 

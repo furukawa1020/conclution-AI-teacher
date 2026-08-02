@@ -4,7 +4,7 @@
 
 現在の公開音声経路は「録音を暗号化して長期保存するサービス」ではありません。利用者が明示的に開始したセッション中に、一つの発話を認識して音声で返します。KOTAE側では原音、文字起こし、Native Audio caption、モデル応答を永続化しません。
 
-標準liveでPDFを添付しないturnは、raw audioを`global`のVertex AI Native Audioへstreamします。providerが返す音声とcaptionは、最終入力captionの確定とCloud Run内の決定論的なPII・高リスク・tool要求screenが終わるまで利用者へ解放しません。このscreenはregional DLPでも、Vertex AIへ送信する前の原音検査でもありません。厳格モード、PDF turn、Native Audioを使えない接続fallbackはregional STT、文字列推論、regional TTSの段階的な経路を使います。厳格モードはrequestからresponseまで別の型として扱い、文字起こしとモデル応答の両方をCloud Run内の決定論的検査とregional DLPで検査します。`clear`以外、timeout、権限エラー、応答mode不一致は停止し、PDF、外部探索、cross-turn stateを許可しません。どちらのモードもE2EEでも完全なPII除去でもありません。
+標準liveでPDFを添付しないturnは、raw audioを`us-central1`のVertex AI Native Audioへstreamします。GA endpointのsetupは`responseModalities`に`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。一度に許される応答modalityは一つなので`TEXT`を併記しません。providerが返す音声とcaptionは、最終入力captionの確定とCloud Run内の決定論的なPII・高リスク・tool要求screenが終わるまで利用者へ解放しません。このscreenはregional DLPでも、Vertex AIへ送信する前の原音検査でもありません。厳格モード、PDF turn、Native Audioを使えない接続fallbackはregional STT、`global`の文字列推論、regional TTSの段階的な経路を使います。厳格モードはrequestからresponseまで別の型として扱い、文字起こしとモデル応答の両方をCloud Run内の決定論的検査とregional DLPで検査します。`clear`以外、timeout、権限エラー、応答mode不一致は停止し、PDF、外部探索、cross-turn stateを許可しません。どちらのモードもE2EEでも完全なPII除去でもありません。
 
 ここでいう「KOTAE側で保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話本文を書かないという意味です。標準liveの音声は発話ごとのrequest dataとしてVertex AI Native Audioへ、段階的な経路ではregional STTへ渡し、KOTAEはrequest終了後に履歴を保持しません。一方、処理に必要な平文は端末、Cloud Run、Vertex AI、および段階的な経路のSpeech-to-Text、Sensitive Data Protection（DLP）、Text-to-Speechから見えます。Firebase Authenticationも認証用アカウント情報を扱います。E2EE、完全な端末内処理、完全なPII除去、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。管理サービス側のデータ利用・ログ条件は公式契約とproject設定を別に確認します。
 
@@ -17,7 +17,7 @@
 Firebase Hosting /api rewrite または固定run.appへのCORS/TLS
   ▼
 Cloud Run kotae-api（asia-northeast1）
-  ├─ 標準live・PDFなし: raw PCM ──→ Vertex AI Native Audio（global）
+  ├─ 標準live・PDFなし: raw PCM ──→ Vertex AI Native Audio（us-central1）
   │                                   └─ 入力caption gate後のPCM + caption ──→ ブラウザ
   └─ 厳格 / PDF / 接続fallback: raw audio ──→ Cloud Speech-to-Text V2（asia-northeast1）
        ├─ 厳格時のtranscript ──→ Cloud Run内決定論的検査 + Sensitive Data Protection（asia-northeast1）
@@ -29,8 +29,8 @@ Cloud Run kotae-api（asia-northeast1）
 
 | データ | 処理先 | アプリ側の永続化 | セッション継続に残るもの |
 |---|---|---|---|
-| マイク音声 | ブラウザ、Cloud Run、標準liveではVertex AI `global`、段階的な経路では東京リージョンSTT | なし | なし |
-| Native Audio caption / 音声 | Vertex AI `global`、Cloud Run、ブラウザ | なし | 発話本文を状態tokenへ入れない |
+| マイク音声 | ブラウザ、Cloud Run、標準liveではVertex AI `us-central1`、段階的な経路では東京リージョンSTT | なし | なし |
+| Native Audio caption / 音声 | Vertex AI `us-central1`、Cloud Run、ブラウザ | なし | 発話本文を状態tokenへ入れない |
 | STT直後の文字起こし | Cloud Run。厳格時だけ東京リージョンDLP | なし | 厳格時は`clear`でなければVertex AIへ進めない |
 | Vertex AIへ渡す文字列 | Cloud Run、Vertex AI `global` | なし | 標準時だけ、未検出情報を含み得る短いgraph nodeが入る可能性がある |
 | モデル応答文 | Cloud Run、東京リージョンTTS | なし | 原文は状態へ保存しない |
@@ -45,7 +45,7 @@ Cloud Run kotae-api（asia-northeast1）
 | Passkeyレート制限 | Firestore | 48時間TTL | App Check tokenまたは仮名UID由来のclient digestと、App ID由来の高位circuit-breaker digest、回数・時刻。raw token、UID、IPは保存しない |
 | live接続lease | Firestore | 最長7分TTL | SHA-256化UID、ランダム所有者、期限だけ。同じ仮名アカウントのlive接続を1本へ制限し、音声・文字起こし・raw UIDは保存しない |
 
-段階的な経路のSTT、DLP、TTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。一方、Vertex AIのロケーションは`global`で、標準liveのraw audioもNative Audioへ直接送ります。したがって、音声や推論対象が日本国内だけで処理されるとは保証しません。
+段階的な経路のSTT、DLP、TTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。標準liveのraw audioとNative Audio応答はVertex AI `us-central1`、段階的な経路の文字列推論はVertex AI `global`で処理します。したがって、音声や推論対象が日本国内だけで処理されるとは保証しません。
 
 段階的な経路のSTTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 

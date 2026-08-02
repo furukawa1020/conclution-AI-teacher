@@ -35,6 +35,11 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   hybridEndpointAgreementWindowMs: 2_000,
   hybridSoftVoiceAgreementWindowMs: 3_500,
   hybridMonologueEndpointAgreementWindowMs: 6_000,
+  // The native-audio lane consumes PCM while the person is speaking. Only a
+  // short clear utterance uses this fast endpoint; reflective, quiet, and
+  // monologue pauses retain their wider existing windows.
+  nativeAudioEndOfTurnSilenceMs: 520,
+  nativeAudioHybridEndpointSilenceMs: 400,
   // A voice candidate must either reach the 120 ms confirmation threshold
   // promptly or be discarded. This also bounds unconfirmed room audio before
   // a fresh candidate and its isolated recorder are created.
@@ -775,12 +780,14 @@ export function shouldCommitHybridEndpoint({
   firstVoiceAt,
   hasSpeech,
   lastVoiceAt,
+  nativeAudio = false,
   now,
   providerEndpointAt,
   softVoiceConfirmed = false,
 }) {
   if (
     typeof hasSpeech !== "boolean" ||
+    typeof nativeAudio !== "boolean" ||
     typeof softVoiceConfirmed !== "boolean" ||
     !Number.isFinite(now) ||
     now < 0 ||
@@ -811,13 +818,16 @@ export function shouldCommitHybridEndpoint({
     VOICE_SESSION_LIMITS.vadIntervalMs;
   const monologue =
     speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
+  const shortRequiredSilence = nativeAudio
+    ? VOICE_SESSION_LIMITS.nativeAudioHybridEndpointSilenceMs
+    : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
   const requiredSilence = monologue
     ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
     : softVoiceConfirmed
       ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
       : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
         ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
-        : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+        : shortRequiredSilence;
   const agreementWindow = monologue
     ? VOICE_SESSION_LIMITS.hybridMonologueEndpointAgreementWindowMs
     : softVoiceConfirmed

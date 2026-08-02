@@ -30,6 +30,9 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_MAX_VOICE_BYTES", "")
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
+	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "")
+	t.Setenv("KOTAE_NATIVE_AUDIO_MODEL", "")
+	t.Setenv("KOTAE_NATIVE_AUDIO_VOICE", "")
 	t.Setenv("KOTAE_VERTEX_PRIORITY", "")
 	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "")
 	t.Setenv("KOTAE_STATE_V2_WRITES", "")
@@ -98,6 +101,17 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 		t.Fatalf(
 			"speech voice = %q; want ja-JP-Chirp3-HD-Kore",
 			cfg.SpeechVoice,
+		)
+	}
+	if cfg.NativeAudioEnabled {
+		t.Fatal("native audio must remain an explicit deployment opt-in")
+	}
+	if cfg.NativeAudioModel != "gemini-live-2.5-flash-native-audio" ||
+		cfg.NativeAudioVoice != "Kore" {
+		t.Fatalf(
+			"native audio config = %q / %q",
+			cfg.NativeAudioModel,
+			cfg.NativeAudioVoice,
 		)
 	}
 	if cfg.VertexPriority {
@@ -223,6 +237,25 @@ func TestLoadParsesStateV2WritesStrictly(t *testing.T) {
 	}
 }
 
+func TestLoadParsesNativeAudioGateStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.NativeAudioEnabled {
+		t.Fatal("native audio gate was not enabled")
+	}
+
+	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_NATIVE_AUDIO_ENABLED") {
+		t.Fatalf("malformed native audio gate error = %v", err)
+	}
+}
+
 func TestLoadParsesCoachRestatementBindingStrictly(t *testing.T) {
 	setTestEnvironment(t)
 	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "true")
@@ -338,6 +371,8 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "unavailable speech primary", key: "KOTAE_SPEECH_MODEL", value: "chirp_3"},
 		{name: "unreviewed alias speech primary", key: "KOTAE_SPEECH_MODEL", value: "latest_long"},
 		{name: "unreviewed speech voice", key: "KOTAE_SPEECH_VOICE", value: "ja-JP-Neural2-B"},
+		{name: "unreviewed native model", key: "KOTAE_NATIVE_AUDIO_MODEL", value: "gemini-live-latest"},
+		{name: "unreviewed native voice", key: "KOTAE_NATIVE_AUDIO_VOICE", value: "Puck"},
 	}
 
 	for _, test := range tests {

@@ -27,7 +27,7 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
 
 低圧な会話方針は、厚生労働省の[ひきこもり支援ハンドブック](https://www.mhlw.go.jp/content/12200000/001605332.pdf)にある、何気ない会話、答えやすい問い、本人のペースと自己決定を尊重する原則を参照しています。会話練習への短いフィードバックは[IMBUEのランダム化研究](https://aclanthology.org/2024.acl-long.47/)に近接根拠がありますが、英語テキストの単回練習であり、本製品の対象、音声、長期効果を直接検証したものではありません。
 
-本資料には、現在動く増分WebSocket主経路と同期圧縮HTTP fallbackを持つターン型MVP、および将来研究するnative full-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、Vertex Live、検索、個人適応は設計目標です。
+本資料には、現在動く増分WebSocket、Vertex AI Native Audio高速経路、同期圧縮HTTP fallbackを持つターン型MVPと、将来研究するfull-duplex構成の両方を記載します。現在実装済みの境界は次節と「実装段階」を正とし、それ以外のイベント、session resumption、検索、個人適応は設計目標です。
 
 約3分の独話を一つのturnとして受ける経路は実装済みです。ただし、これは「3分話せば技能が改善する」という効果の実装ではありません。現在実装しているのは、長い発話を途中で急いで切らず、最終文字起こしに十分な意味内容がある時に限って、同じturn内で中心点を意味保存して先に返す足場です。長期定着、他場面への転移、心理的負荷の軽減は未実証です。
 
@@ -86,19 +86,19 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 ブラウザだけで高精度な日本語ASR、意味推論、自然なfull-duplex音声をすべて端末内処理するのは、対応端末、電力、モデル配布量の面でまだ不安定です。そのため現在のMVPは次の境界です。
 
 - 利用者が最初にタップして開始したsession中だけマイクを使う。
-- 端末VADで一発話を区切り、録音開始から最大3分30秒まで認証付きWebSocketで東京リージョンSTTへ増分送信する。発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。Cloud Run側は最大4分、20 ms PCMを12,000 frame・7,680,000 byteまで受ける。Goのlive接続deadlineは6分、Cloud Runのrequest timeoutは420秒で、4分のcapture後にもcommitとモデル・TTS処理の時間を残す。
+- 端末VADで一発話を区切り、録音開始から最大3分30秒まで認証付きWebSocketでCloud Runへ20 ms PCMを増分送信する。標準のPDFなしlive turnはglobal Vertex AI Native Audioへ中継し、厳格モード・PDF・live接続前fallbackだけは東京リージョンSTTを含む段階経路を使う。発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。Cloud Run側は最大4分、12,000 frame・7,680,000 byteまで受ける。Goのlive接続deadlineは6分、Cloud Runのrequest timeoutは420秒で、4分のcapture後にもcommitとモデル処理の時間を残す。
 - WebSocketが利用不能な時だけ同じ認証境界のHTTPS requestへ退避する。圧縮音声fallbackは2 MiB上限であり、codecとbitrateがブラウザごとに異なるため約3分を保証しない。2 MiBを超えたfallback chunkは全て破棄し、先頭だけの不完全な音声をuploadしない。live PCMが継続している場合はfallback超過だけを理由に発話を止めない。
 - live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
-- raw audioをVertex AIへ送らない。厳格モードはSTT文字列と応答文がCloud Run内の決定論的検査と東京リージョンDLPの両方で`clear`の時だけ後段へ進み、標準モードに同じ保証があるとは表示しない。
-- commit後のfinal transcriptが160 Unicode code point以上の時だけ、サーバーが今回限りの`extended_speech`を導出する。通常会話では現在turnの発話内に明示された中心点を、否定、条件、数値、不確実性を変えず第一文へ置いて内容へ応答する。中心点を一つに安全に定められなければ創作せず、一つだけ低負担に確認する。途中候補、過去turn、保存本文から中心点を作らず、話した時間、能力、心理状態、習熟度の判定にも使わない。
+- 標準の高速会話モードではraw audioをglobal Vertex AI Native Audioへ送り、同じprovider turnのfinal入力字幕が届き、Cloud Runの決定論的risk gateを通るまで生成音声を上限付きで保持する。厳格モードはraw audioをVertex AIへ送らず、STT文字列と応答文がCloud Run内の決定論的検査と東京リージョンDLPの両方で`clear`の時だけ後段へ進む。標準モードに厳格モードと同じPII除去保証があるとは表示しない。
+- Native Audio経路は発話の中心に関係する言葉から短く返すよう固定promptで制約する。段階経路ではcommit後のfinal transcriptが160 Unicode code point以上の時だけ、サーバーが今回限りの`extended_speech`を導出する。どちらも話した時間、能力、心理状態、習熟度の判定には使わない。
 - 最後のvoiced frameから700 ms無音になった時は、内容非依存の固定表示「ここまで届いています」を出す。発話再開で消し、理解・要約・採点とは扱わない。これはactiveな画面での受領応答budgetであり、意味音声の絶対3秒保証ではない。急ぐ場合は「ここで返して」で長い終端待ちを明示的に終えられる。
-- 応答を選んだ時だけ短い文字列を東京リージョンTTSへ送る。
-- 認証付きWebSocketで増分音声を送るが、Vertex Live、native full-duplex、session resumptionは使わない。AI応答へのbarge-inは端末内VADで確認してからForeground turnへ引き継ぐ。
+- 厳格モード・PDF・fallbackの段階経路で応答を選んだ時だけ、短い文字列を東京リージョンTTSへ送る。標準live turnはNative Audioの24 kHz PCMを直接返す。
+- 標準live turnはVertex AI Native Audioを使うが、provider session resumptionや複数browser turn間のprovider session再利用はしない。AI応答へのbarge-inは端末内VADが400 msの持続音声と0.65以上のvoice densityを確認してからForeground turnへ引き継ぎ、短い相づちやぼやきでは停止しない。
 - AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、4分無発話、30分経過でsessionを止める。
 - 標準モードのPDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。厳格モードではブラウザのfile read前とAPIのモデル呼出し前に拒否する。
 
-将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。native audioやfull-duplexを採用する場合も、現在のregional STT / structured reasoner経路と同じものとして表示しません。
+将来のprivacy-first pathでは、対応端末だけローカルASRで安定した文字列を作り、生音声をクラウドへ送らない経路を比較します。現在もNative Audio高速経路とregional STT / structured reasoner経路は同じものとして表示せず、厳格モードとの境界をUIで分けます。
 
 ## Revision-aware Thought State Graph
 
@@ -787,7 +787,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 
 運用ログにはevent kind、schema version、logical policy ID、latency、列挙型reason code、集約された成功・失敗だけを残します。デバッグのために会話本文を一時的に記録する場合も、本番とは分離した明示同意、短期TTL、アクセス監査を必要とします。
 
-現在のMVPはVertex Liveのsession resumptionもGoogle Search Groundingも使いません。ただし「使っていない」ことだけでGoogle Cloud全体のゼロ保持を保証するとは表現しません。将来Liveや検索を追加する場合は、その時点のGoogle Cloud公式仕様、preview条件、データ保持、リージョンを再確認します。現在の境界は[Vertex AI zero data retention](https://cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)と`docs/audio-security.md`を参照します。
+現在のMVPはVertex AI Native Audioを標準live turnに使いますが、session resumptionとGoogle Search Groundingは使いません。「使っていない機能がある」ことだけでGoogle Cloud全体のゼロ保持を保証するとは表現せず、Native Audioを含む現在のデータ保持・地域境界は`docs/audio-security.md`を正とします。現在の境界は[Vertex AI zero data retention](https://cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)も参照します。
 
 ## 参考一次資料
 

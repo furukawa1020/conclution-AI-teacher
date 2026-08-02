@@ -90,6 +90,7 @@ const (
 	voiceLiveCodeResponseInvalid      = "voice_response_invalid"
 	voiceLiveCodeTurnTooLarge         = "voice_turn_too_large"
 	voiceLiveCodeNoSpeech             = "no_speech"
+	voiceLiveCodeNativeFallback       = "voice_native_fallback"
 	voiceLiveCodeTurnInvalid          = "voice_turn_invalid"
 )
 
@@ -102,6 +103,7 @@ type voiceLiveStartFrame struct {
 	TurnMode                VoiceTurnMode `json:"turnMode"`
 	SampleRateHz            int           `json:"sampleRateHz"`
 	StrictCloudMinimization bool          `json:"strictCloudMinimization"`
+	NativeAudio             bool          `json:"nativeAudio"`
 }
 
 type voiceLiveCommitFrame struct {
@@ -442,6 +444,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		RequestID:               requestIDFromContext(liveCtx),
 		TurnMode:                start.TurnMode,
 		StrictCloudMinimization: start.StrictCloudMinimization,
+		NativeAudio:             start.NativeAudio,
 		Ambient: start.TurnMode == VoiceTurnAmbient ||
 			start.TurnMode == VoiceTurnForeground,
 		Foreground:          start.TurnMode == VoiceTurnForeground,
@@ -487,10 +490,14 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				audio,
 			)
 		}
+		selectedLiveService := liveService
+		if input.NativeAudio && s.voice.NativeLiveService != nil {
+			selectedLiveService = s.voice.NativeLiveService
+		}
 		var result VoiceTurnResult
 		var processErr error
 		if endpointService, supportsEndpoint :=
-			liveService.(VoiceTurnLiveEndpointService); supportsEndpoint {
+			selectedLiveService.(VoiceTurnLiveEndpointService); supportsEndpoint {
 			result, processErr = endpointService.ProcessLiveWithEndpoint(
 				liveCtx,
 				principal.UID,
@@ -505,7 +512,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				},
 			)
 		} else {
-			result, processErr = liveService.ProcessLive(
+			result, processErr = selectedLiveService.ProcessLive(
 				liveCtx,
 				principal.UID,
 				input,
@@ -809,7 +816,11 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}
 	if outcome.err != nil {
 		code := voiceLiveCodeAPIUnavailable
-		if errors.Is(outcome.err, ErrVoiceNotRecognized) ||
+		_, outputFrames, _ := outputMetrics.snapshot()
+		if errors.Is(outcome.err, ErrVoiceNativeFallback) &&
+			input.NativeAudio && outputFrames == 0 {
+			code = voiceLiveCodeNativeFallback
+		} else if errors.Is(outcome.err, ErrVoiceNotRecognized) ||
 			errors.Is(outcome.err, ErrVoiceStateInvalid) {
 			code = voiceLiveCodeTurnInvalid
 		}
@@ -907,7 +918,8 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		len(start.SessionState) > maxStateBytes ||
 		!utf8.ValidString(start.SessionState) ||
 		strings.TrimSpace(start.SessionState) != start.SessionState ||
-		(start.StrictCloudMinimization && start.SessionState != "") {
+		(start.StrictCloudMinimization && start.SessionState != "") ||
+		(start.StrictCloudMinimization && start.NativeAudio) {
 		return false
 	}
 	switch start.TurnMode {

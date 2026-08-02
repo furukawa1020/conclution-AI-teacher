@@ -46,6 +46,7 @@ import {
   isCleanVoiceLiveTerminalClose,
   safeLiveCaptureFrame,
   safeLiveCaptureSignal,
+  shouldReplayCommittedNativeTurn,
   shouldStartAmbientLiveHandoff,
   validatedPlaybackDrainTimeoutMs,
   VOICE_LIVE_LIMITS,
@@ -1558,6 +1559,7 @@ function maybeCommitHybridEndpoint(recording, now) {
       firstVoiceAt: recording.firstVoiceAt,
       hasSpeech: recording.vadHasSpeech,
       lastVoiceAt: recording.lastVoiceAt,
+      nativeAudio: recording.nativeAudio,
       now,
       providerEndpointAt: recording.providerEndpointAt,
       softVoiceConfirmed: recording.softVoiceConfirmed,
@@ -1595,7 +1597,16 @@ function armVad(recording) {
     }
     const rms = Math.sqrt(sumSquares / pcm.length);
     const now = performance.now();
-    vadState = advanceVad(vadState, { now, peak, rms });
+    vadState = advanceVad(
+      vadState,
+      { now, peak, rms },
+      recording.nativeAudio
+        ? {
+            endOfTurnSilenceMs:
+              VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+          }
+        : undefined,
+    );
     recording.firstVoiceAt = vadState.firstVoiceAt;
     recording.vadHasSpeech = vadState.hasSpeech;
     recording.softVoiceConfirmed = vadState.softVoiceConfirmed;
@@ -1681,7 +1692,7 @@ function armVad(recording) {
   }, VAD_INTERVAL_MS);
 }
 
-function createRecordingState(stream) {
+function createRecordingState(stream, nativeAudio = false) {
   let resolveEnd;
   let rejectEnd;
   const endPromise = new Promise((resolve, reject) => {
@@ -1701,6 +1712,7 @@ function createRecordingState(stream) {
     lastVoiceAt: null,
     liveSpeechConfirmed: false,
     liveSpeechStartedAt: null,
+    nativeAudio,
     providerEndpointAt: null,
     resolveEnd,
     rejectEnd,
@@ -1719,9 +1731,9 @@ function createRecordingState(stream) {
   return recording;
 }
 
-function createRecording(stream) {
+function createRecording(stream, nativeAudio = false) {
   setVoiceReceiptVisible(false);
-  const recording = createRecordingState(stream);
+  const recording = createRecordingState(stream, nativeAudio);
   armVad(recording);
   return recording;
 }
@@ -1788,9 +1800,11 @@ async function beginTurn(
         }
 
         setStreamTracksEnabled(stream, true);
+        const nativeAudio = !strictCloudMinimization && !pendingDocument;
         const liveSession = await startVoiceLiveSession({
           ...credentials,
           expectedEpoch,
+          nativeAudio,
           sessionState: serializedSessionState,
           stream,
           strictCloudMinimization,
@@ -1806,7 +1820,7 @@ async function beginTurn(
         // first could confirm speech while the AudioWorklet was still loading
         // and force the live turn to cancel after its first PCM frame.
         activeLiveSession = liveSession;
-        const recording = createRecording(stream);
+        const recording = createRecording(stream, nativeAudio);
         activeRecording = recording;
         return Object.freeze({ state: "listening" });
       },
@@ -2121,6 +2135,7 @@ async function startVoiceLiveSession({
   captureHandoff,
   expectedEpoch,
   idToken,
+  nativeAudio,
   sessionState,
   stream,
   strictCloudMinimization,
@@ -2134,6 +2149,8 @@ async function startVoiceLiveSession({
     typeof sessionState !== "string" ||
     sessionState.length > SESSION_STATE_MAX_CHARS ||
     typeof strictCloudMinimization !== "boolean" ||
+    typeof nativeAudio !== "boolean" ||
+    (nativeAudio && strictCloudMinimization) ||
     !isValidTurnMode(turnMode) ||
     (captureHandoff !== undefined &&
       (captureHandoff === null ||
@@ -2162,6 +2179,7 @@ async function startVoiceLiveSession({
       version: 1,
       idToken,
       appCheckToken,
+      nativeAudio,
       sessionState,
       strictCloudMinimization,
       turnMode,
@@ -2362,6 +2380,7 @@ async function startVoiceLiveSession({
   let speechEndToEstimatedAudibleMs;
   let speechConfirmed = captureHandoff !== undefined;
   let commitSent = false;
+  let nativeFallbackAllowed = false;
   let latencyDispatched = false;
   let terminalCloseTimer;
   let finalResult;
@@ -2658,6 +2677,14 @@ async function startVoiceLiveSession({
       if (typeof event.data === "string") {
         const message = protocol.acceptText(event.data);
         if (message.type === "error") {
+          const snapshot = protocol.snapshot();
+          nativeFallbackAllowed = shouldReplayCommittedNativeTurn({
+            audioEventCount: snapshot.audioEventCount,
+            code: message.code,
+            committed: state === "committed",
+            interrupted: session?.playback?.interrupted === true,
+            nativeAudio,
+          });
           failLive(new Error(message.code));
           return;
         }
@@ -2748,9 +2775,10 @@ async function startVoiceLiveSession({
   }
 
   session = {
+    nativeAudio,
     playback: undefined,
     canFallback() {
-      return !commitSent;
+      return !commitSent || nativeFallbackAllowed;
     },
     handoffAmbient({
       candidateStartedAt,
@@ -2782,6 +2810,7 @@ async function startVoiceLiveSession({
         captureHandoff: nextCapture,
         expectedEpoch,
         idToken,
+        nativeAudio,
         sessionState,
         stream: nextStream,
         strictCloudMinimization,
@@ -3144,10 +3173,6 @@ function rampPlaybackGain(playback, target, seconds) {
   gain.cancelScheduledValues(now);
   gain.setValueAtTime(gain.value, now);
   gain.linearRampToValueAtTime(target, now + seconds);
-}
-
-function softDuckPlayback(playback) {
-  rampPlaybackGain(playback, 0.1, 0.008);
 }
 
 function restorePlaybackGain(playback) {
@@ -3724,7 +3749,10 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   }
 
   setTracksEnabled(true);
-  const recording = createRecordingState(mediaStream);
+  const recording = createRecordingState(
+    mediaStream,
+    playback.nativeAudio === true,
+  );
   const pcm = new Float32Array(analyser.fftSize);
   recording.vadPcm = pcm;
   let vadState = createInterruptVadState(performance.now());
@@ -3786,7 +3814,9 @@ function startBargeInMonitoring(playback, expectedEpoch) {
       ) {
         return;
       }
-      softDuckPlayback(playback);
+    } else if (vadState.action === "provisional") {
+      // Keep the response fully audible until sustained foreground speech
+      // passes the hard interruption gate.
     } else if (vadState.action === "discard") {
       recording.interruptOnsetAt = undefined;
       restorePlaybackGain(playback);
@@ -3809,7 +3839,7 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   }, INTERRUPT_VAD_LIMITS.intervalMs);
 }
 
-function createStreamingPlayback(expectedEpoch) {
+function createStreamingPlayback(expectedEpoch, nativeAudio = false) {
   if (
     activePlayback ||
     !audioContext ||
@@ -3951,6 +3981,7 @@ function createStreamingPlayback(expectedEpoch) {
     },
     finalReceived: false,
     gainNode,
+    nativeAudio,
     hasStreamedAudio: () => streamedAudio,
     interruptRecording: undefined,
     interrupted: false,
@@ -4246,7 +4277,10 @@ async function finishTurn(
       if (expectedEpoch !== sessionEpoch) {
         fail(stoppedSessionCode(expectedEpoch));
       }
-      playback = createStreamingPlayback(expectedEpoch);
+      playback = createStreamingPlayback(
+        expectedEpoch,
+        liveSession.nativeAudio === true,
+      );
       try {
         const completed = await awaitVoiceTurnResult(
           liveSession.commit(

@@ -23,18 +23,20 @@ Rust / Dioxus / Wasm UI
        └─ Firebase Hosting /api rewrite または固定Cloud Run URLへ認証付きTLS
             └─ WebSocket、HTTPS stream、またはPOST /api/v1/voice/turns
                  └─ Cloud Run / Go
-                  ├─ Cloud Speech-to-Text V2（asia-northeast1）
-                  ├─ 厳格モード: Cloud Run内の決定論的検査 + Sensitive Data Protection（asia-northeast1）
-                  ├─ 文字列 ──→ Vertex AI（global）: KOTAE Reflex + LAC
-                  ├─ Crossref（明示したDOI / 新着論文検索だけ）
-                  └─ Cloud Text-to-Speech（asia-northeast1）
+                  ├─ 標準live・PDFなし: raw PCM ──→ Vertex AI Native Audio（global）──→ PCM + caption
+                  └─ 厳格 / PDF / 接続fallback
+                       ├─ Cloud Speech-to-Text V2（asia-northeast1）
+                       ├─ 厳格モード: Cloud Run内の決定論的検査 + Sensitive Data Protection（asia-northeast1）
+                       ├─ 文字列 ──→ Vertex AI（global）: KOTAE Reflex + LAC
+                       ├─ Crossref（明示したDOI / 新着論文検索だけ）
+                       └─ Cloud Text-to-Speech（asia-northeast1）
 ```
 
-マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。最後の声から700 ms無音になった時点で、内容を理解したとは主張しない「ここまで届いています」を端末上に表示し、発話再開時は即座に消します。これは画面上の受領応答の3秒未満budgetであり、回線・STT・Vertex AI・TTSを含む意味音声の絶対3秒保証ではありません。
+マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。最後の声から700 ms無音になった時点で、内容を理解したとは主張しない「ここまで届いています」を端末上に表示し、発話再開時は即座に消します。標準liveの短い明瞭な発話はNative Audioで段階的なSTT・推論・TTS待ちを避け、1秒で話し始めることを目標にしますが、回線とmanaged modelを含む絶対1秒保証ではありません。
 
-標準モードでは、文字起こし、短い暗号化会話状態、利用者が選んだ一ターン限りのPDF、明示したCrossref検索を使えます。厳格モードは別のrequest型として束縛し、raw audioだけを東京リージョンSTTへ渡した後、文字起こしと応答文の両方がCloud Run内の決定論的検査とregional DLPで`clear`になった時だけVertex AIまたはTTSへ進めます。検出、timeout、権限エラー、応答不整合はすべて停止し、PDF、外部検索、cross-turn stateを許可しません。厳格streamingの合成音声も`clear`検証が終わるまでサーバー内に保持します。どちらもE2EEでも完全なPII除去でもありません。
+標準liveでPDFを添付しないturnは、raw audioをCloud Runから`global`のVertex AI Native Audioへstreamし、音声とcaptionを受け取ります。最終入力captionの確定前には生成音声を解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけ利用者へ送ります。このscreenはregional DLPでも、Vertex AIへ送信する前の原音検査でもありません。厳格モード、PDF turn、Native Audioを使えない接続fallbackは東京リージョンSTT、文字列のVertex AI推論、東京リージョンTTSの段階的な経路を使います。厳格モードは別のrequest型として束縛し、文字起こしと応答文の両方がCloud Run内の決定論的検査とregional DLPで`clear`になった時だけ後段へ進め、PDF、外部検索、cross-turn stateを許可しません。どちらもE2EEでも完全なPII除去でもありません。
 
-原音、文字起こし、モデル応答、PDF本文、研究query・候補はKOTAEのFirestore、Cloud Storage、アプリログへ保存しません。これはクラウド事業者全体の絶対的なゼロ保持保証ではありません。標準モードの会話状態は自由文要約を避け、短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返しますが、未検出の機微情報が残る可能性があり、Cloud Runは復号できます。厳格モードでは会話状態自体を返しません。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
+原音、文字起こし、Native Audioのcaption、モデル応答、PDF本文、研究query・候補はKOTAEのFirestore、Cloud Storage、アプリログへ保存しません。これはクラウド事業者全体の絶対的なゼロ保持保証ではありません。Native Audio turnが返す状態tokenは発話本文を含まず、段階的な標準経路の会話状態も自由文要約を避け、短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返します。ただし、後者には未検出の機微情報が残る可能性があり、Cloud Runは復号できます。厳格モードでは会話状態自体を返しません。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
 
 ## 構成
 
@@ -80,9 +82,9 @@ PDFの課題との対応と未解決点は [「Aと聞かれてAと答えられ�
 - `turnMode`を各turnで明示し、UID単位とFirebase App単位のquotaを本文デコード前に消費する
 - サービスアカウントJSON鍵を作らず、Cloud Runの専用サービスIDを使う
 - 原音、文字起こし、モデル応答、PDF本文、token、秘密鍵をKOTAEのアプリログへ出さない。Google Cloud全体の絶対的なゼロ保持とは表現しない
-- STT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する
+- 厳格 / PDF / Native Audioを使えないfallbackのSTT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する
 - 厳格モードはSTT文字列と応答文のCloud Run内決定論検査 + regional DLP検査が`clear`の時だけ後段へ進め、失敗時は停止する。標準モードに同じ保証があるとは表現しない
-- Vertex AIは`global`であり、評価APIで置換した文字列や厳格音声で検査済みの文字列が日本リージョン内に限定されるとは説明しない
+- Vertex AIは`global`であり、標準liveのraw audio、評価APIで置換した文字列、厳格音声で検査済みの文字列や応答が日本リージョン内に限定されるとは説明しない
 - 標準モードのPDFは利用者が選んだ次の一turnだけVertex AIへ渡し、応答後に参照を解放する。厳格モードでは選択・読込・送信を止め、APIでも拒否する
 - 状態鍵はSecret Managerで管理し、状態トークンはFirebase UIDへ束縛して15分で失効させる
 - 音声履歴、再生履歴、無人の後日再評価、保存音声Vaultは現在の公開経路に実装していない

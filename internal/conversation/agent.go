@@ -145,6 +145,14 @@ type StateTokenValidator interface {
 	ValidateStateToken(uid string, token string) error
 }
 
+// StateTokenRefresher advances only the opaque session lease and turn count.
+// Native-audio sessions keep conversational continuity inside their bounded
+// provider connection; this capability gives HTTP fallback a valid token
+// without storing a transcript or running a second reply generator.
+type StateTokenRefresher interface {
+	RefreshStateToken(uid string, token string) (string, error)
+}
+
 type ContentGenerator interface {
 	GenerateContent(
 		ctx context.Context,

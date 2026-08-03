@@ -34,7 +34,7 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 | Text-to-Speech | `asia-northeast1` regional endpoint | 回答支援、厳格モード、PDF turn、Native Audioを使えないfallbackで選ばれた短い応答文 |
 | Crossref | Google Cloud外の公開REST API | intentional turnで明示し、tool-policyとPII screenを通過したDOIまたは最小topicだけ |
 
-標準live会話では、PDFを添付せず厳格モードでもないturnだけ、Cloud Runから`us-central1`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。GA endpointはsetupごとに応答modalityを一つだけ許すため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。本人が外部の質問への回答支援を明示した初回turnは、Native出力を破棄し、同じ確定発話を東京リージョンSTTから`global`文字列Vertex AI、LAC、Respondent Coach、東京リージョンTTSの段階経路へ一度だけ再処理します。実際の外部質問からoperator、required slot、非可逆の質問継続tagを作るため、無関係な次turnを回答完了にしません。具体的な質問・答え・逐語録はstateやDBへ保存しません。厳格モード、PDF turn、Native Audioが利用できない接続fallback、高リスク・tool要求も、応答音声を解放していない場合だけ明示sentinelで段階経路へ切り替えます。したがって、標準liveのraw audioは`us-central1`、fallbackと回答支援の文字列、明示添付したPDFは`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
+標準live会話では、PDFを添付せず厳格モードでもないturnだけ、Cloud Runから`us-central1`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。GA endpointはsetupごとに応答modalityを一つだけ許すため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。利用者が入力内で外部の質問として報告した問いへの回答支援を明示した初回turnは、Native出力を破棄し、同じ確定発話を東京リージョンSTTから`global`文字列Vertex AI、LAC、Respondent Coach、東京リージョンTTSの段階経路へ一度だけ再処理します。同じ解析済み質問spanからoperatorとrequired slotを作り、確定入力の回答evidenceと用途分離した非可逆tagへ束縛するため、無関係な次turnを回答完了にしません。外部で質問された事実や現在の話者は検証せず、具体的な質問・答え・逐語録はstateやDBへ保存しません。厳格モード、PDF turn、Native Audioが利用できない接続fallback、高リスク・tool要求も、応答音声を解放していない場合だけ明示sentinelで段階経路へ切り替えます。したがって、標準liveのraw audioは`us-central1`、fallbackと回答支援の文字列、明示添付したPDFは`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
 
 ## 必要なAPI
 
@@ -162,6 +162,7 @@ KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview
 KOTAE_VERTEX_PRIORITY=false
 KOTAE_STATE_V2_WRITES=true
 KOTAE_COACH_RESTATEMENT_BINDING=true
+KOTAE_ANSWER_PROOF_WRITES=true
 KOTAE_SPEECH_LOCATION=asia-northeast1
 KOTAE_SPEECH_MODEL=long
 KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore
@@ -219,7 +220,7 @@ gcloud run deploy kotae-api `
   --max-instances=3 `
   --timeout=420 `
   --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL,KOTAE_COACHING_ROLLOUT,KOTAE_PRIVACY_LOCATION,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY" `
-  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_NATIVE_AUDIO_ENABLED=true,KOTAE_NATIVE_AUDIO_LOCATION=us-central1,KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio,KOTAE_NATIVE_AUDIO_VOICE=Kore,KOTAE_REQUEST_TIMEOUT=25s,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_REQUEST_BYTES=32768,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200,KOTAE_PASSKEY_RP_ID=kotae-ai.web.app,KOTAE_PASSKEY_ORIGIN=https://kotae-ai.web.app,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE=10,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY=100,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE=300,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY=20000,KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true" `
+  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_ANSWER_PROOF_WRITES=false,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_NATIVE_AUDIO_ENABLED=true,KOTAE_NATIVE_AUDIO_LOCATION=us-central1,KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio,KOTAE_NATIVE_AUDIO_VOICE=Kore,KOTAE_REQUEST_TIMEOUT=25s,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_REQUEST_BYTES=32768,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200,KOTAE_PASSKEY_RP_ID=kotae-ai.web.app,KOTAE_PASSKEY_ORIGIN=https://kotae-ai.web.app,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE=10,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY=100,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE=300,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY=20000,KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true" `
   --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:1"
 ```
 
@@ -229,7 +230,7 @@ Native Audioのlocationは`KOTAE_NATIVE_AUDIO_LOCATION=us-central1`へ固定し�
 
 本番では`KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true`を維持し、未指定でもsecure defaultとして`true`になります。まずcandidate backendを検証し、必須7 collectionのTTLをすべて`ACTIVE`にしてからservice rootへ昇格し、その後にPasskey UIを含むHostingを最終公開します。これにより、短命データを期限管理できないrevisionへ本番trafficを流さず、新しいUIが未対応の旧backendへ接続する時間も作りません。音声APIのbuffered、streaming、WebSocketすべてが、Passkey由来claimと5分以内の署名検証時刻`kotae_passkey_at`を要求します。Firebaseの`auth_time`はcustom token交換時に新しくなり得るため、freshness根拠には使いません。`false`は認証を迂回できるため、明示的なローカル開発以外では使いません。
 
-`KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行を制御します。privacy境界導入後の長期運用値は両方`true`です。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
+`KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行、`KOTAE_ANSWER_PROOF_WRITES`はQBA Proof用の質問インスタンスtag発行を制御します。長期運用値は3つとも`true`です。QBA Proofはreader-firstで移行します。まず新fieldを読める同じ新binaryを`KOTAE_ANSWER_PROOF_WRITES=false`でcandidate検証して100%へ昇格し、次に同じbinaryを`true`で別candidateとして検証して100%へ昇格します。切替後に戻せるのは新fieldを読めるrevisionだけです。これにより新しい暗号化stateが旧readerへ届く時間を作りません。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
 
 rollback時も`v1`と`v2`の状態は相互利用しません。revisionを戻した後はブラウザのopaque stateを破棄して新しいセッションから始めます。
 

@@ -1990,6 +1990,7 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 		result["audioBase64"] != "" ||
 		result["coachPhase"] != "none" ||
 		result["coachAction"] != "none" ||
+		result["answerProof"] != "none" ||
 		result["caption"] != "Aです。理由はBです。" {
 		t.Fatalf("final result=%#v", final["result"])
 	}

@@ -841,6 +841,8 @@ func (p *Pipeline) processLive(
 				}
 				if synthesisReady {
 					specHit = 1
+					outcome.decision.AnswerProof =
+						committedSpeculativeAnswerProof(input, outcome.decision)
 					result = voiceResultFromDecision(input, outcome.decision)
 					spokenReply = outcome.decision.SpokenReply
 					adoptedSpeculation = true
@@ -1717,6 +1719,22 @@ func voiceResultFromDecision(
 				decision.Route == "planner-unavailable-silent") &&
 				input.Document != nil),
 	}
+}
+
+func committedSpeculativeAnswerProof(
+	input httpapi.VoiceTurnInput,
+	decision conversation.VoiceTurnResult,
+) conversation.AnswerProof {
+	if input.StrictCloudMinimization || input.Document != nil ||
+		(decision.AnswerProof != "" &&
+			decision.AnswerProof != conversation.AnswerProofNone) {
+		return conversation.AnswerProofNone
+	}
+	if decision.AnswerProofCandidate !=
+		conversation.AnswerProofQuestionBoundInputAnswerFirst {
+		return conversation.AnswerProofNone
+	}
+	return decision.AnswerProofCandidate
 }
 
 func (p *Pipeline) silentRecognitionResult(

@@ -738,6 +738,10 @@ func validateVoiceResultMode(
 	input VoiceTurnInput,
 	result VoiceTurnResult,
 ) error {
+	if normalizedAnswerProof(result.AnswerProof) != "none" &&
+		(input.StrictCloudMinimization || input.Document != nil) {
+		return errors.New("answer proof is unavailable for this request mode")
+	}
 	if input.StrictCloudMinimization {
 		if result.PrivacyStatus != "clear" && result.PrivacyStatus != "blocked" {
 			return errors.New("strict request returned an uninspected result")

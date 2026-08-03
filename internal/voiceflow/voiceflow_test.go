@@ -699,6 +699,55 @@ func TestPipelinePropagatesRespondentAssistanceMetadata(t *testing.T) {
 	}
 }
 
+func TestVoiceResultPropagatesOnlyConversationAnswerProof(t *testing.T) {
+	t.Parallel()
+	result := voiceResultFromDecision(
+		httpapi.VoiceTurnInput{},
+		conversation.VoiceTurnResult{
+			AssistanceTarget: "respondent",
+			RespondentStage:  "restructure",
+			CoachPhase:       "complete",
+			CoachAction:      "complete",
+			AnswerProof:      conversation.AnswerProofQuestionBoundInputAnswerFirst,
+		},
+	)
+	if result.AnswerProof != "question_bound_input_answer_first" {
+		t.Fatalf("answer proof = %q", result.AnswerProof)
+	}
+
+	committed := conversationTurn(httpapi.VoiceTurnInput{}, "Aです", false)
+	provisional := conversationTurn(httpapi.VoiceTurnInput{}, "Aかも", true)
+	if committed.InputOrigin != conversation.InputOriginCommittedVoice ||
+		committed.Speculative ||
+		provisional.InputOrigin != conversation.InputOriginProvisionalVoice ||
+		!provisional.Speculative {
+		t.Fatalf("voice provenance committed=%+v provisional=%+v", committed, provisional)
+	}
+}
+
+func TestSpeculativeAnswerProofCommitsOnlyAtEligibleFinalBoundary(t *testing.T) {
+	t.Parallel()
+	decision := conversation.VoiceTurnResult{
+		AnswerProof:          conversation.AnswerProofNone,
+		AnswerProofCandidate: conversation.AnswerProofQuestionBoundInputAnswerFirst,
+	}
+	if got := committedSpeculativeAnswerProof(
+		httpapi.VoiceTurnInput{},
+		decision,
+	); got != conversation.AnswerProofQuestionBoundInputAnswerFirst {
+		t.Fatalf("eligible exact-final candidate = %q", got)
+	}
+	for _, input := range []httpapi.VoiceTurnInput{
+		{StrictCloudMinimization: true},
+		{Document: &httpapi.VoiceDocument{}},
+	} {
+		if got := committedSpeculativeAnswerProof(input, decision); got !=
+			conversation.AnswerProofNone {
+			t.Fatalf("ineligible candidate committed: input=%+v proof=%q", input, got)
+		}
+	}
+}
+
 func TestPipelineMapsResearchRecords(t *testing.T) {
 	t.Parallel()
 

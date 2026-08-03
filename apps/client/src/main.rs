@@ -5,12 +5,12 @@ use serde::Deserialize;
 
 const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
-const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、答えを代わりに作らない";
+const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する";
 const TALK_ONLY_COPY: &str = "届いた瞬間だけ知らせて、点数にはしない";
 const STANDARD_MODE_ROUTE_LABEL: &str =
-    "通常会話はNative Audio / 明示した回答支援は質問を結ぶ段階経路";
-const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。最終入力字幕から、人に聞かれた質問への回答支援を本人が明示したと決定論的に確認した時は、生成済みのNative音声を一切出さず、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路で一度だけ処理します。この経路で実際の外部質問からoperator・required slot・非可逆の質問継続tagを作り、次の発話が別の話題なら回答完了にしません。完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
-const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。最終入力字幕から、人に聞かれた質問への回答支援を本人が明示したと決定論的に確認した時は、Native出力を破棄し、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで一度だけ再処理します。回答支援の短期stateには実質問から作ったoperator・required slot・非可逆の質問継続tagを保持しますが、具体的な質問・答え・文字起こしは保存しません。PDF・Native接続不能時も段階経路を使います。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+    "通常会話はNative Audio / 明示した回答支援はQBA Proof段階経路";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、生成済みのNative音声を一切出さず、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路で一度だけ処理します。この経路で入力内に報告された問いの範囲、operator、required slot、今回の入力evidenceをそれぞれ非可逆tagへ結びます。確定音声入力だけを対象に、exact-span gateと独立criticが全slotとA先頭で一致した時だけ、本文を含まないQBA Proofを今回のturnへ返します。外部で実際にその問いを聞かれた事実や話者・ライブネスは確認しません。次の発話が別の話題なら回答完了にも証明にもしません。完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、Native出力を破棄し、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで一度だけ再処理します。回答支援の短期stateには入力内に報告された問いから作ったoperator・required slot・非可逆の質問／入力tagを保持しますが、具体的な質問・答え・文字起こしは保存しません。QBA Proofも固定enumだけで本文を含みません。外部の質問事実、話者、ライブネス、正解、能力、上達は確認しません。PDF・Native接続不能時も段階経路を使います。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -34,7 +34,7 @@ const PASSKEY_ACCOUNT_EXISTS_COPY: &str =
     "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした";
 const ACCOUNT_BOUNDARY_CHANGED_COPY: &str =
     "別の仮名アカウントへ切り替わったため　前の会話を閉じました　もう一度話し始めてください";
-const SUPPORT_BOUNDARY_COPY: &str = "話題を用意できない時は「こんにちは」だけでKOTAEが短い話題を持ち、短い返事・相づち・まとまらない長話を失敗扱いしません。AIが長く話すより本人の次の一言を優先し、訓練や採点を前面に出さず、返事の中で中心を先に受け取れる形へ整えます。外出・学校・仕事・家族への相談を勝手に目標にしません。画面の受領表示は今回の一往復だけで、診断や治療、長期効果を示しません。";
+const SUPPORT_BOUNDARY_COPY: &str = "話題を用意できない時は「こんにちは」だけでKOTAEが短い話題を持ち、短い返事・相づち・まとまらない長話を失敗扱いしません。AIが長く話すより利用者の次の一言を優先し、訓練や採点を前面に出さず、返事の中で中心を先に受け取れる形へ整えます。外出・学校・仕事・家族への相談を勝手に目標にしません。通常の受領表示は声が届いたことだけを示します。明示回答支援では、入力内に報告された問い、確定した今回の入力発話、全required slot、A先頭を二重検証できた時だけ、本文を含まないQBA Proofを表示します。話者、ライブネス、外部で実際にその問いを聞かれた事実、正解、能力、上達、他場面への転移は判定しません。";
 const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -156,20 +156,54 @@ enum CoachAction {
     Release,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AnswerProof {
+    #[default]
+    None,
+    QuestionBoundInputAnswerFirst,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CoachState {
     phase: CoachPhase,
     action: CoachAction,
+    answer_proof: AnswerProof,
 }
 
 impl CoachState {
     const NONE: Self = Self {
         phase: CoachPhase::None,
         action: CoachAction::None,
+        answer_proof: AnswerProof::None,
     };
 
     const fn from_result(phase: CoachPhase, action: CoachAction) -> Self {
-        Self { phase, action }
+        Self {
+            phase,
+            action,
+            answer_proof: AnswerProof::None,
+        }
+    }
+
+    const fn from_authoritative_result(
+        phase: CoachPhase,
+        action: CoachAction,
+        answer_proof: AnswerProof,
+    ) -> Self {
+        Self {
+            phase,
+            action,
+            answer_proof,
+        }
+    }
+
+    const fn without_answer_proof(self) -> Self {
+        Self {
+            phase: self.phase,
+            action: self.action,
+            answer_proof: AnswerProof::None,
+        }
     }
 
     const fn is_active(self) -> bool {
@@ -187,6 +221,12 @@ impl CoachState {
     }
 
     const fn status(self) -> &'static str {
+        if matches!(
+            self.answer_proof,
+            AnswerProof::QuestionBoundInputAnswerFirst
+        ) {
+            return "今回の入力 / A先頭確認";
+        }
         match self.action {
             CoachAction::Elicit => "あなたの一言を待っています",
             CoachAction::Restate => "あなたの言葉をそのまま",
@@ -206,6 +246,12 @@ impl CoachState {
     }
 
     const fn heading(self) -> &'static str {
+        if matches!(
+            self.answer_proof,
+            AnswerProof::QuestionBoundInputAnswerFirst
+        ) {
+            return "報告された問いへの入力が、Aから始まりました";
+        }
         match (self.phase, self.action) {
             (CoachPhase::Blocked, CoachAction::Release) => "そのまま話して大丈夫です",
             (CoachPhase::None, _) => "まとまらないまま、話していい",
@@ -218,6 +264,12 @@ impl CoachState {
     }
 
     const fn hint(self) -> &'static str {
+        if matches!(
+            self.answer_proof,
+            AnswerProof::QuestionBoundInputAnswerFirst
+        ) {
+            return "KOTAEが答えを補った入力ではありません。今回の入力内でA先頭を確認しただけです。話者・ライブネス・外部で実際にその問いを聞かれた事実・正解・能力・上達は確認していません";
+        }
         match (self.phase, self.action) {
             (CoachPhase::Blocked, CoachAction::Release) => "この続きでも、別の話でも大丈夫",
             (CoachPhase::None, _) => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
@@ -407,6 +459,8 @@ struct VoiceTurnResult {
     respondent_stage: String,
     coach_phase: CoachPhase,
     coach_action: CoachAction,
+    #[serde(default)]
+    answer_proof: AnswerProof,
     route: String,
     needs_paper: bool,
     research_status: ResearchStatus,
@@ -507,9 +561,9 @@ mod cloud {
         PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
         PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord, ResearchStatus,
         STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState, VoiceTurnMode,
-        VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
-        session_stop_pauses, valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
-        valid_voice_pause_metadata, valid_voice_receipt_metadata,
+        VoiceTurnResult, WaitTurnError, confirmed_voice_input_state, recoverable_finish_turn_code,
+        recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
+        valid_coach_checkpoint_metadata, valid_voice_pause_metadata, valid_voice_receipt_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -573,6 +627,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct VoiceInputConfirmedListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     impl Drop for FirstAudioListener {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
@@ -595,6 +654,15 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:voice-receipt",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for VoiceInputConfirmedListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-input-confirmed",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -893,6 +961,48 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(VoiceReceiptListener { window, callback }))
+    }
+
+    pub fn install_voice_input_confirmed_listener(
+        mut coach_state: Signal<CoachState>,
+    ) -> Option<Rc<VoiceInputConfirmedListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Some(key_names) = keys
+                .iter()
+                .map(|key| key.as_string())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            let Some(next_state) =
+                confirmed_voice_input_state(*coach_state.peek(), version, &key_names)
+            else {
+                return;
+            };
+            coach_state.set(next_state);
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:voice-input-confirmed",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(VoiceInputConfirmedListener { window, callback }))
     }
 
     pub fn install_first_audio_listener(
@@ -1311,6 +1421,12 @@ mod cloud {
         None
     }
 
+    pub fn install_voice_input_confirmed_listener(
+        _coach_state: Signal<CoachState>,
+    ) -> Option<Listener> {
+        None
+    }
+
     pub fn install_first_audio_listener(
         _voice_state: Signal<VoiceState>,
         _voice_receipt: Signal<VoiceReceipt>,
@@ -1637,6 +1753,8 @@ fn submit_turn(
     research_status.set(ResearchStatus::None);
     research_records.set(Vec::new());
     turn_notice.set(TurnNotice::Clear);
+    let coach_without_proof = (*coach_state.peek()).without_answer_proof();
+    coach_state.set(coach_without_proof);
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
@@ -1709,6 +1827,22 @@ fn submit_turn(
                 return;
             }
         };
+
+        if !valid_answer_proof_metadata(
+            result.answer_proof,
+            &result.assistance_target,
+            &result.respondent_stage,
+            result.coach_phase,
+            result.coach_action,
+            strict_snapshot,
+            consumed_document,
+        ) {
+            cloud::stop_session();
+            voice_state.set(VoiceState::Error(
+                "回答確認の境界を検証できないため停止しました",
+            ));
+            return;
+        }
 
         if !valid_voice_privacy_metadata(
             strict_snapshot,
@@ -1804,9 +1938,15 @@ fn submit_turn(
             );
             return;
         }
-        coach_state.set(CoachState::from_result(
+        let answer_proof = if result.interrupted {
+            AnswerProof::None
+        } else {
+            result.answer_proof
+        };
+        coach_state.set(CoachState::from_authoritative_result(
             result.coach_phase,
             result.coach_action,
+            answer_proof,
         ));
         if result.interrupted {
             // The final frame reached a clean terminal EOF, so commit its
@@ -1920,6 +2060,44 @@ const fn session_stop_pauses(state: VoiceState) -> bool {
 
 fn valid_voice_receipt_metadata(phase: &str, version: f64, field_count: u32) -> bool {
     field_count == 2 && version == 1.0 && matches!(phase, "received" | "clear")
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn confirmed_voice_input_state(
+    state: CoachState,
+    version: f64,
+    keys: &[String],
+) -> Option<CoachState> {
+    if version == 1.0 && keys == ["version"] {
+        Some(state.without_answer_proof())
+    } else {
+        None
+    }
+}
+
+fn valid_answer_proof_metadata(
+    proof: AnswerProof,
+    assistance_target: &str,
+    respondent_stage: &str,
+    coach_phase: CoachPhase,
+    coach_action: CoachAction,
+    strict_cloud_minimization: bool,
+    consumed_document: bool,
+) -> bool {
+    match proof {
+        AnswerProof::None => true,
+        AnswerProof::QuestionBoundInputAnswerFirst => {
+            !strict_cloud_minimization
+                && !consumed_document
+                && assistance_target == "respondent"
+                && respondent_stage == "restructure"
+                && matches!(
+                    (coach_phase, coach_action),
+                    (CoachPhase::Complete, CoachAction::Complete)
+                        | (CoachPhase::Expanding, CoachAction::Expand)
+                )
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -2471,6 +2649,8 @@ fn App() -> Element {
         )
     });
     let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
+    let _voice_input_confirmed_listener =
+        use_hook(|| cloud::install_voice_input_confirmed_listener(coach_state));
     let _first_audio_listener =
         use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
     let _coach_checkpoint_listener =
@@ -2690,6 +2870,7 @@ fn App() -> Element {
                         class: "voice-status",
                         role: "status",
                         aria_live: "polite",
+                        aria_atomic: "true",
                         aria_busy: matches!(
                             state_snapshot,
                             VoiceState::RequestingPermission | VoiceState::Thinking
@@ -3319,8 +3500,8 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSWER_SUPPORT_COPY, COACH_CHECKPOINT_MAX_CHARS, CloudState, CoachAction, CoachPhase,
-        CoachState, NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY,
+        ANSWER_SUPPORT_COPY, AnswerProof, COACH_CHECKPOINT_MAX_CHARS, CloudState, CoachAction,
+        CoachPhase, CoachState, NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY,
         PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
         PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
         PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
@@ -3328,9 +3509,10 @@ mod tests {
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
         STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
         TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceState, VoiceTurnMode,
-        cloud_state_for_display, passkey_focus_target, recoverable_wait_turn_code,
-        requires_passkey_choice, requires_passkey_registration_recovery, session_stop_pauses,
-        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_coach_checkpoint_keys,
+        cloud_state_for_display, confirmed_voice_input_state, passkey_focus_target,
+        recoverable_wait_turn_code, requires_passkey_choice,
+        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
+        turn_mode_for_gesture_epoch, valid_answer_proof_metadata, valid_coach_checkpoint_keys,
         valid_coach_checkpoint_metadata, valid_streamed_audio_metadata, valid_voice_pause_metadata,
         valid_voice_privacy_metadata, valid_voice_receipt_metadata,
     };
@@ -3342,6 +3524,10 @@ mod tests {
 
     fn deserialize_action(value: &str) -> Result<CoachAction, serde::de::value::Error> {
         CoachAction::deserialize(value.into_deserializer())
+    }
+
+    fn deserialize_answer_proof(value: &str) -> Result<AnswerProof, serde::de::value::Error> {
+        AnswerProof::deserialize(value.into_deserializer())
     }
 
     #[test]
@@ -3417,6 +3603,132 @@ mod tests {
     }
 
     #[test]
+    fn answer_proof_is_fail_closed_and_current_turn_only() {
+        let verified = AnswerProof::QuestionBoundInputAnswerFirst;
+        assert!(valid_answer_proof_metadata(
+            verified,
+            "respondent",
+            "restructure",
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            false,
+            false,
+        ));
+        assert!(valid_answer_proof_metadata(
+            verified,
+            "respondent",
+            "restructure",
+            CoachPhase::Expanding,
+            CoachAction::Expand,
+            false,
+            false,
+        ));
+        for (target, stage, phase, action) in [
+            ("assistant", "none", CoachPhase::None, CoachAction::None),
+            (
+                "respondent",
+                "awaiting_answer",
+                CoachPhase::AwaitingAnswer,
+                CoachAction::Elicit,
+            ),
+            (
+                "respondent",
+                "restructure",
+                CoachPhase::Complete,
+                CoachAction::Release,
+            ),
+        ] {
+            assert!(!valid_answer_proof_metadata(
+                verified, target, stage, phase, action, false, false,
+            ));
+        }
+        assert!(!valid_answer_proof_metadata(
+            verified,
+            "respondent",
+            "restructure",
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            true,
+            false,
+        ));
+        assert!(!valid_answer_proof_metadata(
+            verified,
+            "respondent",
+            "restructure",
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            false,
+            true,
+        ));
+        assert!(valid_answer_proof_metadata(
+            AnswerProof::None,
+            "assistant",
+            "none",
+            CoachPhase::None,
+            CoachAction::None,
+            true,
+            true,
+        ));
+        assert!(deserialize_answer_proof("none").is_ok());
+        assert!(deserialize_answer_proof("question_bound_input_answer_first").is_ok());
+        assert!(deserialize_answer_proof("verified").is_err());
+        assert!(deserialize_answer_proof("question_bound_user_answer_first").is_err());
+
+        let state = CoachState::from_authoritative_result(
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            verified,
+        );
+        assert_eq!(state.status(), "今回の入力 / A先頭確認");
+        assert_eq!(
+            state.heading(),
+            "報告された問いへの入力が、Aから始まりました"
+        );
+        for boundary in [
+            "今回の入力内",
+            "話者",
+            "ライブネス",
+            "外部で実際にその問いを聞かれた事実",
+            "正解",
+            "能力",
+            "上達",
+        ] {
+            assert!(state.hint().contains(boundary));
+        }
+        assert!(!state.status().contains("本人"));
+        assert!(!state.heading().contains("実際に聞かれた"));
+        let cleared = state.without_answer_proof();
+        assert_eq!(cleared.answer_proof, AnswerProof::None);
+        assert_eq!(cleared.phase, CoachPhase::Complete);
+        assert_eq!(cleared.action, CoachAction::Complete);
+        assert_ne!(cleared.heading(), state.heading());
+    }
+
+    #[test]
+    fn confirmed_voice_input_event_can_only_clear_the_current_proof() {
+        let verified = CoachState::from_authoritative_result(
+            CoachPhase::Expanding,
+            CoachAction::Expand,
+            AnswerProof::QuestionBoundInputAnswerFirst,
+        );
+        let exact_keys = ["version".to_string()];
+        let cleared = confirmed_voice_input_state(verified, 1.0, &exact_keys).unwrap();
+        assert_eq!(cleared.answer_proof, AnswerProof::None);
+        assert_eq!(cleared.phase, verified.phase);
+        assert_eq!(cleared.action, verified.action);
+
+        for (version, keys) in [
+            (0.0, vec!["version".to_string()]),
+            (2.0, vec!["version".to_string()]),
+            (1.0, Vec::new()),
+            (1.0, vec!["proof".to_string()]),
+            (1.0, vec!["version".to_string(), "answerProof".to_string()]),
+        ] {
+            assert_eq!(confirmed_voice_input_state(verified, version, &keys), None);
+        }
+    }
+
+    #[test]
     fn visible_copy_keeps_answer_support_optional_unscored_and_non_clinical() {
         let ready_hint = VoiceState::Ready.hint();
 
@@ -3430,21 +3742,24 @@ mod tests {
         );
         assert_eq!(
             ANSWER_SUPPORT_COPY,
-            "「一問だけ手伝って」で、答えを代わりに作らない"
+            "「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する"
         );
         assert_eq!(TALK_ONLY_COPY, "届いた瞬間だけ知らせて、点数にはしない");
 
         for boundary in [
             "KOTAEが短い話題を持ち",
             "短い返事・相づち・まとまらない長話を失敗扱いしません",
-            "AIが長く話すより本人の次の一言を優先",
+            "AIが長く話すより利用者の次の一言を優先",
             "訓練や採点を前面に出さず",
             "中心を先に",
             "外出・学校・仕事・家族",
             "勝手に目標にしません",
-            "今回の一往復だけ",
-            "診断や治療",
-            "長期効果を示しません",
+            "通常の受領表示",
+            "入力内に報告された問い",
+            "QBA Proof",
+            "話者、ライブネス、外部で実際にその問いを聞かれた事実",
+            "正解、能力、上達",
+            "他場面への転移",
         ] {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }
@@ -3456,19 +3771,26 @@ mod tests {
         for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
             assert!(copy.contains("最終入力字幕"));
             assert!(copy.contains("人に聞かれた質問への回答支援"));
-            assert!(copy.contains("本人が明示"));
+            assert!(copy.contains("利用者が明示"));
+            assert!(copy.contains("QBA Proof"));
+            assert!(copy.contains("質問"));
+            assert!(copy.contains("非可逆"));
             assert!(copy.contains("Native"));
             assert!(copy.contains("Speech-to-Text"));
             assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coach"));
             assert!(copy.contains("一度だけ"));
-            assert!(copy.contains("operator・required slot・非可逆の質問継続tag"));
+            assert!(copy.contains("operator"));
+            assert!(copy.contains("required slot"));
+            assert!(copy.contains("tag"));
+            assert!(copy.contains("話者"));
+            assert!(copy.contains("ライブネス"));
         }
         assert_eq!(
             STANDARD_MODE_ROUTE_LABEL,
-            "通常会話はNative Audio / 明示した回答支援は質問を結ぶ段階経路"
+            "通常会話はNative Audio / 明示した回答支援はQBA Proof段階経路"
         );
         assert!(STANDARD_MODE_ROUTE_COPY.contains("生成済みのNative音声を一切出さず"));
-        assert!(STANDARD_MODE_ROUTE_COPY.contains("別の話題なら回答完了にしません"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("別の話題なら回答完了にも証明にもしません"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("Native出力を破棄"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("具体的な質問・答え・文字起こし"));
         assert!(!STANDARD_MODE_ROUTE_COPY.contains("汎用の署名済みcheckpoint"));

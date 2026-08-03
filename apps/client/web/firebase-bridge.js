@@ -1609,7 +1609,15 @@ function armVad(recording) {
         : undefined,
     );
     recording.firstVoiceAt = vadState.firstVoiceAt;
+    const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.hasSpeech;
+    if (!hadConfirmedSpeech && recording.vadHasSpeech) {
+      globalThis.dispatchEvent(
+        new CustomEvent("kotae:voice-input-confirmed", {
+          detail: Object.freeze({ version: 1 }),
+        }),
+      );
+    }
     recording.softVoiceConfirmed = vadState.softVoiceConfirmed;
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
@@ -2077,6 +2085,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
       payload.coachPhase,
       payload.coachAction,
     ) ||
+    (expectedStrictCloudMinimization && answerProof !== "none") ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
     !["", "blocked", "clear"].includes(payload.privacyStatus) ||
@@ -3990,7 +3999,15 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       rms: Math.sqrt(sumSquares / pcm.length),
     });
     recording.firstVoiceAt = vadState.firstVoiceAt;
+    const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.phase === "confirmed";
+    if (!hadConfirmedSpeech && recording.vadHasSpeech) {
+      globalThis.dispatchEvent(
+        new CustomEvent("kotae:voice-input-confirmed", {
+          detail: Object.freeze({ version: 1 }),
+        }),
+      );
+    }
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }

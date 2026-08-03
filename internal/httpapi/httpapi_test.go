@@ -579,12 +579,82 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"assistanceTarget":"respondent"`) ||
 		!strings.Contains(response.Body.String(), `"respondentStage":"restructure"`) ||
 		!strings.Contains(response.Body.String(), `"coachPhase":"awaiting_restatement"`) ||
-		!strings.Contains(response.Body.String(), `"coachAction":"restate"`) {
+		!strings.Contains(response.Body.String(), `"coachAction":"restate"`) ||
+		!strings.Contains(response.Body.String(), `"answerProof":"none"`) {
 		t.Fatalf("response assistance metadata = %s", response.Body.String())
 	}
 	if !strings.Contains(response.Body.String(), `"researchStatus":"none"`) ||
 		!strings.Contains(response.Body.String(), `"researchRecords":[]`) {
 		t.Fatalf("response research metadata = %s", response.Body.String())
+	}
+}
+
+func TestAnswerProofMetadataFailsClosed(t *testing.T) {
+	t.Parallel()
+	verified := VoiceTurnResult{
+		StateToken:       "opaque-state",
+		DetectedDomain:   "daily",
+		AssistanceTarget: "respondent",
+		RespondentStage:  "restructure",
+		CoachPhase:       "complete",
+		CoachAction:      "complete",
+		AnswerProof:      "question_bound_input_answer_first",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            "respondent-complete-fast",
+	}
+	if err := validateVoiceResult(verified); err != nil {
+		t.Fatalf("verified proof rejected: %v", err)
+	}
+	strict := verified
+	strict.PrivacyStatus = "clear"
+	if err := validateVoiceResultForInput(
+		VoiceTurnInput{StrictCloudMinimization: true},
+		strict,
+	); err == nil {
+		t.Fatal("strict request accepted an answer proof")
+	}
+	if err := validateVoiceResultForInput(
+		VoiceTurnInput{Document: &VoiceDocument{}},
+		verified,
+	); err == nil {
+		t.Fatal("document request accepted an answer proof")
+	}
+
+	expanding := verified
+	expanding.CoachPhase = "expanding"
+	expanding.CoachAction = "expand"
+	if err := validateVoiceResult(expanding); err != nil {
+		t.Fatalf("authorized expansion proof rejected: %v", err)
+	}
+
+	invalid := []VoiceTurnResult{}
+	unknown := verified
+	unknown.AnswerProof = "verified"
+	invalid = append(invalid, unknown)
+	assistant := verified
+	assistant.AssistanceTarget = "assistant"
+	assistant.RespondentStage = "none"
+	assistant.CoachPhase = "none"
+	assistant.CoachAction = "none"
+	invalid = append(invalid, assistant)
+	lateCompletion := verified
+	lateCompletion.AnswerProof = "question_bound_input_answer_first"
+	lateCompletion.RespondentStage = "awaiting_answer"
+	invalid = append(invalid, lateCompletion)
+	for _, result := range invalid {
+		if err := validateVoiceResult(result); err == nil {
+			t.Fatalf("inconsistent proof accepted: %+v", result)
+		}
+	}
+
+	withoutProof := verified
+	withoutProof.AnswerProof = ""
+	if err := validateVoiceResult(withoutProof); err != nil {
+		t.Fatalf("rolling-compatible empty proof was not normalized to none: %v", err)
+	}
+	if got := normalizedAnswerProof(""); got != "none" {
+		t.Fatalf("normalized empty proof = %q", got)
 	}
 }
 

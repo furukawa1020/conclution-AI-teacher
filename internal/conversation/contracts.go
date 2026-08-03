@@ -101,27 +101,32 @@ type InlinePDF struct {
 }
 
 type VoiceTurnResult struct {
-	SchemaVersion       int                    `json:"schemaVersion"`
-	Domain              string                 `json:"domain"`
-	Intent              string                 `json:"intent"`
-	AssistanceTarget    string                 `json:"assistance_target"`
-	RespondentStage     string                 `json:"respondent_stage"`
-	CoachPhase          string                 `json:"coach_phase"`
-	CoachAction         string                 `json:"coach_action"`
-	AnswerProof         AnswerProof            `json:"answer_proof"`
-	ResearchStatus      string                 `json:"research_status"`
-	ResearchRecords     []ResearchRecord       `json:"research_records"`
-	LatentQuestion      string                 `json:"latent_question"`
-	ArgumentStructure   string                 `json:"argument_structure"`
-	InterventionPolicy  string                 `json:"intervention_policy"`
-	SpokenReply         string                 `json:"spoken_reply"`
-	Confidence          float64                `json:"confidence"`
-	Intervention        ArbiterDecision        `json:"intervention"`
-	SelfCorrectionGrace bool                   `json:"self_correction_grace"`
-	AnswerContract      answercontract.Metrics `json:"answer_contract_metrics"`
-	Route               string                 `json:"route"`
-	NeedsClarification  bool                   `json:"needs_clarification"`
-	StateToken          string                 `json:"state_token"`
+	SchemaVersion    int         `json:"schemaVersion"`
+	Domain           string      `json:"domain"`
+	Intent           string      `json:"intent"`
+	AssistanceTarget string      `json:"assistance_target"`
+	RespondentStage  string      `json:"respondent_stage"`
+	CoachPhase       string      `json:"coach_phase"`
+	CoachAction      string      `json:"coach_action"`
+	AnswerProof      AnswerProof `json:"answer_proof"`
+	// AnswerProofCandidate is process-private evidence produced for both
+	// provisional and committed voice input. The voice pipeline may promote it
+	// only after its exact final-transcript commit boundary. It is never
+	// serialized, persisted, or returned by an HTTP handler.
+	AnswerProofCandidate AnswerProof            `json:"-"`
+	ResearchStatus       string                 `json:"research_status"`
+	ResearchRecords      []ResearchRecord       `json:"research_records"`
+	LatentQuestion       string                 `json:"latent_question"`
+	ArgumentStructure    string                 `json:"argument_structure"`
+	InterventionPolicy   string                 `json:"intervention_policy"`
+	SpokenReply          string                 `json:"spoken_reply"`
+	Confidence           float64                `json:"confidence"`
+	Intervention         ArbiterDecision        `json:"intervention"`
+	SelfCorrectionGrace  bool                   `json:"self_correction_grace"`
+	AnswerContract       answercontract.Metrics `json:"answer_contract_metrics"`
+	Route                string                 `json:"route"`
+	NeedsClarification   bool                   `json:"needs_clarification"`
+	StateToken           string                 `json:"state_token"`
 }
 
 // AnswerProof is a content-free, current-turn server attestation. It is not a
@@ -132,9 +137,8 @@ type VoiceTurnResult struct {
 type AnswerProof string
 
 const (
-	AnswerProofNone AnswerProof = "none"
-	AnswerProofQuestionBoundInputAnswerFirst AnswerProof =
-		"question_bound_input_answer_first"
+	AnswerProofNone                          AnswerProof = "none"
+	AnswerProofQuestionBoundInputAnswerFirst AnswerProof = "question_bound_input_answer_first"
 )
 
 // ResearchRecord is bounded, current-turn discovery metadata. It deliberately

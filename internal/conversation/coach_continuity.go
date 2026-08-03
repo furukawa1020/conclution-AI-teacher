@@ -86,6 +86,27 @@ func authoritativeCoachCommitmentPosition(
 	return respondent.PositionAbsent
 }
 
+func coachProofSpanBound(plan modelPlan, authoritativeAttempt string) bool {
+	anchor, _, ok := boundedCoachAnswerFingerprint(
+		plan,
+		authoritativeAttempt,
+		false,
+		false,
+	)
+	source := strings.ToLower(collapseSpace(
+		norm.NFKC.String(authoritativeAttempt),
+	))
+	if !ok || source == "" ||
+		utf8.RuneCountInString(anchor)*100 >
+			utf8.RuneCountInString(source)*60 {
+		return false
+	}
+	return authoritativeCoachCommitmentPosition(
+		plan,
+		authoritativeAttempt,
+	) == respondent.PositionFirst
+}
+
 func coachSubstantiveClausesBefore(prefix []rune, subject string) int {
 	count := 0
 	var clause strings.Builder
@@ -217,12 +238,18 @@ func (agent *vertexAgent) coachQuestionContinuityTag(anchor string) string {
 	return tag
 }
 
-func (agent *vertexAgent) coachQuestionInstanceTag(anchor string) string {
-	if agent == nil || len(agent.continuityKey) != sha256.Size || anchor == "" {
+func (agent *vertexAgent) coachQuestionInstanceTag(
+	sessionID string,
+	anchor string,
+) string {
+	if agent == nil || len(agent.continuityKey) != sha256.Size ||
+		!validSessionID(sessionID) || anchor == "" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, agent.continuityKey)
 	_, _ = mac.Write([]byte("reported-question-instance-anchor-v1\x00"))
+	_, _ = mac.Write([]byte(sessionID))
+	_, _ = mac.Write([]byte("\x00"))
 	_, _ = mac.Write([]byte(anchor))
 	full := mac.Sum(nil)
 	tag := base64.RawURLEncoding.EncodeToString(full[:coachContinuityTagBytes])
@@ -742,19 +769,85 @@ func boundedCoachContinuityAnchorForPlan(
 
 func boundedReportedCoachQuestionInstanceAnchor(
 	utterance string,
+	questionSubject string,
 ) (string, bool) {
 	source := strings.ToLower(collapseSpace(norm.NFKC.String(utterance)))
-	end := coachReportedQuestionEndOutsideQuote(source)
-	if end <= 0 || end > len(source) {
+	questionSubject = strings.ToLower(
+		collapseSpace(norm.NFKC.String(questionSubject)),
+	)
+	start, end, ok := coachReportedQuestionSpanForSubjectBefore(
+		source,
+		questionSubject,
+		len(source),
+	)
+	if !ok || start < 0 || end <= start || end > len(source) ||
+		coachReportedQuestionEndOutsideQuote(source[end:]) >= 0 {
 		return "", false
 	}
-	anchor := strings.TrimSpace(source[:end])
+	anchor := strings.TrimSpace(source[start:end])
 	if anchor == "" || utf8.RuneCountInString(anchor) > 320 {
 		return "", false
 	}
 	// The raw reported-question span is used only as keyed HMAC input. It is
 	// never stored, logged, spoken, or sent back to either model.
-	return "reported-question-instance\x00" + anchor, true
+	return anchor, true
+}
+
+func boundedReportedCoachQuestionOperator(
+	questionSpan string,
+) (answercontract.Operator, bool) {
+	questionSpan = strings.ToLower(
+		collapseSpace(norm.NFKC.String(questionSpan)),
+	)
+	if questionSpan == "" {
+		return "", false
+	}
+	containsAny := func(signals ...string) bool {
+		for _, signal := range signals {
+			if strings.Contains(questionSpan, signal) {
+				return true
+			}
+		}
+		return false
+	}
+	candidates := make([]answercontract.Operator, 0, 2)
+	add := func(operator answercontract.Operator, matched bool) {
+		if matched {
+			candidates = append(candidates, operator)
+		}
+	}
+	add(answercontract.OperatorChoice,
+		containsAny("どちら", "どっち", "どれ", "どの案", "which"))
+	add(answercontract.OperatorQuantity,
+		containsAny("いくつ", "何個", "何人", "何件", "何回", "何日", "何時間", "どのくらい", "どれくらい", "how many", "how much"))
+	add(answercontract.OperatorPurpose,
+		containsAny("何のため", "目的", "what for"))
+	add(answercontract.OperatorCause,
+		containsAny("なぜ", "どうして", "理由", "原因", "why"))
+	add(answercontract.OperatorProcedure,
+		containsAny("どうやって", "どのように", "手順", "進め方", "how do", "how should"))
+	add(answercontract.OperatorComparison,
+		containsAny("違い", "比べ", "比較", "difference", "compare"))
+	add(answercontract.OperatorEvidence,
+		containsAny("根拠", "証拠", "エビデンス", "evidence"))
+	add(answercontract.OperatorState,
+		containsAny("どうなって", "どんな状態", "状況", "状態は", "現在の状態", "現在の状況"))
+	add(answercontract.OperatorDefinition,
+		containsAny("とは", "定義", "何ですか", "what is"))
+	add(answercontract.OperatorOpen,
+		containsAny("何を", "何が", "誰", "いつ", "どこ", "どう考え", "どう思", "教えて", "what", "who", "when", "where"))
+	add(answercontract.OperatorBoolean,
+		containsAny("できますか", "できるか", "ありますか", "あるか", "しますか", "するか", "でしょうか", "ですか", "かどうか", "can you", "do you", "is it", "are you"))
+	if len(candidates) != 1 {
+		return "", false
+	}
+	return candidates[0], true
+}
+
+func reportedCoachQuestionPresent(utterance string) bool {
+	source := strings.ToLower(collapseSpace(norm.NFKC.String(utterance)))
+	end := coachReportedQuestionEndOutsideQuote(source)
+	return end > 0 && end <= len(source)
 }
 
 func boundedCoachPlanQuestionAnchors(subject string) []string {

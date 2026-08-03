@@ -153,7 +153,8 @@ func TestVoiceStreamPublishesStateOnlyAfterOrderedPCM(t *testing.T) {
 	if !strings.Contains(lines[3], `"sessionState":"opaque-final-state"`) ||
 		!strings.Contains(lines[3], `"audioMimeType":"audio/L16"`) ||
 		!strings.Contains(lines[3], `"coachPhase":"none"`) ||
-		!strings.Contains(lines[3], `"coachAction":"none"`) {
+		!strings.Contains(lines[3], `"coachAction":"none"`) ||
+		!strings.Contains(lines[3], `"answerProof":"none"`) {
 		t.Fatalf("invalid final frame: %s", lines[3])
 	}
 	if service.calls != 1 ||

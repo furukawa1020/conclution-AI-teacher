@@ -2374,6 +2374,9 @@ fn App() -> Element {
     let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
     let _first_audio_listener =
         use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
+    let _coach_checkpoint_listener = use_hook(|| {
+        cloud::install_coach_checkpoint_listener(session_state, route, coach_state)
+    });
     let _voice_interrupted_listener =
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
     let _voice_session_paused_listener =

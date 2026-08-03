@@ -1752,6 +1752,19 @@ fn valid_voice_receipt_metadata(phase: &str, version: f64, field_count: u32) -> 
     field_count == 2 && version == 1.0 && matches!(phase, "received" | "clear")
 }
 
+fn valid_coach_checkpoint_metadata(
+    session_state: &str,
+    version: f64,
+    field_count: u32,
+) -> bool {
+    field_count == 2
+        && version == 1.0
+        && !session_state.is_empty()
+        && session_state.encode_utf16().count() <= COACH_CHECKPOINT_MAX_CHARS
+        && session_state.trim() == session_state
+        && !session_state.chars().any(char::is_control)
+}
+
 const fn valid_voice_pause_metadata(reason: &str, version: f64, field_count: u32) -> bool {
     field_count == 2
         && version == 1.0

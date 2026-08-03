@@ -104,6 +104,7 @@ type VoiceTurnResult struct {
 	RespondentStage  string
 	CoachPhase       string
 	CoachAction      string
+	AnswerProof      string
 	ResearchStatus   string
 	PrivacyStatus    string
 	ResearchRecords  []ResearchRecord
@@ -457,6 +458,7 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"respondentStage":  result.RespondentStage,
 		"coachPhase":       result.CoachPhase,
 		"coachAction":      result.CoachAction,
+		"answerProof":      normalizedAnswerProof(result.AnswerProof),
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
 		"privacyStatus":    result.PrivacyStatus,
@@ -613,6 +615,7 @@ func normalizedAudioMIME(value string) string {
 }
 
 func validateVoiceResult(result VoiceTurnResult) error {
+	answerProof := normalizedAnswerProof(result.AnswerProof)
 	if result.PrivacyStatus == "blocked" {
 		if len(result.Audio) != 0 || result.AudioMIMEType != "" ||
 			result.StateToken != "" || result.Caption != "" ||
@@ -620,6 +623,7 @@ func validateVoiceResult(result VoiceTurnResult) error {
 			result.AssistanceTarget != "assistant" ||
 			result.RespondentStage != "none" ||
 			result.CoachPhase != "none" || result.CoachAction != "none" ||
+			answerProof != "none" ||
 			result.ResearchStatus != "none" ||
 			result.ResearchRecords == nil || len(result.ResearchRecords) != 0 ||
 			result.Route != "strict-privacy-blocked" || result.NeedsPaper {
@@ -644,6 +648,13 @@ func validateVoiceResult(result VoiceTurnResult) error {
 			result.RespondentStage != "restructure") ||
 		!validCoachMetadata(
 			result.AssistanceTarget,
+			result.CoachPhase,
+			result.CoachAction,
+		) ||
+		!validAnswerProofMetadata(
+			answerProof,
+			result.AssistanceTarget,
+			result.RespondentStage,
 			result.CoachPhase,
 			result.CoachAction,
 		) ||
@@ -684,6 +695,33 @@ func validateVoiceResult(result VoiceTurnResult) error {
 		return errors.New("unsupported synthesized audio type")
 	}
 	return nil
+}
+
+func normalizedAnswerProof(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
+}
+
+func validAnswerProofMetadata(
+	proof string,
+	assistanceTarget string,
+	respondentStage string,
+	coachPhase string,
+	coachAction string,
+) bool {
+	switch proof {
+	case "none":
+		return true
+	case "question_bound_input_answer_first":
+		return assistanceTarget == "respondent" &&
+			respondentStage == "restructure" &&
+			((coachPhase == "complete" && coachAction == "complete") ||
+				(coachPhase == "expanding" && coachAction == "expand"))
+	default:
+		return false
+	}
 }
 
 func validateVoiceResultForInput(

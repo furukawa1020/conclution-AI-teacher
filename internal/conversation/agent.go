@@ -1264,6 +1264,7 @@ func (agent *vertexAgent) Process(
 		Phase:  respondent.CoachPhaseNone,
 		Action: respondent.CoachActionNone,
 	}
+	coachContinuityVerified := false
 	coachVerificationPlan := finalPlan
 	if coachTurn && !verificationUnavailable {
 		operator := authoritativeCoachOperator(coachFrame)
@@ -1376,6 +1377,7 @@ func (agent *vertexAgent) Process(
 				coachFrame.AssistantFollowUp,
 				agent.coachRestatementBinding,
 			)
+			coachContinuityVerified = continuityOK
 		}
 		if coachFrame.Phase == respondent.CoachPhaseExpanding &&
 			substantiveCoachAttempt(normalized.Utterance) {
@@ -1706,6 +1708,14 @@ func (agent *vertexAgent) Process(
 		responseCoachPhase = string(respondent.CoachPhaseNone)
 		responseCoachAction = string(respondent.CoachActionNone)
 	}
+	answerProof := answerProofForTurn(
+		normalized,
+		coachFrame,
+		coachDecision,
+		coachContinuityVerified,
+		responseAssistanceTarget,
+		responseRespondentStage,
+	)
 
 	return VoiceTurnResult{
 		SchemaVersion:       SchemaVersion,
@@ -1715,6 +1725,7 @@ func (agent *vertexAgent) Process(
 		RespondentStage:     responseRespondentStage,
 		CoachPhase:          responseCoachPhase,
 		CoachAction:         responseCoachAction,
+		AnswerProof:         answerProof,
 		ResearchStatus:      researchStatus,
 		ResearchRecords:     researchRecords,
 		LatentQuestion:      finalPlan.LatentQuestion,
@@ -2527,6 +2538,8 @@ func (agent *vertexAgent) pendingAnswerFromPlan(
 		Attempts: 0,
 	}
 	if agent != nil && agent.stateV2Writes {
+		questionInstanceAnchor, questionInstanceOK :=
+			boundedReportedCoachQuestionInstanceAnchor(utterance)
 		questionAnchor, questionOK := boundedCoachContinuityAnchorForPlan(
 			question.Subject,
 			utterance,
@@ -2536,15 +2549,17 @@ func (agent *vertexAgent) pendingAnswerFromPlan(
 			questionOK = false
 		}
 		if !questionOK {
-			_, reportedQuestionOK :=
-				boundedReportedCoachQuestionInstanceAnchor(utterance)
 			questionAnchor, questionOK =
 				boundedCoachPlanQuestionAnchor(question.Subject)
-			questionOK = reportedQuestionOK && questionOK
+			questionOK = questionInstanceOK && questionOK
 		}
 		if questionOK {
 			frame.QuestionContinuityTag =
 				agent.coachQuestionContinuityTag(questionAnchor)
+			if questionInstanceOK {
+				frame.QuestionInstanceTag =
+					agent.coachQuestionInstanceTag(questionInstanceAnchor)
+			}
 		}
 		if answerAnchor, ok := boundedCoachTargetCandidate(plan, utterance); ok {
 			questionSubject, linked := agent.utteranceLinksCoachQuestionTag(

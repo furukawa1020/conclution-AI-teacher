@@ -217,13 +217,13 @@ func (agent *vertexAgent) coachQuestionContinuityTag(anchor string) string {
 	return tag
 }
 
-func (agent *vertexAgent) nativeCoachScopeTag(anchor string) string {
-	if agent == nil || len(agent.continuityKey) != sha256.Size || anchor == "" {
+func (agent *vertexAgent) nativeCoachScopeTag(scopeID string) string {
+	if agent == nil || len(agent.continuityKey) != sha256.Size || scopeID == "" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, agent.continuityKey)
 	_, _ = mac.Write([]byte("native-explicit-coach-scope-v1\x00"))
-	_, _ = mac.Write([]byte(anchor))
+	_, _ = mac.Write([]byte(scopeID))
 	full := mac.Sum(nil)
 	tag := base64.RawURLEncoding.EncodeToString(full[:coachContinuityTagBytes])
 	wipe(full)

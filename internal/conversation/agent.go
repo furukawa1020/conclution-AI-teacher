@@ -168,7 +168,9 @@ type NativeStatePreparer interface {
 // NativeCoachStatePreparer synchronously issues the only cross-turn authority
 // for a newly detected Native Respondent Coach turn. It stores no transcript
 // or generated question: only a finite open-answer shape and a dedicated,
-// non-reversible scope proof derived from the current explicit request.
+// non-reversible scope marker bound to the random session and turn. The
+// deterministic issuance path, not a persisted utterance fingerprint, proves
+// that the current request passed explicit-consent gating.
 type NativeCoachStatePreparer interface {
 	PrepareNativeCoachState(
 		uid string,

@@ -162,6 +162,44 @@ func TestPrepareNativeCoachStateRejectsSpeechWithoutExplicitConsent(t *testing.T
 	}
 }
 
+func TestPrepareNativeCoachStateScopeTagContainsNoUtteranceFingerprint(t *testing.T) {
+	const uid = "native-generic-scope-user"
+	agent := newTestAgent(t, &fakeGenerator{})
+	base, requiresStaged, err := agent.PrepareNativeState(uid, "")
+	if err != nil || requiresStaged || base == "" {
+		t.Fatalf("base state=%q requires staged=%v err=%v", base, requiresStaged, err)
+	}
+	first, err := agent.PrepareNativeCoachState(
+		uid,
+		base,
+		"上司に目的を聞かれました。答え方を一問だけ手伝ってください",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := agent.PrepareNativeCoachState(
+		uid,
+		base,
+		"面接で強みを質問されました。何て答えたらいいですか",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstState, err := agent.codec.open(uid, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondState, err := agent.codec.open(uid, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTag := firstState.PendingAnswer.NativeCoachScopeTag
+	secondTag := secondState.PendingAnswer.NativeCoachScopeTag
+	if firstTag == "" || firstTag != secondTag {
+		t.Fatalf("generic scope changed with utterance: first=%q second=%q", firstTag, secondTag)
+	}
+}
+
 func TestPreparedNativeCoachStateDrivesTheRealNextRespondentTurn(t *testing.T) {
 	const (
 		uid       = "native-coach-next-turn-user"

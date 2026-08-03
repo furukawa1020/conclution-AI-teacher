@@ -2928,10 +2928,32 @@ test("a first-turn Native coach preserves signed state without replaying the utt
   assert.notEqual(liveStart, -1);
   assert.notEqual(liveEnd, -1);
   const live = bridge.slice(liveStart, liveEnd);
+  assert.match(
+    live,
+    /createVoiceLiveServerProtocol\([\s\S]*safeVoiceResponse\(result, strictCloudMinimization\)[\s\S]*\{ nativeAudio \},\s*\);/u,
+  );
 
   assert.match(
     live,
     /message\.type === "coach"[\s\S]*state !== "committed"[\s\S]*session\.playback\.activateCoach\(\)/u,
+  );
+  const coachStart = live.indexOf('if (message.type === "coach")');
+  const finalStart = live.indexOf('if (message.type === "final")', coachStart);
+  assert.ok(coachStart >= 0);
+  assert.ok(finalStart > coachStart);
+  const coachBranch = live.slice(coachStart, finalStart);
+  assert.match(
+    coachBranch,
+    /globalThis\.dispatchEvent\(\s*new CustomEvent\("kotae:coach-checkpoint", \{\s*detail: Object\.freeze\(\{\s*sessionState: message\.sessionState,\s*version: 1,\s*\}\),\s*\}\),\s*\);/u,
+  );
+  assert.ok(
+    coachBranch.indexOf("session.playback.activateCoach();") <
+      coachBranch.indexOf("globalThis.dispatchEvent("),
+  );
+  assert.ok(
+    coachBranch.indexOf("globalThis.dispatchEvent(") <
+      coachBranch.lastIndexOf("return;"),
+    "the exact checkpoint event is committed synchronously before audio handling",
   );
   assert.match(
     live,
@@ -2984,6 +3006,69 @@ test("a first-turn Native coach preserves signed state without replaying the utt
   );
 });
 
+test("Rust accepts only the exact coach checkpoint and preserves it across a recoverable turn", async () => {
+  const client = await readFile(
+    new URL("../src/main.rs", import.meta.url),
+    "utf8",
+  );
+  const listenerStart = client.indexOf(
+    "pub fn install_coach_checkpoint_listener(",
+  );
+  const listenerEnd = client.indexOf("\n    pub fn end_turn()", listenerStart);
+  assert.ok(listenerStart >= 0);
+  assert.ok(listenerEnd > listenerStart);
+  const listener = client.slice(listenerStart, listenerEnd);
+  assert.match(listener, /js_sys::Object::keys\(detail_object\)/u);
+  assert.match(listener, /valid_coach_checkpoint_keys\(&key_names\)/u);
+  assert.match(
+    listener,
+    /valid_coach_checkpoint_metadata\(&checkpoint, version, keys\.length\(\)\)/u,
+  );
+  const sessionAt = listener.indexOf("session_state.set(checkpoint);");
+  const routeAt = listener.indexOf(
+    "route.set(NATIVE_RESPONDENT_COACH_ROUTE.to_string());",
+  );
+  const coachAt = listener.indexOf("coach_state.set(CoachState::from_result(");
+  assert.ok(sessionAt >= 0);
+  assert.ok(routeAt > sessionAt);
+  assert.ok(coachAt > routeAt);
+  assert.match(
+    listener.slice(coachAt),
+    /CoachPhase::AwaitingAnswer,\s*CoachAction::Elicit/u,
+  );
+  assert.match(
+    listener,
+    /add_event_listener_with_callback\(\s*"kotae:coach-checkpoint"/u,
+  );
+
+  const armStart = client.indexOf("fn arm_listening(");
+  const armEnd = client.indexOf("\nfn resume_foreground_interruption(", armStart);
+  const arm = client.slice(armStart, armEnd);
+  assert.match(
+    arm,
+    /coach_state\.peek\(\)\.requires_staged_route\(\)[\s\S]*session_state\.peek\(\)\.clone\(\)[\s\S]*cloud::begin_turn\([\s\S]*&state_snapshot,[\s\S]*coach_active_snapshot/u,
+  );
+
+  const submitStart = client.indexOf("fn submit_turn(");
+  const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
+  const submit = client.slice(submitStart, submitEnd);
+  const recoverableStart = submit.indexOf(
+    "Err(FinishTurnError::Recoverable(message))",
+  );
+  const terminalStart = submit.indexOf(
+    "Err(FinishTurnError::Message(message))",
+    recoverableStart,
+  );
+  assert.ok(recoverableStart >= 0);
+  assert.ok(terminalStart > recoverableStart);
+  const recoverable = submit.slice(recoverableStart, terminalStart);
+  assert.match(recoverable, /arm_listening\(/u);
+  assert.doesNotMatch(
+    recoverable,
+    /session_state\.set|route\.set|coach_state\.set|cloud::stop_session/u,
+  );
+});
+
 test("a Native coach control is exact, one-shot, and precedes response audio", () => {
   const checkpoint = "signed-coach-checkpoint";
   const coachControl = Object.freeze({
@@ -3012,6 +3097,19 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     return protocol;
   };
 
+  for (const expectations of [
+    undefined,
+    null,
+    {},
+    { nativeAudio: 1 },
+    { nativeAudio: true, extra: true },
+  ]) {
+    assert.throws(
+      () => createVoiceLiveServerProtocol((result) => result, expectations),
+      /voice_live_protocol_expectation_invalid/u,
+    );
+  }
+
   const protocol = createCommitted();
   assert.deepEqual(
     protocol.acceptText(JSON.stringify(coachControl)),
@@ -3030,6 +3128,8 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     { ...coachControl, sessionState: "" },
     { ...coachControl, sessionState: ` ${checkpoint}` },
     { ...coachControl, sessionState: `${checkpoint}\n` },
+    { ...coachControl, sessionState: `${checkpoint}\u007f` },
+    { ...coachControl, sessionState: `\u0085${checkpoint}` },
     {
       ...coachControl,
       sessionState: "x".repeat(

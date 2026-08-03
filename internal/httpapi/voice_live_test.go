@@ -279,7 +279,19 @@ type liveEndpointTestService struct {
 
 type liveControlTestService struct {
 	liveTestVoiceService
-	controlCalls int
+	controlCalls       int
+	prepareErr         error
+	controlState       *string
+	ignoreControlError bool
+}
+
+type liveCoachStateValidator struct{}
+
+func (*liveCoachStateValidator) ValidateStateToken(uid string, token string) error {
+	if uid != "user-123" || token == "cryptographically-invalid" {
+		return errors.New("invalid caller-bound state")
+	}
+	return nil
 }
 
 type liveLifecycleTestService struct {
@@ -388,10 +400,18 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 			return VoiceTurnResult{}, ctx.Err()
 		case chunk, open := <-audio:
 			if !open {
+				if service.prepareErr != nil {
+					return VoiceTurnResult{}, service.prepareErr
+				}
 				service.mu.Lock()
 				service.controlCalls++
 				service.mu.Unlock()
-				if err := onCoachActive(service.result.StateToken); err != nil {
+				controlState := service.result.StateToken
+				if service.controlState != nil {
+					controlState = *service.controlState
+				}
+				if err := onCoachActive(controlState); err != nil &&
+					!service.ignoreControlError {
 					return VoiceTurnResult{}, err
 				}
 				for _, output := range service.output {
@@ -529,6 +549,7 @@ func newVoiceLiveControlledTestServer(
 			AppRateLimiter:          appLimiter,
 			LiveLeaseManager:        leaseManager,
 			LiveHandshakeGate:       handshakeGate,
+			CoachStateValidator:     &liveCoachStateValidator{},
 			RequestTimeout:          2 * time.Second,
 			MaxRequestBytes:         13 * 1024 * 1024,
 			livePipelineJoinTimeout: pipelineJoinTimeout,
@@ -804,10 +825,153 @@ func TestVoiceLiveCoachControlPrecedesNativeAudioAndCompletesNormally(t *testing
 	}
 }
 
+func TestVoiceLiveRejectsInvalidCoachCheckpointBeforeControlOrAudio(t *testing.T) {
+	for name, invalidState := range map[string]string{
+		"empty":         "",
+		"oversize":      strings.Repeat("x", maxStateBytes+1),
+		"bad signature": "cryptographically-invalid",
+	} {
+		t.Run(name, func(t *testing.T) {
+			controlState := invalidState
+			native := &liveControlTestService{
+				liveTestVoiceService: liveTestVoiceService{
+					output: [][]byte{{4, 0, 5, 0}},
+				},
+				controlState:       &controlState,
+				ignoreControlError: true,
+			}
+			server := newVoiceLiveControlledTestServer(
+				t,
+				&liveTestVoiceService{},
+				&liveTestVerifier{},
+				&fakeLimiter{},
+				&fakeLimiter{wantKey: "app:app-123"},
+				guard.NewMemoryVoiceLiveLeaseManager(),
+				NewVoiceLiveHandshakeGate(2),
+				0,
+				nil,
+				native,
+			)
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.CloseNow()
+
+			writeVoiceLiveNativeStart(t, ctx, conn)
+			if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+				t.Fatalf("ready=%#v", ready)
+			}
+			if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+				t.Fatal(err)
+			}
+			commit, err := json.Marshal(voiceLiveCommitFrame{
+				Type: "commit", Version: voiceLiveVersion,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+				t.Fatal(err)
+			}
+
+			// The first post-ready frame is the terminal error. Receiving either a
+			// coach JSON frame or binary audio here would expose an uncheckpointed
+			// turn, even though this fake deliberately ignores the callback error.
+			terminal := readVoiceLiveJSON(t, ctx, conn)
+			if terminal["type"] != "error" ||
+				terminal["code"] != voiceLiveCodeAPIUnavailable {
+				t.Fatalf("terminal=%#v", terminal)
+			}
+		})
+	}
+}
+
+func TestVoiceLiveRejectsCoachCheckpointFinalStateMismatch(t *testing.T) {
+	checkpoint := "signed-native-coach-state"
+	native := &liveControlTestService{
+		liveTestVoiceService: liveTestVoiceService{
+			result: VoiceTurnResult{StateToken: "different-final-state"},
+		},
+		controlState: &checkpoint,
+	}
+	server := newVoiceLiveControlledTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		guard.NewMemoryVoiceLiveLeaseManager(),
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		nil,
+		native,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type: "commit", Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	coach := readVoiceLiveJSON(t, ctx, conn)
+	if coach["type"] != "coach" || coach["sessionState"] != checkpoint {
+		t.Fatalf("coach=%#v", coach)
+	}
+	terminal := readVoiceLiveJSON(t, ctx, conn)
+	if terminal["type"] != "error" ||
+		terminal["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("terminal=%#v", terminal)
+	}
+}
+
+func TestValidVoiceLiveCoachSessionState(t *testing.T) {
+	tests := map[string]struct {
+		value string
+		want  bool
+	}{
+		"valid":         {value: "opaque.signed-state_123", want: true},
+		"empty":         {value: ""},
+		"oversize":      {value: strings.Repeat("x", maxStateBytes+1)},
+		"trim mismatch": {value: " signed-state"},
+		"control":       {value: "signed\x00state"},
+		"invalid UTF-8": {value: string([]byte{0xff})},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := validVoiceLiveCoachSessionState(test.value); got != test.want {
+				t.Fatalf("validVoiceLiveCoachSessionState()=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestVoiceLiveReturnsNativeFallbackOnlyBeforeAnyOutputAudio(t *testing.T) {
 	t.Parallel()
 	legacy := &liveTestVoiceService{}
-	native := &liveTestVoiceService{err: ErrVoiceNativeFallback}
+	native := &liveControlTestService{
+		liveTestVoiceService: liveTestVoiceService{},
+		prepareErr:           ErrVoiceNativeFallback,
+	}
 	server := newVoiceLiveControlledTestServer(
 		t,
 		legacy,
@@ -850,8 +1014,17 @@ func TestVoiceLiveReturnsNativeFallbackOnlyBeforeAnyOutputAudio(t *testing.T) {
 	legacy.mu.Lock()
 	legacyCalls := legacy.processLiveCalls
 	legacy.mu.Unlock()
-	if legacyCalls != 0 {
-		t.Fatalf("legacy calls=%d; replay belongs to the authenticated client", legacyCalls)
+	native.mu.Lock()
+	controlCalls := native.controlCalls
+	nativeCalls := native.processLiveCalls
+	native.mu.Unlock()
+	if legacyCalls != 0 || controlCalls != 0 || nativeCalls != 1 {
+		t.Fatalf(
+			"legacy calls=%d control calls=%d native calls=%d; prep failure must release nothing",
+			legacyCalls,
+			controlCalls,
+			nativeCalls,
+		)
 	}
 }
 

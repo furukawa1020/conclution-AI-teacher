@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -34,8 +35,8 @@ func (agent *vertexAgent) PrepareNativeState(
 // PrepareNativeCoachState synchronously establishes the only signed authority
 // for a newly detected Native Respondent Coach turn. The frame is deliberately
 // generic: it records an open answer position and a domain-separated opaque
-// proof of this explicit request, never the transcript, external question, a
-// generated prompt, or a model-selected answer operator.
+// marker for this consent-gated issuance, never a fingerprint of the
+// transcript, external question, generated prompt, or model-selected operator.
 func (agent *vertexAgent) PrepareNativeCoachState(
 	uid string,
 	token string,
@@ -66,11 +67,11 @@ func (agent *vertexAgent) PrepareNativeCoachState(
 		return "", ErrInvalidStateToken
 	}
 
-	scopeAnchor, reported :=
-		boundedReportedCoachQuestionInstanceAnchor(normalizedUtterance)
-	if !reported {
-		scopeAnchor = "explicit-native-coach-request\x00" + normalizedUtterance
-	}
+	// Bind this opaque marker only to the already-random session and the new
+	// generic turn. Explicit consent is proven by this deterministic issuance
+	// path and the enclosing authenticated state; no question or utterance
+	// fingerprint belongs in the persisted capability.
+	scopeAnchor := state.SessionID + "\x00" + strconv.Itoa(state.Turn+1)
 	scopeTag := agent.nativeCoachScopeTag(scopeAnchor)
 	if scopeTag == "" {
 		return "", ErrInvalidStateToken

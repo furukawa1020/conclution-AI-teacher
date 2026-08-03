@@ -623,6 +623,62 @@ func TestNativeRespondentCoachStatePreparationFailureReleasesNothing(t *testing.
 	}
 }
 
+func TestNativeRespondentCoachWithoutControlBoundaryReleasesNothing(t *testing.T) {
+	const utterance = "My manager asked why this change was needed. How should I answer?"
+	for _, method := range []string{"ProcessLive", "ProcessLiveWithEndpoint"} {
+		t.Run(method, func(t *testing.T) {
+			session := newScriptedSession(nativevoice.Event{
+				Kind:         nativevoice.EventInputCaption,
+				CaptionUTF8:  []byte(utterance),
+				CaptionFinal: true,
+			})
+			service, err := New(
+				&fakeOpener{session: session},
+				fakePreparer{
+					token:      "advanced-native-state",
+					coachToken: "generic-signed-coach-state",
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+
+			delivered := false
+			var processErr error
+			switch method {
+			case "ProcessLive":
+				_, processErr = service.ProcessLive(
+					context.Background(),
+					"uid-coach-no-control",
+					nativeInput(),
+					oneFrame(),
+					func([]byte) error { delivered = true; return nil },
+				)
+			case "ProcessLiveWithEndpoint":
+				_, processErr = service.ProcessLiveWithEndpoint(
+					context.Background(),
+					"uid-coach-no-control-endpoint",
+					nativeInput(),
+					oneFrame(),
+					func([]byte) error { delivered = true; return nil },
+					func() {},
+				)
+			}
+			if !errors.Is(processErr, httpapi.ErrVoiceNativeFallback) || delivered ||
+				session.commits != 0 || session.discards == 0 {
+				t.Fatalf(
+					"err=%v delivered=%v commits=%d discards=%d",
+					processErr,
+					delivered,
+					session.commits,
+					session.discards,
+				)
+			}
+		})
+	}
+}
+
 func TestNativeRespondentCoachUsesAuditedDirectConsentBoundary(t *testing.T) {
 	for _, value := range []string{
 		"上司に目的を聞かれた。答え方を一問だけ手伝って",

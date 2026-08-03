@@ -192,6 +192,13 @@ type VoiceTurnLiveControlService interface {
 	) (VoiceTurnResult, error)
 }
 
+// VoiceStateTokenValidator authenticates an opaque conversation state without
+// advancing it. The HTTP boundary uses a separately supplied validator instead
+// of trusting a live-service callback to vouch for its own checkpoint.
+type VoiceStateTokenValidator interface {
+	ValidateStateToken(uid string, token string) error
+}
+
 type VoiceOptions struct {
 	Service              VoiceTurnService
 	NativeLiveService    VoiceTurnLiveService
@@ -199,6 +206,7 @@ type VoiceOptions struct {
 	AppRateLimiter       guard.Limiter
 	LiveLeaseManager     guard.VoiceLiveLeaseManager
 	LiveHandshakeGate    *VoiceLiveHandshakeGate
+	CoachStateValidator  VoiceStateTokenValidator
 	RequestTimeout       time.Duration
 	MaxRequestBytes      int64
 	RequireRecentPasskey bool

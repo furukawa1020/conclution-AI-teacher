@@ -825,7 +825,7 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
 
   assert.match(
     client,
-    /const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、答えを代わりに作らない";/u,
+    /const ANSWER_SUPPORT_COPY: &str =\s*"「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する";/u,
   );
   assert.match(
     client,
@@ -4514,6 +4514,101 @@ test("committed-response barge-in preserves foreground response mode", async () 
   );
 });
 
+test("confirmed follow-up speech expires only the previous turn proof", async () => {
+  const [bridge, client] = await Promise.all([
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+  ]);
+
+  const monitorStart = bridge.indexOf("function startBargeInMonitoring(");
+  const monitorEnd = bridge.indexOf(
+    "\n}\n\nfunction createStreamingPlayback(",
+    monitorStart,
+  );
+  assert.ok(monitorStart >= 0);
+  assert.ok(monitorEnd > monitorStart);
+  const monitor = bridge.slice(monitorStart, monitorEnd);
+  const priorAt = monitor.indexOf(
+    "const hadConfirmedSpeech = recording.vadHasSpeech;",
+  );
+  const transitionAt = monitor.indexOf(
+    'recording.vadHasSpeech = vadState.phase === "confirmed";',
+  );
+  const eventAt = monitor.indexOf(
+    'new CustomEvent("kotae:voice-input-confirmed"',
+  );
+  const endpointAt = monitor.indexOf("maybeCommitHybridEndpoint(recording, now)");
+  assert.ok(priorAt >= 0);
+  assert.ok(transitionAt > priorAt);
+  assert.ok(eventAt > transitionAt);
+  assert.ok(endpointAt > eventAt);
+  assert.match(
+    monitor,
+    /if \(!hadConfirmedSpeech && recording\.vadHasSpeech\) \{\s*globalThis\.dispatchEvent\(\s*new CustomEvent\("kotae:voice-input-confirmed", \{\s*detail: Object\.freeze\(\{ version: 1 \}\),\s*\}\),\s*\);\s*\}/u,
+  );
+  const eventBlock = monitor.slice(eventAt, eventAt + 220);
+  assert.doesNotMatch(eventBlock, /answerProof|phase|action|audio|transcript/u);
+
+  const captureStart = bridge.indexOf("function armVad(recording)");
+  const captureEnd = bridge.indexOf(
+    "\n}\n\nfunction createRecordingState(",
+    captureStart,
+  );
+  assert.ok(captureStart >= 0);
+  assert.ok(captureEnd > captureStart);
+  const capture = bridge.slice(captureStart, captureEnd);
+  assert.match(
+    capture,
+    /const hadConfirmedSpeech = recording\.vadHasSpeech;\s*recording\.vadHasSpeech = vadState\.hasSpeech;\s*if \(!hadConfirmedSpeech && recording\.vadHasSpeech\) \{[\s\S]*new CustomEvent\("kotae:voice-input-confirmed", \{\s*detail: Object\.freeze\(\{ version: 1 \}\)/u,
+  );
+
+  const listenerStart = client.indexOf(
+    "pub fn install_voice_input_confirmed_listener(",
+  );
+  const listenerEnd = client.indexOf(
+    "\n    pub fn install_first_audio_listener(",
+    listenerStart,
+  );
+  assert.ok(listenerStart >= 0);
+  assert.ok(listenerEnd > listenerStart);
+  const listener = client.slice(listenerStart, listenerEnd);
+  assert.match(listener, /js_sys::Object::keys\(detail_object\)/u);
+  assert.match(
+    listener,
+    /confirmed_voice_input_state\(\*coach_state\.peek\(\), version, &key_names\)/u,
+  );
+  assert.match(listener, /coach_state\.set\(next_state\)/u);
+  assert.doesNotMatch(listener, /CoachState::from_|phase:|action:/u);
+  assert.match(
+    listener,
+    /add_event_listener_with_callback\(\s*"kotae:voice-input-confirmed"/u,
+  );
+  assert.match(
+    client,
+    /use_hook\(\|\| cloud::install_voice_input_confirmed_listener\(coach_state\)\)/u,
+  );
+  assert.ok(
+    [...client.matchAll(/pub fn install_voice_input_confirmed_listener\(/gu)]
+      .length >= 2,
+    "the native test build keeps a non-wasm listener stub",
+  );
+
+  assert.doesNotMatch(client, /本人回答証明/u);
+  assert.doesNotMatch(client, /実際に聞かれた問いへ/u);
+  assert.match(client, /今回の入力 \/ A先頭確認/u);
+  assert.match(client, /報告された問いへの入力が、Aから始まりました/u);
+  for (const boundary of [
+    "話者",
+    "ライブネス",
+    "外部で実際にその問いを聞かれた事実",
+    "正解",
+    "能力",
+    "上達",
+  ]) {
+    assert.match(client, new RegExp(boundary, "u"));
+  }
+});
+
 test("network keeps one finite deadline while validated playback drains separately", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
@@ -4624,6 +4719,9 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
   const validate = Function(
     `"use strict"; ${validatorSource}; return hasValidCoachMetadata;`,
   )();
+  const validateAnswerProof = Function(
+    `"use strict"; ${validatorSource}; return hasValidAnswerProofMetadata;`,
+  )();
 
   for (const [target, phase, action] of [
     ["assistant", "none", "none"],
@@ -4647,6 +4745,56 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
     assert.equal(validate(target, phase, action), false);
   }
 
+  assert.equal(
+    validateAnswerProof(
+      "question_bound_input_answer_first",
+      "respondent",
+      "restructure",
+      "complete",
+      "complete",
+    ),
+    true,
+  );
+  assert.equal(
+    validateAnswerProof(
+      "question_bound_input_answer_first",
+      "respondent",
+      "restructure",
+      "expanding",
+      "expand",
+    ),
+    true,
+  );
+  for (const candidate of [
+    ["verified", "respondent", "restructure", "complete", "complete"],
+    [
+      "question_bound_input_answer_first",
+      "assistant",
+      "none",
+      "none",
+      "none",
+    ],
+    [
+      "question_bound_input_answer_first",
+      "respondent",
+      "awaiting_answer",
+      "awaiting_answer",
+      "elicit",
+    ],
+  ]) {
+    assert.equal(validateAnswerProof(...candidate), false);
+  }
+  assert.equal(
+    validateAnswerProof(
+      "none",
+      "assistant",
+      "none",
+      "none",
+      "none",
+    ),
+    true,
+  );
+
   const responseStart = bridge.indexOf("function safeVoiceResponse(");
   const responseEnd = bridge.indexOf(
     "\n}\n\nfunction mapVoiceResponseError",
@@ -4659,6 +4807,15 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
   );
   assert.match(response, /coachPhase: payload\.coachPhase/u);
   assert.match(response, /coachAction: payload\.coachAction/u);
+  assert.match(
+    response,
+    /hasValidAnswerProofMetadata\(\s*answerProof,\s*payload\.assistanceTarget,\s*payload\.respondentStage,\s*payload\.coachPhase,\s*payload\.coachAction,\s*\)/u,
+  );
+  assert.match(
+    response,
+    /expectedStrictCloudMinimization && answerProof !== "none"/u,
+  );
+  assert.match(response, /answerProof,/u);
   assert.match(
     response,
     /expectedStrictCloudMinimization[\s\S]*payload\.privacyStatus !== "blocked"[\s\S]*payload\.privacyStatus !== "clear"/u,

@@ -1609,7 +1609,15 @@ function armVad(recording) {
         : undefined,
     );
     recording.firstVoiceAt = vadState.firstVoiceAt;
+    const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.hasSpeech;
+    if (!hadConfirmedSpeech && recording.vadHasSpeech) {
+      globalThis.dispatchEvent(
+        new CustomEvent("kotae:voice-input-confirmed", {
+          detail: Object.freeze({ version: 1 }),
+        }),
+      );
+    }
     recording.softVoiceConfirmed = vadState.softVoiceConfirmed;
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
@@ -1985,6 +1993,23 @@ function hasValidCoachMetadata(assistanceTarget, phase, action) {
   );
 }
 
+function hasValidAnswerProofMetadata(
+  proof,
+  assistanceTarget,
+  respondentStage,
+  coachPhase,
+  coachAction,
+) {
+  if (proof === "none") return true;
+  if (proof !== "question_bound_input_answer_first") return false;
+  return (
+    assistanceTarget === "respondent" &&
+    respondentStage === "restructure" &&
+    ((coachPhase === "complete" && coachAction === "complete") ||
+      (coachPhase === "expanding" && coachAction === "expand"))
+  );
+}
+
 function clearPendingDocument(reason = "cleared") {
   const hadPendingDocument = pendingDocument !== undefined;
   pendingDocument = undefined;
@@ -2028,6 +2053,8 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     fail("voice_response_invalid");
   }
   const hasAudio = payload.audioBase64 !== "";
+  const answerProof =
+    payload.answerProof === undefined ? "none" : payload.answerProof;
   if (
     !isBase64(payload.audioBase64) ||
     payload.audioBase64.length > RESPONSE_AUDIO_MAX_BASE64_CHARS ||
@@ -2051,6 +2078,14 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
       payload.coachPhase,
       payload.coachAction,
     ) ||
+    !hasValidAnswerProofMetadata(
+      answerProof,
+      payload.assistanceTarget,
+      payload.respondentStage,
+      payload.coachPhase,
+      payload.coachAction,
+    ) ||
+    (expectedStrictCloudMinimization && answerProof !== "none") ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
     !["", "blocked", "clear"].includes(payload.privacyStatus) ||
@@ -2085,6 +2120,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
         payload.respondentStage !== "none" ||
         payload.coachPhase !== "none" ||
         payload.coachAction !== "none" ||
+        answerProof !== "none" ||
         research.status !== "none" ||
         research.records.length !== 0 ||
         payload.route !== "strict-privacy-blocked" ||
@@ -2106,6 +2142,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     respondentStage: payload.respondentStage,
     coachPhase: payload.coachPhase,
     coachAction: payload.coachAction,
+    answerProof,
     needsPaper: payload.needsPaper,
     privacyStatus: payload.privacyStatus,
     researchStatus: research.status,
@@ -3962,7 +3999,15 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       rms: Math.sqrt(sumSquares / pcm.length),
     });
     recording.firstVoiceAt = vadState.firstVoiceAt;
+    const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.phase === "confirmed";
+    if (!hadConfirmedSpeech && recording.vadHasSpeech) {
+      globalThis.dispatchEvent(
+        new CustomEvent("kotae:voice-input-confirmed", {
+          detail: Object.freeze({ version: 1 }),
+        }),
+      );
+    }
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }

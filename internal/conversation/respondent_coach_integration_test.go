@@ -152,6 +152,7 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 	first, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     questionText + "。どう答えればいいですか",
+		InputOrigin:   InputOriginCommittedVoice,
 	})
 	if err != nil {
 		t.Fatalf("elicit: %v", err)
@@ -183,6 +184,7 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 		SchemaVersion: SchemaVersion,
 		Utterance:     lateAnswer,
 		StateToken:    first.StateToken,
+		InputOrigin:   InputOriginCommittedVoice,
 	})
 	if err != nil {
 		t.Fatalf("A later: %v", err)
@@ -310,21 +312,31 @@ func TestAgentExplicitFirstAnswerUpdatesBoundedFadingMetadata(t *testing.T) {
 	first, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     questionText + "。答え方を一問だけ手伝って",
+		InputOrigin:   InputOriginCommittedVoice,
 	})
 	if err != nil {
 		t.Fatalf("elicit: %v", err)
 	}
 	assertCoachMetadata(t, first, "awaiting_answer", "elicit")
+	firstState := openCoachState(t, agent, uid, first.StateToken)
+	if first.AnswerProof != AnswerProofNone ||
+		firstState.PendingAnswer.QuestionInstanceTag == "" {
+		t.Fatalf("question instance was not bound without premature proof: %#v %#v", first, firstState.PendingAnswer)
+	}
 
 	result, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     coreAnswer,
 		StateToken:    first.StateToken,
+		InputOrigin:   InputOriginCommittedVoice,
 	})
 	if err != nil {
 		t.Fatalf("A first: %v", err)
 	}
 	assertCoachMetadata(t, result, "complete", "complete")
+	if result.AnswerProof != AnswerProofQuestionBoundInputAnswerFirst {
+		t.Fatalf("verified answer proof = %q", result.AnswerProof)
+	}
 	if result.SpokenReply != fixedReply ||
 		strings.Contains(result.SpokenReply, proxyDraft) ||
 		strings.Contains(result.SpokenReply, coreAnswer) ||
@@ -339,6 +351,110 @@ func TestAgentExplicitFirstAnswerUpdatesBoundedFadingMetadata(t *testing.T) {
 		following.Support.VerifiedFirstAnswers != 1 ||
 		following.Support.QuestionCooldown != questionCooldownAfterAnswer {
 		t.Fatalf("verified explicit answer did not update bounded fading metadata: %#v", following.Support)
+	}
+}
+
+func TestAnswerProofRejectsWholeTurnTargetEvenWhenBothModelsSayFirst(t *testing.T) {
+	const (
+		uid      = "uid-proof-whole-turn-target"
+		question = "上司に導入目的は何かと聞かれました。答え方を一問だけ手伝って"
+		answer   = "目的は背景を説明すると長いのですが評価基準をそろえることです"
+	)
+	plan := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		answer,
+		answer,
+		"この下書きは読み上げない。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, respondentAwaitingPlan())},
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			answer,
+			answer,
+			answercontract.PositionFirst,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     question,
+		InputOrigin:   InputOriginCommittedVoice,
+	})
+	if err != nil {
+		t.Fatalf("bind question: %v", err)
+	}
+	second, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     answer,
+		StateToken:    first.StateToken,
+		InputOrigin:   InputOriginCommittedVoice,
+	})
+	if err != nil {
+		t.Fatalf("whole-turn answer: %v", err)
+	}
+	if second.AnswerProof != AnswerProofNone ||
+		second.AnswerProofCandidate != AnswerProofNone {
+		t.Fatalf("whole-turn target minted proof: %#v", second)
+	}
+}
+
+func TestAnswerProofRejectsQuestionOperatorMismatch(t *testing.T) {
+	const (
+		uid      = "uid-proof-question-operator-mismatch"
+		question = "上司に導入時期はいつかと聞かれました。答え方を一問だけ手伝って"
+		answer   = "目的は品質向上です。判断のばらつきを減らします"
+	)
+	awaiting := respondentAwaitingPlan()
+	awaiting.AnswerContract.QuestionFrame.Subject = "導入時期"
+	plan := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入時期",
+		answer,
+		"目的は品質向上です",
+		"この下書きは読み上げない。",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, awaiting)},
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			answer,
+			"目的は品質向上です",
+			answercontract.PositionFirst,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     question,
+		InputOrigin:   InputOriginCommittedVoice,
+	})
+	if err != nil {
+		t.Fatalf("bind mismatched question: %v", err)
+	}
+	frame := openCoachState(t, agent, uid, first.StateToken).PendingAnswer
+	if frame.QuestionInstanceTag != "" {
+		t.Fatalf("operator mismatch minted a question capability: %#v", frame)
+	}
+	second, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     answer,
+		StateToken:    first.StateToken,
+		InputOrigin:   InputOriginCommittedVoice,
+	})
+	if err != nil {
+		t.Fatalf("mismatched answer: %v", err)
+	}
+	if second.AnswerProof != AnswerProofNone ||
+		second.AnswerProofCandidate != AnswerProofNone {
+		t.Fatalf("operator mismatch minted proof: %#v", second)
 	}
 }
 
@@ -1407,6 +1523,7 @@ func TestAgentExplicitRespondentCoachAcceptsLateAnswerWithoutRestatement(t *test
 	first, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
 		Utterance:     questionText + "。どう答えればいいですか",
+		InputOrigin:   InputOriginCommittedVoice,
 	})
 	if err != nil {
 		t.Fatalf("elicit: %v", err)
@@ -1432,11 +1549,15 @@ func TestAgentExplicitRespondentCoachAcceptsLateAnswerWithoutRestatement(t *test
 		SchemaVersion: SchemaVersion,
 		Utterance:     lateAnswer,
 		StateToken:    first.StateToken,
+		InputOrigin:   InputOriginCommittedVoice,
 	})
 	if err != nil {
 		t.Fatalf("A later: %v", err)
 	}
 	assertCoachMetadata(t, second, "complete", "complete")
+	if second.AnswerProof != AnswerProofNone {
+		t.Fatalf("late answer received a false proof: %q", second.AnswerProof)
+	}
 	if second.SpokenReply != fixedTip ||
 		strings.Contains(second.SpokenReply, proxyDraft) ||
 		strings.Contains(second.SpokenReply, lateAnswer) ||

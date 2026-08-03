@@ -74,11 +74,26 @@ type VoiceTurn struct {
 	// still provisional. It never widens authority: outbound research and any
 	// future executable action must fail before execution.
 	Speculative bool `json:"-"`
+	// InputOrigin is server-authored provenance. Only the voice pipeline may
+	// mark an utterance as committed voice input, after recognition has reached
+	// its final boundary. Model text, provisional recognition, tests, and future
+	// non-voice callers must leave it unset or use a different fixed value.
+	InputOrigin InputOrigin `json:"-"`
 	// ResearchDisabled is a server-authored capability restriction. It is not
 	// model-visible input and must be checked before any outbound verifier call.
 	ResearchDisabled bool       `json:"-"`
 	PDF              *InlinePDF `json:"pdf,omitempty"`
 }
+
+// InputOrigin is deliberately finite so an AnswerProof can never be minted
+// from model-written or merely provisional text.
+type InputOrigin string
+
+const (
+	InputOriginUnknown          InputOrigin = ""
+	InputOriginProvisionalVoice InputOrigin = "provisional_voice"
+	InputOriginCommittedVoice   InputOrigin = "committed_voice"
+)
 
 type InlinePDF struct {
 	MIMEType string `json:"mimeType"`
@@ -86,27 +101,45 @@ type InlinePDF struct {
 }
 
 type VoiceTurnResult struct {
-	SchemaVersion       int                    `json:"schemaVersion"`
-	Domain              string                 `json:"domain"`
-	Intent              string                 `json:"intent"`
-	AssistanceTarget    string                 `json:"assistance_target"`
-	RespondentStage     string                 `json:"respondent_stage"`
-	CoachPhase          string                 `json:"coach_phase"`
-	CoachAction         string                 `json:"coach_action"`
-	ResearchStatus      string                 `json:"research_status"`
-	ResearchRecords     []ResearchRecord       `json:"research_records"`
-	LatentQuestion      string                 `json:"latent_question"`
-	ArgumentStructure   string                 `json:"argument_structure"`
-	InterventionPolicy  string                 `json:"intervention_policy"`
-	SpokenReply         string                 `json:"spoken_reply"`
-	Confidence          float64                `json:"confidence"`
-	Intervention        ArbiterDecision        `json:"intervention"`
-	SelfCorrectionGrace bool                   `json:"self_correction_grace"`
-	AnswerContract      answercontract.Metrics `json:"answer_contract_metrics"`
-	Route               string                 `json:"route"`
-	NeedsClarification  bool                   `json:"needs_clarification"`
-	StateToken          string                 `json:"state_token"`
+	SchemaVersion    int         `json:"schemaVersion"`
+	Domain           string      `json:"domain"`
+	Intent           string      `json:"intent"`
+	AssistanceTarget string      `json:"assistance_target"`
+	RespondentStage  string      `json:"respondent_stage"`
+	CoachPhase       string      `json:"coach_phase"`
+	CoachAction      string      `json:"coach_action"`
+	AnswerProof      AnswerProof `json:"answer_proof"`
+	// AnswerProofCandidate is process-private evidence produced for both
+	// provisional and committed voice input. The voice pipeline may promote it
+	// only after its exact final-transcript commit boundary. It is never
+	// serialized, persisted, or returned by an HTTP handler.
+	AnswerProofCandidate AnswerProof            `json:"-"`
+	ResearchStatus       string                 `json:"research_status"`
+	ResearchRecords      []ResearchRecord       `json:"research_records"`
+	LatentQuestion       string                 `json:"latent_question"`
+	ArgumentStructure    string                 `json:"argument_structure"`
+	InterventionPolicy   string                 `json:"intervention_policy"`
+	SpokenReply          string                 `json:"spoken_reply"`
+	Confidence           float64                `json:"confidence"`
+	Intervention         ArbiterDecision        `json:"intervention"`
+	SelfCorrectionGrace  bool                   `json:"self_correction_grace"`
+	AnswerContract       answercontract.Metrics `json:"answer_contract_metrics"`
+	Route                string                 `json:"route"`
+	NeedsClarification   bool                   `json:"needs_clarification"`
+	StateToken           string                 `json:"state_token"`
 }
+
+// AnswerProof is a content-free, current-turn server attestation. It is not a
+// correctness score or speaker identity proof. The verified value means only
+// that a committed input utterance was bound to a screened reported-question
+// instance and both independent gates found complete required-slot evidence
+// at the front without using an AI reconstruction.
+type AnswerProof string
+
+const (
+	AnswerProofNone                          AnswerProof = "none"
+	AnswerProofQuestionBoundInputAnswerFirst AnswerProof = "question_bound_input_answer_first"
+)
 
 // ResearchRecord is bounded, current-turn discovery metadata. It deliberately
 // excludes abstracts and never represents claim-level evidence.
@@ -157,9 +190,10 @@ type ThoughtStateDelta struct {
 // answer someone else's question. It intentionally stores no transcript,
 // question span, answer attempt, evidence span, hypothesis prose, reconstructed
 // reply, or model-written prompt. RestatementTag is retained as a compatibility
-// reader for the preceding rollout. QuestionContinuityTag and ContinuityTag
-// are domain-separated, truncated HMACs of a screened question subject and the
-// person's exact target answer. NativeCoachScopeTag is a separately
+// reader for the preceding rollout. QuestionInstanceTag,
+// QuestionContinuityTag, and ContinuityTag are domain-separated, truncated
+// HMACs of the screened reported-question instance, its bounded subject, and
+// the person's exact target answer. NativeCoachScopeTag is a separately
 // domain-separated HMAC proving only that this user explicitly opened one
 // generic Native coach scope; it is never interpreted as question or answer
 // continuity. None of these server-only proofs is included in a model prompt.
@@ -177,6 +211,7 @@ type PendingAnswerFrame struct {
 	AssistantFollowUp     bool                          `json:"assistant_follow_up,omitempty"`
 	ExpansionOptIn        bool                          `json:"expansion_opt_in,omitempty"`
 	RestatementTag        string                        `json:"restatement_tag,omitempty"`
+	QuestionInstanceTag   string                        `json:"question_instance_tag,omitempty"`
 	QuestionContinuityTag string                        `json:"question_continuity_tag,omitempty"`
 	ContinuityTag         string                        `json:"continuity_tag,omitempty"`
 	NativeCoachScopeTag   string                        `json:"native_coach_scope_tag,omitempty"`
@@ -189,6 +224,16 @@ func (turn VoiceTurn) Validate() error {
 
 func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 	if turn.SchemaVersion != SchemaVersion {
+		return VoiceTurn{}, ErrInvalidTurn
+	}
+	switch turn.InputOrigin {
+	case InputOriginUnknown,
+		InputOriginProvisionalVoice,
+		InputOriginCommittedVoice:
+	default:
+		return VoiceTurn{}, ErrInvalidTurn
+	}
+	if turn.Speculative && turn.InputOrigin == InputOriginCommittedVoice {
 		return VoiceTurn{}, ErrInvalidTurn
 	}
 	if turn.Foreground && !turn.Ambient {
@@ -294,7 +339,8 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 	}
 	target, ok := answercontract.TargetSlot(frame.Operator)
 	_, expansionOK := answercontract.TargetSlot(frame.ExpansionOperator)
-	continuityProtected := frame.QuestionContinuityTag != "" ||
+	continuityProtected := frame.QuestionInstanceTag != "" ||
+		frame.QuestionContinuityTag != "" ||
 		frame.ContinuityTag != ""
 	nativeCoachScope := frame.NativeCoachScopeTag != ""
 	if continuityProtected {
@@ -324,6 +370,8 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 			frame.Subject != assistantFollowUpSubject) ||
 		(frame.ExpansionOptIn &&
 			(frame.AssistantFollowUp || frame.QuestionContinuityTag == "")) ||
+		(frame.QuestionInstanceTag != "" &&
+			(frame.QuestionContinuityTag == "" || frame.AssistantFollowUp)) ||
 		(frame.AssistantFollowUp && frame.Phase == respondent.CoachPhaseExpanding) ||
 		(nativeCoachScope &&
 			(frame.Phase != respondent.CoachPhaseAwaitingAnswer ||
@@ -335,6 +383,7 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 				frame.RequiredSlots[0] != answercontract.SlotPosition ||
 				frame.AssistantFollowUp || frame.ExpansionOptIn ||
 				frame.RestatementTag != "" ||
+				frame.QuestionInstanceTag != "" ||
 				frame.QuestionContinuityTag != "" ||
 				frame.ContinuityTag != "")) ||
 		(frame.RestatementTag != "" &&
@@ -345,6 +394,7 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		return PendingAnswerFrame{}, ErrInvalidStateToken
 	}
 	for _, encodedTag := range []string{
+		frame.QuestionInstanceTag,
 		frame.QuestionContinuityTag,
 		frame.ContinuityTag,
 		frame.NativeCoachScopeTag,

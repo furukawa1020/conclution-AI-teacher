@@ -132,6 +132,7 @@ type voiceLiveFinalResult struct {
 	RespondentStage  string           `json:"respondentStage"`
 	CoachPhase       string           `json:"coachPhase"`
 	CoachAction      string           `json:"coachAction"`
+	AnswerProof      string           `json:"answerProof"`
 	ResearchStatus   string           `json:"researchStatus"`
 	ResearchRecords  []ResearchRecord `json:"researchRecords"`
 	PrivacyStatus    string           `json:"privacyStatus"`
@@ -962,6 +963,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		RespondentStage:  outcome.result.RespondentStage,
 		CoachPhase:       outcome.result.CoachPhase,
 		CoachAction:      outcome.result.CoachAction,
+		AnswerProof:      normalizedAnswerProof(outcome.result.AnswerProof),
 		ResearchStatus:   outcome.result.ResearchStatus,
 		ResearchRecords:  outcome.result.ResearchRecords,
 		PrivacyStatus:    outcome.result.PrivacyStatus,

@@ -1384,8 +1384,15 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 		},
 		session: session,
 	}
+	speculativeDecision := liveTestDecision("先読みした回答", "spec-state")
+	speculativeDecision.AssistanceTarget = "respondent"
+	speculativeDecision.RespondentStage = "restructure"
+	speculativeDecision.CoachPhase = "complete"
+	speculativeDecision.CoachAction = "complete"
+	speculativeDecision.AnswerProofCandidate =
+		conversation.AnswerProofQuestionBoundInputAnswerFirst
 	agent := &speculativeTestAgent{
-		speculativeResult: liveTestDecision("先読みした回答", "spec-state"),
+		speculativeResult: speculativeDecision,
 		normalResult:      liveTestDecision("通常回答", "normal-state"),
 		started:           make(chan struct{}),
 	}
@@ -1452,6 +1459,7 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 	}
 	if outcome.result.StateToken != "spec-state" ||
 		outcome.result.Caption != "先読みした回答" ||
+		outcome.result.AnswerProof != "question_bound_input_answer_first" ||
 		speech.synthesizedText != "先読みした回答" {
 		t.Fatalf("result=%+v synthesized=%q", outcome.result, speech.synthesizedText)
 	}

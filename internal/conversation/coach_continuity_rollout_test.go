@@ -105,6 +105,39 @@ func TestExtendedSealPreservesAdditiveFields(t *testing.T) {
 	}
 }
 
+func TestAnswerProofReaderFirstSealOmitsOnlyNewInstanceField(t *testing.T) {
+	agent := newTestAgent(t, &fakeGenerator{})
+	agent.stateV2Writes = true
+	agent.answerProofWrites = false
+	const uid = "uid-answer-proof-reader-first"
+	state := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	)
+	state.PendingAnswer.QuestionContinuityTag =
+		agent.coachQuestionContinuityTag("導入目的")
+	state.PendingAnswer.QuestionInstanceTag =
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x55}, 16))
+
+	token, err := agent.sealState(uid, state)
+	if err != nil {
+		t.Fatalf("reader-first seal: %v", err)
+	}
+	plaintext := decryptedStateJSON(t, agent.codec, uid, token)
+	if bytes.Contains(plaintext, []byte("question_instance_tag")) {
+		t.Fatalf("reader-first revision emitted the new field: %s", plaintext)
+	}
+	decoded, err := agent.codec.open(uid, token)
+	if err != nil {
+		t.Fatalf("reader-first token did not decode: %v", err)
+	}
+	if !decoded.PendingAnswer.Active ||
+		decoded.PendingAnswer.QuestionContinuityTag == "" {
+		t.Fatalf("reader-first rollout dropped ordinary coaching state: %#v", decoded.PendingAnswer)
+	}
+}
+
 func TestPromptPendingAnswerOmitsEveryServerProofAndExpansionCapability(t *testing.T) {
 	agent := newTestAgent(t, &fakeGenerator{})
 	frame := coachState(
@@ -188,6 +221,7 @@ func TestNaturalReportedQuestionBindsBareAnswerAcrossTurns(t *testing.T) {
 	frame := agent.pendingAnswerFromPlan(
 		awaiting,
 		"上司に何のために入れるのかと聞かれました",
+		"QUFBQUFBQUFBQUFBQUFBQQ",
 	)
 	if !frame.Active || frame.QuestionContinuityTag == "" {
 		t.Fatalf("natural reported question was not committed: %#v", frame)
@@ -253,6 +287,74 @@ func TestBareABindingRejectsNewQuestionQuoteProxyAndCorrection(t *testing.T) {
 				t.Fatal("unsafe answer acquired a continuity capability")
 			}
 		})
+	}
+}
+
+func TestProofSpanRejectsWholeTurnEvidenceWithoutExceptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		operator answercontract.Operator
+		slot     answercontract.RequiredSlot
+		subject  string
+		answer   string
+	}{
+		{
+			name:     "fronted label hides background",
+			operator: answercontract.OperatorPurpose,
+			slot:     answercontract.SlotPurpose,
+			subject:  "導入目的",
+			answer:   "目的は背景を説明すると長いのですが評価基準をそろえることです",
+		},
+		{
+			name:     "fronted label hides AI proxy",
+			operator: answercontract.OperatorState,
+			slot:     answercontract.SlotState,
+			subject:  "日本の首都",
+			answer:   "答えはChatGPTに作ってもらった東京です",
+		},
+		{
+			name:     "fronted label hides correction",
+			operator: answercontract.OperatorState,
+			slot:     answercontract.SlotState,
+			subject:  "日本の首都",
+			answer:   "答えは東京じゃなく大阪です",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan := validModelPlan()
+			plan.AssistanceTarget = "respondent"
+			plan.RespondentStage = "restructure"
+			plan.AnswerAttempt = test.answer
+			plan.RespondentEvidence = []modelSlotEvidence{{
+				Slot: test.slot,
+				Span: test.answer,
+			}}
+			plan.AnswerContract.QuestionFrame.Operator = test.operator
+			plan.AnswerContract.QuestionFrame.Subject = test.subject
+			plan.AnswerContract.QuestionFrame.RequiredSlots =
+				[]answercontract.RequiredSlot{test.slot}
+			if coachProofSpanBound(plan, test.answer) {
+				t.Fatal("whole-turn evidence passed the proof-only span gate")
+			}
+		})
+	}
+
+	const answer = "目的は評価基準をそろえることです。判断のばらつきを減らします"
+	plan := validModelPlan()
+	plan.AssistanceTarget = "respondent"
+	plan.RespondentStage = "restructure"
+	plan.AnswerAttempt = answer
+	plan.RespondentEvidence = []modelSlotEvidence{{
+		Slot: answercontract.SlotPurpose,
+		Span: "目的は評価基準をそろえることです",
+	}}
+	plan.AnswerContract.QuestionFrame.Operator = answercontract.OperatorPurpose
+	plan.AnswerContract.QuestionFrame.Subject = "導入目的"
+	plan.AnswerContract.QuestionFrame.RequiredSlots =
+		[]answercontract.RequiredSlot{answercontract.SlotPurpose}
+	if !coachProofSpanBound(plan, answer) {
+		t.Fatal("bounded A-first evidence was rejected")
 	}
 }
 

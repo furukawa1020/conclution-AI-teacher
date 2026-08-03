@@ -211,6 +211,7 @@ type vertexAgent struct {
 	coachRestatementKey     []byte
 	continuityKey           []byte
 	stateV2Writes           bool
+	answerProofWrites       bool
 	research                *securityflow.CrossrefExecutor
 	security                *securityflow.Guard
 	now                     func() time.Time
@@ -329,6 +330,7 @@ func NewVertexAgent(
 	priority bool,
 	coachRestatementBinding bool,
 	stateV2Writes bool,
+	answerProofWrites bool,
 ) (Agent, error) {
 	if ctx == nil || strings.TrimSpace(project) == "" {
 		return nil, errors.New("conversation: Vertex AI project is required")
@@ -368,6 +370,7 @@ func NewVertexAgent(
 		verifier,
 		coachRestatementBinding,
 		stateV2Writes,
+		answerProofWrites,
 	)
 }
 
@@ -388,7 +391,7 @@ func NewAgent(
 	precisionModel string,
 	stateKey []byte,
 ) (Agent, error) {
-	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true, true)
+	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true, true, true)
 }
 
 func newAgent(
@@ -399,6 +402,7 @@ func newAgent(
 	researchVerifier research.Verifier,
 	coachRestatementBinding bool,
 	stateV2Writes bool,
+	answerProofWrites bool,
 ) (Agent, error) {
 	if generator == nil {
 		return nil, errors.New("conversation: content generator is required")
@@ -439,6 +443,7 @@ func newAgent(
 		coachRestatementKey:     coachRestatementKey,
 		continuityKey:           continuityKey,
 		stateV2Writes:           stateV2Writes,
+		answerProofWrites:       answerProofWrites,
 		security:                securityGuard,
 		now:                     time.Now,
 	}
@@ -480,14 +485,22 @@ func (agent *vertexAgent) sealState(
 	if agent == nil || agent.codec == nil {
 		return "", ErrInvalidStateToken
 	}
+	if !agent.answerProofWrites {
+		// Reader-first rollout boundary for this additive JSON field. The first
+		// revision can decode it but cannot emit it; a following revision enables
+		// writes only after all traffic is on a compatible reader.
+		state.PendingAnswer.QuestionInstanceTag = ""
+	}
 	if !agent.stateV2Writes {
 		state.Support = nil
-		if state.PendingAnswer.QuestionContinuityTag != "" ||
+		if state.PendingAnswer.QuestionInstanceTag != "" ||
+			state.PendingAnswer.QuestionContinuityTag != "" ||
 			state.PendingAnswer.ContinuityTag != "" ||
 			state.PendingAnswer.NativeCoachScopeTag != "" ||
 			state.PendingAnswer.ExpansionOptIn {
 			state.PendingAnswer = emptyPendingAnswer()
 		} else {
+			state.PendingAnswer.QuestionInstanceTag = ""
 			state.PendingAnswer.QuestionContinuityTag = ""
 			state.PendingAnswer.ContinuityTag = ""
 			state.PendingAnswer.ExpansionOptIn = false
@@ -1104,6 +1117,7 @@ func (agent *vertexAgent) Process(
 			coachFrame = agent.pendingAnswerFromPlan(
 				finalPlan,
 				normalized.Utterance,
+				state.SessionID,
 			)
 			if !coachFrame.Active {
 				return agent.completeInterpretationClarification(
@@ -1120,6 +1134,7 @@ func (agent *vertexAgent) Process(
 			coachFrame = agent.pendingAnswerFromPlan(
 				finalPlan,
 				normalized.Utterance,
+				state.SessionID,
 			)
 			if !coachFrame.Active {
 				return agent.completeInterpretationClarification(
@@ -1264,6 +1279,7 @@ func (agent *vertexAgent) Process(
 		Phase:  respondent.CoachPhaseNone,
 		Action: respondent.CoachActionNone,
 	}
+	coachContinuityVerified := false
 	coachVerificationPlan := finalPlan
 	if coachTurn && !verificationUnavailable {
 		operator := authoritativeCoachOperator(coachFrame)
@@ -1284,7 +1300,8 @@ func (agent *vertexAgent) Process(
 				)
 			}
 		case "restructure":
-			continuityProtected := coachFrame.QuestionContinuityTag != "" ||
+			continuityProtected := coachFrame.QuestionInstanceTag != "" ||
+				coachFrame.QuestionContinuityTag != "" ||
 				coachFrame.ContinuityTag != ""
 			continuityOK := true
 			if continuityProtected && preTurnState.PendingAnswer.Active {
@@ -1376,6 +1393,7 @@ func (agent *vertexAgent) Process(
 				coachFrame.AssistantFollowUp,
 				agent.coachRestatementBinding,
 			)
+			coachContinuityVerified = continuityOK
 		}
 		if coachFrame.Phase == respondent.CoachPhaseExpanding &&
 			substantiveCoachAttempt(normalized.Utterance) {
@@ -1706,28 +1724,61 @@ func (agent *vertexAgent) Process(
 		responseCoachPhase = string(respondent.CoachPhaseNone)
 		responseCoachAction = string(respondent.CoachActionNone)
 	}
+	proofAttempt := normalized.Utterance
+	if coachFrame.QuestionContinuityTag != "" ||
+		coachFrame.ContinuityTag != "" {
+		proofAttempt = authoritativeCoachAttemptTextWithPolicy(
+			coachVerificationPlan,
+			normalized.Utterance,
+			!preTurnState.PendingAnswer.Active,
+		)
+	}
+	proofSpanBound := coachProofSpanBound(
+		coachVerificationPlan,
+		proofAttempt,
+	)
+	answerProof := answerProofForTurn(
+		normalized,
+		coachFrame,
+		coachDecision,
+		coachContinuityVerified,
+		proofSpanBound,
+		responseAssistanceTarget,
+		responseRespondentStage,
+	)
+	answerProofCandidate := answerProofCandidateForTurn(
+		normalized,
+		coachFrame,
+		coachDecision,
+		coachContinuityVerified,
+		proofSpanBound,
+		responseAssistanceTarget,
+		responseRespondentStage,
+	)
 
 	return VoiceTurnResult{
-		SchemaVersion:       SchemaVersion,
-		Domain:              finalPlan.Domain,
-		Intent:              finalPlan.Intent,
-		AssistanceTarget:    responseAssistanceTarget,
-		RespondentStage:     responseRespondentStage,
-		CoachPhase:          responseCoachPhase,
-		CoachAction:         responseCoachAction,
-		ResearchStatus:      researchStatus,
-		ResearchRecords:     researchRecords,
-		LatentQuestion:      finalPlan.LatentQuestion,
-		ArgumentStructure:   finalPlan.ArgumentStructure,
-		InterventionPolicy:  interventionPolicy,
-		SpokenReply:         spokenReply,
-		Confidence:          finalPlan.Confidence,
-		Intervention:        decision,
-		SelfCorrectionGrace: nextSelfCorrectionGrace,
-		AnswerContract:      finalPlan.answerAssessment.Metrics,
-		Route:               route,
-		NeedsClarification:  decision.Act == "clarify",
-		StateToken:          stateToken,
+		SchemaVersion:        SchemaVersion,
+		Domain:               finalPlan.Domain,
+		Intent:               finalPlan.Intent,
+		AssistanceTarget:     responseAssistanceTarget,
+		RespondentStage:      responseRespondentStage,
+		CoachPhase:           responseCoachPhase,
+		CoachAction:          responseCoachAction,
+		AnswerProof:          answerProof,
+		AnswerProofCandidate: answerProofCandidate,
+		ResearchStatus:       researchStatus,
+		ResearchRecords:      researchRecords,
+		LatentQuestion:       finalPlan.LatentQuestion,
+		ArgumentStructure:    finalPlan.ArgumentStructure,
+		InterventionPolicy:   interventionPolicy,
+		SpokenReply:          spokenReply,
+		Confidence:           finalPlan.Confidence,
+		Intervention:         decision,
+		SelfCorrectionGrace:  nextSelfCorrectionGrace,
+		AnswerContract:       finalPlan.answerAssessment.Metrics,
+		Route:                route,
+		NeedsClarification:   decision.Act == "clarify",
+		StateToken:           stateToken,
 	}, nil
 }
 
@@ -2513,6 +2564,7 @@ func coachRestatementMatches(
 func (agent *vertexAgent) pendingAnswerFromPlan(
 	plan modelPlan,
 	utterance string,
+	sessionID string,
 ) PendingAnswerFrame {
 	question := plan.AnswerContract.QuestionFrame
 	frame := PendingAnswerFrame{
@@ -2535,16 +2587,42 @@ func (agent *vertexAgent) pendingAnswerFromPlan(
 			!coachReportedQuestionIsLatestFocus(utterance, questionAnchor) {
 			questionOK = false
 		}
-		if !questionOK {
-			_, reportedQuestionOK :=
-				boundedReportedCoachQuestionInstanceAnchor(utterance)
-			questionAnchor, questionOK =
-				boundedCoachPlanQuestionAnchor(question.Subject)
-			questionOK = reportedQuestionOK && questionOK
-		}
+		questionInstanceOK := false
 		if questionOK {
-			frame.QuestionContinuityTag =
-				agent.coachQuestionContinuityTag(questionAnchor)
+			questionInstanceAnchor, instanceOK :=
+				boundedReportedCoachQuestionInstanceAnchor(
+					utterance,
+					questionAnchor,
+				)
+			if instanceOK {
+				frame.QuestionContinuityTag =
+					agent.coachQuestionContinuityTag(questionAnchor)
+				reportedOperator, operatorOK :=
+					boundedReportedCoachQuestionOperator(
+						questionInstanceAnchor,
+					)
+				questionInstanceOK = operatorOK &&
+					reportedOperator == question.Operator
+				if agent.answerProofWrites && questionInstanceOK {
+					frame.QuestionInstanceTag =
+						agent.coachQuestionInstanceTag(
+							sessionID,
+							questionInstanceAnchor,
+						)
+				}
+			}
+		}
+		if frame.QuestionContinuityTag == "" {
+			// Preserve the pre-proof coaching path for an imperfect planner
+			// subject, but deliberately omit QuestionInstanceTag. The exercise may
+			// continue; a public question-bound proof cannot be minted.
+			fallbackAnchor, fallbackOK :=
+				boundedCoachPlanQuestionAnchor(question.Subject)
+			if fallbackOK && reportedCoachQuestionPresent(utterance) {
+				questionAnchor = fallbackAnchor
+				frame.QuestionContinuityTag =
+					agent.coachQuestionContinuityTag(questionAnchor)
+			}
 		}
 		if answerAnchor, ok := boundedCoachTargetCandidate(plan, utterance); ok {
 			questionSubject, linked := agent.utteranceLinksCoachQuestionTag(
@@ -3848,7 +3926,8 @@ func (agent *vertexAgent) auditAnswer(
 ) (answercontract.Assessment, error) {
 	auditedReply := candidatePlan.SpokenReply
 	auditedAttempt := candidatePlan.AnswerAttempt
-	continuityProtected := state.PendingAnswer.QuestionContinuityTag != "" ||
+	continuityProtected := state.PendingAnswer.QuestionInstanceTag != "" ||
+		state.PendingAnswer.QuestionContinuityTag != "" ||
 		state.PendingAnswer.ContinuityTag != ""
 	if candidatePlan.AssistanceTarget == "respondent" &&
 		candidatePlan.RespondentStage == "restructure" {

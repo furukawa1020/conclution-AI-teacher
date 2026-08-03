@@ -15,11 +15,11 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 
 ## 公開音声経路での回答支援切替
 
-標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、本人自身が相手から聞かれた質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、生成済みのNative音声と汎用stateを一切解放せず、同じ確定発話を東京リージョンSTTから段階経路へ一度だけ再処理する。段階経路は実際の外部質問からoperator、required slot、非可逆の質問継続tagを作るため、次の無関係な発話を「Aへの回答」として完了にしない。質問・回答・逐語録はDBへ永続化せず、短期stateにも具体的な質問本文を入れない。
+標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、利用者が入力内で相手から聞かれたものとして報告した質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、生成済みのNative音声と汎用stateを一切解放せず、同じ確定発話を東京リージョンSTTから段階経路へ一度だけ再処理する。段階経路は、同じ解析済み質問span、質問主題、確定入力内の全required-slot evidenceを用途分離した非可逆tagへ束縛するため、同じ主題の別質問や次の無関係な発話を「Aへの回答」として完了にしない。質問・回答・逐語録はDBへ永続化せず、短期stateにも具体的な質問本文を入れない。第三者が現実にその質問をした事実や現在の話者は検証しない。
 
-Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。通常Native会話はcommitから最初の音声frameまで1,000 ms以内を運用SLOとして計測するが、実質問を結ぶ初回回答支援は正確性を優先して段階経路の遅延を別に計測する。
+Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。通常Native会話はcommitから最初の音声frameまで1,000 ms以内を運用SLOとして計測するが、報告質問を結ぶ初回回答支援は正確性を優先して段階経路の遅延を別に計測する。
 
-UIの`complete`は「あなたの言葉を受け取りました」「あなた自身の言葉が出ました」という今回限りのreceiptに留める。これはそのturnで利用者自身の発話を受け取ったという状態表示であり、質問への正答や「Aを先に言えた」「上達した」「別の人にも同じように答えられる」を判定・実証する表示ではない。
+一般の`complete`は「あなたの言葉を受け取りました」「あなた自身の言葉が出ました」という今回限りのreceiptに留め、A-firstを推測しない。別のQBA Proofは、確定音声入力の現在turnについて、同じ報告質問spanと確定入力の回答evidenceの非可逆tagがそろい、決定論的Meaning Gateと独立LAC criticの双方が全required slotとA-firstで一致した場合だけ表示する。そこでも外部質問の実在、質問への正答、「上達した」「別の人にも同じように答えられる」、話者の身元は判定・実証しない。
 
 約3分まとまらずに話した場合も、時間だけで失敗や能力不足と判定しない。現在のlive経路は端末で録音開始から最大3分30秒、Cloud Run側で最大4分のcaptureを受け、Go側のlive接続を6分、Cloud Runのrequest timeoutを420秒に制限する。発話が確定しない無音候補は録音開始後最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。commit後のfinal transcriptが160 Unicode code point以上の場合だけ、サーバーが今回限りの長い発話と判定し、現在turn内で本人が明示した中心点を、条件や不確実性を変えず第一文へ置いて自然に応答する。160未満でも通常会話は続け、長さだけを根拠に指導、採点、言い直し要求をしない。
 
@@ -31,7 +31,7 @@ UIの`complete`は「あなたの言葉を受け取りました」「あなた�
 | 「結局このプロジェクトで何をやりたいの？」 | `purpose` operatorと`purpose` slotを要求する |
 | 質問だけ分かり、本人の答えがまだない | 結論を代作せず、「まとまっていなくてよいので今の答えを話して」と一問だけ返す |
 | 本人の答えが理由や前置きの後ろにある | AIが代読せず、本人へ「今の答えを先に、もう一度」と一問だけ返す |
-| 本人が答えを先に言えた | 通常は支援を閉じる。同じ明示支援中に本人が厳密句「理由まで一問お願いします」と頼んだ時だけ、理由・根拠・最初の一歩のうち質問の型に合う一問を尋ねる |
+| 本人が答えを先に言えた | 二重検証と質問／回答tagがすべてそろった現在turnだけQBA Proofを表示し、通常は支援を閉じる。同じ明示支援中に本人が厳密句「理由まで一問お願いします」と頼んだ時だけ、理由・根拠・最初の一歩のうち質問の型に合う一問を尋ねる |
 | 条件、否定、不確実性、数値がある | 追加・削除・強さの変更を拒否する |
 | 本人が自分で言い直しかけている | self-correction grace中は原則として沈黙する |
 | 「努力」「練習不足」と責められてきた | 努力不足と決めつける文や普通らしさを要求する一律矯正を除外する。本人が選んだ回答練習も採点せず、聞き直しは一度だけにする |
@@ -79,7 +79,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 
 - PasskeyのWebAuthn ceremonyを実装し、仮名Firebase accountの操作をuser verification付き署名で確認する。秘密鍵はPasskey providerが管理し、KOTAEのブラウザコードとサーバーは受け取らない（同期や保管の方式はproviderに依存する）。これは法的な本人確認や現在の話者認証ではない
 - 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をCloud Run内の決定論的検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
-- 標準モードで回答支援を明示した初回turnは、`us-central1`のNative Audio出力を破棄し、同じcaptureを`asia-northeast1`のSTTから段階経路へ一度だけ再処理する。実質問由来のoperator・required slot・非可逆tagを短期stateへ結び、無関係な後続turnをcompleteにしない。`complete` / `release`後の次turnからNativeへ戻る
+- 標準モードで回答支援を明示した初回turnは、`us-central1`のNative Audio出力を破棄し、同じcaptureを`asia-northeast1`のSTTから段階経路へ一度だけ再処理する。入力内の報告質問span、質問主題、確定入力の全required-slot evidenceの用途分離HMACを短期stateへ結び、無関係な後続turnをcompleteにもQBA Proofにもしない。proofのwire値は本文・tag・scoreを含まない固定enumだけである。`complete` / `release`後の次turnからNativeへ戻る
 - DLPにも検出漏れがあり得るため、完全なPII除去とは呼ばない。Cloud Run、Speech-to-Text、DLPが平文を扱うためE2EEとも呼ばない
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
 - 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する
@@ -110,3 +110,4 @@ PDFへの適合は、見栄えやAPI数ではなく次で測る。
 - `Fabrication Rate`: 本人の原回答にない内容を一つでも足した割合
 - `Unnecessary Intervention Rate`: 自己修正できた場面へ割り込んだ割合
 - `First-person Helpfulness`: 本人が「代わりに決められた」のではなく「自分の答えを出せた」と評価した割合
+- `QBA False-Proof Rate`: A-later、無A、AI draftだけ、同主題の別質問、proxy・引用・訂正、監査不能でQBA Proofを誤発行した割合

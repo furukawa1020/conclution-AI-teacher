@@ -37,6 +37,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_VERTEX_PRIORITY", "")
 	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "")
 	t.Setenv("KOTAE_STATE_V2_WRITES", "")
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "")
 }
 
 func unsetTestEnvironment(t *testing.T, key string) {
@@ -237,6 +238,25 @@ func TestLoadParsesStateV2WritesStrictly(t *testing.T) {
 	if _, err := Load(); err == nil ||
 		!strings.Contains(err.Error(), "KOTAE_STATE_V2_WRITES") {
 		t.Fatalf("malformed state v2 writes error = %v", err)
+	}
+}
+
+func TestLoadParsesAnswerProofWritesStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AnswerProofWrites {
+		t.Fatal("answer proof writes were not enabled")
+	}
+
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_ANSWER_PROOF_WRITES") {
+		t.Fatalf("malformed answer proof writes error = %v", err)
 	}
 }
 

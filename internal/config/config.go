@@ -42,6 +42,7 @@ type Config struct {
 	VertexPriority               bool
 	CoachRestatementBinding      bool
 	StateV2Writes                bool
+	AnswerProofWrites            bool
 	SpeechLocation               string
 	SpeechModel                  string
 	SpeechVoice                  string
@@ -178,6 +179,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	answerProofWrites, err := envStrictBool(
+		"KOTAE_ANSWER_PROOF_WRITES",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	nativeAudioEnabled, err := envStrictBool(
 		"KOTAE_NATIVE_AUDIO_ENABLED",
 		false,
@@ -204,6 +212,7 @@ func Load() (Config, error) {
 		VertexPriority:          vertexPriority,
 		CoachRestatementBinding: coachRestatementBinding,
 		StateV2Writes:           stateV2Writes,
+		AnswerProofWrites:       answerProofWrites,
 		SpeechLocation:          envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
 		SpeechModel:             envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
 		SpeechVoice:             envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),

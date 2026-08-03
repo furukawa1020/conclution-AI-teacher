@@ -153,6 +153,18 @@ type StateTokenRefresher interface {
 	RefreshStateToken(uid string, token string) (string, error)
 }
 
+// NativeStatePreparer authenticates the caller-bound state before a native
+// provider is opened. An active staged-answer scope is server authority: the
+// native lane must hand the unchanged token back to the staged flow instead
+// of advancing it or starting a competing provider turn.
+type NativeStatePreparer interface {
+	PrepareNativeState(uid string, token string) (
+		refreshed string,
+		requiresStaged bool,
+		err error,
+	)
+}
+
 type ContentGenerator interface {
 	GenerateContent(
 		ctx context.Context,
@@ -4613,10 +4625,15 @@ func coachOptOutControl(utterance string) (string, bool, bool) {
 
 func explicitCoachOptIn(utterance string) bool {
 	phrase := normalizeExplicitCoachPhrase(utterance)
+	var quotesValid bool
+	phrase, quotesValid = coachPhraseWithoutQuotedSpeech(phrase)
+	if !quotesValid {
+		return false
+	}
 	reportedThirdPartyContext := false
 	for _, clause := range strings.FieldsFunc(phrase, func(r rune) bool {
 		switch r {
-		case '。', '！', '？', '!', '?', '\n', '\r', ';', '；':
+		case '。', '！', '？', '!', '?', '.', '\n', '\r', ';', '；':
 			return true
 		default:
 			return false
@@ -4632,6 +4649,61 @@ func explicitCoachOptIn(utterance string) bool {
 		}
 	}
 	return false
+}
+
+func coachPhraseWithoutQuotedSpeech(value string) (string, bool) {
+	var result strings.Builder
+	closers := make([]rune, 0, 2)
+	for _, r := range value {
+		if len(closers) > 0 {
+			if r == closers[len(closers)-1] {
+				closers = closers[:len(closers)-1]
+				if len(closers) == 0 {
+					result.WriteByte(' ')
+				}
+				continue
+			}
+			if closer, opens := coachQuoteCloser(r); opens {
+				closers = append(closers, closer)
+			}
+			continue
+		}
+		if closer, opens := coachQuoteCloser(r); opens {
+			closers = append(closers, closer)
+			result.WriteByte(' ')
+			continue
+		}
+		if r == '」' || r == '』' || r == '”' {
+			return "", false
+		}
+		result.WriteRune(r)
+	}
+	if len(closers) != 0 {
+		return "", false
+	}
+	return result.String(), true
+}
+
+func coachQuoteCloser(r rune) (rune, bool) {
+	switch r {
+	case '「':
+		return '」', true
+	case '『':
+		return '』', true
+	case '“':
+		return '”', true
+	case '"':
+		return '"', true
+	default:
+		return 0, false
+	}
+}
+
+// ExplicitCoachOptIn exposes the staged coach's deterministic consent parser
+// to transports. Keeping this as a wrapper prevents native audio from growing
+// a second, weaker grammar for quotation, ownership, and negation.
+func ExplicitCoachOptIn(utterance string) bool {
+	return explicitCoachOptIn(utterance)
 }
 
 func explicitCurrentSpeakerCoachRequest(clause string) bool {
@@ -4687,6 +4759,17 @@ func thirdPartyReportContext(clause string) bool {
 		// A leading self-owned request does not erase a later third-party
 		// owner in the same ASR clause.
 		return containsThirdPartyRequestPossession(remainder)
+	}
+	// A passive question report such as "今後の希望を尋ねられた" is
+	// question context, not evidence that an absent third party owns a later
+	// direct request. In particular, the semantic noun "希望" must not be
+	// mistaken for the consent grammar "母の希望です".
+	for _, predicate := range []string{
+		"聞かれ", "質問され", "尋ねられ", "問われ",
+	} {
+		if strings.Contains(clause, predicate) {
+			return false
+		}
 	}
 	if containsThirdPartyRequestPossession(clause) {
 		return true
@@ -4804,8 +4887,10 @@ func explicitCoachOptInClause(clause string) bool {
 	for _, ending := range []string{
 		"どう答えればいい", "どう答えればいいですか", "どう答えたらいい", "どう答えたらいいですか",
 		"何て答えればいい", "何て答えればいいですか", "なんて答えればいい", "なんて答えればいいですか",
+		"何て答えたらいい", "何て答えたらいいですか", "なんて答えたらいい", "なんて答えたらいいですか",
 		"どう返せばいい", "どう返せばいいですか", "どう返したらいい", "どう返したらいいですか",
 		"何て返せばいい", "何て返せばいいですか", "なんて返せばいい", "なんて返せばいいですか",
+		"何て返したらいい", "何て返したらいいですか", "なんて返したらいい", "なんて返したらいいですか",
 	} {
 		if strings.HasSuffix(clause, ending) &&
 			!thirdPartyOwnsCoachRequest(clause, strings.LastIndex(clause, ending)) {
@@ -4898,6 +4983,26 @@ func thirdPartyOwnsCoachRequest(clause string, requestAt int) bool {
 	if containsThirdPartyRequestPossession(prefix) {
 		return true
 	}
+	for _, self := range []string{
+		"私の", "わたしの", "僕の", "ぼくの", "俺の", "自分の",
+	} {
+		if strings.HasSuffix(prefix, self) {
+			return false
+		}
+	}
+	for _, questionReference := range []string{
+		"質問への", "問いへの", "聞かれたことへの", "尋ねられたことへの",
+	} {
+		if strings.HasSuffix(prefix, questionReference) {
+			return false
+		}
+	}
+	// A possessive immediately owning "答え方" or "回答" belongs to
+	// somebody other than the speaker unless first-person ownership was
+	// explicit above. Ambiguity must not grant respondent authority.
+	if strings.HasSuffix(prefix, "の") {
+		return true
+	}
 
 	// Consent belongs to the current speaker. Treat any remaining Japanese
 	// subject/topic as reported or third-party-owned unless the clause starts
@@ -4909,6 +5014,7 @@ func thirdPartyOwnsCoachRequest(clause string, requestAt int) bool {
 		"私が", "私は", "私も", "わたしが", "わたしは", "わたしも",
 		"僕が", "僕は", "僕も", "ぼくが", "ぼくは", "ぼくも",
 		"俺が", "俺は", "俺も", "自分が", "自分は", "自分も",
+		"私なら", "わたしなら", "僕なら", "ぼくなら", "俺なら", "自分なら",
 	} {
 		if strings.HasPrefix(prefix, firstPerson) {
 			remainder := strings.TrimSpace(strings.TrimPrefix(prefix, firstPerson))
@@ -4942,7 +5048,8 @@ func endsWithRequestContextConnector(phrase string) bool {
 func containsJapaneseOwnerMarker(phrase string) bool {
 	return strings.Contains(phrase, "が") ||
 		strings.Contains(phrase, "は") ||
-		strings.Contains(phrase, "も")
+		strings.Contains(phrase, "も") ||
+		strings.Contains(phrase, "なら")
 }
 
 func directEnglishCoachRequest(clause string) bool {

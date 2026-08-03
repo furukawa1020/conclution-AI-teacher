@@ -329,6 +329,11 @@ async function createExecutablePlaybackHarness() {
     ),
     executableBridgeFunction(
       bridge,
+      "function shouldAbortPlaybackTransportOnInterrupt(",
+      "function confirmBargeIn(",
+    ),
+    executableBridgeFunction(
+      bridge,
       "function createStreamingPlayback(",
       "function haltStreamingPlayback(",
     ),
@@ -385,6 +390,7 @@ async function createExecutablePlaybackHarness() {
 let activeLiveSession;
 let activePasskeyController;
 let activePlayback;
+let activeRecording;
 let activeRequestController;
 let audioContext = dependencies.audioContext;
 let documentEpoch = 0;
@@ -413,6 +419,7 @@ const sessionClock = dependencies.sessionClock;
 const sessionExpiryWatchdog = dependencies.sessionExpiryWatchdog;
 const setTimeout = dependencies.setTimeout;
 const setTracksEnabled = dependencies.setTracksEnabled;
+const shouldAbortVoiceTransportOnInterrupt = dependencies.shouldAbortVoiceTransportOnInterrupt;
 const startBargeInMonitoring = dependencies.startBargeInMonitoring;
 const validatedPlaybackDrainTimeoutMs = dependencies.validatedPlaybackDrainTimeoutMs;
 
@@ -430,9 +437,14 @@ return Object.freeze({
   awaitValidatedPlaybackCompletion,
   consumeVoiceStream,
   createStreamingPlayback,
+  discardInterruptedPlaybackRecording,
   getActivePlayback: () => activePlayback,
   getSessionEpoch: () => sessionEpoch,
   haltStreamingPlayback,
+  maybeAbortPlaybackTransportOnInterrupt,
+  setActiveRecording: (recording) => { activeRecording = recording; },
+  shouldAbortPlaybackTransportOnInterrupt,
+  shouldDiscardInterruptedHTTPRecording,
   stopSession,
 });`,
   );
@@ -501,9 +513,13 @@ return Object.freeze({
     setTracksEnabled(enabled) {
       state.micEnabled = enabled;
     },
+    shouldAbortVoiceTransportOnInterrupt,
     startBargeInMonitoring(playback) {
       state.micEnabled = true;
-      playback.interruptRecording = { settled: false };
+      playback.interruptRecording = {
+        coachActive: playback.coachActive,
+        settled: false,
+      };
     },
     validatedPlaybackDrainTimeoutMs,
   });
@@ -648,6 +664,132 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.ok(microphoneAt > warmAt);
 });
 
+test("unfinished respondent coaching selects the staged lane at each session boundary", async () => {
+  const [bridge, client] = await Promise.all([
+    readFile(
+      new URL("../web/firebase-bridge.js", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+  ]);
+  const beginStart = bridge.indexOf("async function beginTurn(");
+  const beginEnd = bridge.indexOf(
+    "\n}\n\nasync function waitForTurnEnd",
+    beginStart,
+  );
+  assert.notEqual(beginStart, -1);
+  assert.notEqual(beginEnd, -1);
+  const begin = bridge.slice(beginStart, beginEnd);
+
+  assert.match(
+    begin,
+    /strictCloudMinimization,\s*coachActive,\s*\)/u,
+  );
+  assert.match(begin, /typeof coachActive !== "boolean"/u);
+  assert.match(
+    begin,
+    /const nativeAudio =\s*!strictCloudMinimization && !pendingDocument && !coachActive;/u,
+  );
+  assert.match(begin, /nativeAudio,\s*sessionState: serializedSessionState/u);
+  assert.match(
+    begin,
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*\)/u,
+  );
+
+  const routeStart = client.indexOf("const fn requires_staged_route(self)");
+  const routeEnd = client.indexOf("\n    const fn status(self)", routeStart);
+  assert.notEqual(routeStart, -1);
+  assert.notEqual(routeEnd, -1);
+  const route = client.slice(routeStart, routeEnd);
+  for (const pair of [
+    "(CoachPhase::AwaitingAnswer, CoachAction::Elicit)",
+    "(CoachPhase::AwaitingRestatement, CoachAction::Restate)",
+    "(CoachPhase::Expanding, CoachAction::Expand)",
+    "(CoachPhase::Blocked, CoachAction::Retry)",
+  ]) {
+    assert.ok(route.includes(pair), pair);
+  }
+  assert.doesNotMatch(route, /CoachAction::Complete|CoachAction::Release/u);
+
+  const armStart = client.indexOf("fn arm_listening(");
+  const armEnd = client.indexOf("\nfn resume_foreground_interruption(", armStart);
+  const arm = client.slice(armStart, armEnd);
+  assert.match(
+    arm,
+    /let coach_active_snapshot = coach_state\.peek\(\)\.requires_staged_route\(\);/u,
+  );
+  assert.match(
+    arm,
+    /cloud::begin_turn\(\s*&state_snapshot,\s*turn_mode,\s*strict_snapshot,\s*coach_active_snapshot,\s*\)/u,
+  );
+});
+
+test("the staged coach lane stays coherent across interruption, fallback, and reconnect", async () => {
+  const [bridge, client] = await Promise.all([
+    readFile(
+      new URL("../web/firebase-bridge.js", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+  ]);
+  const liveStart = bridge.indexOf("async function startVoiceLiveSession(");
+  const liveEnd = bridge.indexOf("\n}\n\nfunction isNdjsonContentType", liveStart);
+  const live = bridge.slice(liveStart, liveEnd);
+  assert.match(
+    live,
+    /handoffAmbient\([\s\S]*startVoiceLiveSession\(\{[\s\S]*nativeAudio,[\s\S]*turnMode: "foreground"/u,
+  );
+  assert.match(
+    live,
+    /matches\([\s\S]*expectedSessionState === sessionState[\s\S]*expectedStrictCloudMinimization === strictCloudMinimization/u,
+  );
+
+  const finishStart = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishStart,
+  );
+  const finish = bridge.slice(finishStart, finishEnd);
+  assert.match(
+    finish,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*liveSession\.nativeAudio === true,\s*"live",\s*coachActive,\s*\)/u,
+  );
+  assert.match(
+    finish,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*\)/u,
+  );
+  assert.match(
+    finish,
+    /liveSession\.requiresStatefulHTTPFallback\(\)/u,
+  );
+  assert.match(finish, /sessionState: serializedSessionState/u);
+  const bargeStart = bridge.indexOf("function startBargeInMonitoring(");
+  const bargeEnd = bridge.indexOf(
+    "\n}\n\nfunction createStreamingPlayback",
+    bargeStart,
+  );
+  const barge = bridge.slice(bargeStart, bargeEnd);
+  assert.match(
+    barge,
+    /createRecordingState\(\s*mediaStream,\s*playback\.nativeAudio === true,\s*playback\.coachActive === true,\s*\)/u,
+  );
+
+  const resumeStart = client.indexOf("fn start_or_resume(");
+  const resumeEnd = client.indexOf("\nfn human_file_size(", resumeStart);
+  const resume = client.slice(resumeStart, resumeEnd);
+  assert.match(resume, /arm_listening\(/u);
+  assert.match(resume, /coach_state,/u);
+
+  assert.match(
+    client,
+    /const ANSWER_SUPPORT_COPY: &str = "人に聞かれた質問も、そのまま話していい";/u,
+  );
+  assert.match(
+    client,
+    /\(CoachPhase::Complete, _\) => "今の答えは、聞かれたことに届いています"/u,
+  );
+});
+
 test("live PCM capture is attached before VAD can confirm immediate speech", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
@@ -665,13 +807,17 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
     "const liveSession = await startVoiceLiveSession(",
   );
   const recordingAt = begin.indexOf(
-    "const recording = createRecording(stream, nativeAudio)",
+    "const recording = createRecording(",
   );
   const assignmentAt = begin.indexOf("activeLiveSession = liveSession");
   assert.ok(liveAt >= 0);
   assert.ok(recordingAt > liveAt);
   assert.ok(assignmentAt > liveAt);
   assert.ok(assignmentAt < recordingAt);
+  assert.match(
+    begin.slice(recordingAt, recordingAt + 180),
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*\)/u,
+  );
   assert.doesNotMatch(begin, /voice_live_capture_late/u);
 });
 
@@ -979,6 +1125,232 @@ test("executable pre-final and post-final barge races keep their ownership", asy
     assert.equal(context.sources[0].stopped, true);
     assert.equal(state.micEnabled, true);
     assert.equal(timers.pending.size, 0);
+  });
+
+  await t.test("pre-final HTTP interruption stops audio but commits only a clean final", async () => {
+    const { context, runtime, state, timers } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(
+      1,
+      false,
+      "http",
+      true,
+    );
+    const reader = new ControlledVoiceReader();
+    const expectedFinal = {
+      ...finalVoiceResult(),
+      assistanceTarget: "respondent",
+      coachAction: "elicit",
+      coachPhase: "awaiting_answer",
+      respondentStage: "awaiting_answer",
+      sessionState: "signed-coach-state",
+    };
+    let fetchCalls = 0;
+    const response = (() => {
+      fetchCalls += 1;
+      return fakeVoiceStreamResponse(reader);
+    })();
+    reader.pushText(
+      streamLine({ type: "ready", version: 1 }) +
+        streamLine({
+          type: "audio",
+          version: 1,
+          sequence: 0,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }),
+    );
+    const consume = runtime.consumeVoiceStream(response, playback, 1);
+    await waitForPlaybackState(() => playback.hasStreamedAudio());
+    assert.equal(playback.interruptRecording.coachActive, true);
+    const firstAudioEventsBefore = state.pauseEvents.filter(
+      (event) => event.type === "kotae:first-audio",
+    ).length;
+
+    const requestController = new AbortController();
+    playback.interruptedBeforeFinal = true;
+    playback.interrupted = true;
+    runtime.setActiveRecording(playback.interruptRecording);
+    assert.equal(
+      runtime.maybeAbortPlaybackTransportOnInterrupt(
+        playback,
+        requestController,
+      ),
+      false,
+    );
+    runtime.haltStreamingPlayback(
+      playback,
+      new Error("voice_interrupted"),
+    );
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(requestController.signal.aborted, false);
+
+    reader.pushText(
+      streamLine({
+        type: "audio",
+        version: 1,
+        sequence: 1,
+        audioBase64: "BQYHCA==",
+        sampleRateHz: 24_000,
+      }) +
+        streamLine({
+          type: "final",
+          version: 1,
+          result: expectedFinal,
+        }),
+    );
+    reader.close();
+
+    const completed = await consume;
+    await runtime.awaitValidatedPlaybackCompletion(playback, 1);
+    assert.deepEqual(completed.finalResult, expectedFinal);
+    assert.equal(completed.streamedAudio, true);
+    assert.equal(playback.finalReceived, true);
+    assert.equal(fetchCalls, 1);
+    assert.equal(context.sources.length, 1, "post-barge audio is not scheduled");
+    assert.equal(
+      state.pauseEvents.filter(
+        (event) => event.type === "kotae:first-audio",
+      ).length,
+      firstAudioEventsBefore,
+      "discarded audio cannot re-fire first-audio",
+    );
+    assert.equal(reader.cancelledWith, undefined);
+    assert.equal(reader.released, true);
+    assert.equal(state.micEnabled, true);
+    assert.equal(timers.pending.size, 0);
+  });
+
+  await t.test("an interrupted HTTP stream rejects trailing data without committing final", async () => {
+    const { context, runtime, state } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(
+      1,
+      false,
+      "http",
+      true,
+    );
+    const reader = new ControlledVoiceReader();
+    reader.pushText(
+      streamLine({ type: "ready", version: 1 }) +
+        streamLine({
+          type: "audio",
+          version: 1,
+          sequence: 0,
+          audioBase64: "AQIDBA==",
+          sampleRateHz: 24_000,
+        }),
+    );
+    const consume = runtime.consumeVoiceStream(
+      fakeVoiceStreamResponse(reader),
+      playback,
+      1,
+    );
+    await waitForPlaybackState(() => playback.hasStreamedAudio());
+    playback.interruptedBeforeFinal = true;
+    playback.interrupted = true;
+    runtime.setActiveRecording(playback.interruptRecording);
+    runtime.haltStreamingPlayback(
+      playback,
+      new Error("voice_interrupted"),
+    );
+    reader.pushText(
+      streamLine({
+        type: "final",
+        version: 1,
+        result: finalVoiceResult(),
+      }) +
+        streamLine({ type: "ready", version: 1 }),
+    );
+    reader.close();
+
+    await assert.rejects(consume, /voice_response_invalid/u);
+    assert.equal(
+      runtime.shouldDiscardInterruptedHTTPRecording(playback),
+      true,
+    );
+    runtime.discardInterruptedPlaybackRecording(playback);
+    assert.equal(context.sources.length, 1);
+    assert.notEqual(reader.cancelledWith, undefined);
+    assert.equal(reader.released, true);
+    assert.equal(playback.interruptRecording, undefined);
+    assert.equal(state.abandonedInterrupts, 1);
+    assert.equal(state.micEnabled, false);
+  });
+
+  await t.test("a non-stateful HTTP interruption aborts promptly and keeps the held turn", async () => {
+    const { context, runtime, state } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(
+      1,
+      false,
+      "http",
+      false,
+    );
+    playback.schedulePcm(fakePcmEvent(0));
+    const heldRecording = playback.interruptRecording;
+    assert.notEqual(heldRecording, undefined);
+    assert.equal(heldRecording.coachActive, false);
+
+    const requestController = new AbortController();
+    playback.interruptedBeforeFinal = true;
+    playback.interrupted = true;
+    runtime.setActiveRecording(heldRecording);
+    assert.equal(
+      runtime.maybeAbortPlaybackTransportOnInterrupt(
+        playback,
+        requestController,
+      ),
+      true,
+    );
+    runtime.haltStreamingPlayback(
+      playback,
+      new Error("voice_interrupted"),
+    );
+
+    assert.equal(requestController.signal.aborted, true);
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(playback.interruptRecording, heldRecording);
+    assert.equal(
+      runtime.shouldDiscardInterruptedHTTPRecording(playback),
+      false,
+    );
+    assert.equal(state.abandonedInterrupts, 0);
+    assert.equal(state.micEnabled, true);
+  });
+
+  await t.test("a non-stateful HTTP interruption after final still validates clean EOF", async () => {
+    const { runtime } = await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(
+      1,
+      false,
+      "http",
+      false,
+    );
+    playback.finalReceived = true;
+    const requestController = new AbortController();
+    assert.equal(
+      runtime.maybeAbortPlaybackTransportOnInterrupt(
+        playback,
+        requestController,
+      ),
+      false,
+    );
+    assert.equal(requestController.signal.aborted, false);
+  });
+
+  await t.test("a live pre-final interruption still aborts its controller", async () => {
+    const { runtime } = await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1, true, "live");
+    const requestController = new AbortController();
+    assert.equal(
+      runtime.maybeAbortPlaybackTransportOnInterrupt(
+        playback,
+        requestController,
+      ),
+      true,
+    );
+    assert.equal(requestController.signal.aborted, true);
   });
 });
 
@@ -3164,9 +3536,9 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
   assert.match(
     confirm,
-    /if \(!playback\.finalReceived && activeRequestController\)/u,
+    /maybeAbortPlaybackTransportOnInterrupt\(\s*playback,\s*activeRequestController,\s*\)/u,
   );
-  assert.match(confirm, /activeRequestController\.abort\(\)/u);
+  assert.doesNotMatch(confirm, /activeRequestController\.abort\(\)/u);
   assert.match(confirm, /haltStreamingPlayback\(playback, interruption\)/u);
   assert.ok(
     confirm.indexOf("markSessionSpeech(expectedEpoch)") <
@@ -3238,9 +3610,25 @@ test("barge-in starts with audible output and preserves foreground response mode
     finish,
     /startBargeInMonitoring\(playback, expectedEpoch\)/u,
   );
-  assert.ok(
-    finish.indexOf('stopCode === "session_expired"') <
-      finish.indexOf("playback?.interruptedBeforeFinal"),
+  const stoppedSessionAt = finish.indexOf(
+    'stopCode === "session_expired"',
+  );
+  const interruptedFailureAt = finish.indexOf(
+    "if (interruptionAbortedTransport)",
+  );
+  const timeoutFailureAt = finish.indexOf(
+    "if (turnTimedOut)",
+    interruptedFailureAt,
+  );
+  assert.ok(stoppedSessionAt < interruptedFailureAt);
+  assert.ok(interruptedFailureAt < timeoutFailureAt);
+  assert.match(
+    finish,
+    /const interruptionAbortedTransport = Boolean\(\s*playback\?\.interruptedBeforeFinal &&\s*shouldAbortPlaybackTransportOnInterrupt\(playback\),\s*\)/u,
+  );
+  assert.match(
+    finish,
+    /if \(shouldDiscardInterruptedHTTPRecording\(playback\)\) \{\s*discardInterruptedPlaybackRecording\(playback\);\s*\}/u,
   );
   const scheduleAt = bridge.indexOf("function scheduleBuffer(");
   const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);
@@ -4771,6 +5159,21 @@ test("an incomplete recorder fallback can never be uploaded after live fails", a
     bridge,
     /canFallback\(\) \{\s*return !commitSent \|\| nativeFallbackAllowed;\s*\}/u,
   );
+  assert.match(
+    bridge,
+    /requiresStatefulHTTPFallback\(\) \{[\s\S]*return nativeFallbackAllowed;\s*\}/u,
+  );
+  const statefulLatchAt = finish.indexOf(
+    "liveSession.requiresStatefulHTTPFallback()",
+  );
+  const liveCancelAt = finish.indexOf("liveSession.cancel(", statefulLatchAt);
+  const httpPlaybackAt = finish.indexOf(
+    '"http",',
+    statefulLatchAt,
+  );
+  assert.ok(statefulLatchAt > liveCommitAt);
+  assert.ok(liveCancelAt > statefulLatchAt);
+  assert.ok(httpPlaybackAt > liveCancelAt);
 });
 
 test("an 80 ms noise candidate is discarded before a fresh capture starts", () => {

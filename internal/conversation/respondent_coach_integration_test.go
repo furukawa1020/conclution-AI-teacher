@@ -1096,7 +1096,14 @@ func TestCoachOptOutPassPhrasesDoNotMatchOrdinaryWords(t *testing.T) {
 		"私はこう言いました。答え方を手伝ってほしい",
 		"母はそう言いました。私は自分の回答を整えてほしい",
 		"上司に聞かれました。答え方を一問だけ手伝って",
+		"上司に聞かれた質問への答え方を一問だけ手伝って",
+		"上司に「目的は何ですか」と聞かれました。どう答えればいいですか",
+		"面接で強みを質問されました。何て答えたらいいですか",
+		"面談で今後の希望を尋ねられた。なんて返せばいいですか",
+		"私ならどう答えればいいですか",
+		"自分なら何て答えたらいいですか",
 		"could you please help me answer",
+		"my boss asked me why. please help me answer",
 	} {
 		if !explicitCoachOptIn(utterance) {
 			t.Fatalf("explicitCoachOptIn(%q) rejected a direct request", utterance)
@@ -1131,6 +1138,11 @@ func TestCoachOptOutPassPhrasesDoNotMatchOrdinaryWords(t *testing.T) {
 		"my friend said please help me answer",
 		"my friend wants me to practice answering",
 		"my friend wants you to help me answer",
+		"母に「どう答えればいい？」と聞かれた",
+		"上司に目的を聞かれた。ChatGPTならどう答えればいいですか",
+		"友達が上司に目的を聞かれた。友達の答え方を手伝って",
+		"「上司に目的を聞かれた。どう答えればいい？」と友達が言っていた",
+		"上司に「目的を聞かれた。どう答えればいいですか",
 	} {
 		if explicitCoachOptIn(utterance) {
 			t.Fatalf("explicitCoachOptIn(%q) treated non-consent as opt-in", utterance)

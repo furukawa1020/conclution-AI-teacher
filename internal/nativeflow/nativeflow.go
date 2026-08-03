@@ -44,8 +44,8 @@ type pooledSession struct {
 // Service implements only the live service contract. Buffered audio, PDF,
 // strict mode, tools, and research continue through the audited legacy flow.
 type Service struct {
-	opener    nativevoice.Opener
-	refresher conversation.StateTokenRefresher
+	opener   nativevoice.Opener
+	preparer conversation.NativeStatePreparer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -58,19 +58,19 @@ type Service struct {
 
 func New(
 	opener nativevoice.Opener,
-	refresher conversation.StateTokenRefresher,
+	preparer conversation.NativeStatePreparer,
 ) (*Service, error) {
-	if opener == nil || refresher == nil {
+	if opener == nil || preparer == nil {
 		return nil, errors.New("native audio dependencies are required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
-		opener:    opener,
-		refresher: refresher,
-		ctx:       ctx,
-		cancel:    cancel,
-		now:       time.Now,
-		sessions:  make(map[string]*pooledSession),
+		opener:   opener,
+		preparer: preparer,
+		ctx:      ctx,
+		cancel:   cancel,
+		now:      time.Now,
+		sessions: make(map[string]*pooledSession),
 	}, nil
 }
 
@@ -115,12 +115,22 @@ func (s *Service) ProcessLiveWithEndpoint(
 		input.Document != nil || input.MIMEType != "audio/L16" {
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 	}
-	stateToken, err := s.refresher.RefreshStateToken(uid, input.StateToken)
+	stateToken, requiresStaged, err := s.preparer.PrepareNativeState(uid, input.StateToken)
 	if err != nil {
 		if errors.Is(err, conversation.ErrInvalidStateToken) {
 			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceStateInvalid
 		}
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+	}
+	if requiresStaged {
+		// The WebSocket handler recognizes native fallback only after its commit
+		// frame closes audio. Drain and wipe capture without opening a provider;
+		// returning before commit would be treated as an unexpected pipeline
+		// failure and the client could not replay its held MediaRecorder turn.
+		if err := discardNativeInputUntilCommit(ctx, audio); err != nil {
+			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+		}
+		return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 	}
 
 	pooled, err := s.acquire(ctx, uid)
@@ -187,7 +197,9 @@ func (s *Service) ProcessLiveWithEndpoint(
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 				}
-				if !nativeAudioEligible(string(inputCaption)) {
+				inputCaptionText := string(inputCaption)
+				if !nativeAudioEligible(inputCaptionText) ||
+					requiresRespondentCoachFallback(inputCaptionText) {
 					pooled.session.DiscardOutput()
 					event.Clear()
 					clear(inputCaption)
@@ -308,6 +320,20 @@ func (s *Service) ProcessLiveWithEndpoint(
 	return result, nil
 }
 
+func discardNativeInputUntilCommit(ctx context.Context, audio <-chan []byte) error {
+	for {
+		select {
+		case frame, ok := <-audio:
+			if !ok {
+				return nil
+			}
+			clear(frame)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func streamInput(
 	ctx context.Context,
 	session nativevoice.Session,
@@ -349,6 +375,13 @@ func mergeCaption(current []byte, next []byte) []byte {
 	merged = append(merged, next...)
 	clear(current)
 	return merged
+}
+
+// requiresRespondentCoachFallback delegates the consent boundary to the
+// staged coach's single, audited parser so the native lane cannot drift into
+// granting broader respondent authority.
+func requiresRespondentCoachFallback(value string) bool {
+	return conversation.ExplicitCoachOptIn(value)
 }
 
 func nativeAudioEligible(value string) bool {

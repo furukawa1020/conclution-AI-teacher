@@ -4,8 +4,10 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、KOTAEが話題を持つ";
-const ANSWER_SUPPORT_COPY: &str = "長くまとまらなくても、中心から返す";
+const ANSWER_SUPPORT_COPY: &str = "人に聞かれた質問も、そのまま話していい";
 const TALK_ONLY_COPY: &str = "ぼやきや相づちでは止めず、続けて話すと止める";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。PDF・接続不能時・人に聞かれた質問への回答支援を明示した時はSpeech-to-Text・Vertex AI・TTSの段階経路へ切り替えます。回答支援では、Native応答音声を出さずに破棄し、同じ録音をSpeech-to-Textへ送り直す場合があります。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。PDF・接続不能時・人に聞かれた質問への回答支援を明示した時はSpeech-to-Text・Vertex AI・Text-to-Speechで処理します。回答支援では、Native応答音声を出さずに破棄し、同じ録音をSpeech-to-Textへ送り直す場合があります。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
@@ -127,6 +129,16 @@ impl CoachState {
 
     const fn is_active(self) -> bool {
         !matches!(self.phase, CoachPhase::None)
+    }
+
+    const fn requires_staged_route(self) -> bool {
+        matches!(
+            (self.phase, self.action),
+            (CoachPhase::AwaitingAnswer, CoachAction::Elicit)
+                | (CoachPhase::AwaitingRestatement, CoachAction::Restate)
+                | (CoachPhase::Expanding, CoachAction::Expand)
+                | (CoachPhase::Blocked, CoachAction::Retry)
+        )
     }
 
     const fn status(self) -> &'static str {
@@ -545,6 +557,7 @@ mod cloud {
             session_state: &str,
             turn_mode: &str,
             strict_cloud_minimization: bool,
+            coach_active: bool,
         ) -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = waitForTurnEnd)]
@@ -597,11 +610,17 @@ mod cloud {
         session_state: &str,
         turn_mode: VoiceTurnMode,
         strict_cloud_minimization: bool,
+        coach_active: bool,
     ) -> Result<(), &'static str> {
-        begin_turn_js(session_state, turn_mode.as_str(), strict_cloud_minimization)
-            .await
-            .map(|_| ())
-            .map_err(user_message)
+        begin_turn_js(
+            session_state,
+            turn_mode.as_str(),
+            strict_cloud_minimization,
+            coach_active,
+        )
+        .await
+        .map(|_| ())
+        .map_err(user_message)
     }
 
     pub async fn wait_for_turn_end() -> Result<bool, WaitTurnError> {
@@ -1086,6 +1105,7 @@ mod cloud {
         _session_state: &str,
         _turn_mode: VoiceTurnMode,
         _strict_cloud_minimization: bool,
+        _coach_active: bool,
     ) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
@@ -1199,12 +1219,23 @@ fn arm_listening(
 
     spawn(async move {
         let strict_snapshot = *strict_cloud_minimization.peek();
+        // This snapshot belongs to the same session-start boundary as the
+        // opaque state below. Completion and release remain visible in the UI
+        // but no longer pin a later turn to the staged coach route.
+        let coach_active_snapshot = coach_state.peek().requires_staged_route();
         let state_snapshot = if strict_snapshot {
             String::new()
         } else {
             session_state.peek().clone()
         };
-        if let Err(message) = cloud::begin_turn(&state_snapshot, turn_mode, strict_snapshot).await {
+        if let Err(message) = cloud::begin_turn(
+            &state_snapshot,
+            turn_mode,
+            strict_snapshot,
+            coach_active_snapshot,
+        )
+        .await
+        {
             if *generation.peek() == operation {
                 if message == ACCOUNT_BOUNDARY_CHANGED_COPY {
                     let next = generation.peek().wrapping_add(1);
@@ -2654,7 +2685,7 @@ fn App() -> Element {
                             strong { {ORDINARY_CHAT_COPY} }
                         }
                         div { class: "capability",
-                            span { "長い話" }
+                            span { "聞かれたこと" }
                             i { aria_hidden: "true", "→" }
                             strong { {ANSWER_SUPPORT_COPY} }
                         }
@@ -2841,7 +2872,7 @@ fn App() -> Element {
                                     if strict_mode {
                                         "検査不能も停止 / PDF・外部検索・会話状態なし"
                                     } else {
-                                        "Native Audioで先に話し始める / PDF時は従来経路"
+                                        "通常はNative Audio / 回答支援時は段階経路"
                                     }
                                 }
                             }
@@ -2850,7 +2881,7 @@ fn App() -> Element {
                             if strict_mode {
                                 "原音はSpeech-to-Textへ送ります。文字起こしの検査に通らなければVertex AIを呼びません。Vertex AIが作った返答も別に検査し、通らなければTTS・画面・音声へ出しません。PDF・外部検索・会話状態は使いません。"
                             } else {
-                                "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、音声を直接返します。PDF・接続不能時はSpeech-to-Text・Vertex AI・TTSの従来経路へ戻ります。"
+                                {STANDARD_MODE_ROUTE_COPY}
                             }
                         }
                         p {
@@ -2980,7 +3011,7 @@ fn App() -> Element {
                                 if strict_mode {
                                     "原音はTLSでSpeech-to-Textへ送ります。文字起こしはCloud Run内の決定論的検査とregional DLPがclearの時だけVertex AIへ進みます。返答も同じ検査がclearの時だけTTS・画面・音声へ出します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
                                 } else {
-                                    "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、音声応答と字幕を直接生成します。PDF・接続不能時はSpeech-to-Text・Vertex AI・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。"
+                                    {STANDARD_VOICE_PRIVACY_COPY}
                                 }
                             }
                             p {
@@ -3052,9 +3083,10 @@ mod tests {
         PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
-        RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, VoiceReceipt, VoiceState, VoiceTurnMode, cloud_state_for_display,
-        passkey_focus_target, recoverable_wait_turn_code, requires_passkey_choice,
+        RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
+        STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceReceipt,
+        VoiceState, VoiceTurnMode, cloud_state_for_display, passkey_focus_target,
+        recoverable_wait_turn_code, requires_passkey_choice,
         requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
         turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
         valid_voice_privacy_metadata, valid_voice_receipt_metadata,
@@ -3108,6 +3140,7 @@ mod tests {
             "答えなくても大丈夫　話したい方へ続けられます"
         );
         assert_eq!(complete.status(), "聞かれたことへの答えが届きました");
+        assert_eq!(complete.heading(), "今の答えは、聞かれたことに届いています");
 
         for copy in [
             awaiting.status(),
@@ -3143,7 +3176,10 @@ mod tests {
             ORDINARY_CHAT_COPY,
             "「こんにちは」だけで、KOTAEが話題を持つ"
         );
-        assert_eq!(ANSWER_SUPPORT_COPY, "長くまとまらなくても、中心から返す");
+        assert_eq!(
+            ANSWER_SUPPORT_COPY,
+            "人に聞かれた質問も、そのまま話していい"
+        );
         assert_eq!(
             TALK_ONLY_COPY,
             "ぼやきや相づちでは止めず、続けて話すと止める"
@@ -3162,6 +3198,17 @@ mod tests {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }
         assert!(!SUPPORT_BOUNDARY_COPY.contains("曝露"));
+    }
+
+    #[test]
+    fn standard_privacy_copy_discloses_the_answer_support_audio_reprocessing() {
+        for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
+            assert!(copy.contains("人に聞かれた質問への回答支援を明示した時"));
+            assert!(copy.contains("Native応答音声を出さずに破棄"));
+            assert!(copy.contains("同じ録音"));
+            assert!(copy.contains("Speech-to-Textへ送り直す"));
+        }
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("保存しません"));
     }
 
     #[test]
@@ -3362,6 +3409,27 @@ mod tests {
         assert_eq!(release.hint(), "この続きでも、別の話でも大丈夫");
         assert_eq!(CoachState::NONE.phase, CoachPhase::None);
         assert_eq!(CoachState::NONE.action, CoachAction::None);
+    }
+
+    #[test]
+    fn only_unfinished_coach_steps_require_the_staged_route() {
+        for state in [
+            CoachState::from_result(CoachPhase::AwaitingAnswer, CoachAction::Elicit),
+            CoachState::from_result(CoachPhase::AwaitingRestatement, CoachAction::Restate),
+            CoachState::from_result(CoachPhase::Expanding, CoachAction::Expand),
+            CoachState::from_result(CoachPhase::Blocked, CoachAction::Retry),
+        ] {
+            assert!(state.is_active());
+            assert!(state.requires_staged_route());
+        }
+
+        for state in [
+            CoachState::NONE,
+            CoachState::from_result(CoachPhase::Complete, CoachAction::Complete),
+            CoachState::from_result(CoachPhase::Blocked, CoachAction::Release),
+        ] {
+            assert!(!state.requires_staged_route());
+        }
     }
 
     #[test]

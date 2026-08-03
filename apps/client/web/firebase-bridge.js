@@ -1692,7 +1692,18 @@ function armVad(recording) {
   }, VAD_INTERVAL_MS);
 }
 
-function createRecordingState(stream, nativeAudio = false) {
+function createRecordingState(
+  stream,
+  nativeAudio = false,
+  coachActive = false,
+) {
+  if (
+    typeof nativeAudio !== "boolean" ||
+    typeof coachActive !== "boolean" ||
+    (nativeAudio && coachActive)
+  ) {
+    fail("voice_turn_invalid");
+  }
   let resolveEnd;
   let rejectEnd;
   const endPromise = new Promise((resolve, reject) => {
@@ -1713,6 +1724,7 @@ function createRecordingState(stream, nativeAudio = false) {
     liveSpeechConfirmed: false,
     liveSpeechStartedAt: null,
     nativeAudio,
+    coachActive,
     providerEndpointAt: null,
     resolveEnd,
     rejectEnd,
@@ -1731,9 +1743,17 @@ function createRecordingState(stream, nativeAudio = false) {
   return recording;
 }
 
-function createRecording(stream, nativeAudio = false) {
+function createRecording(
+  stream,
+  nativeAudio = false,
+  coachActive = false,
+) {
   setVoiceReceiptVisible(false);
-  const recording = createRecordingState(stream, nativeAudio);
+  const recording = createRecordingState(
+    stream,
+    nativeAudio,
+    coachActive,
+  );
   armVad(recording);
   return recording;
 }
@@ -1742,6 +1762,7 @@ async function beginTurn(
   serializedSessionState,
   turnMode,
   strictCloudMinimization,
+  coachActive,
 ) {
   if (document.hidden) {
     stopSession("hidden");
@@ -1752,6 +1773,7 @@ async function beginTurn(
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
     !isValidTurnMode(turnMode) ||
     typeof strictCloudMinimization !== "boolean" ||
+    typeof coachActive !== "boolean" ||
     activeRecording ||
     activeLiveSession ||
     pendingLiveSession ||
@@ -1800,7 +1822,12 @@ async function beginTurn(
         }
 
         setStreamTracksEnabled(stream, true);
-        const nativeAudio = !strictCloudMinimization && !pendingDocument;
+        // A continuing Respondent Coach turn needs the authoritative staged
+        // path. The boolean is validated above and captured once at this
+        // session-start boundary, so reconnect/fallback code cannot reinterpret
+        // a truthy value or change lanes halfway through the turn.
+        const nativeAudio =
+          !strictCloudMinimization && !pendingDocument && !coachActive;
         const liveSession = await startVoiceLiveSession({
           ...credentials,
           expectedEpoch,
@@ -1820,7 +1847,11 @@ async function beginTurn(
         // first could confirm speech while the AudioWorklet was still loading
         // and force the live turn to cancel after its first PCM frame.
         activeLiveSession = liveSession;
-        const recording = createRecording(stream, nativeAudio);
+        const recording = createRecording(
+          stream,
+          nativeAudio,
+          coachActive,
+        );
         activeRecording = recording;
         return Object.freeze({ state: "listening" });
       },
@@ -2780,6 +2811,11 @@ async function startVoiceLiveSession({
     canFallback() {
       return !commitSent || nativeFallbackAllowed;
     },
+    requiresStatefulHTTPFallback() {
+      // This latch is set only by shouldReplayCommittedNativeTurn after an
+      // exact committed, zero-audio voice_native_fallback sentinel.
+      return nativeFallbackAllowed;
+    },
     handoffAmbient({
       candidateStartedAt,
       captureHandoff: nextCapture,
@@ -3157,6 +3193,20 @@ function stopBargeInMonitoring(playback) {
     playback.interruptRecording = undefined;
   }
   playback.resetInterruptGuard = undefined;
+  setTracksEnabled(false);
+}
+
+function discardInterruptedPlaybackRecording(playback) {
+  if (!playback?.interrupted) return;
+  const recording = playback.interruptRecording;
+  playback.interruptRecording = undefined;
+  playback.resetInterruptGuard = undefined;
+  if (activeRecording === recording) {
+    activeRecording = undefined;
+  }
+  if (recording && !recording.settled) {
+    abandonInterruptRecording(recording);
+  }
   setTracksEnabled(false);
 }
 
@@ -3578,6 +3628,52 @@ async function takePendingLiveSession(recording, expectedEpoch) {
   return nextLiveSession;
 }
 
+function shouldAbortPlaybackTransportOnInterrupt(playback) {
+  if (
+    !playback ||
+    typeof playback.finalReceived !== "boolean" ||
+    typeof playback.coachActive !== "boolean" ||
+    (playback.transportKind !== "http" &&
+      playback.transportKind !== "live")
+  ) {
+    fail("voice_response_invalid");
+  }
+  // Only an explicitly scoped Respondent Coach response may need the newly
+  // signed state in its final event. Other HTTP turns abort immediately so a
+  // PDF, strict, or ordinary fallback response cannot delay the interruption.
+  if (playback.transportKind === "http") {
+    return (
+      shouldAbortVoiceTransportOnInterrupt(playback.finalReceived) &&
+      !playback.coachActive
+    );
+  }
+  return shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+}
+
+function maybeAbortPlaybackTransportOnInterrupt(
+  playback,
+  requestController,
+) {
+  const shouldAbort = shouldAbortPlaybackTransportOnInterrupt(playback);
+  if (shouldAbort && requestController) {
+    requestController.abort();
+  }
+  return shouldAbort;
+}
+
+function shouldDiscardInterruptedHTTPRecording(playback) {
+  if (!playback?.interrupted || playback.transportKind !== "http") {
+    return false;
+  }
+  // A prompt, intentional pre-final abort owns the held recording and hands
+  // it back to Rust. All failures on a state-preserving drain must discard it
+  // because no validated final state exists to bind the next turn.
+  return !(
+    playback.interruptedBeforeFinal &&
+    shouldAbortPlaybackTransportOnInterrupt(playback)
+  );
+}
+
 function confirmBargeIn(
   playback,
   recording,
@@ -3625,8 +3721,7 @@ function confirmBargeIn(
   }
   clearCandidateDeadline(candidate);
   candidate.confirmed = true;
-  playback.interruptedBeforeFinal =
-    shouldAbortVoiceTransportOnInterrupt(playback.finalReceived);
+  playback.interruptedBeforeFinal = !playback.finalReceived;
   playback.interrupted = true;
   activeRecording = recording;
 
@@ -3656,12 +3751,14 @@ function confirmBargeIn(
     captureHandoff?.stop();
     interruptedLiveSession?.interrupt(interruption);
   }
-  // Once a final frame has been parsed, keep reading to a clean EOF so
-  // trailing bytes cannot be hidden by the interruption. Before final, there
-  // is no state that can be committed, so abort the transport immediately.
-  if (!playback.finalReceived && activeRequestController) {
-    activeRequestController.abort();
-  }
+  // Live WebSocket handoff retains its existing pre-final abort behavior.
+  // HTTP staged playback is different: its final metadata can contain a new
+  // signed coach state, so audio halts now while the response transport keeps
+  // validating and discarding audio events through final + clean EOF.
+  maybeAbortPlaybackTransportOnInterrupt(
+    playback,
+    activeRequestController,
+  );
   haltStreamingPlayback(playback, interruption);
   const bargeHaltMs = performance.now() - interruptionStartedAt;
   if (interruptedLiveSession) {
@@ -3752,6 +3849,7 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   const recording = createRecordingState(
     mediaStream,
     playback.nativeAudio === true,
+    playback.coachActive === true,
   );
   const pcm = new Float32Array(analyser.fftSize);
   recording.vadPcm = pcm;
@@ -3839,11 +3937,21 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   }, INTERRUPT_VAD_LIMITS.intervalMs);
 }
 
-function createStreamingPlayback(expectedEpoch, nativeAudio = false) {
+function createStreamingPlayback(
+  expectedEpoch,
+  nativeAudio = false,
+  transportKind = "live",
+  coachActive = false,
+) {
   if (
     activePlayback ||
     !audioContext ||
-    audioContext.state === "closed"
+    audioContext.state === "closed" ||
+    typeof nativeAudio !== "boolean" ||
+    typeof coachActive !== "boolean" ||
+    (transportKind !== "http" && transportKind !== "live") ||
+    (nativeAudio && transportKind !== "live") ||
+    (nativeAudio && coachActive)
   ) {
     fail("audio_playback_blocked");
   }
@@ -3979,9 +4087,11 @@ function createStreamingPlayback(expectedEpoch, nativeAudio = false) {
         scheduledEndContextTime: nextStartAt,
       });
     },
+    coachActive,
     finalReceived: false,
     gainNode,
     nativeAudio,
+    transportKind,
     hasStreamedAudio: () => streamedAudio,
     interruptRecording: undefined,
     interrupted: false,
@@ -4119,6 +4229,15 @@ async function consumeVoiceStream(
   function acceptEvents(events) {
     for (const event of events) {
       if (event.type === "audio") {
+        if (
+          playback.interrupted &&
+          playback.transportKind === "http"
+        ) {
+          // createVoiceStreamParser has already enforced sequence, canonical
+          // base64 shape, per-event size, and total byte bounds. Do not decode,
+          // schedule, or fire another first-audio event after confirmed barge.
+          continue;
+        }
         playback.schedule(event);
       } else if (event.type === "final") {
         // Latch at parse time rather than EOF. Barge-in after this point must
@@ -4197,6 +4316,7 @@ async function finishTurn(
   let documentForTurn;
   let liveSession;
   let playback;
+  let coachActive = recording.coachActive === true;
   let requestController;
   let responseClockActive = false;
   let turnTimedOut = false;
@@ -4280,6 +4400,8 @@ async function finishTurn(
       playback = createStreamingPlayback(
         expectedEpoch,
         liveSession.nativeAudio === true,
+        "live",
+        coachActive,
       );
       try {
         const completed = await awaitVoiceTurnResult(
@@ -4315,6 +4437,9 @@ async function finishTurn(
         ) {
           throw error;
         }
+        coachActive =
+          coachActive ||
+          liveSession.requiresStatefulHTTPFallback();
         liveSession.cancel(
           error instanceof Error
             ? error
@@ -4360,7 +4485,12 @@ async function finishTurn(
     if (expectedEpoch !== sessionEpoch) {
       fail(stoppedSessionCode(expectedEpoch));
     }
-    playback = createStreamingPlayback(expectedEpoch);
+    playback = createStreamingPlayback(
+      expectedEpoch,
+      false,
+      "http",
+      coachActive,
+    );
     // Barge-in starts only when the first response audio frame is scheduled.
     // Keeping the track disabled while the model is still thinking prevents
     // a resumed phrase from aborting an answer that has not begun.
@@ -4428,15 +4558,25 @@ async function finishTurn(
       playback,
       error instanceof Error ? error : new Error("voice_response_invalid"),
     );
+    const interruptionAbortedTransport = Boolean(
+      playback?.interruptedBeforeFinal &&
+        shouldAbortPlaybackTransportOnInterrupt(playback),
+    );
+    // A prompt non-stateful HTTP abort keeps the held interruption for Rust.
+    // A state-preserving drain that fails validation has no final state to
+    // bind, so timeout, malformed data, and lifecycle failure discard it.
+    if (shouldDiscardInterruptedHTTPRecording(playback)) {
+      discardInterruptedPlaybackRecording(playback);
+    }
     const stopCode = stoppedSessionCode(expectedEpoch);
     if (stopCode === "session_expired") {
       fail(stopCode);
     }
+    if (interruptionAbortedTransport) {
+      fail("voice_interrupted");
+    }
     if (turnTimedOut) {
       fail("voice_turn_timeout");
-    }
-    if (playback?.interruptedBeforeFinal) {
-      fail("voice_interrupted");
     }
     if (error && typeof error === "object" && error.name === "AbortError") {
       fail(stopCode);

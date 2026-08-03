@@ -253,7 +253,7 @@ func main() {
 			os.Exit(1)
 		}
 		if cfg.NativeAudioEnabled {
-			stateRefresher, ok := conversationAgent.(conversation.StateTokenRefresher)
+			statePreparer, ok := conversationAgent.(conversation.NativeStatePreparer)
 			if !ok {
 				logger.Error("initialize native audio state boundary")
 				os.Exit(1)
@@ -280,7 +280,7 @@ func main() {
 			_ = probe.Close()
 			nativeService, nativeErr := nativeflow.New(
 				nativeOpener,
-				stateRefresher,
+				statePreparer,
 			)
 			if nativeErr != nil {
 				logger.Error("initialize native audio flow", "error", nativeErr)

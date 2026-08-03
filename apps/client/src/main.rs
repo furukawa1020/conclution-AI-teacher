@@ -497,6 +497,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct CoachCheckpointListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     pub(super) struct VoiceReceiptListener {
         window: web_sys::Window,
         callback: Closure<dyn FnMut(web_sys::Event)>,
@@ -506,6 +511,15 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:first-audio",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for CoachCheckpointListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:coach-checkpoint",
                 self.callback.as_ref().unchecked_ref(),
             );
         }

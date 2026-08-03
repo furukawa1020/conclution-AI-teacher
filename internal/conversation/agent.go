@@ -588,8 +588,7 @@ func (agent *vertexAgent) Process(
 			state.PendingAnswer = emptyPendingAnswer()
 		case agent.coachRestatementBinding &&
 			state.PendingAnswer.Phase == respondent.CoachPhaseAwaitingRestatement &&
-			state.PendingAnswer.RestatementTag == "" &&
-			state.PendingAnswer.NativeCoachScopeTag == "":
+			state.PendingAnswer.RestatementTag == "":
 			// Compatibility revisions can decode the new field without issuing
 			// it. Once issuance is enabled, never renew an unbound legacy
 			// restatement scope; return the utterance to ordinary conversation.

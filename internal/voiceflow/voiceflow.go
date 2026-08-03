@@ -1669,6 +1669,10 @@ func conversationTurn(
 	transcript string,
 	speculative bool,
 ) conversation.VoiceTurn {
+	inputOrigin := conversation.InputOriginCommittedVoice
+	if speculative {
+		inputOrigin = conversation.InputOriginProvisionalVoice
+	}
 	turn := conversation.VoiceTurn{
 		SchemaVersion: conversation.SchemaVersion,
 		Utterance:     transcript,
@@ -1679,6 +1683,7 @@ func conversationTurn(
 		ExtendedSpeech: !speculative &&
 			utf8.RuneCountInString(transcript) >= extendedSpeechMinRunes,
 		Speculative:      speculative,
+		InputOrigin:      inputOrigin,
 		ResearchDisabled: input.StrictCloudMinimization,
 	}
 	if input.Document == nil {
@@ -1702,6 +1707,7 @@ func voiceResultFromDecision(
 		RespondentStage:  decision.RespondentStage,
 		CoachPhase:       decision.CoachPhase,
 		CoachAction:      decision.CoachAction,
+		AnswerProof:      string(decision.AnswerProof),
 		ResearchStatus:   decision.ResearchStatus,
 		ResearchRecords:  researchRecords(decision.ResearchRecords),
 		Route:            decision.Route,

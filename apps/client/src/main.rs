@@ -435,14 +435,16 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        ACCOUNT_BOUNDARY_CHANGED_COPY, BridgeStatus, CloudState, CoachState, DocumentInfo,
-        FinishTurnError, PASSKEY_ACCOUNT_EXISTS_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
+        ACCOUNT_BOUNDARY_CHANGED_COPY, BridgeStatus, CloudState, CoachAction, CoachPhase,
+        CoachState, DocumentInfo, FinishTurnError, PASSKEY_ACCOUNT_EXISTS_COPY,
+        PASSKEY_AUTHENTICATION_FAILED_COPY,
         PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
         ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code,
-        recoverable_wait_turn_code, session_stop_pauses, valid_voice_pause_metadata,
+        VoiceTurnMode, VoiceTurnResult, WaitTurnError, NATIVE_RESPONDENT_COACH_ROUTE,
+        recoverable_finish_turn_code, recoverable_wait_turn_code, session_stop_pauses,
+        valid_coach_checkpoint_metadata, valid_voice_pause_metadata,
         valid_voice_receipt_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
@@ -849,6 +851,58 @@ mod cloud {
         Some(Rc::new(FirstAudioListener { window, callback }))
     }
 
+    pub fn install_coach_checkpoint_listener(
+        mut session_state: Signal<String>,
+        mut route: Signal<String>,
+        mut coach_state: Signal<CoachState>,
+    ) -> Option<Rc<CoachCheckpointListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(checkpoint) =
+                js_sys::Reflect::get(&detail, &JsValue::from_str("sessionState"))
+            else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(checkpoint) = checkpoint.as_string() else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            if !valid_coach_checkpoint_metadata(&checkpoint, version, keys.length()) {
+                return;
+            }
+
+            // Commit the opaque server-signed checkpoint before activating
+            // the staged route. A network failure after this event can rearm
+            // from the generic pending state without the original transcript.
+            session_state.set(checkpoint);
+            route.set(NATIVE_RESPONDENT_COACH_ROUTE.to_string());
+            coach_state.set(CoachState::from_result(
+                CoachPhase::AwaitingAnswer,
+                CoachAction::Elicit,
+            ));
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:coach-checkpoint",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(CoachCheckpointListener { window, callback }))
+    }
+
     pub fn end_turn() {
         let _ = end_turn_js();
     }
@@ -1187,6 +1241,14 @@ mod cloud {
     pub fn install_first_audio_listener(
         _voice_state: Signal<VoiceState>,
         _voice_receipt: Signal<VoiceReceipt>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_coach_checkpoint_listener(
+        _session_state: Signal<String>,
+        _route: Signal<String>,
+        _coach_state: Signal<CoachState>,
     ) -> Option<Listener> {
         None
     }

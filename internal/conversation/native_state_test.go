@@ -217,3 +217,96 @@ func TestPreparedNativeCoachStateDrivesTheRealNextRespondentTurn(t *testing.T) {
 		t.Fatalf("Native scope persisted after completion: %+v", next.PendingAnswer)
 	}
 }
+
+func TestPreparedNativeCoachStateExchangesScopeForBoundRestatement(t *testing.T) {
+	const (
+		uid          = "native-coach-restatement-user"
+		request      = "上司に目的を聞かれました。答え方を一問だけ手伝ってください"
+		firstAnswer  = "背景として評価が人ごとに違います。判断のばらつきを減らしたいです"
+		firstTarget  = "判断のばらつきを減らしたいです"
+		different    = "売上を増やしたいです"
+		plannerDraft = "判断のばらつきを減らしたいです。"
+	)
+	firstPlan := coachAttemptPlan(
+		answercontract.OperatorOpen,
+		answercontract.SlotPosition,
+		pendingSubjectForOperator(answercontract.OperatorOpen),
+		firstAnswer,
+		firstTarget,
+		plannerDraft,
+	)
+	differentPlan := coachAttemptPlan(
+		answercontract.OperatorOpen,
+		answercontract.SlotPosition,
+		pendingSubjectForOperator(answercontract.OperatorOpen),
+		different,
+		different,
+		different,
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, firstPlan)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorOpen,
+			answercontract.SlotPosition,
+			firstAnswer,
+			firstTarget,
+			answercontract.PositionLater,
+		))},
+		{body: encodePlan(t, differentPlan)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorOpen,
+			answercontract.SlotPosition,
+			different,
+			different,
+			answercontract.PositionFirst,
+		))},
+	}}
+	agent := newTestAgent(t, fake)
+	token, err := agent.PrepareNativeCoachState(uid, "", request)
+	if err != nil {
+		t.Fatalf("prepare Native coach state: %v", err)
+	}
+
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     firstAnswer,
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("process first staged answer: %v", err)
+	}
+	if first.CoachPhase != "awaiting_restatement" ||
+		first.CoachAction != "restate" {
+		t.Fatalf("first answer did not enter restatement: %+v", first)
+	}
+	restatementState, err := agent.codec.open(uid, first.StateToken)
+	if err != nil {
+		t.Fatalf("open restatement state: %v", err)
+	}
+	frame := restatementState.PendingAnswer
+	if !frame.Active ||
+		frame.Phase != respondent.CoachPhaseAwaitingRestatement ||
+		frame.NativeCoachScopeTag != "" ||
+		!validCoachRestatementTag(frame.RestatementTag) {
+		t.Fatalf("Native scope was not exchanged for a restatement proof: %+v", frame)
+	}
+
+	second, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     different,
+		StateToken:    first.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("process different restatement: %v", err)
+	}
+	if second.CoachPhase == "complete" || second.CoachAction == "complete" {
+		t.Fatalf("different answer completed the bound restatement: %+v", second)
+	}
+	secondState, err := agent.codec.open(uid, second.StateToken)
+	if err != nil {
+		t.Fatalf("open rejected restatement state: %v", err)
+	}
+	if secondState.PendingAnswer.NativeCoachScopeTag != "" {
+		t.Fatalf("Native scope returned after first substantive answer: %+v", secondState.PendingAnswer)
+	}
+}

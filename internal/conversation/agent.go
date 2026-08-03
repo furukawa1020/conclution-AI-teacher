@@ -1556,7 +1556,7 @@ func (agent *vertexAgent) Process(
 			}
 			nativeRestatementTransition :=
 				storedPhase == respondent.CoachPhaseAwaitingRestatement &&
-				storedFrame.NativeCoachScopeTag != ""
+					storedFrame.NativeCoachScopeTag != ""
 			if nativeRestatementTransition {
 				// The Native tag authorizes only the first generic answer slot. A
 				// substantive answer that needs another try must exchange it for the

@@ -8,8 +8,10 @@ const ANSWER_SUPPORT_COPY: &str = "人に聞かれた質問も、そのまま話
 const TALK_ONLY_COPY: &str = "ぼやきや相づちでは止めず、続けて話すと止める";
 const STANDARD_MODE_ROUTE_LABEL: &str =
     "通常・初回の回答支援はNative Audio / 回答保留中の後続は段階経路";
-const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。人に聞かれた質問への回答支援を明示した初回も、同じ原音を送り直さずNative音声を返します。同時に、その一度だけ得た確定した入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ並行利用し、回答保留中の次の一歩を守る署名済み状態を作ります。回答保留中の後続ターンはSpeech-to-Text・Vertex AI・TTSの段階経路を使い、完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
-const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。人に聞かれた質問への回答支援を明示した初回は、同じ原音をSpeech-to-Textへ送り直さずNative音声を返しながら、その一度だけ得た確定した入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ並行利用して署名済み状態を作ります。回答保留中の後続ターンとPDF・接続不能時はSpeech-to-Text・Vertex AI・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。人に聞かれた質問への回答支援を明示した初回も、同じ原音を送り直さずNative音声を返します。初回の入力字幕はCloud Run内の決定論的規則だけで判定し、モデルを使わず、音声より先に回答保留中を示す汎用の署名済みcheckpointを作ります。この時点では入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ送りません。checkpointに具体的な質問・答え・文字起こしは保存しません。回答保留中の後続ターンだけSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路を使い、完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。人に聞かれた質問への回答支援を明示した初回は、同じ原音をSpeech-to-Textへ送り直さずNative音声を返します。確定した入力字幕はCloud Run内の決定論的規則だけで判定し、モデルなしで、具体的な質問・答え・文字起こしを含まない汎用の署名済みcheckpointを音声より先に作ります。初回の入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへは送りません。回答保留中の後続ターンとPDF・接続不能時だけSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
+const NATIVE_RESPONDENT_COACH_ROUTE: &str = "native-respondent-coach";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =

@@ -8,9 +8,9 @@ const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言�
 const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する";
 const TALK_ONLY_COPY: &str = "届いた瞬間だけ知らせて、点数にはしない";
 const STANDARD_MODE_ROUTE_LABEL: &str =
-    "通常会話はNative Audio / 明示した回答支援はQBA Proof段階経路";
-const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、生成済みのNative音声を一切出さず、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路で一度だけ処理します。この経路で入力内に報告された問いの範囲、operator、required slot、今回の入力evidenceをそれぞれ非可逆tagへ結びます。確定音声入力だけを対象に、exact-span gateと独立criticが全slotとA先頭で一致した時だけ、本文を含まないQBA Proofを今回のturnへ返します。外部で実際にその問いを聞かれた事実や話者・ライブネスは確認しません。次の発話が別の話題なら回答完了にも証明にもしません。完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
-const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、Native出力を破棄し、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで一度だけ再処理します。回答支援の短期stateには入力内に報告された問いから作ったoperator・required slot・非可逆の質問／入力tagを保持しますが、具体的な質問・答え・文字起こしは保存しません。QBA Proofも固定enumだけで本文を含みません。外部の質問事実、話者、ライブネス、正解、能力、上達は確認しません。PDF・Native接続不能時も段階経路を使います。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+    "通常会話はNative Audio / 明示した回答支援はQ-ARC + QBA Proof";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、生成済みのNative音声を一切出さず、その確定字幕を再認識せず監査済み段階経路へ渡します。発話途中に同じ字幕が安定した時は、答え本文を入力できないQ-ARCが8つの一時的な検索状態への区間信念と4つの固定行動を厳密なminimax regretで比較し、質問が求める型だけの短いcueとTTSを非公開buffer内で先に準備します。Nativeの最終字幕と完全一致した時だけ音声とstateを解放し、不一致なら全て破棄して確定字幕を一度だけ処理します。続く回答発話はSpeech-to-Textを一度だけ通り、exact-span gateと独立criticの一致後にBayesian反実仮想controllerが待つ・型だけ促す・言い直す・完了・解放を選びます。入力内に報告された問いの範囲、operator、required slot、今回の入力evidenceは非可逆tagへ結びます。全slotとA先頭が一致した時だけ、本文を含まないQBA Proofを今回のturnへ返します。外部で実際にその問いを聞かれた事実や話者・ライブネス・正解・能力・上達は確認しません。次の発話が別の話題なら回答完了にも証明にもしません。完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。明示した最初の回答支援ではNative出力を破棄し、Nativeの確定入力字幕を再認識せずQ-ARC・監査済み文字列経路・Text-to-Speechへ渡します。発話途中の候補から準備した判断と音声は、最終字幕との完全一致まで外へ出しません。続く回答発話は最初から段階経路でSpeech-to-Textを一度だけ使います。回答支援の短期stateにはoperator・required slot・非可逆の質問／入力tagと本文を含まない固定長posteriorだけを保持し、具体的な質問・答え・文字起こし・診断は保存しません。QBA Proofも固定enumだけで本文を含みません。外部の質問事実、話者、ライブネス、正解、能力、上達は確認しません。PDF・Native接続不能時も段階経路を使います。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -3769,15 +3769,13 @@ mod tests {
     #[test]
     fn standard_privacy_copy_discloses_the_question_bound_staged_switch() {
         for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
-            assert!(copy.contains("最終入力字幕"));
-            assert!(copy.contains("人に聞かれた質問への回答支援"));
-            assert!(copy.contains("利用者が明示"));
+            assert!(copy.contains("入力字幕"));
+            assert!(copy.contains("明示"));
             assert!(copy.contains("QBA Proof"));
             assert!(copy.contains("質問"));
             assert!(copy.contains("非可逆"));
             assert!(copy.contains("Native"));
             assert!(copy.contains("Speech-to-Text"));
-            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coach"));
             assert!(copy.contains("一度だけ"));
             assert!(copy.contains("operator"));
             assert!(copy.contains("required slot"));
@@ -3787,12 +3785,21 @@ mod tests {
         }
         assert_eq!(
             STANDARD_MODE_ROUTE_LABEL,
-            "通常会話はNative Audio / 明示した回答支援はQBA Proof段階経路"
+            "通常会話はNative Audio / 明示した回答支援はQ-ARC + QBA Proof"
         );
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("人に聞かれた質問への回答支援"));
         assert!(STANDARD_MODE_ROUTE_COPY.contains("生成済みのNative音声を一切出さず"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("再認識せず"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("Q-ARC"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("8つの一時的な検索状態"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("4つの固定行動"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("minimax regret"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("Bayesian反実仮想controller"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("完全一致"));
         assert!(STANDARD_MODE_ROUTE_COPY.contains("別の話題なら回答完了にも証明にもしません"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("Native出力を破棄"));
-        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("具体的な質問・答え・文字起こし"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("固定長posterior"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("具体的な質問・答え・文字起こし・診断"));
         assert!(!STANDARD_MODE_ROUTE_COPY.contains("汎用の署名済みcheckpoint"));
         assert!(STANDARD_MODE_ROUTE_COPY.contains("PDF・接続不能時"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("保存しません"));

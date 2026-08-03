@@ -160,7 +160,13 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 	firstState := openCoachState(t, agent, uid, first.StateToken)
 	if !firstState.PendingAnswer.Active ||
 		firstState.PendingAnswer.Attempts != 0 ||
-		firstState.PendingAnswer.Subject != "質問が求める目的" {
+		firstState.PendingAnswer.Operator != answercontract.OperatorPurpose ||
+		firstState.PendingAnswer.Subject != "質問が求める目的" ||
+		len(firstState.PendingAnswer.RequiredSlots) != 1 ||
+		firstState.PendingAnswer.RequiredSlots[0] != answercontract.SlotPurpose ||
+		firstState.PendingAnswer.QuestionContinuityTag !=
+			agent.coachQuestionContinuityTag("導入目的") ||
+		firstState.PendingAnswer.ContinuityTag != "" {
 		t.Fatalf("initial coach frame: %#v", firstState.PendingAnswer)
 	}
 	stateJSON, err := json.Marshal(firstState)
@@ -226,6 +232,49 @@ func TestAgentExplicitRespondentCoachRunsBoundedAnswerFirstSequence(t *testing.T
 		if strings.Contains(call.prompt, bound.PendingAnswer.RestatementTag) {
 			t.Fatal("server-only restatement verifier entered a model prompt")
 		}
+	}
+}
+
+func TestAgentBoundExternalQuestionCannotCompleteOnUnrelatedNextTurn(t *testing.T) {
+	const (
+		uid          = "uid-bound-question-unrelated-turn"
+		questionText = "上司に、導入目的は何かと聞かれました"
+		unrelated    = "今日はゲームの音楽がよかったです"
+	)
+	ordinary := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, respondentAwaitingPlan())},
+		{body: encodePlan(t, ordinary)},
+		{body: encodeContract(t, validCriticContract(ordinary.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+
+	first, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     questionText + "。どう答えればいいですか",
+	})
+	if err != nil {
+		t.Fatalf("bind external question: %v", err)
+	}
+	bound := openCoachState(t, agent, uid, first.StateToken)
+	if bound.PendingAnswer.QuestionContinuityTag !=
+		agent.coachQuestionContinuityTag("導入目的") {
+		t.Fatalf("external question was not bound: %#v", bound.PendingAnswer)
+	}
+
+	second, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     unrelated,
+		StateToken:    first.StateToken,
+	})
+	if err != nil {
+		t.Fatalf("unrelated next turn: %v", err)
+	}
+	if second.CoachPhase == "complete" || second.CoachAction == "complete" {
+		t.Fatalf("unrelated turn completed the bound answer: %#v", second)
+	}
+	if openCoachState(t, agent, uid, second.StateToken).PendingAnswer.Active {
+		t.Fatal("explicit topic change retained the old answer scope")
 	}
 }
 

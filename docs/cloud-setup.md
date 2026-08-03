@@ -30,11 +30,11 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 | Speech-to-Text | `asia-northeast1` regional endpoint | 厳格モード、PDF turn、Native Audioを使えないfallbackのraw audio |
 | Sensitive Data Protection | `asia-northeast1` regional endpoint | 厳格モードの文字起こしと応答文 |
 | Vertex AI Native Audio | `us-central1` | 標準liveのraw audioと音声応答 |
-| Vertex AI文字列推論 | `global` | fallbackの文字起こし、標準モードの短い状態要約と今回添付したPDF |
-| Text-to-Speech | `asia-northeast1` regional endpoint | 厳格モード、PDF turn、Native Audioを使えないfallbackで選ばれた短い応答文 |
+| Vertex AI文字列推論 | `global` | 回答支援とfallbackの文字起こし、標準モードの短い状態要約と今回添付したPDF |
+| Text-to-Speech | `asia-northeast1` regional endpoint | 回答支援、厳格モード、PDF turn、Native Audioを使えないfallbackで選ばれた短い応答文 |
 | Crossref | Google Cloud外の公開REST API | intentional turnで明示し、tool-policyとPII screenを通過したDOIまたは最小topicだけ |
 
-標準live会話では、PDFを添付せず厳格モードでもないturnだけ、Cloud Runから`us-central1`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。GA endpointはsetupごとに応答modalityを一つだけ許すため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。本人が外部の質問への回答支援を明示した初回turnは、同じraw audioを東京リージョンSTTへ再送しません。Cloud Run内で明示支援を決定論的に確認し、モデルを呼ばずに最小の署名済みstateを発行して音声より先にブラウザへcheckpointします。初回captionを別の文字列modelへ送らず、`global`文字列Vertex AI、LAC、Respondent Coachを使うのは保留中の後続turnからです。厳格モード、PDF turn、Native Audioが利用できない接続fallbackに加え、高リスク・tool要求などこのscreenが不適格としたturnは、まだ応答音声を一切解放していない場合だけ明示sentinelで従来の東京リージョンSTTから`global`の文字列推論、東京リージョンTTSの経路へ再送します。したがって、標準liveのraw audioは`us-central1`、fallbackと回答保留中の文字起こし、明示添付したPDFは`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
+標準live会話では、PDFを添付せず厳格モードでもないturnだけ、Cloud Runから`us-central1`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。GA endpointはsetupごとに応答modalityを一つだけ許すため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。本人が外部の質問への回答支援を明示した初回turnは、Native出力を破棄し、同じ確定発話を東京リージョンSTTから`global`文字列Vertex AI、LAC、Respondent Coach、東京リージョンTTSの段階経路へ一度だけ再処理します。実際の外部質問からoperator、required slot、非可逆の質問継続tagを作るため、無関係な次turnを回答完了にしません。具体的な質問・答え・逐語録はstateやDBへ保存しません。厳格モード、PDF turn、Native Audioが利用できない接続fallback、高リスク・tool要求も、応答音声を解放していない場合だけ明示sentinelで段階経路へ切り替えます。したがって、標準liveのraw audioは`us-central1`、fallbackと回答支援の文字列、明示添付したPDFは`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
 
 ## 必要なAPI
 

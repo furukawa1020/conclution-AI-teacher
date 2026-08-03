@@ -3,13 +3,14 @@ mod longitudinal;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、KOTAEが話題を持つ";
-const ANSWER_SUPPORT_COPY: &str = "人に聞かれた質問も、そのまま話していい";
-const TALK_ONLY_COPY: &str = "ぼやきや相づちでは止めず、続けて話すと止める";
+const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
+const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
+const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、答えを代わりに作らない";
+const TALK_ONLY_COPY: &str = "届いた瞬間だけ知らせて、点数にはしない";
 const STANDARD_MODE_ROUTE_LABEL: &str =
-    "通常・初回の回答支援はNative Audio / 回答保留中の後続は段階経路";
-const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。人に聞かれた質問への回答支援を明示した初回も、同じ原音を送り直さずNative音声を返します。初回の入力字幕はCloud Run内の決定論的規則だけで判定し、モデルを使わず、音声より先に回答保留中を示す汎用の署名済みcheckpointを作ります。この時点では入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ送りません。checkpointに具体的な質問・答え・文字起こしは保存しません。回答保留中の後続ターンだけSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路を使い、完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
-const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。人に聞かれた質問への回答支援を明示した初回は、同じ原音をSpeech-to-Textへ送り直さずNative音声を返します。確定した入力字幕はCloud Run内の決定論的規則だけで判定し、モデルなしで、具体的な質問・答え・文字起こしを含まない汎用の署名済みcheckpointを音声より先に作ります。初回の入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへは送りません。回答保留中の後続ターンとPDF・接続不能時だけSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+    "通常会話はNative Audio / 明示した回答支援は質問を結ぶ段階経路";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。最終入力字幕から、人に聞かれた質問への回答支援を本人が明示したと決定論的に確認した時は、生成済みのNative音声を一切出さず、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路で一度だけ処理します。この経路で実際の外部質問からoperator・required slot・非可逆の質問継続tagを作り、次の発話が別の話題なら回答完了にしません。完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。最終入力字幕から、人に聞かれた質問への回答支援を本人が明示したと決定論的に確認した時は、Native出力を破棄し、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで一度だけ再処理します。回答支援の短期stateには実質問から作ったoperator・required slot・非可逆の質問継続tagを保持しますが、具体的な質問・答え・文字起こしは保存しません。PDF・Native接続不能時も段階経路を使います。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -33,7 +34,7 @@ const PASSKEY_ACCOUNT_EXISTS_COPY: &str =
     "このタブには既存アカウントがあります　新しい別アカウントは作りませんでした";
 const ACCOUNT_BOUNDARY_CHANGED_COPY: &str =
     "別の仮名アカウントへ切り替わったため　前の会話を閉じました　もう一度話し始めてください";
-const SUPPORT_BOUNDARY_COPY: &str = "話題を用意できない時は「こんにちは」だけでKOTAEが話題を持ち、短い返事・相づち・まとまらない長話を失敗扱いしません。訓練や採点を前面に出さず、返事の中で中心を先に受け取れる形へ整えます。外出・学校・仕事・家族への相談を勝手に目標にしません。診断や治療ではなく、長期効果はまだ実証していません。";
+const SUPPORT_BOUNDARY_COPY: &str = "話題を用意できない時は「こんにちは」だけでKOTAEが短い話題を持ち、短い返事・相づち・まとまらない長話を失敗扱いしません。AIが長く話すより本人の次の一言を優先し、訓練や採点を前面に出さず、返事の中で中心を先に受け取れる形へ整えます。外出・学校・仕事・家族への相談を勝手に目標にしません。画面の受領表示は今回の一往復だけで、診断や治療、長期効果を示しません。";
 const STRICT_PRIVACY_BLOCKED_COPY: &str = "個人情報の可能性があるため、この発話はAIへ進めませんでした。言い直さなくて大丈夫です。厳格モードを切り替えるか、別の話題から続けられます。";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,44 @@ enum VoiceState {
 enum VoiceReceipt {
     Clear,
     Received,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnNotice {
+    Clear,
+    CaptureSkipped,
+    ReplyUnavailable,
+    PrivacyBlocked,
+}
+
+impl TurnNotice {
+    const fn is_visible(self) -> bool {
+        !matches!(self, Self::Clear)
+    }
+
+    const fn heading(self) -> &'static str {
+        match self {
+            Self::Clear => "",
+            Self::CaptureSkipped => "こちらで声を受け切れませんでした",
+            Self::ReplyUnavailable => "こちらの返事だけ止まりました",
+            Self::PrivacyBlocked => "この発話はAIへ進めませんでした",
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Clear => "",
+            Self::CaptureSkipped => {
+                "会話は開いたままです。あなたの言い方の問題ではありません。別の一言から続けられます"
+            }
+            Self::ReplyUnavailable => {
+                "声は言い直さなくて大丈夫です。会話は開いたままなので、そのまま続けられます"
+            }
+            Self::PrivacyBlocked => {
+                "言い直さなくて大丈夫です。厳格モードを切るか、別の話題から続けられます"
+            }
+        }
+    }
 }
 
 impl VoiceReceipt {
@@ -149,18 +188,18 @@ impl CoachState {
 
     const fn status(self) -> &'static str {
         match self.action {
-            CoachAction::Elicit => "ひとつだけ聞いています",
-            CoachAction::Restate => "少しだけ聞き直します",
-            CoachAction::Expand => "もう少し聞かせて",
-            CoachAction::Complete => "聞かれたことへの答えが届きました",
-            CoachAction::Retry => "音をもう一度拾います",
-            CoachAction::Release => "そのまま続けられます",
+            CoachAction::Elicit => "あなたの一言を待っています",
+            CoachAction::Restate => "あなたの言葉をそのまま",
+            CoachAction::Expand => "あなたの続きを待っています",
+            CoachAction::Complete => "あなたの言葉を受け取りました",
+            CoachAction::Retry => "急がせず待っています",
+            CoachAction::Release => "話したい方へ戻れます",
             CoachAction::None => match self.phase {
                 CoachPhase::None => "",
-                CoachPhase::AwaitingAnswer => "ひとつだけ聞いています",
-                CoachPhase::AwaitingRestatement => "少しだけ聞き直します",
-                CoachPhase::Expanding => "もう少し聞かせて",
-                CoachPhase::Complete => "聞かれたことへの答えが届きました",
+                CoachPhase::AwaitingAnswer => "あなたの一言を待っています",
+                CoachPhase::AwaitingRestatement => "あなたの言葉をそのまま",
+                CoachPhase::Expanding => "あなたの続きを待っています",
+                CoachPhase::Complete => "あなたの言葉を受け取りました",
                 CoachPhase::Blocked => "そのままで大丈夫",
             },
         }
@@ -170,10 +209,10 @@ impl CoachState {
         match (self.phase, self.action) {
             (CoachPhase::Blocked, CoachAction::Release) => "そのまま話して大丈夫です",
             (CoachPhase::None, _) => "まとまらないまま、話していい",
-            (CoachPhase::AwaitingAnswer, _) => "短いひと言だけでも大丈夫",
+            (CoachPhase::AwaitingAnswer, _) => "今は、あなたの一言だけで大丈夫",
             (CoachPhase::AwaitingRestatement, _) => "そこまで、ちゃんと聞こえています",
-            (CoachPhase::Expanding, _) => "もう少しだけ聞かせてください",
-            (CoachPhase::Complete, _) => "今の答えは、聞かれたことに届いています",
+            (CoachPhase::Expanding, _) => "話したい続きを、一つだけ",
+            (CoachPhase::Complete, _) => "あなた自身の言葉が出ました",
             (CoachPhase::Blocked, _) => "急がなくて大丈夫です",
         }
     }
@@ -182,13 +221,11 @@ impl CoachState {
         match (self.phase, self.action) {
             (CoachPhase::Blocked, CoachAction::Release) => "この続きでも、別の話でも大丈夫",
             (CoachPhase::None, _) => "小さな声でも、3分ほどまとまらなくても、そのままどうぞ",
-            (CoachPhase::AwaitingAnswer, _) => {
-                "わからない、まだ決めていない、でも会話は続けられます"
-            }
+            (CoachPhase::AwaitingAnswer, _) => "わからない、まだ決めていない、でも答えになります",
             (CoachPhase::AwaitingRestatement, _) => "聞きたいところを一つだけ小さくしています",
             (CoachPhase::Expanding, _) => "答えなくても大丈夫　話したい方へ続けられます",
             (CoachPhase::Complete, _) => {
-                "今の一回だけの確認です　話し方全体や長期の変化を表すものではありません"
+                "今の一回で声に出せたことだけの表示です　上達や長期の変化を表すものではありません"
             }
             (CoachPhase::Blocked, _) => "短くても大丈夫　拾えなければそのまま先へ進めます",
         }
@@ -210,9 +247,9 @@ impl VoiceState {
         match self {
             Self::Ready => "話しはじめる",
             Self::RequestingPermission => "マイクを準備しています",
-            Self::Listening => "聴いています",
-            Self::Thinking => "返事を整えています",
-            Self::Speaking => "言葉で返しています",
+            Self::Listening => "あなたの言葉を待っています",
+            Self::Thinking => "短い返事を整えています",
+            Self::Speaking => "短く返しています",
             Self::Paused => "会話を止めています",
             Self::Error(message) => message,
         }
@@ -220,6 +257,10 @@ impl VoiceState {
 
     const fn eyebrow(self) -> &'static str {
         match self {
+            Self::Ready => "あなたが話すための音声AI",
+            Self::Listening => "あなたの番",
+            Self::Thinking => "短い返事を準備",
+            Self::Speaking => "KOTAEの番・短く返す",
             Self::Error(_) => "接続を続けられませんでした",
             _ => self.label(),
         }
@@ -228,16 +269,32 @@ impl VoiceState {
     const fn hint(self) -> &'static str {
         match self {
             Self::Ready => {
-                "「こんにちは」だけでも、こちらから話します　聞くだけ、沈黙、途中で終わるのも大丈夫"
+                "うまく話す準備はいりません。「こんにちは」、一言、沈黙、聞くだけから。KOTAEは短く返して、次の言葉を待ちます"
             }
             Self::RequestingPermission => "この会話に使うマイクを選ぶ",
             Self::Listening => "話し終わりの間を見て自動で返す　急ぐ時は「ここで返して」を選べます",
-            Self::Thinking => {
-                "答えを組み立てている間はマイクへ送らない　返事が始まれば話して止められる"
-            }
+            Self::Thinking => "答えを奪わず、次の言葉につながる一つだけを返します",
             Self::Speaking => "ぼやきや相づちはそのままで大丈夫　返事を止めたい時は少し続けて話す",
             Self::Paused => "マイクは止まってる　再開まで何も取り込まない",
             Self::Error(_) => "丸いボタンか下の「もう一度接続する」からやり直せる",
+        }
+    }
+
+    const fn active_heading(self) -> &'static str {
+        match self {
+            Self::Listening => "あなたの言葉を、急がず待っています",
+            Self::Thinking => "言いたかったことを、短く受け取ります",
+            Self::Speaking => "短く返したら、またあなたの番です",
+            _ => "まとまらないまま、話していい",
+        }
+    }
+
+    const fn active_hint(self) -> &'static str {
+        match self {
+            Self::Listening => "一言でも、途中でも、沈黙のあとでも大丈夫",
+            Self::Thinking => "長い講評や点数にはしません",
+            Self::Speaking => "聞くだけでも、話したくなったら続けても大丈夫",
+            _ => self.hint(),
         }
     }
 
@@ -275,10 +332,15 @@ impl VoiceState {
         matches!(self, Self::Paused | Self::Error(_))
     }
 
+    const fn session_control_takes_turn(self) -> bool {
+        matches!(self, Self::Thinking | Self::Speaking)
+    }
+
     const fn session_control_label(self) -> &'static str {
         match self {
             Self::Paused => "再開",
             Self::Error(_) => "もう一度接続する",
+            Self::Thinking | Self::Speaking => "今話す",
             _ => "一時停止",
         }
     }
@@ -287,6 +349,7 @@ impl VoiceState {
         match self {
             Self::Paused => "▶",
             Self::Error(_) => "↻",
+            Self::Thinking | Self::Speaking => "●",
             _ => "Ⅱ",
         }
     }
@@ -1301,6 +1364,7 @@ fn arm_listening(
     mut research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
+    mut turn_notice: Signal<TurnNotice>,
     strict_cloud_minimization: Signal<bool>,
 ) {
     if announce_permission {
@@ -1357,12 +1421,12 @@ fn arm_listening(
         voice_state.set(VoiceState::Listening);
         let has_speech = match cloud::wait_for_turn_end().await {
             Ok(has_speech) => has_speech,
-            Err(WaitTurnError::Recoverable(message)) => {
+            Err(WaitTurnError::Recoverable(_message)) => {
                 if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
                     // The failed encoded capture has already been discarded.
                     // Keep the opaque session and wait for a fresh foreground
                     // utterance; never resend bytes from the oversized turn.
-                    caption.set(Some(message.to_string()));
+                    turn_notice.set(TurnNotice::CaptureSkipped);
                     arm_listening(
                         operation,
                         false,
@@ -1378,6 +1442,7 @@ fn arm_listening(
                         research_records,
                         document_info,
                         caption,
+                        turn_notice,
                         strict_cloud_minimization,
                     );
                 }
@@ -1409,6 +1474,7 @@ fn arm_listening(
                     research_records,
                     document_info,
                     caption,
+                    turn_notice,
                     strict_cloud_minimization,
                 );
             } else {
@@ -1432,6 +1498,7 @@ fn arm_listening(
                     research_records,
                     document_info,
                     caption,
+                    turn_notice,
                     strict_cloud_minimization,
                 );
             }
@@ -1452,16 +1519,17 @@ fn resume_foreground_interruption(
     research_status: Signal<ResearchStatus>,
     research_records: Signal<Vec<ResearchRecord>>,
     document_info: Signal<Option<DocumentInfo>>,
-    mut caption: Signal<Option<String>>,
+    caption: Signal<Option<String>>,
+    mut turn_notice: Signal<TurnNotice>,
     strict_cloud_minimization: Signal<bool>,
 ) {
     voice_state.set(VoiceState::Listening);
     spawn(async move {
         let has_speech = match cloud::wait_for_turn_end().await {
             Ok(has_speech) => has_speech,
-            Err(WaitTurnError::Recoverable(message)) => {
+            Err(WaitTurnError::Recoverable(_message)) => {
                 if *generation.peek() == operation && *voice_state.peek() == VoiceState::Listening {
-                    caption.set(Some(message.to_string()));
+                    turn_notice.set(TurnNotice::CaptureSkipped);
                     arm_listening(
                         operation,
                         false,
@@ -1477,6 +1545,7 @@ fn resume_foreground_interruption(
                         research_records,
                         document_info,
                         caption,
+                        turn_notice,
                         strict_cloud_minimization,
                     );
                 }
@@ -1510,6 +1579,7 @@ fn resume_foreground_interruption(
                 research_records,
                 document_info,
                 caption,
+                turn_notice,
                 strict_cloud_minimization,
             );
         } else {
@@ -1528,6 +1598,7 @@ fn resume_foreground_interruption(
                 research_records,
                 document_info,
                 caption,
+                turn_notice,
                 strict_cloud_minimization,
             );
         }
@@ -1549,6 +1620,7 @@ fn submit_turn(
     mut research_records: Signal<Vec<ResearchRecord>>,
     mut document_info: Signal<Option<DocumentInfo>>,
     mut caption: Signal<Option<String>>,
+    mut turn_notice: Signal<TurnNotice>,
     strict_cloud_minimization: Signal<bool>,
 ) {
     if *generation.peek() != operation || *voice_state.peek() != VoiceState::Listening {
@@ -1564,6 +1636,7 @@ fn submit_turn(
     let consumed_document = !strict_snapshot && document_info.peek().is_some();
     research_status.set(ResearchStatus::None);
     research_records.set(Vec::new());
+    turn_notice.set(TurnNotice::Clear);
     voice_state.set(VoiceState::Thinking);
 
     spawn(async move {
@@ -1591,11 +1664,12 @@ fn submit_turn(
                     research_records,
                     document_info,
                     caption,
+                    turn_notice,
                     strict_cloud_minimization,
                 );
                 return;
             }
-            Err(FinishTurnError::Recoverable(message)) => {
+            Err(FinishTurnError::Recoverable(_message)) => {
                 if consumed_document {
                     document_info.set(None);
                 }
@@ -1603,9 +1677,9 @@ fn submit_turn(
                 // transient provider or network failure also must not revoke
                 // the user's foreground microphone gesture: keep the opaque
                 // pre-turn state, leave the session open, and listen for a new
-                // utterance. The notice is optional caption text only; it does
-                // not make the user repeat the failed turn.
-                caption.set(Some(message.to_string()));
+                // utterance. Publish a content-free notice independently from
+                // optional model captions so it remains visible with CC off.
+                turn_notice.set(TurnNotice::ReplyUnavailable);
                 arm_listening(
                     operation,
                     false,
@@ -1621,6 +1695,7 @@ fn submit_turn(
                     research_records,
                     document_info,
                     caption,
+                    turn_notice,
                     strict_cloud_minimization,
                 );
                 return;
@@ -1659,6 +1734,7 @@ fn submit_turn(
             research_records.set(Vec::new());
             document_info.set(None);
             caption.set(Some(STRICT_PRIVACY_BLOCKED_COPY.to_string()));
+            turn_notice.set(TurnNotice::PrivacyBlocked);
             arm_listening(
                 operation,
                 false,
@@ -1674,6 +1750,7 @@ fn submit_turn(
                 research_records,
                 document_info,
                 caption,
+                turn_notice,
                 strict_cloud_minimization,
             );
             return;
@@ -1691,6 +1768,7 @@ fn submit_turn(
             return;
         }
         let spoke = result.streamed_audio;
+        turn_notice.set(TurnNotice::Clear);
         session_state.set(result.session_state.clone());
         detected_domain.set(result.detected_domain.clone());
         route.set(result.route.clone());
@@ -1721,6 +1799,7 @@ fn submit_turn(
                 research_records,
                 document_info,
                 caption,
+                turn_notice,
                 strict_cloud_minimization,
             );
             return;
@@ -1745,6 +1824,7 @@ fn submit_turn(
                 research_records,
                 document_info,
                 caption,
+                turn_notice,
                 strict_cloud_minimization,
             );
             return;
@@ -1772,6 +1852,7 @@ fn submit_turn(
             research_records,
             document_info,
             caption,
+            turn_notice,
             strict_cloud_minimization,
         );
     });
@@ -1790,8 +1871,10 @@ fn start_or_resume(
     research_records: Signal<Vec<ResearchRecord>>,
     document_info: Signal<Option<DocumentInfo>>,
     caption: Signal<Option<String>>,
+    mut turn_notice: Signal<TurnNotice>,
     strict_cloud_minimization: Signal<bool>,
 ) {
+    turn_notice.set(TurnNotice::Clear);
     let operation = generation.peek().wrapping_add(1);
     generation.set(operation);
     arm_listening(
@@ -1809,6 +1892,7 @@ fn start_or_resume(
         research_records,
         document_info,
         caption,
+        turn_notice,
         strict_cloud_minimization,
     );
 }
@@ -2358,6 +2442,7 @@ fn App() -> Element {
     let mut document_info = use_signal(|| None::<DocumentInfo>);
     let mut document_error = use_signal(|| None::<&'static str>);
     let mut caption = use_signal(|| None::<String>);
+    let mut turn_notice = use_signal(|| TurnNotice::Clear);
     let mut captions_visible = use_signal(|| false);
     let mut strict_cloud_minimization = use_signal(|| false);
     let cloud_status_refresh = use_signal(|| 0_u64);
@@ -2418,6 +2503,7 @@ fn App() -> Element {
     let receipt_snapshot = *voice_receipt.read();
     let receipt_is_visible = receipt_snapshot.is_visible_for(state_snapshot);
     let coach_snapshot = *coach_state.read();
+    let turn_notice_snapshot = *turn_notice.read();
     let captions_are_visible = *captions_visible.read();
     let strict_mode = *strict_cloud_minimization.read();
     let document_snapshot = document_info.read().clone();
@@ -2475,7 +2561,7 @@ fn App() -> Element {
                     span { class: "identity__mark", "K" }
                     span { class: "identity__type",
                         strong { "KOTAE" }
-                        small { "話す / 考える / 伝わる" }
+                        small { "あなたが話すための音声AI" }
                     }
                 }
                 div { class: displayed_cloud_state.class_name(),
@@ -2532,7 +2618,6 @@ fn App() -> Element {
                         if coach_snapshot.is_active() {
                             span {
                                 class: "coach-chip",
-                                aria_label: "会話を支える次の一歩",
                                 {coach_snapshot.status()}
                             }
                         }
@@ -2577,6 +2662,7 @@ fn App() -> Element {
                                             research_records,
                                             document_info,
                                             caption,
+                                            turn_notice,
                                             strict_cloud_minimization,
                                         );
                                     }
@@ -2622,9 +2708,7 @@ fn App() -> Element {
                             if receipt_is_visible {
                                 {receipt_snapshot.heading()}
                             } else if state_snapshot == VoiceState::Ready {
-                                "まとまらないまま、"
-                                br {}
-                                "話していい"
+                                {PRODUCT_PROMISE_COPY}
                             } else if matches!(
                                 state_snapshot,
                                 VoiceState::RequestingPermission
@@ -2632,8 +2716,10 @@ fn App() -> Element {
                                     | VoiceState::Error(_)
                             ) {
                                 {state_snapshot.label()}
-                            } else {
+                            } else if coach_snapshot.is_active() {
                                 {coach_snapshot.heading()}
+                            } else {
+                                {state_snapshot.active_heading()}
                             }
                         }
                         p { class: "voice-status__hint",
@@ -2647,8 +2733,10 @@ fn App() -> Element {
                                     | VoiceState::Error(_)
                             ) {
                                 {state_snapshot.hint()}
-                            } else {
+                            } else if coach_snapshot.is_active() {
                                 {coach_snapshot.hint()}
+                            } else {
+                                {state_snapshot.active_hint()}
                             }
                         }
                         if matches!(
@@ -2657,6 +2745,16 @@ fn App() -> Element {
                         ) {
                             p { class: "voice-status__transport", {state_snapshot.hint()} }
                             }
+                    }
+                    if turn_notice_snapshot.is_visible() {
+                        section {
+                            class: "turn-notice",
+                            role: "status",
+                            aria_live: "polite",
+                            aria_atomic: "true",
+                            strong { {turn_notice_snapshot.heading()} }
+                            p { {turn_notice_snapshot.hint()} }
+                        }
                     }
                     }
 
@@ -2678,7 +2776,7 @@ fn App() -> Element {
                                     }
                                 }
                                 p { class: "passkey-entry__lead",
-                                    "一言、沈黙、聞くだけから始められます。名前やメールは入力しません。初めての方は新しい仮名アカウント、登録済みの方は同じパスキーで戻れます。"
+                                    "KOTAEは短く返して、あなたの次の言葉を待ちます。一言、沈黙、聞くだけから始められます。名前やメールは入力しません。"
                                 }
                                 div {
                                     class: "passkey-entry__actions",
@@ -2716,6 +2814,7 @@ fn App() -> Element {
                                                         document_info.set(None);
                                                         document_error.set(None);
                                                         caption.set(None);
+                                                        turn_notice.set(TurnNotice::Clear);
                                                         passkey_setup_feedback.set(Some(
                                                             PasskeySetupFeedback::Success(
                                                                 PASSKEY_REGISTRATION_SUCCESS_COPY,
@@ -2759,6 +2858,7 @@ fn App() -> Element {
                                                 research_records,
                                                 document_info,
                                                 caption,
+                                                turn_notice,
                                                 strict_cloud_minimization,
                                             );
                                         },
@@ -2789,17 +2889,17 @@ fn App() -> Element {
                         },
                         aria_label: "できること",
                         div { class: "capability",
-                            span { "入口" }
+                            span { "声を出す" }
                             i { aria_hidden: "true", "→" }
                             strong { {ORDINARY_CHAT_COPY} }
                         }
                         div { class: "capability",
-                            span { "聞かれたこと" }
+                            span { "自分の言葉" }
                             i { aria_hidden: "true", "→" }
                             strong { {ANSWER_SUPPORT_COPY} }
                         }
                         div { class: "capability",
-                            span { "割り込み" }
+                            span { "今回の実感" }
                             i { aria_hidden: "true", "→" }
                             strong { {TALK_ONLY_COPY} }
                         }
@@ -2845,6 +2945,29 @@ fn App() -> Element {
                                             research_records,
                                             document_info,
                                             caption,
+                                            turn_notice,
+                                            strict_cloud_minimization,
+                                        );
+                                    } else if current_state.session_control_takes_turn() {
+                                        // This press is an explicit fresh gesture. Stop the
+                                        // pending/playing reply, then immediately open a new
+                                        // intentional turn so a short correction such as
+                                        // 「違う」does not need to satisfy the passive 800 ms
+                                        // acoustic interruption threshold.
+                                        cloud::stop_session();
+                                        start_or_resume(
+                                            voice_state,
+                                            generation,
+                                            session_state,
+                                            detected_domain,
+                                            route,
+                                            coach_state,
+                                            needs_paper,
+                                            research_status,
+                                            research_records,
+                                            document_info,
+                                            caption,
+                                            turn_notice,
                                             strict_cloud_minimization,
                                         );
                                     } else {
@@ -2877,6 +3000,7 @@ fn App() -> Element {
                                     document_info.set(None);
                                     document_error.set(None);
                                     caption.set(None);
+                                    turn_notice.set(TurnNotice::Clear);
                                     cloud::stop_session();
                                 },
                                 span { aria_hidden: "true", "×" }
@@ -2986,15 +3110,22 @@ fn App() -> Element {
                                 }
                             }
                         }
-                        p {
+                        p { class: "mode-summary",
                             if strict_mode {
-                                "原音はSpeech-to-Textへ送ります。文字起こしの検査に通らなければVertex AIを呼びません。Vertex AIが作った返答も別に検査し、通らなければTTS・画面・音声へ出しません。PDF・外部検索・会話状態は使いません。"
+                                "文字起こしと返答を二段階で検査し、確認できない時は止めます。PDF・検索・会話状態は使いません。"
                             } else {
-                                {STANDARD_MODE_ROUTE_COPY}
+                                "速い音声経路を使います。原音と本文はKOTAEの履歴へ保存しませんが、個人情報の除去やE2EEではありません。"
                             }
                         }
-                        p {
-                            "どちらもE2EEや完全なPII除去ではありません。厳格モードもDLPの検出漏れまでは保証できません。"
+                        details { class: "mode-route",
+                            summary { "処理経路の詳細" }
+                            p {
+                                if strict_mode {
+                                    "原音はSpeech-to-Textへ送ります。文字起こしの検査に通らなければVertex AIを呼びません。Vertex AIが作った返答も別に検査し、通らなければTTS・画面・音声へ出しません。どちらのモードもE2EEや完全なPII除去ではなく、DLPにも検出漏れがあり得ます。"
+                                } else {
+                                    {STANDARD_MODE_ROUTE_COPY}
+                                }
+                            }
                         }
                         nav { class: "session-controls", aria_label: "クラウド最小化モードを切り替え",
                             button {
@@ -3019,6 +3150,7 @@ fn App() -> Element {
                                     document_info.set(None);
                                     document_error.set(None);
                                     caption.set(None);
+                                    turn_notice.set(TurnNotice::Clear);
                                     strict_cloud_minimization.set(next);
                                 },
                                 if strict_mode {
@@ -3105,7 +3237,7 @@ fn App() -> Element {
 
                     LongitudinalPanel {}
 
-                    details { class: "privacy-fold", open: true,
+                    details { class: "privacy-fold",
                         summary {
                             span { class: "utility-index", "03" }
                             span {
@@ -3176,8 +3308,8 @@ fn App() -> Element {
             }
 
             footer { class: "bottomline",
-                span { "NO PROMPT REQUIRED" }
-                span { "VOICE IN · REASONING IN BETWEEN · VOICE OUT" }
+                span { "うまく話す準備はいらない" }
+                span { "AIは短く · あなたの言葉を待つ" }
                 span { "KOTAE / 2026" }
             }
         }
@@ -3192,15 +3324,15 @@ mod tests {
         PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
         PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
         PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
-        PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
+        PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
         STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, VoiceReceipt, VoiceState, VoiceTurnMode, cloud_state_for_display,
-        passkey_focus_target, recoverable_wait_turn_code, requires_passkey_choice,
-        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
-        turn_mode_for_gesture_epoch, valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
-        valid_streamed_audio_metadata, valid_voice_pause_metadata, valid_voice_privacy_metadata,
-        valid_voice_receipt_metadata,
+        TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceState, VoiceTurnMode,
+        cloud_state_for_display, passkey_focus_target, recoverable_wait_turn_code,
+        requires_passkey_choice, requires_passkey_registration_recovery, session_stop_pauses,
+        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_coach_checkpoint_keys,
+        valid_coach_checkpoint_metadata, valid_streamed_audio_metadata, valid_voice_pause_metadata,
+        valid_voice_privacy_metadata, valid_voice_receipt_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -3244,14 +3376,22 @@ mod tests {
         let expanding = CoachState::from_result(CoachPhase::Expanding, CoachAction::Expand);
         let complete = CoachState::from_result(CoachPhase::Complete, CoachAction::Complete);
 
-        assert_eq!(awaiting.status(), "ひとつだけ聞いています");
+        assert_eq!(awaiting.status(), "あなたの一言を待っています");
         assert_eq!(restating.heading(), "そこまで、ちゃんと聞こえています");
         assert_eq!(
             expanding.hint(),
             "答えなくても大丈夫　話したい方へ続けられます"
         );
-        assert_eq!(complete.status(), "聞かれたことへの答えが届きました");
-        assert_eq!(complete.heading(), "今の答えは、聞かれたことに届いています");
+        assert_eq!(complete.status(), "あなたの言葉を受け取りました");
+        assert_eq!(complete.heading(), "あなた自身の言葉が出ました");
+        assert!(complete.hint().contains("今の一回"));
+        assert!(
+            complete
+                .hint()
+                .contains("長期の変化を表すものではありません")
+        );
+        assert!(!complete.status().contains("聞かれたこと"));
+        assert!(!complete.heading().contains("聞かれたこと"));
 
         for copy in [
             awaiting.status(),
@@ -3283,28 +3423,28 @@ mod tests {
         assert!(ready_hint.contains("こんにちは"));
         assert!(ready_hint.contains("聞くだけ"));
         assert!(ready_hint.contains("沈黙"));
+        assert_eq!(PRODUCT_PROMISE_COPY, "AIが話すより、あなたが話せるために");
         assert_eq!(
             ORDINARY_CHAT_COPY,
-            "「こんにちは」だけで、KOTAEが話題を持つ"
+            "「こんにちは」だけで、次の一言を一緒に見つける"
         );
         assert_eq!(
             ANSWER_SUPPORT_COPY,
-            "人に聞かれた質問も、そのまま話していい"
+            "「一問だけ手伝って」で、答えを代わりに作らない"
         );
-        assert_eq!(
-            TALK_ONLY_COPY,
-            "ぼやきや相づちでは止めず、続けて話すと止める"
-        );
+        assert_eq!(TALK_ONLY_COPY, "届いた瞬間だけ知らせて、点数にはしない");
 
         for boundary in [
-            "KOTAEが話題を持ち",
+            "KOTAEが短い話題を持ち",
             "短い返事・相づち・まとまらない長話を失敗扱いしません",
+            "AIが長く話すより本人の次の一言を優先",
             "訓練や採点を前面に出さず",
             "中心を先に",
             "外出・学校・仕事・家族",
             "勝手に目標にしません",
-            "診断や治療ではなく",
-            "長期効果はまだ実証していません",
+            "今回の一往復だけ",
+            "診断や治療",
+            "長期効果を示しません",
         ] {
             assert!(SUPPORT_BOUNDARY_COPY.contains(boundary), "{boundary}");
         }
@@ -3312,26 +3452,26 @@ mod tests {
     }
 
     #[test]
-    fn standard_privacy_copy_discloses_the_direct_native_answer_support_switch() {
+    fn standard_privacy_copy_discloses_the_question_bound_staged_switch() {
         for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
-            assert!(copy.contains("人に聞かれた質問への回答支援を明示した初回"));
-            assert!(copy.contains("Cloud Run内の決定論的規則"));
-            assert!(copy.contains("モデル"));
-            assert!(copy.contains("汎用の署名済みcheckpoint"));
-            assert!(copy.contains("具体的な質問・答え・文字起こし"));
-            assert!(copy.contains("初回の入力字幕"));
-            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coachへ"));
-            assert!(copy.contains("送りません"));
-            assert!(copy.contains("回答保留中の後続ターン"));
+            assert!(copy.contains("最終入力字幕"));
+            assert!(copy.contains("人に聞かれた質問への回答支援"));
+            assert!(copy.contains("本人が明示"));
+            assert!(copy.contains("Native"));
+            assert!(copy.contains("Speech-to-Text"));
+            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coach"));
+            assert!(copy.contains("一度だけ"));
+            assert!(copy.contains("operator・required slot・非可逆の質問継続tag"));
         }
         assert_eq!(
             STANDARD_MODE_ROUTE_LABEL,
-            "通常・初回の回答支援はNative Audio / 回答保留中の後続は段階経路"
+            "通常会話はNative Audio / 明示した回答支援は質問を結ぶ段階経路"
         );
-        assert!(STANDARD_MODE_ROUTE_COPY.contains("同じ原音を送り直さずNative音声"));
-        assert!(
-            STANDARD_VOICE_PRIVACY_COPY.contains("同じ原音をSpeech-to-Textへ送り直さずNative音声")
-        );
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("生成済みのNative音声を一切出さず"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("別の話題なら回答完了にしません"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("Native出力を破棄"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("具体的な質問・答え・文字起こし"));
+        assert!(!STANDARD_MODE_ROUTE_COPY.contains("汎用の署名済みcheckpoint"));
         assert!(STANDARD_MODE_ROUTE_COPY.contains("PDF・接続不能時"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("保存しません"));
     }
@@ -3572,9 +3712,9 @@ mod tests {
         let retry = CoachState::from_result(CoachPhase::Blocked, CoachAction::Retry);
         let release = CoachState::from_result(CoachPhase::Blocked, CoachAction::Release);
 
-        assert_eq!(retry.status(), "音をもう一度拾います");
+        assert_eq!(retry.status(), "急がせず待っています");
         assert!(retry.hint().contains("そのまま先へ進めます"));
-        assert_eq!(release.status(), "そのまま続けられます");
+        assert_eq!(release.status(), "話したい方へ戻れます");
         assert_eq!(release.heading(), "そのまま話して大丈夫です");
         assert_eq!(release.hint(), "この続きでも、別の話でも大丈夫");
         assert_eq!(CoachState::NONE.phase, CoachPhase::None);
@@ -3721,6 +3861,41 @@ mod tests {
         assert_eq!(VoiceState::Paused.session_control_label(), "再開");
         assert!(!VoiceState::Listening.session_control_reconnects());
         assert_eq!(VoiceState::Listening.session_control_label(), "一時停止");
+        assert_eq!(VoiceState::Thinking.session_control_label(), "今話す");
+        assert_eq!(VoiceState::Speaking.session_control_label(), "今話す");
+        assert!(VoiceState::Thinking.session_control_takes_turn());
+        assert!(VoiceState::Speaking.session_control_takes_turn());
+        assert!(!VoiceState::Listening.session_control_takes_turn());
+    }
+
+    #[test]
+    fn turn_notice_stays_visible_without_captions_and_never_blames_the_user() {
+        assert!(!TurnNotice::Clear.is_visible());
+
+        for notice in [
+            TurnNotice::CaptureSkipped,
+            TurnNotice::ReplyUnavailable,
+            TurnNotice::PrivacyBlocked,
+        ] {
+            assert!(notice.is_visible());
+            assert!(!notice.heading().is_empty());
+            assert!(!notice.hint().is_empty());
+            assert!(!notice.heading().contains("失敗"));
+            assert!(!notice.hint().contains("不正解"));
+            assert!(!notice.hint().contains("採点"));
+        }
+
+        assert!(
+            TurnNotice::CaptureSkipped
+                .hint()
+                .contains("言い方の問題ではありません")
+        );
+        assert!(TurnNotice::ReplyUnavailable.heading().contains("返事だけ"));
+        assert!(
+            TurnNotice::ReplyUnavailable
+                .hint()
+                .contains("言い直さなくて大丈夫")
+        );
     }
 
     #[test]

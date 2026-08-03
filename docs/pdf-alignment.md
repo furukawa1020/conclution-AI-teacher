@@ -15,11 +15,11 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 
 ## 公開音声経路での回答支援切替
 
-標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、本人自身が相手から聞かれた質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、回答を代作せず本人の考えを一問だけ尋ねる固定promptのNative音声をそのまま解放する。同じ原音を東京リージョンSTTへ再送せず、初回captionも別の文字列modelへ送らない。音声より先に、Cloud Run内でモデルを呼ばず「明示支援を開始し本人の最初の一言を待つ」という最小の署名済み有限stateを発行してブラウザへcheckpointする。これは厳格モードではなく、regional DLPを通過してからNative Audioへ送る経路でもない。
+標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、本人自身が相手から聞かれた質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、生成済みのNative音声と汎用stateを一切解放せず、同じ確定発話を東京リージョンSTTから段階経路へ一度だけ再処理する。段階経路は実際の外部質問からoperator、required slot、非可逆の質問継続tagを作るため、次の無関係な発話を「Aへの回答」として完了にしない。質問・回答・逐語録はDBへ永続化せず、短期stateにも具体的な質問本文を入れない。
 
-Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。初回支援ではモデル待ちのないstate発行とcontrol checkpointを音声より先に終え、commitから最初の音声frameまで1,000 ms以内を通常Nativeと同じ運用SLOとして計測する。
+Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。通常Native会話はcommitから最初の音声frameまで1,000 ms以内を運用SLOとして計測するが、実質問を結ぶ初回回答支援は正確性を優先して段階経路の遅延を別に計測する。
 
-UIの`complete`は「聞かれたことへの答えが届きました」という今回限りのreceiptに留める。これは当該turnで質問に対応するevidenceを受け取ったという状態表示であり、「Aを先に言えた」「上達した」「別の人にも同じように答えられる」と判定・実証する表示ではない。
+UIの`complete`は「あなたの言葉を受け取りました」「あなた自身の言葉が出ました」という今回限りのreceiptに留める。これはそのturnで利用者自身の発話を受け取ったという状態表示であり、質問への正答や「Aを先に言えた」「上達した」「別の人にも同じように答えられる」を判定・実証する表示ではない。
 
 約3分まとまらずに話した場合も、時間だけで失敗や能力不足と判定しない。現在のlive経路は端末で録音開始から最大3分30秒、Cloud Run側で最大4分のcaptureを受け、Go側のlive接続を6分、Cloud Runのrequest timeoutを420秒に制限する。発話が確定しない無音候補は録音開始後最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。commit後のfinal transcriptが160 Unicode code point以上の場合だけ、サーバーが今回限りの長い発話と判定し、現在turn内で本人が明示した中心点を、条件や不確実性を変えず第一文へ置いて自然に応答する。160未満でも通常会話は続け、長さだけを根拠に指導、採点、言い直し要求をしない。
 
@@ -79,7 +79,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 
 - PasskeyのWebAuthn ceremonyを実装し、仮名Firebase accountの操作をuser verification付き署名で確認する。秘密鍵はPasskey providerが管理し、KOTAEのブラウザコードとサーバーは受け取らない（同期や保管の方式はproviderに依存する）。これは法的な本人確認や現在の話者認証ではない
 - 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をCloud Run内の決定論的検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
-- 標準モードで回答支援を明示した初回turnは、モデルなしで署名済みcoach checkpointを発行してから`us-central1`のNative Audio音声を解放する。同じcaptureは`asia-northeast1`のSTTへ再送せず、captionも別の文字列modelへ送らない。保留中の後続turnは段階経路を維持し、`complete` / `release`後の次turnからNativeへ戻る
+- 標準モードで回答支援を明示した初回turnは、`us-central1`のNative Audio出力を破棄し、同じcaptureを`asia-northeast1`のSTTから段階経路へ一度だけ再処理する。実質問由来のoperator・required slot・非可逆tagを短期stateへ結び、無関係な後続turnをcompleteにしない。`complete` / `release`後の次turnからNativeへ戻る
 - DLPにも検出漏れがあり得るため、完全なPII除去とは呼ばない。Cloud Run、Speech-to-Text、DLPが平文を扱うためE2EEとも呼ばない
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
 - 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する
@@ -96,7 +96,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 - 録音開始から3分30秒を超える一turn capture、Cloud Speech-to-Textのstreaming上限をまたぐsession継続、発話途中の意味へ介入する完全増分校正。端末上限には発話前の無音や発話中の間も含まれる
 - 任意Web、複数論文本文、claim単位の自動検証
 - 本人を対象にした有効性、誤修復率、負荷軽減の実証
-- `route=native-respondent-coach`を含む、実端末でのcommitから最初の音声frameまでのp50 / p95と1,000 ms SLO達成率
+- 通常Native routeの実端末commitから最初の音声frameまでのp50 / p95と1,000 ms SLO達成率。初回回答支援は段階経路のspeech-end-to-audibleを別系列で計測する
 
 これらを「実装済み」「安全」とは表示しない。現在の受け答え支援では、利用者が相手の質問を自分で言い直し、その後に自分の答えを話す形だけを対象にする。長期効果は、事前登録した比較試験、未見質問、一定期間後の追跡、本人の同意と撤回・削除を含む評価が終わるまで主張しない。
 

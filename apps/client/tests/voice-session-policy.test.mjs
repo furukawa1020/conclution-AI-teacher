@@ -316,7 +316,7 @@ async function waitForPlaybackState(predicate) {
   assert.fail("playback state did not settle");
 }
 
-async function createExecutablePlaybackHarness() {
+async function createExecutablePlaybackHarness({ pcmSamples = [] } = {}) {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -331,6 +331,11 @@ async function createExecutablePlaybackHarness() {
       bridge,
       "function shouldAbortPlaybackTransportOnInterrupt(",
       "function confirmBargeIn(",
+    ),
+    executableBridgeFunction(
+      bridge,
+      "function confirmBargeIn(",
+      "function startBargeInMonitoring(",
     ),
     executableBridgeFunction(
       bridge,
@@ -365,9 +370,14 @@ async function createExecutablePlaybackHarness() {
   ].join("\n\n");
   const context = new FakePlaybackAudioContext();
   const timers = new FakePlaybackTimers();
+  const remainingPcmSamples = [...pcmSamples];
   const state = {
     abandonedInterrupts: 0,
+    bargeStartedAt: [],
+    bargeResetAt: [],
+    clearedCandidateDeadlines: 0,
     clearedDocuments: [],
+    latencyEvents: [],
     micEnabled: false,
     pauseEvents: [],
     releasedCodes: [],
@@ -376,9 +386,11 @@ async function createExecutablePlaybackHarness() {
   };
 
   function pcmBuffer(decodedBytes, sampleRateHz) {
+    const samples =
+      remainingPcmSamples.shift() ?? Float32Array.of(0.25);
     return {
       duration: decodedBytes / (sampleRateHz * 2),
-      getChannelData: () => Float32Array.of(0.25),
+      getChannelData: () => samples,
       numberOfChannels: 1,
       sampleRate: sampleRateHz,
     };
@@ -394,16 +406,21 @@ let activeRecording;
 let activeRequestController;
 let audioContext = dependencies.audioContext;
 let documentEpoch = 0;
+let mediaStream = dependencies.mediaStream;
 let sessionEpoch = 1;
 const stoppedSessionCodes = new Map();
 const CustomEvent = dependencies.CustomEvent;
+const BARGE_PCM_LIMITS = dependencies.BARGE_PCM_LIMITS;
 const TextDecoder = dependencies.TextDecoder;
 const VOICE_STREAM_LIMITS = dependencies.VOICE_STREAM_LIMITS;
 const abandonInterruptRecording = dependencies.abandonInterruptRecording;
 const classifyVoiceSessionStopReason = dependencies.classifyVoiceSessionStopReason;
+const candidateEventIsCurrent = dependencies.candidateEventIsCurrent;
+const clearCandidateDeadline = dependencies.clearCandidateDeadline;
 const clearPendingDocument = dependencies.clearPendingDocument;
 const clearTimeout = dependencies.clearTimeout;
 const createVoiceStreamParser = dependencies.createVoiceStreamParser;
+const dispatchVoiceLatency = dependencies.dispatchVoiceLatency;
 const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
 const fail = dependencies.fail;
 const finishGate = dependencies.finishGate;
@@ -411,6 +428,7 @@ const globalThis = dependencies.eventTarget;
 const pcm16AudioBuffer = dependencies.pcm16AudioBuffer;
 const pcm16BytesAudioBuffer = dependencies.pcm16BytesAudioBuffer;
 const performance = dependencies.performance;
+const markSessionSpeech = dependencies.markSessionSpeech;
 const releaseMicrophone = dependencies.releaseMicrophone;
 const restorePlaybackGain = dependencies.restorePlaybackGain;
 const retirePendingLiveSession = dependencies.retirePendingLiveSession;
@@ -435,13 +453,16 @@ ${executable}
 
 return Object.freeze({
   awaitValidatedPlaybackCompletion,
+  confirmBargeIn,
   consumeVoiceStream,
   createStreamingPlayback,
   discardInterruptedPlaybackRecording,
   getActivePlayback: () => activePlayback,
+  getActiveRecording: () => activeRecording,
   getSessionEpoch: () => sessionEpoch,
   haltStreamingPlayback,
   maybeAbortPlaybackTransportOnInterrupt,
+  setActiveRequestController: (controller) => { activeRequestController = controller; },
   setActiveRecording: (recording) => { activeRecording = recording; },
   shouldAbortPlaybackTransportOnInterrupt,
   shouldDiscardInterruptedPlaybackRecording,
@@ -449,6 +470,7 @@ return Object.freeze({
 });`,
   );
   const runtime = factory({
+    BARGE_PCM_LIMITS,
     CustomEvent: class {
       constructor(type, options) {
         this.detail = options?.detail;
@@ -462,12 +484,21 @@ return Object.freeze({
       state.abandonedInterrupts += 1;
     },
     audioContext: context,
+    candidateEventIsCurrent(recording, candidate) {
+      return recording.candidate === candidate;
+    },
     classifyVoiceSessionStopReason,
+    clearCandidateDeadline() {
+      state.clearedCandidateDeadlines += 1;
+    },
     clearPendingDocument(reason) {
       state.clearedDocuments.push(reason);
     },
     clearTimeout: (id) => timers.clearTimeout(id),
     createVoiceStreamParser,
+    dispatchVoiceLatency(value) {
+      state.latencyEvents.push(value);
+    },
     estimateAudiblePerformanceTime,
     eventTarget: {
       dispatchEvent(event) {
@@ -483,6 +514,10 @@ return Object.freeze({
         state.resetCount += 1;
       },
     },
+    markSessionSpeech() {
+      return true;
+    },
+    mediaStream: Object.freeze({}),
     pcm16AudioBuffer(_audioBase64, decodedBytes, sampleRateHz) {
       return pcmBuffer(decodedBytes, sampleRateHz);
     },
@@ -514,11 +549,15 @@ return Object.freeze({
       state.micEnabled = enabled;
     },
     shouldAbortVoiceTransportOnInterrupt,
-    startBargeInMonitoring(playback) {
+    startBargeInMonitoring(playback, _expectedEpoch, audibleAt) {
       state.micEnabled = true;
+      state.bargeStartedAt.push(audibleAt);
       playback.interruptRecording = {
         coachActive: playback.coachActive,
         settled: false,
+      };
+      playback.resetInterruptGuard = (nextAudibleAt) => {
+        state.bargeResetAt.push(nextAudibleAt);
       };
     },
     validatedPlaybackDrainTimeoutMs,
@@ -786,12 +825,13 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
 
   assert.match(
     client,
-    /const ANSWER_SUPPORT_COPY: &str = "人に聞かれた質問も、そのまま話していい";/u,
+    /const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、答えを代わりに作らない";/u,
   );
   assert.match(
     client,
-    /\(CoachPhase::Complete, _\) => "今の答えは、聞かれたことに届いています"/u,
+    /\(CoachPhase::Complete, _\) => "あなた自身の言葉が出ました"/u,
   );
+  assert.doesNotMatch(client, /聞かれたことに届いています/u);
 });
 
 test("live PCM capture is attached before VAD can confirm immediate speech", async () => {
@@ -899,11 +939,14 @@ test("barge-in racing bounded local playback preserves the validated final", asy
   assert.notEqual(end, -1);
   const consume = bridge.slice(start, end);
   const terminalAt = consume.indexOf("const completed = parser.finish()");
-  const sealAt = consume.indexOf("playback.seal()");
-  const returnAt = consume.indexOf(
-    "finalResult: completed.finalResult",
+  const finalizeAt = consume.indexOf(
+    "const finalized = finalizeMeaningfulVoiceStream(",
   );
+  const sealAt = consume.indexOf("playback.seal()");
+  const returnAt = consume.indexOf("return finalized");
   assert.ok(terminalAt >= 0);
+  assert.ok(finalizeAt > terminalAt);
+  assert.ok(sealAt > finalizeAt);
   assert.ok(sealAt > terminalAt);
   assert.ok(returnAt > sealAt);
   assert.doesNotMatch(consume, /await playback\.completion/u);
@@ -974,6 +1017,288 @@ test("validated playback drain follows scheduled audio with a protocol-sized cap
       /voice_playback_deadline_invalid/u,
     );
   }
+});
+
+test("leading silent PCM does not start Speaking or barge monitoring", async () => {
+  const silentSamples = new Float32Array(2_400);
+  const meaningfulSamples = new Float32Array(2_400);
+  meaningfulSamples[1_200] = 0.25;
+  const { context, runtime, state } = await createExecutablePlaybackHarness({
+    pcmSamples: [silentSamples, meaningfulSamples],
+  });
+  const playback = runtime.createStreamingPlayback(1);
+
+  const silentAudibleAt = playback.schedulePcm(fakePcmEvent(0));
+  assert.equal(silentAudibleAt, undefined);
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(state.micEnabled, false);
+  assert.equal(state.bargeStartedAt.length, 0);
+  assert.equal(
+    state.pauseEvents.filter((event) => event.type === "kotae:first-audio")
+      .length,
+    0,
+  );
+
+  const meaningfulAudibleAt = playback.schedulePcm(fakePcmEvent(1));
+  assert.ok(Number.isFinite(meaningfulAudibleAt));
+  assert.equal(playback.hasStreamedAudio(), true);
+  assert.equal(state.micEnabled, true);
+  assert.deepEqual(state.bargeStartedAt, [meaningfulAudibleAt]);
+  assert.deepEqual(
+    state.pauseEvents
+      .filter((event) => event.type === "kotae:first-audio")
+      .map((event) => event.detail.sequence),
+    [1],
+  );
+
+  playback.finalReceived = true;
+  playback.seal();
+  for (const source of context.sources) source.end();
+  await playback.completion;
+});
+
+test("a committed response monitors Thinking before meaningful audio", async () => {
+  const silentSamples = new Float32Array(2_400);
+  const meaningfulSamples = new Float32Array(2_400);
+  meaningfulSamples[1_200] = 0.25;
+  const { context, runtime, state } = await createExecutablePlaybackHarness({
+    pcmSamples: [silentSamples, meaningfulSamples],
+  });
+  const playback = runtime.createStreamingPlayback(1, true, "live");
+
+  playback.armResponseInterruption(25);
+  assert.equal(playback.hasCommittedResponse(), true);
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(state.micEnabled, true);
+  assert.deepEqual(state.bargeStartedAt, [25]);
+  assert.equal(state.bargeResetAt.length, 0);
+  assert.equal(
+    state.pauseEvents.filter((event) => event.type === "kotae:first-audio")
+      .length,
+    0,
+  );
+
+  playback.activateCoach();
+  assert.equal(playback.coachActive, true);
+  assert.equal(playback.interruptRecording.coachActive, true);
+
+  assert.equal(playback.schedulePcm(fakePcmEvent(0)), undefined);
+  assert.deepEqual(state.bargeStartedAt, [25]);
+  assert.equal(state.bargeResetAt.length, 0);
+  assert.equal(playback.hasStreamedAudio(), false);
+
+  const audibleAt = playback.schedulePcm(fakePcmEvent(1));
+  assert.ok(Number.isFinite(audibleAt));
+  assert.deepEqual(state.bargeStartedAt, [25]);
+  assert.deepEqual(state.bargeResetAt, [audibleAt]);
+  assert.equal(playback.hasStreamedAudio(), true);
+  assert.deepEqual(
+    state.pauseEvents
+      .filter((event) => event.type === "kotae:first-audio")
+      .map((event) => event.detail.sequence),
+    [1],
+  );
+
+  playback.finalReceived = true;
+  playback.seal();
+  for (const source of context.sources) source.end();
+  await playback.completion;
+});
+
+test("sustained Thinking speech cancels the pending response and owns the foreground turn", async () => {
+  const { runtime, state } = await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    false,
+  );
+  playback.armResponseInterruption(0);
+  const recording = playback.interruptRecording;
+  const candidate = {
+    confirmed: false,
+    contextFrame: 0,
+  };
+  recording.candidate = candidate;
+  recording.interruptOnsetAt = 0;
+
+  let vadState = advancePastInterruptGuard(
+    createInterruptVadState(0),
+    0,
+  );
+  const firstVoiceAt =
+    INTERRUPT_VAD_LIMITS.guardMs + INTERRUPT_VAD_LIMITS.intervalMs;
+  const confirmationFrames =
+    INTERRUPT_VAD_LIMITS.confirmationMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 0; frame < confirmationFrames; frame += 1) {
+    vadState = advanceInterruptVad(vadState, {
+      now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: false,
+      peak: 0.15,
+      rms: 0.05,
+    });
+  }
+  assert.equal(vadState.action, "confirm");
+  assert.equal(vadState.voiceRunMs, INTERRUPT_VAD_LIMITS.confirmationMs);
+
+  const requestController = new AbortController();
+  runtime.setActiveRequestController(requestController);
+  runtime.confirmBargeIn(playback, recording, candidate, 1);
+
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(playback.interruptedBeforeFinal, true);
+  assert.equal(playback.interrupted, true);
+  assert.equal(requestController.signal.aborted, true);
+  assert.equal(candidate.confirmed, true);
+  assert.equal(runtime.getActiveRecording(), recording);
+  assert.equal(runtime.getActivePlayback(), undefined);
+  assert.equal(playback.interruptRecording, recording);
+  assert.equal(state.clearedCandidateDeadlines, 1);
+  assert.equal(state.micEnabled, true);
+  assert.equal(
+    state.pauseEvents.filter(
+      (event) => event.type === "kotae:voice-interrupted",
+    ).length,
+    1,
+  );
+  await assert.rejects(playback.completion, /voice_interrupted/u);
+});
+
+test("an all-zero PCM response follows the recoverable no-reply path", async () => {
+  const { context, runtime, state } =
+    await createExecutablePlaybackHarness({
+      pcmSamples: [new Float32Array(2_400)],
+    });
+  const playback = runtime.createStreamingPlayback(1, false, "http");
+  playback.armResponseInterruption(0);
+  const reader = new ControlledVoiceReader();
+  reader.pushText(
+    streamLine({ type: "ready", version: 1 }) +
+      streamLine({
+        type: "audio",
+        version: 1,
+        sequence: 0,
+        audioBase64: "AQIDBA==",
+        sampleRateHz: 24_000,
+      }) +
+      streamLine({
+        type: "final",
+        version: 1,
+        result: finalVoiceResult(),
+      }),
+  );
+  reader.close();
+
+  await assert.rejects(
+    runtime.consumeVoiceStream(
+      fakeVoiceStreamResponse(reader),
+      playback,
+      1,
+    ),
+    /voice_turn_unavailable/u,
+  );
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(playback.finalReceived, true);
+  assert.equal(
+    state.pauseEvents.filter((event) => event.type === "kotae:first-audio")
+      .length,
+    0,
+  );
+  assert.notEqual(reader.cancelledWith, undefined);
+  assert.equal(reader.released, true);
+
+  runtime.haltStreamingPlayback(
+    playback,
+    new Error("voice_turn_unavailable"),
+  );
+  assert.equal(context.sources[0].stopped, true);
+  assert.equal(state.micEnabled, false);
+});
+
+test("a zero-event silent final remains a valid recognition miss", async () => {
+  const { runtime } = await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1, false, "http");
+  playback.armResponseInterruption(0);
+  const reader = new ControlledVoiceReader();
+  const expectedFinal = {
+    ...finalVoiceResult(),
+    audioMimeType: "",
+  };
+  reader.pushText(
+    streamLine({ type: "ready", version: 1 }) +
+      streamLine({
+        type: "final",
+        version: 1,
+        result: expectedFinal,
+      }),
+  );
+  reader.close();
+
+  const completed = await runtime.consumeVoiceStream(
+    fakeVoiceStreamResponse(reader),
+    playback,
+    1,
+  );
+  assert.deepEqual(completed.finalResult, expectedFinal);
+  assert.equal(completed.streamedAudio, false);
+  assert.equal(playback.hasStreamedAudio(), false);
+  await runtime.awaitValidatedPlaybackCompletion(playback, 1);
+});
+
+test("an interrupted stateful silent drain preserves its validated final", async () => {
+  const { runtime } = await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    true,
+  );
+  playback.armResponseInterruption(0);
+  runtime.setActiveRecording(playback.interruptRecording);
+  playback.interruptedBeforeFinal = true;
+  playback.interrupted = true;
+  runtime.haltStreamingPlayback(
+    playback,
+    new Error("voice_interrupted"),
+  );
+
+  const reader = new ControlledVoiceReader();
+  const expectedFinal = {
+    ...finalVoiceResult(),
+    assistanceTarget: "respondent",
+    coachAction: "elicit",
+    coachPhase: "awaiting_answer",
+    respondentStage: "awaiting_answer",
+    sessionState: "signed-coach-state",
+  };
+  reader.pushText(
+    streamLine({ type: "ready", version: 1 }) +
+      streamLine({
+        type: "audio",
+        version: 1,
+        sequence: 0,
+        audioBase64: "AQIDBA==",
+        sampleRateHz: 24_000,
+      }) +
+      streamLine({
+        type: "final",
+        version: 1,
+        result: expectedFinal,
+      }),
+  );
+  reader.close();
+
+  const completed = await runtime.consumeVoiceStream(
+    fakeVoiceStreamResponse(reader),
+    playback,
+    1,
+  );
+  assert.deepEqual(completed.finalResult, expectedFinal);
+  assert.equal(completed.streamedAudio, true);
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(playback.finalReceived, true);
+  await runtime.awaitValidatedPlaybackCompletion(playback, 1);
 });
 
 test("executable finish boundary waits for the last Web Audio source", async () => {
@@ -1509,7 +1834,7 @@ test("successful and transiently failed turns rearm without resending confirmed 
   const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
   const submit = client.slice(submitStart, submitEnd);
   const recoverableStart = submit.indexOf(
-    "Err(FinishTurnError::Recoverable(message))",
+    "Err(FinishTurnError::Recoverable(_message))",
   );
   const terminalStart = submit.indexOf(
     "Err(FinishTurnError::Message(message))",
@@ -1586,7 +1911,7 @@ test("an oversized local capture rearms from wait without resending or closing t
   );
   const arm = client.slice(armStart, armEnd);
   const recoverableStart = arm.indexOf(
-    "Err(WaitTurnError::Recoverable(message))",
+    "Err(WaitTurnError::Recoverable(_message))",
   );
   const terminalStart = arm.indexOf(
     "Err(WaitTurnError::Terminal(message))",
@@ -1611,7 +1936,7 @@ test("an oversized local capture rearms from wait without resending or closing t
   );
   const resume = client.slice(resumeStart, resumeEnd);
   const resumeRecoverableStart = resume.indexOf(
-    "Err(WaitTurnError::Recoverable(message))",
+    "Err(WaitTurnError::Recoverable(_message))",
   );
   const resumeTerminalStart = resume.indexOf(
     "Err(WaitTurnError::Terminal(message))",
@@ -2292,23 +2617,23 @@ function filledPcmFrame(value) {
 
 test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
   assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
-  assert.equal(BARGE_PCM_LIMITS.historyMs, 900);
+  assert.equal(BARGE_PCM_LIMITS.historyMs, 1_500);
   assert.equal(BARGE_PCM_LIMITS.leadInMs, 100);
-  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 45);
+  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 75);
   assert.equal(
     BARGE_PCM_LIMITS.maximumBytes,
-    45 * VOICE_LIVE_LIMITS.inputFrameBytes,
+    75 * VOICE_LIVE_LIMITS.inputFrameBytes,
   );
 
   const ring = createBargePcmRing();
   const evicted = filledPcmFrame(255);
   ring.push(evicted, 0);
-  for (let index = 1; index <= 45; index += 1) {
+  for (let index = 1; index <= 75; index += 1) {
     ring.push(filledPcmFrame(index), index * 20);
   }
   assert.deepEqual(ring.snapshot(), {
-    frameCount: 45,
-    newestAt: 900,
+    frameCount: 75,
+    newestAt: 1_500,
     oldestAt: 20,
     totalBytes: BARGE_PCM_LIMITS.maximumBytes,
   });
@@ -2323,8 +2648,8 @@ test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
     candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
   );
   assert.equal(drained[0].capturedAt, 20);
-  assert.equal(drained.at(-1).capturedAt, 900);
-  assert.equal(drained.length, 45);
+  assert.equal(drained.at(-1).capturedAt, 1_500);
+  assert.equal(drained.length, 75);
   assert.deepEqual(ring.snapshot(), {
     frameCount: 0,
     newestAt: null,
@@ -2335,11 +2660,11 @@ test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
   const expired = filledPcmFrame(91);
   const cleared = filledPcmFrame(92);
   ring.push(expired, 500);
-  ring.push(cleared, 1_420);
+  ring.push(cleared, 2_020);
   assert.equal(
     new Uint8Array(expired).every((value) => value === 0),
     true,
-    "timestamp eviction must zero audio older than 900 ms",
+    "timestamp eviction must zero audio older than 1.5 seconds",
   );
   ring.clear();
   assert.equal(
@@ -3084,7 +3409,7 @@ test("Rust accepts only the exact coach checkpoint and preserves it across a rec
   const submitEnd = client.indexOf("\nfn start_or_resume(", submitStart);
   const submit = client.slice(submitStart, submitEnd);
   const recoverableStart = submit.indexOf(
-    "Err(FinishTurnError::Recoverable(message))",
+    "Err(FinishTurnError::Recoverable(_message))",
   );
   const terminalStart = submit.indexOf(
     "Err(FinishTurnError::Message(message))",
@@ -3660,7 +3985,7 @@ test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () 
     INTERRUPT_VAD_LIMITS.provisionalMs /
     INTERRUPT_VAD_LIMITS.intervalMs;
   assert.equal(provisionalFrames, 4);
-  assert.equal(confirmationFrames, 10);
+  assert.equal(confirmationFrames, 20);
 
   for (let frame = 0; frame < confirmationFrames; frame += 1) {
     state = advanceInterruptVad(state, {
@@ -3681,13 +4006,13 @@ test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () 
   assert.equal(state.firstVoiceAt, firstVoiceAt);
   assert.equal(
     state.lastVoiceAt - state.firstVoiceAt,
-    360,
+    760,
   );
 
   state = advanceInterruptVad(state, {
     now:
       state.lastVoiceAt +
-      INTERRUPT_VAD_LIMITS.trailingSilenceMs -
+      INTERRUPT_VAD_LIMITS.reflectiveSilenceMs -
       1,
     outputActive: false,
     peak: 0.003,
@@ -3696,7 +4021,7 @@ test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () 
   assert.equal(state.action, null);
   state = advanceInterruptVad(state, {
     now:
-      state.lastVoiceAt + INTERRUPT_VAD_LIMITS.trailingSilenceMs,
+      state.lastVoiceAt + INTERRUPT_VAD_LIMITS.reflectiveSilenceMs,
     outputActive: false,
     peak: 0.003,
     rms: 0.003,
@@ -3708,8 +4033,12 @@ test("interrupt recorder deadline covers a finite dense gapped confirmation", ()
   let now = 0;
   let state = createInterruptVadState(now);
   let candidateStartedAt = null;
-  const voicedFrames = new Set([1, 2, 4, 5, 7, 8, 10, 11, 13, 15]);
-  for (let frame = 1; frame <= 15; frame += 1) {
+  const voicedFrames = new Set(
+    Array.from({ length: 29 }, (_, index) => index + 1).filter(
+      (frame) => frame % 3 !== 0,
+    ),
+  );
+  for (let frame = 1; frame <= 29; frame += 1) {
     now += INTERRUPT_VAD_LIMITS.intervalMs;
     const voiced = voicedFrames.has(frame);
     state = advanceInterruptVad(state, {
@@ -3724,7 +4053,7 @@ test("interrupt recorder deadline covers a finite dense gapped confirmation", ()
   }
 
   assert.equal(state.action, "confirm");
-  assert.equal(now - candidateStartedAt, 560);
+  assert.equal(now - candidateStartedAt, 1_120);
   assert.ok(
     state.voiceRunMs /
       (now - candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs) >=
@@ -3734,7 +4063,7 @@ test("interrupt recorder deadline covers a finite dense gapped confirmation", ()
     now - candidateStartedAt <
       INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
   );
-  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 800);
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 1_400);
   assert.equal(
     BARGE_PCM_LIMITS.historyMs,
     INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs +
@@ -3786,6 +4115,46 @@ test("a short mutter is only provisional and is discarded without interruption",
   assert.equal(state.firstVoiceAt, null);
 });
 
+test("a 600 ms provisional mutter cannot interrupt the current reply", () => {
+  const startedAt = 50_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  const firstVoiceAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  const mutterFrames = 600 / INTERRUPT_VAD_LIMITS.intervalMs;
+
+  for (let frame = 0; frame < mutterFrames; frame += 1) {
+    state = advanceInterruptVad(state, {
+      now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.15,
+      rms: 0.05,
+    });
+    assert.notEqual(state.action, "confirm");
+  }
+  assert.equal(state.phase, "provisional");
+  assert.equal(state.voiceRunMs, 600);
+  assert.ok(state.voiceRunMs < INTERRUPT_VAD_LIMITS.confirmationMs);
+
+  const finalVoiceAt =
+    firstVoiceAt + (mutterFrames - 1) * INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let gap = 1; gap <= 3; gap += 1) {
+    state = advanceInterruptVad(state, {
+      now: finalVoiceAt + gap * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.003,
+      rms: 0.003,
+    });
+  }
+  assert.equal(state.action, "discard");
+  assert.equal(state.phase, "armed");
+  assert.equal(state.firstVoiceAt, null);
+});
+
 test("sparse muttering cannot cross the hard interrupt density gate", () => {
   let now = 0;
   let state = createInterruptVadState(now);
@@ -3800,7 +4169,7 @@ test("sparse muttering cannot cross the hard interrupt density gate", () => {
       rms: voiced ? 0.08 : 0.003,
     });
   }
-  assert.equal(state.voiceRunMs, INTERRUPT_VAD_LIMITS.confirmationMs);
+  assert.ok(state.voiceRunMs < INTERRUPT_VAD_LIMITS.confirmationMs);
   assert.equal(state.phase, "provisional");
   assert.notEqual(state.action, "confirm");
 });
@@ -3932,7 +4301,7 @@ test("interrupt VAD permits a three-minute follow-up monologue", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
-test("barge-in starts with audible output and preserves foreground response mode", async () => {
+test("committed-response barge-in preserves foreground response mode", async () => {
   const [bridge, client] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
@@ -3941,8 +4310,9 @@ test("barge-in starts with audible output and preserves foreground response mode
   const confirm = bridge.slice(confirmAt, confirmAt + 7_000);
   assert.match(
     confirm,
-    /playback\.hasStreamedAudio\?\.\(\) !== true/u,
+    /playback\.hasCommittedResponse\?\.\(\) !== true/u,
   );
+  assert.match(confirm, /playback\.interruptRecording !== recording/u);
   assert.match(
     confirm,
     /maybeAbortPlaybackTransportOnInterrupt\(\s*playback,\s*activeRequestController,\s*\)/u,
@@ -3975,6 +4345,19 @@ test("barge-in starts with audible output and preserves foreground response mode
   assert.match(bridge, /source\.connect\(gainNode\)/u);
   const bargeMonitorAt = bridge.indexOf("function startBargeInMonitoring(");
   const bargeMonitor = bridge.slice(bargeMonitorAt, bargeMonitorAt + 3_500);
+  assert.match(
+    bargeMonitor,
+    /createInterruptVadState\(guardStartedAt\)/u,
+  );
+  assert.match(
+    bargeMonitor,
+    /resetInterruptGuard = \(nextAudibleAt\)[\s\S]*createInterruptVadState\(nextAudibleAt\)/u,
+  );
+  assert.match(bargeMonitor, /now < vadState\.startedAt/u);
+  assert.match(
+    bargeMonitor,
+    /outputActive:\s*playback\.hasStreamedAudio\(\) && playback\.sources\.size > 0/u,
+  );
   assert.match(
     bargeMonitor,
     /vadState\.action === "start"[\s\S]*startCandidateRecorder\([\s\S]*\} else if \(vadState\.action === "provisional"\) \{[\s\S]*hard interruption gate/u,
@@ -4043,7 +4426,11 @@ test("barge-in starts with audible output and preserves foreground response mode
   const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);
   assert.match(
     schedule,
-    /if \(!streamedAudio\)[\s\S]*startBargeInMonitoring\(playback, expectedEpoch\)/u,
+    /if \(!streamedAudio && Number\.isFinite\(audibleAt\)\)[\s\S]*playback\.armResponseInterruption\(audibleAt\)/u,
+  );
+  assert.match(
+    schedule,
+    /playback\.interruptRecording\.coachActive = true/u,
   );
   const handoffAt = bridge.indexOf("handoffAmbient({");
   const handoff = bridge.slice(handoffAt, handoffAt + 2_000);
@@ -4156,7 +4543,7 @@ test("network keeps one finite deadline while validated playback drains separate
   );
   assert.match(
     finish,
-    /awaitVoiceTurnResult\(\s*fetch\(VOICE_ENDPOINT/u,
+    /const responsePromise = fetch\(VOICE_ENDPOINT[\s\S]*playback\.armResponseInterruption\(performance\.now\(\)\);[\s\S]*await awaitVoiceTurnResult\(\s*responsePromise/u,
   );
   assert.match(
     finish,
@@ -4197,7 +4584,18 @@ test("network keeps one finite deadline while validated playback drains separate
     commitAt,
   );
   const commit = live.slice(commitAt, interruptAt);
+  const committedAt = commit.indexOf('state = "committed"');
+  const clockAt = commit.indexOf("commitAt = performance.now()");
+  const monitorAt = commit.indexOf(
+    "playback.armResponseInterruption(commitAt)",
+  );
+  const resultAt = commit.indexOf("const result = await resultPromise");
+  assert.ok(committedAt >= 0);
+  assert.ok(clockAt > committedAt);
+  assert.ok(monitorAt > clockAt);
+  assert.ok(resultAt > monitorAt);
   assert.match(commit, /const result = await resultPromise/u);
+  assert.match(commit, /finalizeMeaningfulVoiceStream\(/u);
   assert.doesNotMatch(commit, /await playback\.completion/u);
 
   const consumeStart = bridge.indexOf(
@@ -4209,6 +4607,7 @@ test("network keeps one finite deadline while validated playback drains separate
   );
   const consume = bridge.slice(consumeStart, consumeEnd);
   assert.match(consume, /const completed = parser\.finish\(\)/u);
+  assert.match(consume, /finalizeMeaningfulVoiceStream\(/u);
   assert.doesNotMatch(consume, /await playback\.completion/u);
 });
 
@@ -5838,7 +6237,7 @@ test("a clear onset upgrades once to the absolute soft deadline and barge-in rem
       VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
   );
 
-  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 800);
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 1_400);
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",

@@ -3,6 +3,7 @@ package nativeflow
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,12 +13,47 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/nativevoice"
 )
 
+func TestDefaultSystemPromptPrioritizesUserAirtimeAndCannotStartCoach(
+	t *testing.T,
+) {
+	for _, required := range []string{
+		"原則1〜2文",
+		"およそ25〜70文字",
+		"相手の次の言葉を最優先",
+		"答えやすい任意の一問まで",
+		"考え途中なら失敗扱いせず",
+		"短く受け取って話す番を返し",
+		"最初の挨拶だけは、低開示の話題を一つ短く添え",
+		"すぐ相手へ話す番を返して",
+	} {
+		if !strings.Contains(DefaultSystemPrompt, required) {
+			t.Fatalf("Native system prompt is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"Respondent Coach",
+		"人から聞かれた質問への答え方",
+		"まず、あなた自身が一番伝えたいことは何ですか？",
+	} {
+		if strings.Contains(DefaultSystemPrompt, forbidden) {
+			t.Fatalf("Native prompt can start answer coaching via %q", forbidden)
+		}
+	}
+	if strings.Contains(
+		DefaultSystemPrompt,
+		"具体的で答えやすい話題を一つ持ってください",
+	) {
+		t.Fatal("Native prompt still fills every short or quiet turn with AI speech")
+	}
+}
+
 type fakePreparer struct {
 	token          string
 	requiresStaged bool
 	err            error
 	coachToken     string
 	coachErr       error
+	coachCalls     *int
 }
 
 func (f fakePreparer) PrepareNativeState(string, string) (string, bool, error) {
@@ -29,6 +65,9 @@ func (f fakePreparer) PrepareNativeCoachState(
 	string,
 	string,
 ) (string, error) {
+	if f.coachCalls != nil {
+		*f.coachCalls++
+	}
 	return f.coachToken, f.coachErr
 }
 
@@ -314,7 +353,7 @@ func TestNativeFlowKeepsSignedPendingCoachOutOfNativeProvider(t *testing.T) {
 	}
 }
 
-func TestNativeFlowRoutesExplicitRespondentCoachRequestDirectlyThroughNativeAudio(t *testing.T) {
+func TestNativeFlowRoutesExplicitRespondentCoachRequestThroughBoundStagedFlow(t *testing.T) {
 	for _, value := range []string{
 		"上司に目的を聞かれた。答え方を一問だけ手伝って",
 		"上司に「この企画の目的は？」と聞かれました。どう答えればいいですか",
@@ -354,48 +393,40 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestDirectlyThroughNativeAudi
 
 			input := nativeInput()
 			input.StateToken = "original-state"
-			order := make([]string, 0, 2)
-			result, err := service.ProcessLiveWithControl(
+			audioDelivered := false
+			controlPublished := false
+			_, err = service.ProcessLiveWithControl(
 				context.Background(),
 				"uid-respondent-"+value,
 				input,
 				oneFrame(),
 				func([]byte) error {
-					order = append(order, "audio")
+					audioDelivered = true
 					return nil
 				},
 				nil,
-				func(sessionState string) error {
-					if sessionState != "generic-signed-coach-state" {
-						t.Errorf("control state = %q", sessionState)
-					}
-					order = append(order, "coach")
+				func(string) error {
+					controlPublished = true
 					return nil
 				},
 			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(order) != 2 || order[0] != "coach" || order[1] != "audio" ||
-				session.commits != 1 {
-				t.Fatalf("order=%v commits=%d", order, session.commits)
-			}
-			if result.Route != routeNativeRespondentCoach ||
-				result.StateToken != "generic-signed-coach-state" ||
-				result.AssistanceTarget != "respondent" ||
-				result.RespondentStage != "awaiting_answer" ||
-				result.CoachPhase != "awaiting_answer" ||
-				result.CoachAction != "elicit" ||
-				result.LiveTimings.ConversationMS < 0 ||
-				result.LiveTimings.TTSFirstChunkMS < 0 ||
-				result.LiveTimings.FinalToFirstAudioMS < 0 {
-				t.Fatalf("result=%+v", result)
+			if !errors.Is(err, httpapi.ErrVoiceNativeFallback) ||
+				audioDelivered || controlPublished ||
+				session.commits != 0 || session.discards == 0 {
+				t.Fatalf(
+					"err=%v audio=%v control=%v commits=%d discards=%d",
+					err,
+					audioDelivered,
+					controlPublished,
+					session.commits,
+					session.discards,
+				)
 			}
 		})
 	}
 }
 
-func TestNativeRespondentCoachCompletesWithoutConversationPlanner(t *testing.T) {
+func TestNativeRespondentCoachCannotPublishGenericCheckpoint(t *testing.T) {
 	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
 	session := newScriptedSession(
 		nativevoice.Event{
@@ -427,60 +458,32 @@ func TestNativeRespondentCoachCompletesWithoutConversationPlanner(t *testing.T) 
 	}
 	defer service.Close()
 
-	controlSeen := make(chan struct{})
-	audioSeen := make(chan struct{})
-	outcome := make(chan struct {
-		result httpapi.VoiceTurnResult
-		err    error
-	}, 1)
-	go func() {
-		result, processErr := service.ProcessLiveWithControl(
-			context.Background(),
-			"uid-native-coach-concurrent",
-			nativeInput(),
-			oneFrame(),
-			func([]byte) error {
-				select {
-				case <-controlSeen:
-				default:
-					t.Error("audio arrived before coach control")
-				}
-				close(audioSeen)
-				return nil
-			},
-			nil,
-			func(sessionState string) error {
-				if sessionState != "generic-signed-coach-state" {
-					t.Errorf("control state = %q", sessionState)
-				}
-				close(controlSeen)
-				return nil
-			},
+	audioDelivered := false
+	controlPublished := false
+	_, err = service.ProcessLiveWithControl(
+		context.Background(),
+		"uid-native-coach-no-generic-checkpoint",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { audioDelivered = true; return nil },
+		nil,
+		func(string) error { controlPublished = true; return nil },
+	)
+	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) ||
+		audioDelivered || controlPublished ||
+		session.commits != 0 || session.discards == 0 {
+		t.Fatalf(
+			"err=%v audio=%v control=%v commits=%d discards=%d",
+			err,
+			audioDelivered,
+			controlPublished,
+			session.commits,
+			session.discards,
 		)
-		outcome <- struct {
-			result httpapi.VoiceTurnResult
-			err    error
-		}{result: result, err: processErr}
-	}()
-
-	select {
-	case <-audioSeen:
-	case <-time.After(time.Second):
-		t.Fatal("first Native audio did not follow the local signed-state gate")
-	}
-	select {
-	case completed := <-outcome:
-		if completed.err != nil ||
-			completed.result.Route != routeNativeRespondentCoach ||
-			completed.result.StateToken != "generic-signed-coach-state" {
-			t.Fatalf("completed=%+v err=%v", completed.result, completed.err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("turn waited for an external conversation plan")
 	}
 }
 
-func TestNativeRespondentCoachReturnsGenericSignedAuthority(t *testing.T) {
+func TestNativeRespondentCoachReturnsNoNativeAuthority(t *testing.T) {
 	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
 	session := newScriptedSession(
 		nativevoice.Event{
@@ -513,34 +516,36 @@ func TestNativeRespondentCoachReturnsGenericSignedAuthority(t *testing.T) {
 	defer service.Close()
 
 	controls := 0
+	audioDelivered := false
 	result, err := service.ProcessLiveWithControl(
 		context.Background(),
 		"uid-invalid-coach-plan",
 		nativeInput(),
 		oneFrame(),
-		func([]byte) error { return nil },
+		func([]byte) error { audioDelivered = true; return nil },
 		nil,
-		func(sessionState string) error {
+		func(string) error {
 			controls++
-			if sessionState != "generic-signed-coach-state" {
-				t.Errorf("control state = %q", sessionState)
-			}
 			return nil
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if controls != 1 || result.Route != routeNativeRespondentCoach ||
-		result.StateToken != "generic-signed-coach-state" ||
-		result.AssistanceTarget != "respondent" ||
-		result.RespondentStage != "awaiting_answer" ||
-		result.CoachPhase != "awaiting_answer" || result.CoachAction != "elicit" {
-		t.Fatalf("controls=%d result=%+v", controls, result)
+	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) ||
+		controls != 0 || audioDelivered || result.StateToken != "" ||
+		result.Route != "" || result.Caption != "" ||
+		session.commits != 0 || session.discards == 0 {
+		t.Fatalf(
+			"err=%v controls=%d audio=%v result=%+v commits=%d discards=%d",
+			err,
+			controls,
+			audioDelivered,
+			result,
+			session.commits,
+			session.discards,
+		)
 	}
 }
 
-func TestNativeRespondentCoachControlWriteFailureReleasesNoAudio(t *testing.T) {
+func TestNativeRespondentCoachFallbackNeverCallsControlWriter(t *testing.T) {
 	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
 	session := newScriptedSession(nativevoice.Event{
 		Kind:         nativevoice.EventInputCaption,
@@ -560,6 +565,7 @@ func TestNativeRespondentCoachControlWriteFailureReleasesNoAudio(t *testing.T) {
 	defer service.Close()
 
 	delivered := false
+	controls := 0
 	_, err = service.ProcessLiveWithControl(
 		context.Background(),
 		"uid-coach-control-failed",
@@ -567,21 +573,24 @@ func TestNativeRespondentCoachControlWriteFailureReleasesNoAudio(t *testing.T) {
 		oneFrame(),
 		func([]byte) error { delivered = true; return nil },
 		nil,
-		func(string) error { return errors.New("control write failed") },
+		func(string) error { controls++; return errors.New("control write failed") },
 	)
-	if err == nil || delivered || session.commits != 0 || session.discards == 0 {
+	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) || delivered ||
+		controls != 0 || session.commits != 0 || session.discards == 0 {
 		t.Fatalf(
-			"err=%v delivered=%v commits=%d discards=%d",
+			"err=%v delivered=%v controls=%d commits=%d discards=%d",
 			err,
 			delivered,
+			controls,
 			session.commits,
 			session.discards,
 		)
 	}
 }
 
-func TestNativeRespondentCoachStatePreparationFailureReleasesNothing(t *testing.T) {
+func TestNativeRespondentCoachDoesNotDependOnGenericStateIssuance(t *testing.T) {
 	const utterance = "My manager asked why this change was needed. How should I answer?"
+	coachCalls := 0
 	session := newScriptedSession(nativevoice.Event{
 		Kind:         nativevoice.EventInputCaption,
 		CaptionUTF8:  []byte(utterance),
@@ -590,8 +599,9 @@ func TestNativeRespondentCoachStatePreparationFailureReleasesNothing(t *testing.
 	service, err := New(
 		&fakeOpener{session: session},
 		fakePreparer{
-			token:    "advanced-native-state",
-			coachErr: errors.New("state issuance unavailable"),
+			token:      "advanced-native-state",
+			coachErr:   errors.New("state issuance unavailable"),
+			coachCalls: &coachCalls,
 		},
 	)
 	if err != nil {
@@ -611,12 +621,14 @@ func TestNativeRespondentCoachStatePreparationFailureReleasesNothing(t *testing.
 		func(string) error { controls++; return nil },
 	)
 	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) || delivered ||
-		controls != 0 || session.commits != 0 || session.discards == 0 {
+		controls != 0 || coachCalls != 0 ||
+		session.commits != 0 || session.discards == 0 {
 		t.Fatalf(
-			"err=%v delivered=%v controls=%d commits=%d discards=%d",
+			"err=%v delivered=%v controls=%d coach_calls=%d commits=%d discards=%d",
 			err,
 			delivered,
 			controls,
+			coachCalls,
 			session.commits,
 			session.discards,
 		)

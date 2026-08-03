@@ -3021,13 +3021,15 @@ async function startVoiceLiveSession({
       state = "committed";
       commitSent = true;
       commitAt = performance.now();
+      playback.armResponseInterruption(commitAt);
 
       const result = await resultPromise;
       const snapshot = protocol.snapshot();
-      return Object.freeze({
-        finalResult: result,
-        streamedAudio: snapshot.audioEventCount > 0,
-      });
+      return finalizeMeaningfulVoiceStream(
+        playback,
+        result,
+        snapshot.audioEventCount,
+      );
     },
     interrupt(error = new Error("voice_interrupted")) {
       const finalized = state === "final" || state === "complete";
@@ -3734,9 +3736,10 @@ function confirmBargeIn(
   expectedEpoch,
 ) {
   if (
-    playback.hasStreamedAudio?.() !== true ||
+    playback.hasCommittedResponse?.() !== true ||
     playback.interrupted ||
     playback !== activePlayback ||
+    playback.interruptRecording !== recording ||
     recording.settled ||
     !candidate ||
     !candidateEventIsCurrent(recording, candidate)
@@ -3748,6 +3751,7 @@ function confirmBargeIn(
     expectedEpoch !== sessionEpoch ||
     playback !== activePlayback ||
     playback.interrupted ||
+    playback.interruptRecording !== recording ||
     recording.settled ||
     !candidateEventIsCurrent(recording, candidate)
   ) {
@@ -3890,11 +3894,13 @@ function confirmBargeIn(
   );
 }
 
-function startBargeInMonitoring(playback, expectedEpoch) {
+function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
   if (
     playback.interruptRecording ||
     playback.interrupted ||
     expectedEpoch !== sessionEpoch ||
+    !Number.isFinite(guardStartedAt) ||
+    guardStartedAt < 0 ||
     !analyser ||
     !hasLiveAudioTrack(mediaStream) ||
     !hasVerifiedEchoCancellation(mediaStream)
@@ -3915,16 +3921,18 @@ function startBargeInMonitoring(playback, expectedEpoch) {
   );
   const pcm = new Float32Array(analyser.fftSize);
   recording.vadPcm = pcm;
-  let vadState = createInterruptVadState(performance.now());
+  let vadState = createInterruptVadState(guardStartedAt);
   playback.interruptRecording = recording;
   void startBargePcmMonitoring(playback, recording, expectedEpoch);
-  playback.resetInterruptGuard = () => {
+  playback.resetInterruptGuard = (nextAudibleAt) => {
     if (
+      Number.isFinite(nextAudibleAt) &&
+      nextAudibleAt >= 0 &&
       !recording.settled &&
       !recording.candidate &&
       vadState.phase !== "confirmed"
     ) {
-      vadState = createInterruptVadState(performance.now());
+      vadState = createInterruptVadState(nextAudibleAt);
     }
   };
 
@@ -3936,6 +3944,8 @@ function startBargeInMonitoring(playback, expectedEpoch) {
     ) {
       return;
     }
+    const now = performance.now();
+    if (now < vadState.startedAt) return;
     analyser.getFloatTimeDomainData(pcm);
     let sumSquares = 0;
     let peak = 0;
@@ -3944,10 +3954,10 @@ function startBargeInMonitoring(playback, expectedEpoch) {
       sumSquares += magnitude * magnitude;
       if (magnitude > peak) peak = magnitude;
     }
-    const now = performance.now();
     vadState = advanceInterruptVad(vadState, {
       now,
-      outputActive: playback.sources.size > 0,
+      outputActive:
+        playback.hasStreamedAudio() && playback.sources.size > 0,
       peak,
       rms: Math.sqrt(sumSquares / pcm.length),
     });
@@ -4025,6 +4035,7 @@ function createStreamingPlayback(
   let sealed = false;
   let settled = false;
   let streamedAudio = false;
+  let responseCommitted = false;
   const playbackContext = audioContext;
   const sources = new Set();
   const gainNode = playbackContext.createGain();
@@ -4124,13 +4135,9 @@ function createStreamingPlayback(
     }
     nextStartAt = startAt + buffer.duration;
 
-    if (!streamedAudio) {
+    if (!streamedAudio && Number.isFinite(audibleAt)) {
       streamedAudio = true;
-      if (playback.interruptRecording) {
-        playback.resetInterruptGuard?.();
-      } else {
-        startBargeInMonitoring(playback, expectedEpoch);
-      }
+      playback.armResponseInterruption(audibleAt);
       globalThis.dispatchEvent(
         new CustomEvent("kotae:first-audio", {
           detail: Object.freeze({ sequence: event.sequence, version: 1 }),
@@ -4152,6 +4159,33 @@ function createStreamingPlayback(
         fail("voice_response_invalid");
       }
       playback.coachActive = true;
+      if (
+        playback.interruptRecording &&
+        !playback.interruptRecording.settled
+      ) {
+        playback.interruptRecording.coachActive = true;
+      }
+    },
+    armResponseInterruption(guardStartedAt) {
+      if (
+        !Number.isFinite(guardStartedAt) ||
+        guardStartedAt < 0 ||
+        settled ||
+        sealed ||
+        expectedEpoch !== sessionEpoch
+      ) {
+        fail("voice_response_invalid");
+      }
+      responseCommitted = true;
+      if (playback.interruptRecording) {
+        playback.resetInterruptGuard?.(guardStartedAt);
+      } else {
+        startBargeInMonitoring(
+          playback,
+          expectedEpoch,
+          guardStartedAt,
+        );
+      }
     },
     bargePcmMonitor: undefined,
     completion,
@@ -4166,6 +4200,7 @@ function createStreamingPlayback(
     gainNode,
     nativeAudio,
     transportKind,
+    hasCommittedResponse: () => responseCommitted,
     hasStreamedAudio: () => streamedAudio,
     interruptRecording: undefined,
     interrupted: false,
@@ -4268,6 +4303,35 @@ async function awaitValidatedPlaybackCompletion(
   }
 }
 
+function finalizeMeaningfulVoiceStream(
+  playback,
+  finalResult,
+  audioEventCount,
+) {
+  if (
+    !playback ||
+    typeof playback.hasStreamedAudio !== "function" ||
+    !Number.isSafeInteger(audioEventCount) ||
+    audioEventCount < 0
+  ) {
+    fail("voice_response_invalid");
+  }
+  const streamedAudio = playback.hasStreamedAudio() === true;
+  if (streamedAudio && audioEventCount === 0) {
+    fail("voice_response_invalid");
+  }
+  if (!streamedAudio && audioEventCount > 0 && !playback.interrupted) {
+    // A syntactically valid PCM stream can still be entirely silent. Treat it
+    // as the existing recoverable no-reply failure instead of reporting that
+    // the assistant spoke when no meaningful sample reached playback.
+    fail("voice_turn_unavailable");
+  }
+  return Object.freeze({
+    finalResult,
+    streamedAudio: audioEventCount > 0,
+  });
+}
+
 async function consumeVoiceStream(
   response,
   playback,
@@ -4346,13 +4410,15 @@ async function consumeVoiceStream(
     if (expectedEpoch !== sessionEpoch) {
       fail(stoppedSessionCode(expectedEpoch));
     }
+    const finalized = finalizeMeaningfulVoiceStream(
+      playback,
+      completed.finalResult,
+      completed.audioEventCount,
+    );
     if (!playback.interrupted) {
       playback.seal();
     }
-    return Object.freeze({
-      finalResult: completed.finalResult,
-      streamedAudio: completed.audioEventCount > 0,
-    });
+    return finalized;
   } catch (error) {
     void reader.cancel(error).catch(() => {});
     throw error;
@@ -4565,9 +4631,9 @@ async function finishTurn(
       "http",
       coachActive,
     );
-    // Barge-in starts only when the first response audio frame is scheduled.
-    // Keeping the track disabled while the model is still thinking prevents
-    // a resumed phrase from aborting an answer that has not begun.
+    // The microphone remains disabled until the request has actually been
+    // committed. After that boundary, the bounded local interruption gate can
+    // hear a sustained correction while the provider is still thinking.
 
     const payload = {
       audioBase64,
@@ -4584,22 +4650,24 @@ async function finishTurn(
     }
     requestController = new AbortController();
     activeRequestController = requestController;
+    const responsePromise = fetch(VOICE_ENDPOINT, {
+      method: "POST",
+      cache: "no-store",
+      credentials: "omit",
+      mode: "cors",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: requestController.signal,
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        "Content-Type": "application/json",
+        "X-Firebase-AppCheck": appCheckToken,
+      },
+      body: JSON.stringify(payload),
+    });
+    playback.armResponseInterruption(performance.now());
     const response = await awaitVoiceTurnResult(
-      fetch(VOICE_ENDPOINT, {
-        method: "POST",
-        cache: "no-store",
-        credentials: "omit",
-        mode: "cors",
-        redirect: "error",
-        referrerPolicy: "no-referrer",
-        signal: requestController.signal,
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-          "Content-Type": "application/json",
-          "X-Firebase-AppCheck": appCheckToken,
-        },
-        body: JSON.stringify(payload),
-      }),
+      responsePromise,
       () => requestController.abort(),
     );
     if (!response.ok) {

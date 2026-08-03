@@ -279,7 +279,10 @@ type liveEndpointTestService struct {
 
 type liveControlTestService struct {
 	liveTestVoiceService
+	basicCalls         int
+	endpointCalls      int
 	controlCalls       int
+	withoutControlErr  error
 	prepareErr         error
 	controlState       *string
 	ignoreControlError bool
@@ -413,6 +416,90 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 				if err := onCoachActive(controlState); err != nil &&
 					!service.ignoreControlError {
 					return VoiceTurnResult{}, err
+				}
+				for _, output := range service.output {
+					if err := onAudio(output); err != nil {
+						return VoiceTurnResult{}, err
+					}
+				}
+				return service.result, service.err
+			}
+			copied := append([]byte(nil), chunk...)
+			service.mu.Lock()
+			service.audio = append(service.audio, copied)
+			service.mu.Unlock()
+		}
+	}
+}
+
+func (service *liveControlTestService) ProcessLive(
+	ctx context.Context,
+	uid string,
+	input VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+) (VoiceTurnResult, error) {
+	service.mu.Lock()
+	service.basicCalls++
+	service.mu.Unlock()
+	if service.withoutControlErr == nil {
+		return service.liveTestVoiceService.ProcessLive(
+			ctx,
+			uid,
+			input,
+			audio,
+			onAudio,
+		)
+	}
+	if uid != "user-123" {
+		return VoiceTurnResult{}, errors.New("unexpected uid")
+	}
+	service.mu.Lock()
+	service.processLiveCalls++
+	service.input = input
+	service.mu.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			service.signalCanceled()
+			return VoiceTurnResult{}, ctx.Err()
+		case chunk, open := <-audio:
+			if !open {
+				return VoiceTurnResult{}, service.withoutControlErr
+			}
+			copied := append([]byte(nil), chunk...)
+			service.mu.Lock()
+			service.audio = append(service.audio, copied)
+			service.mu.Unlock()
+		}
+	}
+}
+
+func (service *liveControlTestService) ProcessLiveWithEndpoint(
+	ctx context.Context,
+	uid string,
+	input VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+	_ func(),
+) (VoiceTurnResult, error) {
+	if uid != "user-123" {
+		return VoiceTurnResult{}, errors.New("unexpected uid")
+	}
+	service.mu.Lock()
+	service.endpointCalls++
+	service.processLiveCalls++
+	service.input = input
+	service.mu.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			service.signalCanceled()
+			return VoiceTurnResult{}, ctx.Err()
+		case chunk, open := <-audio:
+			if !open {
+				if service.withoutControlErr != nil {
+					return VoiceTurnResult{}, service.withoutControlErr
 				}
 				for _, output := range service.output {
 					if err := onAudio(output); err != nil {
@@ -639,15 +726,29 @@ func writeVoiceLiveStrictStart(t *testing.T, ctx context.Context, conn *websocke
 }
 
 func writeVoiceLiveNativeStart(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+	writeVoiceLiveNativeStartWithCoachControl(t, ctx, conn, true)
+}
+
+func writeVoiceLiveLegacyNativeStart(t *testing.T, ctx context.Context, conn *websocket.Conn) {
+	writeVoiceLiveNativeStartWithCoachControl(t, ctx, conn, false)
+}
+
+func writeVoiceLiveNativeStartWithCoachControl(
+	t *testing.T,
+	ctx context.Context,
+	conn *websocket.Conn,
+	nativeCoachControl bool,
+) {
 	t.Helper()
 	frame := voiceLiveStartFrame{
-		Type:          "start",
-		Version:       voiceLiveVersion,
-		IDToken:       liveTestIDToken,
-		AppCheckToken: liveTestAppCheckToken,
-		TurnMode:      VoiceTurnIntentional,
-		SampleRateHz:  voiceLiveSampleRateHz,
-		NativeAudio:   true,
+		Type:               "start",
+		Version:            voiceLiveVersion,
+		IDToken:            liveTestIDToken,
+		AppCheckToken:      liveTestAppCheckToken,
+		TurnMode:           VoiceTurnIntentional,
+		SampleRateHz:       voiceLiveSampleRateHz,
+		NativeAudio:        true,
+		NativeCoachControl: nativeCoachControl,
 	}
 	payload, err := json.Marshal(frame)
 	if err != nil {
@@ -822,6 +923,130 @@ func TestVoiceLiveCoachControlPrecedesNativeAudioAndCompletesNormally(t *testing
 	native.mu.Unlock()
 	if controlCalls != 1 || nativeCalls != 1 {
 		t.Fatalf("control calls=%d native calls=%d", controlCalls, nativeCalls)
+	}
+}
+
+func TestVoiceLiveNativeCoachControlNegotiatesOldAndNewClients(t *testing.T) {
+	legacy := &liveTestVoiceService{}
+	native := &liveControlTestService{
+		liveTestVoiceService: liveTestVoiceService{
+			output: [][]byte{{4, 0, 5, 0}},
+			result: VoiceTurnResult{
+				StateToken:       "signed-native-coach-state",
+				DetectedDomain:   "daily",
+				AssistanceTarget: "respondent",
+				RespondentStage:  "awaiting_answer",
+				CoachPhase:       "awaiting_answer",
+				CoachAction:      "elicit",
+				ResearchStatus:   "none",
+				ResearchRecords:  []ResearchRecord{},
+				Route:            "native-respondent-coach",
+				Caption:          "one bounded question",
+			},
+		},
+		withoutControlErr: ErrVoiceNativeFallback,
+	}
+	handlerReturned := make(chan struct{}, 2)
+	server := newVoiceLiveControlledTestServer(
+		t,
+		legacy,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		guard.NewMemoryVoiceLiveLeaseManager(),
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		handlerReturned,
+		native,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	commit := func(conn *websocket.Conn) {
+		t.Helper()
+		if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+			t.Fatalf("ready=%#v", ready)
+		}
+		if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+			t.Fatal(err)
+		}
+		payload, err := json.Marshal(voiceLiveCommitFrame{
+			Type: "commit", Version: voiceLiveVersion,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	oldClient, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVoiceLiveLegacyNativeStart(t, ctx, oldClient)
+	commit(oldClient)
+	terminal := readVoiceLiveJSON(t, ctx, oldClient)
+	if terminal["type"] != "error" || terminal["code"] != voiceLiveCodeNativeFallback {
+		t.Fatalf("old client terminal=%#v", terminal)
+	}
+	if _, _, err := oldClient.Read(ctx); websocket.CloseStatus(err) != websocket.StatusInternalError {
+		t.Fatalf("old client close status=%v err=%v", websocket.CloseStatus(err), err)
+	}
+	select {
+	case <-handlerReturned:
+	case <-ctx.Done():
+		t.Fatal("old client handler did not release its live lease")
+	}
+	native.mu.Lock()
+	oldBasicCalls := native.basicCalls
+	oldEndpointCalls := native.endpointCalls
+	oldControlCalls := native.controlCalls
+	native.mu.Unlock()
+	if oldBasicCalls != 0 || oldEndpointCalls != 1 || oldControlCalls != 0 {
+		t.Fatalf(
+			"old client routes: basic=%d endpoint=%d control=%d, want 0/1/0",
+			oldBasicCalls,
+			oldEndpointCalls,
+			oldControlCalls,
+		)
+	}
+
+	newClient, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newClient.CloseNow()
+	writeVoiceLiveNativeStart(t, ctx, newClient)
+	commit(newClient)
+	coach := readVoiceLiveJSON(t, ctx, newClient)
+	if coach["type"] != "coach" || coach["sessionState"] != "signed-native-coach-state" {
+		t.Fatalf("new client coach=%#v", coach)
+	}
+	messageType, audio, err := newClient.Read(ctx)
+	if err != nil || messageType != websocket.MessageBinary ||
+		!bytes.Equal(audio, []byte{4, 0, 5, 0}) {
+		t.Fatalf("new client audio type=%v payload=%v err=%v", messageType, audio, err)
+	}
+	if final := readVoiceLiveJSON(t, ctx, newClient); final["type"] != "final" {
+		t.Fatalf("new client final=%#v", final)
+	}
+
+	native.mu.Lock()
+	basicCalls := native.basicCalls
+	endpointCalls := native.endpointCalls
+	controlCalls := native.controlCalls
+	nativeCalls := native.processLiveCalls
+	native.mu.Unlock()
+	if basicCalls != 0 || endpointCalls != 1 || controlCalls != 1 || nativeCalls != 2 {
+		t.Fatalf(
+			"all client routes: basic=%d endpoint=%d control=%d native=%d, want 0/1/1/2",
+			basicCalls,
+			endpointCalls,
+			controlCalls,
+			nativeCalls,
+		)
 	}
 }
 
@@ -2101,7 +2326,12 @@ func TestVoiceLiveStartRequiresJWTAlphabetAndCanonicalState(t *testing.T) {
 	native := base
 	native.NativeAudio = true
 	if !validVoiceLiveStart(native) {
-		t.Fatal("explicit native audio start frame was rejected")
+		t.Fatal("legacy native audio start frame without coach capability was rejected")
+	}
+	nativeWithCoachControl := native
+	nativeWithCoachControl.NativeCoachControl = true
+	if !validVoiceLiveStart(nativeWithCoachControl) {
+		t.Fatal("native audio start frame with coach capability was rejected")
 	}
 	for _, mutate := range []func(*voiceLiveStartFrame){
 		func(frame *voiceLiveStartFrame) { frame.IDToken = "header.payload" },
@@ -2116,6 +2346,10 @@ func TestVoiceLiveStartRequiresJWTAlphabetAndCanonicalState(t *testing.T) {
 			frame.SessionState = ""
 			frame.NativeAudio = true
 			frame.StrictCloudMinimization = true
+		},
+		func(frame *voiceLiveStartFrame) {
+			frame.NativeCoachControl = true
+			frame.NativeAudio = false
 		},
 	} {
 		frame := base

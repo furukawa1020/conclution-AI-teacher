@@ -683,7 +683,7 @@ test("unfinished respondent coaching selects the staged lane at each session bou
 
   assert.match(
     begin,
-    /strictCloudMinimization,\s*coachActive,\s*\)/u,
+    /strictCloudMinimization,\s*coachActive = false,\s*\)/u,
   );
   assert.match(begin, /typeof coachActive !== "boolean"/u);
   assert.match(
@@ -691,6 +691,10 @@ test("unfinished respondent coaching selects the staged lane at each session bou
     /const nativeAudio =\s*!strictCloudMinimization && !pendingDocument && !coachActive;/u,
   );
   assert.match(begin, /nativeAudio,\s*sessionState: serializedSessionState/u);
+  assert.match(
+    bridge,
+    /nativeAudio \? \{ nativeCoachControl: true \} : \{\}/u,
+  );
   assert.match(
     begin,
     /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*\)/u,
@@ -2138,18 +2142,20 @@ test("voice stream requires version 1 on every PCM frame", () => {
   }
 });
 
-function liveStartFrame() {
-  return {
+function liveStartFrame(nativeAudio = false) {
+  const frame = {
     type: "start",
     version: 1,
     idToken: "firebase-id-token",
-    nativeAudio: false,
+    nativeAudio,
     appCheckToken: "app-check-token",
     sessionState: "opaque-state",
     strictCloudMinimization: false,
     turnMode: "ambient",
     sampleRateHz: 16_000,
   };
+  if (nativeAudio) frame.nativeCoachControl = true;
+  return frame;
 }
 
 class MockWebSocket {
@@ -2756,10 +2762,7 @@ test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
 
 test("native audio is explicit and cannot weaken strict mode", () => {
   const socket = new MockWebSocket();
-  const native = {
-    ...liveStartFrame(),
-    nativeAudio: true,
-  };
+  const native = liveStartFrame(true);
   const transport = createVoiceLiveClientTransport(socket, native);
   transport.open();
   assert.deepEqual(JSON.parse(socket.sent[0]), native);
@@ -2768,6 +2771,22 @@ test("native audio is explicit and cannot weaken strict mode", () => {
       createVoiceLiveClientTransport(new MockWebSocket(), {
         ...native,
         strictCloudMinimization: true,
+      }),
+    /voice_live_start_invalid/,
+  );
+  assert.throws(
+    () =>
+      createVoiceLiveClientTransport(new MockWebSocket(), {
+        ...native,
+        nativeCoachControl: false,
+      }),
+    /voice_live_start_invalid/,
+  );
+  assert.throws(
+    () =>
+      createVoiceLiveClientTransport(new MockWebSocket(), {
+        ...liveStartFrame(),
+        nativeCoachControl: true,
       }),
     /voice_live_start_invalid/,
   );
@@ -2892,7 +2911,7 @@ test("live server protocol gates binary on ready and commit", () => {
   );
 });
 
-test("a committed native turn replays only on the reviewed zero-audio sentinel", () => {
+test("a committed native turn replays only on reviewed zero-audio failures", () => {
   const eligible = {
     audioEventCount: 0,
     coachActivated: false,
@@ -2902,13 +2921,25 @@ test("a committed native turn replays only on the reviewed zero-audio sentinel",
     nativeAudio: true,
   };
   assert.equal(shouldReplayCommittedNativeTurn(eligible), true);
+  assert.equal(
+    shouldReplayCommittedNativeTurn({
+      ...eligible,
+      code: "voice_api_unavailable",
+    }),
+    true,
+  );
   for (const unsafe of [
     { ...eligible, audioEventCount: 1 },
     { ...eligible, coachActivated: true },
-    { ...eligible, code: "voice_api_unavailable" },
+    { ...eligible, code: "voice_response_invalid" },
     { ...eligible, committed: false },
     { ...eligible, interrupted: true },
     { ...eligible, nativeAudio: false },
+    { ...eligible, audioEventCount: 1, code: "voice_api_unavailable" },
+    { ...eligible, coachActivated: true, code: "voice_api_unavailable" },
+    { ...eligible, committed: false, code: "voice_api_unavailable" },
+    { ...eligible, interrupted: true, code: "voice_api_unavailable" },
+    { ...eligible, nativeAudio: false, code: "voice_api_unavailable" },
   ]) {
     assert.equal(shouldReplayCommittedNativeTurn(unsafe), false);
   }
@@ -5539,7 +5570,11 @@ test("an incomplete recorder fallback can never be uploaded after live fails", a
   );
   assert.match(
     bridge,
-    /requiresStatefulHTTPFallback\(\) \{[\s\S]*return nativeFallbackAllowed;\s*\}/u,
+    /nativeFallbackRequiresStatefulHTTP =\s*nativeFallbackAllowed && message\.code === "voice_native_fallback";/u,
+  );
+  assert.match(
+    bridge,
+    /requiresStatefulHTTPFallback\(\) \{[\s\S]*return nativeFallbackRequiresStatefulHTTP;\s*\}/u,
   );
   const statefulLatchAt = finish.indexOf(
     "liveSession.requiresStatefulHTTPFallback()",

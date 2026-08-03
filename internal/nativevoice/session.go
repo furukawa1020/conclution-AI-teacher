@@ -655,10 +655,16 @@ func validOutputAudioMIMEType(value string) bool {
 		return false
 	}
 	mediaType = strings.ToLower(mediaType)
-	if mediaType != "audio/pcm" || len(parameters) != 1 {
+	if mediaType != "audio/pcm" {
 		return false
 	}
-	return parameters["rate"] == "24000"
+	// Vertex Live's documented output contract fixes Native Audio at raw
+	// 16-bit little-endian PCM, 24 kHz. Current GA responses may omit the
+	// redundant rate parameter and send the canonical media type alone.
+	if len(parameters) == 0 {
+		return true
+	}
+	return len(parameters) == 1 && parameters["rate"] == "24000"
 }
 
 func (s *liveSession) enqueueEvents(events []Event, interrupted bool) error {

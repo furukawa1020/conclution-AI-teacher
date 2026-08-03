@@ -137,7 +137,7 @@ func TestOutputIsBufferedUntilCommit(t *testing.T) {
 	provider.push(&genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
 		ModelTurn: &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{
 			Data:     providerPCM,
-			MIMEType: OutputAudioMIMEType,
+			MIMEType: "audio/pcm",
 		}}}},
 		OutputTranscription: &genai.Transcription{Text: "短い返答です。", Finished: true},
 		InputTranscription:  &genai.Transcription{Text: "final input", Finished: true},
@@ -387,7 +387,8 @@ func TestOutputMIMETypeIsStrictLittleEndianPCM(t *testing.T) {
 		{value: "audio/L16;rate=24000", want: false},
 		{value: "audio/pcm;rate=16000", want: false},
 		{value: "audio/pcm;rate=24000;channels=2", want: false},
-		{value: "audio/pcm", want: false},
+		{value: "audio/pcm", want: true},
+		{value: "audio/pcm;channels=1", want: false},
 	}
 	for _, test := range tests {
 		if got := validOutputAudioMIMEType(test.value); got != test.want {

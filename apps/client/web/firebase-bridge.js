@@ -1762,7 +1762,7 @@ async function beginTurn(
   serializedSessionState,
   turnMode,
   strictCloudMinimization,
-  coachActive,
+  coachActive = false,
 ) {
   if (document.hidden) {
     stopSession("hidden");
@@ -2211,6 +2211,7 @@ async function startVoiceLiveSession({
       idToken,
       appCheckToken,
       nativeAudio,
+      ...(nativeAudio ? { nativeCoachControl: true } : {}),
       sessionState,
       strictCloudMinimization,
       turnMode,
@@ -2413,6 +2414,7 @@ async function startVoiceLiveSession({
   let speechConfirmed = captureHandoff !== undefined;
   let commitSent = false;
   let nativeFallbackAllowed = false;
+  let nativeFallbackRequiresStatefulHTTP = false;
   let latencyDispatched = false;
   let terminalCloseTimer;
   let finalResult;
@@ -2718,6 +2720,8 @@ async function startVoiceLiveSession({
             interrupted: session?.playback?.interrupted === true,
             nativeAudio,
           });
+          nativeFallbackRequiresStatefulHTTP =
+            nativeFallbackAllowed && message.code === "voice_native_fallback";
           failLive(new Error(message.code));
           return;
         }
@@ -2841,9 +2845,10 @@ async function startVoiceLiveSession({
       return !commitSent || nativeFallbackAllowed;
     },
     requiresStatefulHTTPFallback() {
-      // This latch is set only by shouldReplayCommittedNativeTurn after an
-      // exact committed, zero-audio voice_native_fallback sentinel.
-      return nativeFallbackAllowed;
+      // A deterministic Native routing sentinel can carry the turn into the
+      // staged coach path. A zero-audio provider outage may replay once too,
+      // but it must not pre-activate coach semantics on the HTTP response.
+      return nativeFallbackRequiresStatefulHTTP;
     },
     requiresStatefulLiveDrain() {
       return Boolean(

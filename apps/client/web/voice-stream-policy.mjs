@@ -548,17 +548,33 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
   if (
     typeof socket.send !== "function" ||
     !isPlainRecord(startFrame) ||
-    !hasExactKeys(startFrame, [
-      "appCheckToken",
-      "idToken",
-      "nativeAudio",
-      "sampleRateHz",
-      "sessionState",
-      "strictCloudMinimization",
-      "turnMode",
-      "type",
-      "version",
-    ]) ||
+    !hasExactKeys(
+      startFrame,
+      startFrame.nativeAudio
+        ? [
+            "appCheckToken",
+            "nativeCoachControl",
+            "idToken",
+            "nativeAudio",
+            "sampleRateHz",
+            "sessionState",
+            "strictCloudMinimization",
+            "turnMode",
+            "type",
+            "version",
+          ]
+        : [
+            "appCheckToken",
+            "idToken",
+            "nativeAudio",
+            "sampleRateHz",
+            "sessionState",
+            "strictCloudMinimization",
+            "turnMode",
+            "type",
+            "version",
+          ],
+    ) ||
     startFrame.type !== "start" ||
     startFrame.version !== 1 ||
     typeof startFrame.idToken !== "string" ||
@@ -566,6 +582,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     typeof startFrame.appCheckToken !== "string" ||
     startFrame.appCheckToken.length === 0 ||
     typeof startFrame.nativeAudio !== "boolean" ||
+    (startFrame.nativeAudio && startFrame.nativeCoachControl !== true) ||
     (startFrame.nativeAudio && startFrame.strictCloudMinimization) ||
     typeof startFrame.sessionState !== "string" ||
     typeof startFrame.strictCloudMinimization !== "boolean" ||
@@ -725,7 +742,8 @@ export function shouldReplayCommittedNativeTurn({
     throw new TypeError("native_fallback_state_invalid");
   }
   return (
-    code === "voice_native_fallback" &&
+    (code === "voice_native_fallback" ||
+      code === "voice_api_unavailable") &&
     nativeAudio &&
     committed &&
     !interrupted &&

@@ -1105,6 +1105,34 @@ test("a committed response monitors Thinking before meaningful audio", async () 
   await playback.completion;
 });
 
+test("no generated spoken presence cue can ship or be scheduled", async () => {
+  await assert.rejects(
+    readRawFile(
+      new URL("../web/voice-presence-cue.mjs", import.meta.url),
+      "utf8",
+    ),
+    { code: "ENOENT" },
+  );
+  const sources = await Promise.all([
+    readFile(
+      new URL("../web/firebase-bridge.js", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../scripts/build-web.ps1", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../scripts/deploy-hosting.ps1", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  for (const source of sources) {
+    assert.doesNotMatch(source, /voice-presence-cue/u);
+    assert.doesNotMatch(source, /うん。/u);
+  }
+});
+
 test("sustained Thinking speech cancels the pending response and owns the foreground turn", async () => {
   const { runtime, state } = await createExecutablePlaybackHarness();
   const playback = runtime.createStreamingPlayback(
@@ -2617,23 +2645,34 @@ function filledPcmFrame(value) {
 
 test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
   assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
-  assert.equal(BARGE_PCM_LIMITS.historyMs, 1_500);
+  assert.equal(
+    BARGE_PCM_LIMITS.historyMs,
+    INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs + 100,
+  );
   assert.equal(BARGE_PCM_LIMITS.leadInMs, 100);
-  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 75);
+  assert.equal(
+    BARGE_PCM_LIMITS.maximumFrames,
+    BARGE_PCM_LIMITS.historyMs / BARGE_PCM_LIMITS.frameDurationMs,
+  );
   assert.equal(
     BARGE_PCM_LIMITS.maximumBytes,
-    75 * VOICE_LIVE_LIMITS.inputFrameBytes,
+    BARGE_PCM_LIMITS.maximumFrames *
+      VOICE_LIVE_LIMITS.inputFrameBytes,
   );
 
   const ring = createBargePcmRing();
   const evicted = filledPcmFrame(255);
   ring.push(evicted, 0);
-  for (let index = 1; index <= 75; index += 1) {
+  for (
+    let index = 1;
+    index <= BARGE_PCM_LIMITS.maximumFrames;
+    index += 1
+  ) {
     ring.push(filledPcmFrame(index), index * 20);
   }
   assert.deepEqual(ring.snapshot(), {
-    frameCount: 75,
-    newestAt: 1_500,
+    frameCount: BARGE_PCM_LIMITS.maximumFrames,
+    newestAt: BARGE_PCM_LIMITS.historyMs,
     oldestAt: 20,
     totalBytes: BARGE_PCM_LIMITS.maximumBytes,
   });
@@ -2648,8 +2687,11 @@ test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
     candidateStartedAt - BARGE_PCM_LIMITS.leadInMs,
   );
   assert.equal(drained[0].capturedAt, 20);
-  assert.equal(drained.at(-1).capturedAt, 1_500);
-  assert.equal(drained.length, 75);
+  assert.equal(
+    drained.at(-1).capturedAt,
+    BARGE_PCM_LIMITS.historyMs,
+  );
+  assert.equal(drained.length, BARGE_PCM_LIMITS.maximumFrames);
   assert.deepEqual(ring.snapshot(), {
     frameCount: 0,
     newestAt: null,
@@ -2660,11 +2702,11 @@ test("barge PCM ring retains the finite candidate and 100 ms pre-roll", () => {
   const expired = filledPcmFrame(91);
   const cleared = filledPcmFrame(92);
   ring.push(expired, 500);
-  ring.push(cleared, 2_020);
+  ring.push(cleared, 520 + BARGE_PCM_LIMITS.historyMs);
   assert.equal(
     new Uint8Array(expired).every((value) => value === 0),
     true,
-    "timestamp eviction must zero audio older than 1.5 seconds",
+    "timestamp eviction must zero audio older than the finite history",
   );
   ring.clear();
   assert.equal(
@@ -3624,6 +3666,23 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({
       ...short,
+      coachActive: true,
+      now: 1_439,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      coachActive: true,
+      now: 1_440,
+    }),
+    true,
+    "a short clear active-coach answer can use a 440 ms agreement",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
       lastVoiceAt: 1_350,
       now: 1_800,
     }),
@@ -3645,6 +3704,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
+      coachActive: true,
       now: 4_699,
     }),
     false,
@@ -3652,9 +3712,30 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
   assert.equal(
     shouldCommitHybridEndpoint({
       ...reflective,
+      coachActive: true,
       now: 4_700,
     }),
     true,
+  );
+
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...reflective,
+      nativeAudio: true,
+      providerEndpointAt: 2_700,
+      now: 2_899,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...reflective,
+      nativeAudio: true,
+      providerEndpointAt: 2_700,
+      now: 2_900,
+    }),
+    true,
+    "clear Native speech keeps the 400 ms agreement at reflective length",
   );
 
   const softVoice = {
@@ -3665,18 +3746,43 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     softVoiceConfirmed: true,
   };
   assert.equal(
-    shouldCommitHybridEndpoint({ ...softVoice, now: 3_999 }),
+    shouldCommitHybridEndpoint({
+      ...softVoice,
+      coachActive: true,
+      now: 3_999,
+    }),
     false,
     "a confirmed quiet speaker keeps a three-second thinking pause",
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...softVoice, now: 4_000 }),
+    shouldCommitHybridEndpoint({
+      ...softVoice,
+      coachActive: true,
+      now: 4_000,
+    }),
     true,
   );
   assert.equal(
     shouldCommitHybridEndpoint({ ...softVoice, now: 4_801 }),
     false,
     "soft-voice provider agreement is longer but still finite",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...softVoice,
+      nativeAudio: true,
+      now: 3_999,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...softVoice,
+      nativeAudio: true,
+      now: 4_000,
+    }),
+    true,
+    "confirmed quiet Native speech retains its three-second pause",
   );
 
   const monologue = {
@@ -3686,17 +3792,61 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     providerEndpointAt: 12_500,
   };
   assert.equal(
-    shouldCommitHybridEndpoint({ ...monologue, now: 17_099 }),
+    shouldCommitHybridEndpoint({
+      ...monologue,
+      coachActive: true,
+      now: 17_099,
+    }),
     false,
     "a long monologue may continue after a reflective pause",
   );
   assert.equal(
-    shouldCommitHybridEndpoint({ ...monologue, now: 17_100 }),
+    shouldCommitHybridEndpoint({
+      ...monologue,
+      coachActive: true,
+      now: 17_100,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...monologue,
+      nativeAudio: true,
+      now: 17_099,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...monologue,
+      nativeAudio: true,
+      now: 17_100,
+    }),
+    true,
+    "a Native monologue retains its five-second continuation window",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      coachActive: true,
+      nativeAudio: true,
+      now: 1_439,
+    }),
+    false,
+    "dynamic Native-to-Coach promotion must not regress to 400 ms",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      coachActive: true,
+      nativeAudio: true,
+      now: 1_440,
+    }),
     true,
   );
 });
 
-test("bridge forwards soft-voice confirmation to hybrid endpoint policy", async () => {
+test("bridge applies the bounded coach override to local endpointing", async () => {
   const source = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -3707,7 +3857,27 @@ test("bridge forwards soft-voice confirmation to hybrid endpoint policy", async 
   );
   assert.match(
     source,
+    /coachActive: recording\.coachActive/u,
+  );
+  assert.match(
+    source,
     /recording\.softVoiceConfirmed = vadState\.softVoiceConfirmed/u,
+  );
+  const armVadStart = source.indexOf("function armVad(recording)");
+  const armVadEnd = source.indexOf(
+    "\n\nfunction createRecordingState(",
+    armVadStart,
+  );
+  assert.ok(armVadStart >= 0 && armVadEnd > armVadStart);
+  assert.match(
+    source.slice(armVadStart, armVadEnd),
+    /coachActive: recording\.coachActive[\s\S]*VOICE_SESSION_LIMITS\.coachEndOfTurnSilenceMs/u,
+    "active coach continuation must receive the bounded short override",
+  );
+  assert.match(
+    source.slice(armVadStart, armVadEnd),
+    /endOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs,[\s\S]*reflectiveEndOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs/u,
+    "clear Native speech must use 520 ms locally at ordinary and reflective lengths",
   );
 });
 
@@ -3794,17 +3964,34 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
     /authReadyTimer\s*=\s*setTimeout\(/u,
   );
   const metricAt = bridge.indexOf("function dispatchVoiceLatency(");
-  const metric = bridge.slice(metricAt, metricAt + 1_200);
+  const metricEnd = bridge.indexOf("function isPlainRecord(", metricAt);
+  const metric = bridge.slice(metricAt, metricEnd);
   assert.match(metric, /ws_open_ms/u);
   assert.match(metric, /auth_ready_ms/u);
   assert.match(metric, /commit_to_first_audio_ms/u);
   assert.match(metric, /commit_to_estimated_audible_ms/u);
   assert.match(metric, /speech_end_to_estimated_audible_ms/u);
+  assert.match(metric, /substantive_audio:\s*substantiveAudio/u);
+  assert.match(
+    metric,
+    /speech_end_to_estimated_audible_ms:[\s\S]*substantiveAudio &&[\s\S]*Number\.isFinite\(speechEndToEstimatedAudibleMs\)[\s\S]*:\s*null/u,
+  );
   assert.match(metric, /turn_total_ms/u);
   assert.match(metric, /barge_halt_ms/u);
   assert.doesNotMatch(
     metric,
-    /idToken|appCheckToken|sessionState|audioBase64|caption/u,
+    /idToken|appCheckToken|sessionState|audioBase64|caption|presence/u,
+  );
+  const receiptAt = bridge.indexOf("function setVoiceReceiptVisible(");
+  const receiptEnd = bridge.indexOf(
+    "function nextPcmCaptureGeneration()",
+    receiptAt,
+  );
+  const receipt = bridge.slice(receiptAt, receiptEnd);
+  assert.doesNotMatch(
+    receipt,
+    /dispatchVoiceLatency|speech_end_to_estimated_audible/u,
+    "a content-free receipt must never masquerade as substantive audio",
   );
 
   assert.match(worklet, /OUTPUT_SAMPLE_RATE_HZ = 16_000/u);
@@ -3908,27 +4095,21 @@ test("interrupt VAD ignores guarded playback and rejects short echo bursts", () 
     rms: 0.05,
   });
   assert.equal(state.action, "start");
-  state = advanceInterruptVad(state, {
-    now: candidateAt + INTERRUPT_VAD_LIMITS.intervalMs,
-    outputActive: true,
-    peak: 0.04,
-    rms: 0.015,
-  });
-  assert.equal(state.action, null);
-  assert.equal(state.phase, "candidate");
-  state = advanceInterruptVad(state, {
-    now: candidateAt + 2 * INTERRUPT_VAD_LIMITS.intervalMs,
-    outputActive: true,
-    peak: 0.04,
-    rms: 0.015,
-  });
-  assert.equal(state.action, null);
-  state = advanceInterruptVad(state, {
-    now: candidateAt + 3 * INTERRUPT_VAD_LIMITS.intervalMs,
-    outputActive: true,
-    peak: 0.04,
-    rms: 0.015,
-  });
+  const gapFrames =
+    INTERRUPT_VAD_LIMITS.candidateGapMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let gap = 1; gap <= gapFrames; gap += 1) {
+    state = advanceInterruptVad(state, {
+      now: candidateAt + gap * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.04,
+      rms: 0.015,
+    });
+    if (gap < gapFrames) {
+      assert.equal(state.action, null);
+      assert.equal(state.phase, "candidate");
+    }
+  }
   assert.equal(state.action, "discard");
   assert.equal(state.phase, "armed");
 });
@@ -3966,7 +4147,8 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
   assert.equal(state.candidateStartedAt, firstVoiceAt);
 });
 
-test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () => {
+test("interrupt VAD confirms foreground speech after sustained proof", () => {
+  assert.equal(INTERRUPT_VAD_LIMITS.confirmationMs, 1_200);
   assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 1_200);
   assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 2_200);
   const startedAt = 20_000;
@@ -3985,7 +4167,7 @@ test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () 
     INTERRUPT_VAD_LIMITS.provisionalMs /
     INTERRUPT_VAD_LIMITS.intervalMs;
   assert.equal(provisionalFrames, 4);
-  assert.equal(confirmationFrames, 20);
+  assert.equal(confirmationFrames, 30);
 
   for (let frame = 0; frame < confirmationFrames; frame += 1) {
     state = advanceInterruptVad(state, {
@@ -4006,7 +4188,8 @@ test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () 
   assert.equal(state.firstVoiceAt, firstVoiceAt);
   assert.equal(
     state.lastVoiceAt - state.firstVoiceAt,
-    760,
+    INTERRUPT_VAD_LIMITS.confirmationMs -
+      INTERRUPT_VAD_LIMITS.intervalMs,
   );
 
   state = advanceInterruptVad(state, {
@@ -4029,31 +4212,41 @@ test("interrupt VAD keeps 160 ms provisional and confirms sustained speech", () 
   assert.equal(state.action, "end-of-turn");
 });
 
-test("interrupt recorder deadline covers a finite dense gapped confirmation", () => {
-  let now = 0;
-  let state = createInterruptVadState(now);
-  let candidateStartedAt = null;
-  const voicedFrames = new Set(
-    Array.from({ length: 29 }, (_, index) => index + 1).filter(
-      (frame) => frame % 3 !== 0,
-    ),
+test("sustained quiet speech confirms only on the longer floor", () => {
+  const startedAt = 30_000;
+  let now = startedAt + INTERRUPT_VAD_LIMITS.guardMs;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
   );
-  for (let frame = 1; frame <= 29; frame += 1) {
+  let candidateStartedAt = null;
+  const quietFrames =
+    INTERRUPT_VAD_LIMITS.quietConfirmationMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 1; frame <= quietFrames; frame += 1) {
     now += INTERRUPT_VAD_LIMITS.intervalMs;
-    const voiced = voicedFrames.has(frame);
     state = advanceInterruptVad(state, {
       now,
       outputActive: true,
-      peak: voiced ? 0.16 : 0.003,
-      rms: voiced ? 0.08 : 0.003,
+      peak: 0.075,
+      rms: 0.03,
     });
     if (state.action === "start") {
       candidateStartedAt = state.candidateStartedAt;
     }
+    if (frame < quietFrames) {
+      assert.notEqual(state.action, "confirm");
+    }
   }
 
   assert.equal(state.action, "confirm");
-  assert.equal(now - candidateStartedAt, 1_120);
+  assert.equal(state.foregroundVoiceMs, 0);
+  assert.equal(state.voiceRunMs, INTERRUPT_VAD_LIMITS.quietConfirmationMs);
+  assert.equal(
+    now - candidateStartedAt,
+    INTERRUPT_VAD_LIMITS.quietConfirmationMs -
+      INTERRUPT_VAD_LIMITS.intervalMs,
+  );
   assert.ok(
     state.voiceRunMs /
       (now - candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs) >=
@@ -4063,7 +4256,7 @@ test("interrupt recorder deadline covers a finite dense gapped confirmation", ()
     now - candidateStartedAt <
       INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs,
   );
-  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 1_400);
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 2_400);
   assert.equal(
     BARGE_PCM_LIMITS.historyMs,
     INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs +
@@ -4072,6 +4265,47 @@ test("interrupt recorder deadline covers a finite dense gapped confirmation", ()
   assert.equal(
     BARGE_PCM_LIMITS.maximumFrames,
     BARGE_PCM_LIMITS.historyMs / BARGE_PCM_LIMITS.frameDurationMs,
+  );
+});
+
+test("quiet floor uses continuation hysteresis across natural gaps", () => {
+  const startedAt = 35_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  let now = startedAt + INTERRUPT_VAD_LIMITS.guardMs;
+  let voicedFrames = 0;
+  const gapFrames = new Set([9, 10, 21, 22]);
+
+  for (let frame = 1; frame <= 34; frame += 1) {
+    now += INTERRUPT_VAD_LIMITS.intervalMs;
+    const gap = gapFrames.has(frame);
+    state = advanceInterruptVad(state, {
+      now,
+      outputActive: true,
+      // The onset clears the regular floor. Later syllables sit below that
+      // onset floor but above the 0.86 continuation floor.
+      peak: gap ? 0.003 : frame === 1 ? 0.075 : 0.057,
+      rms: gap ? 0.003 : frame === 1 ? 0.03 : 0.023,
+    });
+    if (!gap) voicedFrames += 1;
+    if (gap) {
+      assert.equal(state.phase, "provisional");
+      assert.notEqual(state.action, "discard");
+    }
+  }
+
+  assert.equal(
+    voicedFrames * INTERRUPT_VAD_LIMITS.intervalMs,
+    INTERRUPT_VAD_LIMITS.quietConfirmationMs,
+  );
+  assert.equal(state.action, "confirm");
+  assert.equal(state.foregroundVoiceMs, 0);
+  assert.ok(
+    state.voiceRunMs /
+      (now - state.candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs) >=
+      INTERRUPT_VAD_LIMITS.minimumVoiceDensity,
   );
 });
 
@@ -4099,7 +4333,10 @@ test("a short mutter is only provisional and is discarded without interruption",
   assert.equal(state.action, "provisional");
   assert.equal(state.phase, "provisional");
 
-  for (let gap = 1; gap <= 3; gap += 1) {
+  const gapFrames =
+    INTERRUPT_VAD_LIMITS.candidateGapMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let gap = 1; gap <= gapFrames; gap += 1) {
     state = advanceInterruptVad(state, {
       now:
         firstVoiceAt +
@@ -4115,7 +4352,7 @@ test("a short mutter is only provisional and is discarded without interruption",
   assert.equal(state.firstVoiceAt, null);
 });
 
-test("a 600 ms provisional mutter cannot interrupt the current reply", () => {
+test("a 600 ms quiet mutter cannot interrupt the current reply", () => {
   const startedAt = 50_000;
   let state = advancePastInterruptGuard(
     createInterruptVadState(startedAt),
@@ -4131,8 +4368,8 @@ test("a 600 ms provisional mutter cannot interrupt the current reply", () => {
     state = advanceInterruptVad(state, {
       now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
       outputActive: true,
-      peak: 0.15,
-      rms: 0.05,
+      peak: 0.075,
+      rms: 0.03,
     });
     assert.notEqual(state.action, "confirm");
   }
@@ -4142,7 +4379,10 @@ test("a 600 ms provisional mutter cannot interrupt the current reply", () => {
 
   const finalVoiceAt =
     firstVoiceAt + (mutterFrames - 1) * INTERRUPT_VAD_LIMITS.intervalMs;
-  for (let gap = 1; gap <= 3; gap += 1) {
+  const gapFrames =
+    INTERRUPT_VAD_LIMITS.candidateGapMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let gap = 1; gap <= gapFrames; gap += 1) {
     state = advanceInterruptVad(state, {
       now: finalVoiceAt + gap * INTERRUPT_VAD_LIMITS.intervalMs,
       outputActive: true,
@@ -4153,6 +4393,53 @@ test("a 600 ms provisional mutter cannot interrupt the current reply", () => {
   assert.equal(state.action, "discard");
   assert.equal(state.phase, "armed");
   assert.equal(state.firstVoiceAt, null);
+});
+
+test("600 to 1000 ms clear mutters stay below the deliberate gate", () => {
+  for (const durationMs of [600, 800, 1_000]) {
+    const startedAt = 60_000 + durationMs * 10;
+    let state = advancePastInterruptGuard(
+      createInterruptVadState(startedAt),
+      startedAt,
+    );
+    const firstVoiceAt =
+      startedAt +
+      INTERRUPT_VAD_LIMITS.guardMs +
+      INTERRUPT_VAD_LIMITS.intervalMs;
+    const frames = durationMs / INTERRUPT_VAD_LIMITS.intervalMs;
+    for (let frame = 0; frame < frames; frame += 1) {
+      state = advanceInterruptVad(state, {
+        now:
+          firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+        outputActive: true,
+        peak: 0.15,
+        rms: 0.05,
+      });
+      assert.notEqual(
+        state.action,
+        "confirm",
+        `${durationMs} ms must remain reversible`,
+      );
+    }
+    assert.equal(state.phase, "provisional");
+    assert.equal(state.foregroundVoiceMs, durationMs);
+
+    const finalVoiceAt =
+      firstVoiceAt + (frames - 1) * INTERRUPT_VAD_LIMITS.intervalMs;
+    const gapFrames =
+      INTERRUPT_VAD_LIMITS.candidateGapMs /
+      INTERRUPT_VAD_LIMITS.intervalMs;
+    for (let gap = 1; gap <= gapFrames; gap += 1) {
+      state = advanceInterruptVad(state, {
+        now: finalVoiceAt + gap * INTERRUPT_VAD_LIMITS.intervalMs,
+        outputActive: true,
+        peak: 0.003,
+        rms: 0.003,
+      });
+    }
+    assert.equal(state.action, "discard");
+    assert.equal(state.phase, "armed");
+  }
 });
 
 test("sparse muttering cannot cross the hard interrupt density gate", () => {
@@ -4308,6 +4595,13 @@ test("committed-response barge-in preserves foreground response mode", async () 
   ]);
   const confirmAt = bridge.indexOf("function confirmBargeIn(");
   const confirm = bridge.slice(confirmAt, confirmAt + 7_000);
+  const manualEndAt = bridge.indexOf("function endTurn()");
+  const manualEnd = bridge.slice(manualEndAt, manualEndAt + 650);
+  assert.match(
+    manualEnd,
+    /requestRecordingStop\(recording, "manual"\)/u,
+    "the explicit button path must not wait for the acoustic barge gate",
+  );
   assert.match(
     confirm,
     /playback\.hasCommittedResponse\?\.\(\) !== true/u,
@@ -5286,6 +5580,229 @@ test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
   assert.equal(state.action, "end-of-turn");
 });
 
+test("active coach local VAD accelerates only a short clear answer", () => {
+  assert.equal(VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs, 640);
+  const coachOptions = { coachActive: true };
+  const speakClearly = (startedAt, durationMs) => {
+    let state = createVadState(startedAt);
+    for (
+      let elapsed = VOICE_SESSION_LIMITS.vadIntervalMs;
+      elapsed <= durationMs;
+      elapsed += VOICE_SESSION_LIMITS.vadIntervalMs
+    ) {
+      state = advanceVad(
+        state,
+        { now: startedAt + elapsed, peak: 0.08, rms: 0.03 },
+        coachOptions,
+      );
+    }
+    return state;
+  };
+  const advanceSilence = (state, silenceMs) =>
+    advanceVad(
+      state,
+      {
+        now: state.lastVoiceAt + silenceMs,
+        peak: 0,
+        rms: 0.003,
+      },
+      coachOptions,
+    );
+
+  let short = speakClearly(
+    2_000,
+    VOICE_SESSION_LIMITS.minimumVoiceMs,
+  );
+  const shortLastVoiceAt = short.lastVoiceAt;
+  short = advanceSilence(
+    short,
+    VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs - 1,
+  );
+  assert.equal(short.action, null);
+  short = advanceVad(
+    short,
+    {
+      now:
+        shortLastVoiceAt +
+        VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
+      peak: 0,
+      rms: 0.003,
+    },
+    coachOptions,
+  );
+  assert.equal(short.action, "end-of-turn");
+
+  let reflective = speakClearly(
+    5_000,
+    VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs,
+  );
+  const reflectiveLastVoiceAt = reflective.lastVoiceAt;
+  reflective = advanceSilence(
+    reflective,
+    VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
+  );
+  assert.equal(
+    reflective.action,
+    null,
+    "coach mode must not shorten a reflective pause",
+  );
+  reflective = advanceVad(
+    reflective,
+    {
+      now:
+        reflectiveLastVoiceAt +
+        VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+      peak: 0,
+      rms: 0.003,
+    },
+    coachOptions,
+  );
+  assert.equal(reflective.action, "end-of-turn");
+
+  let now = 10_000;
+  let soft = createVadState(now);
+  const softFrames =
+    VOICE_SESSION_LIMITS.softVoiceMinimumMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < softFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    soft = advanceVad(
+      soft,
+      { now, peak: rms * 2, rms },
+      coachOptions,
+    );
+  }
+  assert.equal(soft.softVoiceConfirmed, true);
+  const softLastVoiceAt = soft.lastVoiceAt;
+  soft = advanceSilence(
+    soft,
+    VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+  );
+  assert.equal(
+    soft.action,
+    null,
+    "coach mode must keep the full quiet-speech pause",
+  );
+  soft = advanceVad(
+    soft,
+    {
+      now:
+        softLastVoiceAt +
+        VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+      peak: 0,
+      rms: 0.003,
+    },
+    coachOptions,
+  );
+  assert.equal(soft.action, "end-of-turn");
+
+  let monologue = speakClearly(
+    20_000,
+    VOICE_SESSION_LIMITS.monologueSpeechSpanMs,
+  );
+  const monologueLastVoiceAt = monologue.lastVoiceAt;
+  monologue = advanceSilence(
+    monologue,
+    VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+  );
+  assert.equal(
+    monologue.action,
+    null,
+    "coach mode must keep the full monologue pause",
+  );
+  monologue = advanceVad(
+    monologue,
+    {
+      now:
+        monologueLastVoiceAt +
+        VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+      peak: 0,
+      rms: 0.003,
+    },
+    coachOptions,
+  );
+  assert.equal(monologue.action, "end-of-turn");
+});
+
+test("clear Native speech ends at 520 ms while protected speech keeps wider pauses", () => {
+  assert.equal(VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs, 520);
+  const nativeVadOptions = {
+    endOfTurnSilenceMs:
+      VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+    reflectiveEndOfTurnSilenceMs:
+      VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+  };
+  const speakClearly = (startedAt, durationMs) => {
+    let state = createVadState(startedAt);
+    for (
+      let elapsed = VOICE_SESSION_LIMITS.vadIntervalMs;
+      elapsed <= durationMs;
+      elapsed += VOICE_SESSION_LIMITS.vadIntervalMs
+    ) {
+      state = advanceVad(
+        state,
+        { now: startedAt + elapsed, peak: 0.08, rms: 0.03 },
+        nativeVadOptions,
+      );
+    }
+    return state;
+  };
+  const expectEndpointAt = (state, silenceMs, message) => {
+    const lastVoiceAt = state.lastVoiceAt;
+    state = advanceVad(
+      state,
+      { now: lastVoiceAt + silenceMs - 1, peak: 0, rms: 0.003 },
+      nativeVadOptions,
+    );
+    assert.equal(state.action, null, message);
+    state = advanceVad(
+      state,
+      { now: lastVoiceAt + silenceMs, peak: 0, rms: 0.003 },
+      nativeVadOptions,
+    );
+    assert.equal(state.action, "end-of-turn");
+  };
+
+  expectEndpointAt(
+    speakClearly(2_000, VOICE_SESSION_LIMITS.minimumVoiceMs),
+    VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+    "a short clear Native answer must not commit before 520 ms",
+  );
+  expectEndpointAt(
+    speakClearly(5_000, VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs),
+    VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+    "clear Native speech keeps 520 ms at reflective length",
+  );
+
+  let now = 10_000;
+  let soft = createVadState(now);
+  const softFrames =
+    VOICE_SESSION_LIMITS.softVoiceMinimumMs /
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (let frame = 0; frame < softFrames; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    soft = advanceVad(
+      soft,
+      { now, peak: rms * 2, rms },
+      nativeVadOptions,
+    );
+  }
+  assert.equal(soft.softVoiceConfirmed, true);
+  expectEndpointAt(
+    soft,
+    VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs,
+    "confirmed quiet Native speech must keep the full pause",
+  );
+
+  expectEndpointAt(
+    speakClearly(20_000, VOICE_SESSION_LIMITS.monologueSpeechSpanMs),
+    VOICE_SESSION_LIMITS.monologueEndOfTurnSilenceMs,
+    "a Native monologue must keep the full continuation window",
+  );
+});
+
 test("VAD opens the relative-SNR path only at its noise-relative boundary", () => {
   const startedAt = 2_500;
   let now = startedAt;
@@ -6145,6 +6662,418 @@ test("an incomplete recorder fallback can never be uploaded after live fails", a
   assert.ok(httpPlaybackAt > liveCancelAt);
 });
 
+test("late recorder resolve and reject preserve the newer microphone owner", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const lifecycle = executableBridgeFunction(
+    bridge,
+    "function rejectRecording(",
+    "function requestRecordingStop(",
+  );
+  const trackChanges = [];
+  const runtime = new Function(
+    "dependencies",
+    `"use strict";
+let activeRecording;
+let activePlayback;
+const candidateEventIsCurrent = () => true;
+const stopVad = dependencies.stopVad;
+const setStreamTracksEnabled = dependencies.setStreamTracksEnabled;
+const discardCurrentCandidate = dependencies.discardCurrentCandidate;
+${lifecycle}
+return Object.freeze({
+  rejectRecording,
+  resolveRecording,
+  setOwners(recording, playback) {
+    activeRecording = recording;
+    activePlayback = playback;
+  },
+});`,
+  )({
+    discardCurrentCandidate: () => true,
+    setStreamTracksEnabled: (stream, enabled) => {
+      trackChanges.push({ enabled, stream });
+    },
+    stopVad: () => {},
+  });
+  const makeRecording = (name) => {
+    const results = {};
+    return {
+      recording: {
+        candidate: undefined,
+        discard: false,
+        fallbackAudioComplete: false,
+        rejectEnd(error) {
+          results.endError = error;
+        },
+        rejectTurnEnded(error) {
+          results.turnError = error;
+        },
+        resolveEnd(value) {
+          results.end = value;
+        },
+        settled: false,
+        stopLatch: {
+          isRequested: () => false,
+          request: () => true,
+        },
+        stopReason: "end-of-turn",
+        stream: { name },
+        turnEnded: false,
+      },
+      results,
+    };
+  };
+
+  const lateResolve = makeRecording("late-resolve");
+  runtime.setOwners({ stream: { name: "new-recording" } }, undefined);
+  runtime.resolveRecording(lateResolve.recording, undefined);
+  assert.equal(lateResolve.recording.settled, true);
+  assert.equal(lateResolve.results.end.hasSpeech, false);
+  assert.deepEqual(trackChanges, []);
+
+  const lateReject = makeRecording("late-reject");
+  runtime.setOwners(lateReject.recording, { interrupted: false });
+  runtime.rejectRecording(lateReject.recording, "voice_turn_timeout");
+  assert.match(lateReject.results.endError.message, /voice_turn_timeout/u);
+  assert.match(lateReject.results.turnError.message, /voice_turn_timeout/u);
+  assert.deepEqual(trackChanges, []);
+
+  const current = makeRecording("current");
+  runtime.setOwners(current.recording, undefined);
+  runtime.resolveRecording(current.recording, undefined);
+  assert.deepEqual(trackChanges, [
+    { enabled: false, stream: current.recording.stream },
+  ]);
+});
+
+test("abandon settles both the endpoint and recorder promises", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const source = executableBridgeFunction(
+    bridge,
+    "function abandonInterruptRecording(",
+    "function stopBargeInMonitoring(",
+  );
+  const discarded = [];
+  let stopCalls = 0;
+  const abandon = new Function(
+    "dependencies",
+    `"use strict";
+const stopVad = dependencies.stopVad;
+const discardCurrentCandidate = dependencies.discardCurrentCandidate;
+${source}
+return abandonInterruptRecording;`,
+  )({
+    discardCurrentCandidate: (_recording, reason) => {
+      discarded.push(reason);
+      return true;
+    },
+    stopVad: () => {
+      stopCalls += 1;
+    },
+  });
+  let rejectTurnEnded;
+  const turnEndedPromise = new Promise((_resolve, reject) => {
+    rejectTurnEnded = reject;
+  });
+  let resolveEnd;
+  const endPromise = new Promise((resolve) => {
+    resolveEnd = resolve;
+  });
+  const recording = {
+    resolveEnd,
+    rejectTurnEnded,
+    settled: false,
+    turnEnded: false,
+  };
+
+  abandon(recording);
+  await assert.rejects(turnEndedPromise, /request_cancelled/u);
+  const end = await endPromise;
+  assert.equal(recording.settled, true);
+  assert.equal(recording.turnEnded, true);
+  assert.equal(end.hasSpeech, false);
+  assert.equal(end.reason, "interrupt-abandoned");
+  assert.deepEqual(discarded, ["interrupt-abandoned"]);
+  assert.equal(stopCalls, 1);
+});
+
+test("endpoint latch settles before MediaRecorder finalizes fallback", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const stop = executableBridgeFunction(
+    bridge,
+    "function requestRecordingStop(",
+    "function currentAudioContextFrame(",
+  );
+  const finish = executableBridgeFunction(
+    bridge,
+    "async function finishTurn(",
+    "function safeDocumentName(",
+  );
+  const resolve = executableBridgeFunction(
+    bridge,
+    "function resolveRecording(",
+    "function requestRecordingStop(",
+  );
+
+  const endpointAt = stop.indexOf("recording.resolveTurnEnded(");
+  const recorderStopAt = stop.indexOf("candidate.recorder.stop()");
+  assert.ok(endpointAt >= 0);
+  assert.ok(recorderStopAt > endpointAt);
+
+  const turnEndAt = finish.indexOf("recording.turnEndedPromise");
+  const liveCommitAt = finish.indexOf("liveSession.commit(");
+  const fallbackCaptureAt = finish.indexOf("recording.endPromise");
+  assert.ok(turnEndAt >= 0);
+  assert.ok(liveCommitAt > turnEndAt);
+  assert.ok(
+    fallbackCaptureAt > liveCommitAt,
+    "the fallback Blob must not gate a successful live commit",
+  );
+  assert.match(
+    resolve,
+    /activeRecording === recording && activePlayback === undefined/u,
+    "a late fallback stop must not disable a newer barge-in microphone owner",
+  );
+
+  const requestStop = new Function(
+    "dependencies",
+    `"use strict";
+const stopVad = dependencies.stopVad;
+const rejectRecording = dependencies.rejectRecording;
+const discardCurrentCandidate = dependencies.discardCurrentCandidate;
+const resolveRecording = dependencies.resolveRecording;
+${stop}
+return requestRecordingStop;`,
+  )({
+    discardCurrentCandidate: () => true,
+    rejectRecording: (_recording, code) => {
+      throw new Error(code);
+    },
+    resolveRecording: () => {},
+    stopVad: () => {},
+  });
+  let resolveTurnEnded;
+  const turnEndedPromise = new Promise((resolveTurn) => {
+    resolveTurnEnded = resolveTurn;
+  });
+  let resolveFallback;
+  const endPromise = new Promise((resolveEnd) => {
+    resolveFallback = resolveEnd;
+  });
+  let stopCalls = 0;
+  const recording = {
+    candidate: {
+      confirmed: true,
+      recorder: {
+        state: "recording",
+        stop() {
+          stopCalls += 1;
+          this.state = "inactive";
+          // Intentionally never emit MediaRecorder's stop event.
+        },
+      },
+    },
+    discard: false,
+    resolveTurnEnded,
+    settled: false,
+    stopLatch: {
+      requested: false,
+      isRequested() {
+        return this.requested;
+      },
+      request() {
+        if (this.requested) return false;
+        this.requested = true;
+        return true;
+      },
+    },
+    endPromise,
+    turnEnded: false,
+    turnEndedPromise,
+  };
+
+  assert.equal(requestStop(recording, "end-of-turn"), true);
+  assert.deepEqual(await turnEndedPromise, {
+    hasSpeech: true,
+    reason: "end-of-turn",
+  });
+  assert.equal(stopCalls, 1);
+  let fallbackSettled = false;
+  void endPromise.then(() => {
+    fallbackSettled = true;
+  });
+  await Promise.resolve();
+  assert.equal(fallbackSettled, false);
+
+  let commitCalls = 0;
+  const finishRuntime = new Function(
+    "dependencies",
+    `"use strict";
+let activeLiveSession = dependencies.liveSession;
+let activeRecording = dependencies.recording;
+let activeRequestController;
+let pendingDocument;
+let pendingLiveSession;
+let sessionEpoch = 1;
+let audioContext = { state: "running" };
+const AUDIO_MAX_BYTES = 1_000_000;
+const SESSION_STATE_MAX_CHARS = 16_384;
+const VOICE_TURN_CLIENT_TIMEOUT_MS = 5_000;
+const performance = dependencies.performance;
+const finishGate = dependencies.finishGate;
+const isValidTurnMode = () => true;
+const requestRecordingStop = dependencies.requestRecordingStop;
+const beginSessionResponse = () => true;
+const completeSessionResponse = () => true;
+const cancelSessionResponse = () => {};
+const stoppedSessionCode = () => "request_cancelled";
+const clearPendingDocument = () => {};
+const takePendingLiveSession = async () => undefined;
+const setTracksEnabled = () => {};
+const createStreamingPlayback = dependencies.createStreamingPlayback;
+const awaitValidatedPlaybackCompletion = async () => {};
+const retirePendingLiveSession = () => {};
+const haltStreamingPlayback = () => {};
+const shouldDiscardInterruptedPlaybackRecording = () => false;
+const discardInterruptedPlaybackRecording = () => {};
+const shouldAbortPlaybackTransportOnInterrupt = () => false;
+const beginSession = () => {};
+const secureCredentials = async () => { throw new Error("unexpected_fallback"); };
+const arrayBufferToBase64 = () => { throw new Error("unexpected_fallback"); };
+const fetch = () => { throw new Error("unexpected_fallback"); };
+const VOICE_ENDPOINT = "https://invalid.example";
+const consumeVoiceStream = async () => { throw new Error("unexpected_fallback"); };
+const fail = (code) => { throw new Error(code); };
+${finish}
+return Object.freeze({
+  finishTurn,
+  getActiveRecording: () => activeRecording,
+});`,
+  )({
+    createStreamingPlayback: () => ({ interrupted: false }),
+    finishGate: {
+      acquire: () => 1,
+      isBusy: () => false,
+      release: () => {},
+    },
+    liveSession: {
+      nativeAudio: true,
+      matches: () => true,
+      async commit() {
+        commitCalls += 1;
+        return { finalResult: { state: "ok" } };
+      },
+      recordCompletion() {},
+    },
+    performance: { now: () => 0 },
+    recording,
+    requestRecordingStop: requestStop,
+  });
+  const finished = await finishRuntime.finishTurn(
+    "",
+    "foreground",
+    false,
+  );
+  assert.equal(commitCalls, 1);
+  assert.equal(finished.state, "ok");
+  assert.equal(finishRuntime.getActiveRecording(), undefined);
+  assert.equal(fallbackSettled, false);
+  resolveFallback();
+});
+
+test("latency serialization distinguishes missing values from measured zero", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("function boundedLatency(");
+  const end = bridge.indexOf("\n\nfunction isPlainRecord(", start);
+  assert.ok(start >= 0 && end > start);
+  const events = [];
+  const dispatch = new Function(
+    "eventTarget",
+    "CustomEvent",
+    `"use strict";
+const globalThis = eventTarget;
+${bridge.slice(start, end)}
+return dispatchVoiceLatency;`,
+  )(
+    { dispatchEvent: (event) => events.push(event) },
+    class {
+      constructor(type, options) {
+        this.type = type;
+        this.detail = options.detail;
+      }
+    },
+  );
+
+  dispatch({ substantiveAudio: false });
+  const missing = events.at(-1).detail;
+  for (const key of [
+    "auth_ready_ms",
+    "barge_halt_ms",
+    "commit_to_estimated_audible_ms",
+    "commit_to_first_audio_ms",
+    "first_binary_ms",
+    "speech_end_to_estimated_audible_ms",
+    "turn_total_ms",
+    "ws_open_ms",
+  ]) {
+    assert.equal(missing[key], null, `${key} must remain missing`);
+  }
+
+  dispatch({
+    authReadyMs: 0,
+    bargeHaltMs: 0,
+    commitToEstimatedAudibleMs: 0,
+    commitToFirstAudioMs: 0,
+    firstBinaryMs: 0,
+    speechEndToEstimatedAudibleMs: 0,
+    substantiveAudio: true,
+    turnTotalMs: 0,
+    wsOpenMs: 0,
+  });
+  const measuredZero = events.at(-1).detail;
+  assert.equal(measuredZero.commit_to_first_audio_ms, 0);
+  assert.equal(measuredZero.commit_to_estimated_audible_ms, 0);
+  assert.equal(measuredZero.first_binary_ms, 0);
+  assert.equal(measuredZero.speech_end_to_estimated_audible_ms, 0);
+  assert.equal(measuredZero.substantive_audio, true);
+  assert.equal(
+    Object.keys(measuredZero).some((key) => key.includes("presence")),
+    false,
+  );
+
+  dispatch({
+    commitToFirstAudioMs: Number.NaN,
+    firstBinaryMs: -1,
+    substantiveAudio: false,
+  });
+  const invalid = events.at(-1).detail;
+  assert.equal(invalid.commit_to_first_audio_ms, null);
+  assert.equal(invalid.first_binary_ms, null);
+
+  dispatch({
+    commitToFirstAudioMs: 17,
+    firstBinaryMs: 16,
+    substantiveAudio: false,
+  });
+  const silentTransport = events.at(-1).detail;
+  assert.equal(silentTransport.commit_to_first_audio_ms, 17);
+  assert.equal(silentTransport.first_binary_ms, 16);
+  assert.equal(silentTransport.commit_to_estimated_audible_ms, null);
+  assert.equal(silentTransport.speech_end_to_estimated_audible_ms, null);
+});
+
 test("an 80 ms noise candidate is discarded before a fresh capture starts", () => {
   const startedAt = 40_000;
   let vadState = createVadState(startedAt);
@@ -6394,7 +7323,7 @@ test("a clear onset upgrades once to the absolute soft deadline and barge-in rem
       VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
   );
 
-  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 1_400);
+  assert.equal(INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs, 2_400);
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",

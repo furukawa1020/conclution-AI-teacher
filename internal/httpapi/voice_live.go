@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
@@ -482,7 +483,22 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}()
+		var controlGateMu sync.Mutex
+		controlAttempted := false
+		controlRejected := false
+		controlCheckpoint := ""
+		rejectControl := func() {
+			controlGateMu.Lock()
+			controlRejected = true
+			controlGateMu.Unlock()
+		}
 		onAudio := func(audio []byte) error {
+			controlGateMu.Lock()
+			rejected := controlRejected
+			controlGateMu.Unlock()
+			if rejected {
+				return errors.New("voice coach control state was rejected")
+			}
 			if input.StrictCloudMinimization {
 				return strictOutput.append(audio)
 			}
@@ -513,7 +529,27 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					}
 				},
 				func(sessionState string) error {
-					return writeVoiceLiveJSON(
+					controlGateMu.Lock()
+					if controlAttempted {
+						controlRejected = true
+						controlGateMu.Unlock()
+						return errors.New("voice coach control was published more than once")
+					}
+					controlAttempted = true
+					controlGateMu.Unlock()
+					if !validVoiceLiveCoachSessionState(sessionState) {
+						rejectControl()
+						return errors.New("invalid voice coach session state")
+					}
+					if s.voice.CoachStateValidator == nil ||
+						s.voice.CoachStateValidator.ValidateStateToken(
+							principal.UID,
+							sessionState,
+						) != nil {
+						rejectControl()
+						return errors.New("unauthenticated voice coach session state")
+					}
+					if err := writeVoiceLiveJSON(
 						liveCtx,
 						conn,
 						voiceLiveOutboundFrame{
@@ -522,9 +558,26 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 							Active:       true,
 							SessionState: sessionState,
 						},
-					)
+					); err != nil {
+						rejectControl()
+						return err
+					}
+					controlGateMu.Lock()
+					controlCheckpoint = sessionState
+					controlGateMu.Unlock()
+					return nil
 				},
 			)
+			controlGateMu.Lock()
+			rejected := controlRejected
+			checkpoint := controlCheckpoint
+			controlGateMu.Unlock()
+			if rejected {
+				processErr = errors.New("voice coach control state was rejected")
+			} else if processErr == nil && checkpoint != "" &&
+				result.StateToken != checkpoint {
+				processErr = errors.New("voice coach checkpoint did not match final state")
+			}
 		} else if endpointService, supportsEndpoint :=
 			selectedLiveService.(VoiceTurnLiveEndpointService); supportsEndpoint {
 			result, processErr = endpointService.ProcessLiveWithEndpoint(
@@ -960,6 +1013,14 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 	default:
 		return false
 	}
+}
+
+func validVoiceLiveCoachSessionState(value string) bool {
+	return value != "" &&
+		len(value) <= maxStateBytes &&
+		utf8.ValidString(value) &&
+		strings.TrimSpace(value) == value &&
+		!strings.ContainsFunc(value, unicode.IsControl)
 }
 
 func decodeStrictVoiceLiveJSON(payload []byte, destination any) error {

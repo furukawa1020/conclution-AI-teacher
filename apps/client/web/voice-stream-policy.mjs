@@ -738,13 +738,15 @@ export function createVoiceLiveServerProtocol(
   validateFinalResult,
   expectations,
 ) {
+  if (typeof validateFinalResult !== "function") {
+    throw new TypeError("validateFinalResult must be a function");
+  }
   if (
-    typeof validateFinalResult !== "function" ||
     !isPlainRecord(expectations) ||
     !hasExactKeys(expectations, ["nativeAudio"]) ||
     typeof expectations.nativeAudio !== "boolean"
   ) {
-    throw new TypeError("validateFinalResult must be a function");
+    throw new TypeError("voice_live_protocol_expectation_invalid");
   }
   const expectedNativeAudio = expectations.nativeAudio;
   let audioEventCount = 0;

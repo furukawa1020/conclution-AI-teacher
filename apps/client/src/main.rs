@@ -10,7 +10,9 @@ const STANDARD_MODE_ROUTE_LABEL: &str =
     "通常・初回の回答支援はNative Audio / 回答保留中の後続は段階経路";
 const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。人に聞かれた質問への回答支援を明示した初回も、同じ原音を送り直さずNative音声を返します。初回の入力字幕はCloud Run内の決定論的規則だけで判定し、モデルを使わず、音声より先に回答保留中を示す汎用の署名済みcheckpointを作ります。この時点では入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ送りません。checkpointに具体的な質問・答え・文字起こしは保存しません。回答保留中の後続ターンだけSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路を使い、完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
 const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。人に聞かれた質問への回答支援を明示した初回は、同じ原音をSpeech-to-Textへ送り直さずNative音声を返します。確定した入力字幕はCloud Run内の決定論的規則だけで判定し、モデルなしで、具体的な質問・答え・文字起こしを含まない汎用の署名済みcheckpointを音声より先に作ります。初回の入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへは送りません。回答保留中の後続ターンとPDF・接続不能時だけSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const NATIVE_RESPONDENT_COACH_ROUTE: &str = "native-respondent-coach";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
@@ -436,16 +438,15 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 mod cloud {
     use super::{
         ACCOUNT_BOUNDARY_CHANGED_COPY, BridgeStatus, CloudState, CoachAction, CoachPhase,
-        CoachState, DocumentInfo, FinishTurnError, PASSKEY_ACCOUNT_EXISTS_COPY,
-        PASSKEY_AUTHENTICATION_FAILED_COPY,
-        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
-        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
-        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
-        ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, WaitTurnError, NATIVE_RESPONDENT_COACH_ROUTE,
-        recoverable_finish_turn_code, recoverable_wait_turn_code, session_stop_pauses,
-        valid_coach_checkpoint_metadata, valid_voice_pause_metadata,
-        valid_voice_receipt_metadata,
+        CoachState, DocumentInfo, FinishTurnError, NATIVE_RESPONDENT_COACH_ROUTE,
+        PASSKEY_ACCOUNT_EXISTS_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
+        PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
+        PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord, ResearchStatus,
+        STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState, VoiceTurnMode,
+        VoiceTurnResult, WaitTurnError, recoverable_finish_turn_code, recoverable_wait_turn_code,
+        session_stop_pauses, valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
+        valid_voice_pause_metadata, valid_voice_receipt_metadata,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -866,8 +867,17 @@ mod cloud {
                 return;
             };
             let keys = js_sys::Object::keys(detail_object);
-            let Ok(checkpoint) =
-                js_sys::Reflect::get(&detail, &JsValue::from_str("sessionState"))
+            let Some(key_names) = keys
+                .iter()
+                .map(|key| key.as_string())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            if !valid_coach_checkpoint_keys(&key_names) {
+                return;
+            }
+            let Ok(checkpoint) = js_sys::Reflect::get(&detail, &JsValue::from_str("sessionState"))
             else {
                 return;
             };
@@ -1828,17 +1838,21 @@ fn valid_voice_receipt_metadata(phase: &str, version: f64, field_count: u32) -> 
     field_count == 2 && version == 1.0 && matches!(phase, "received" | "clear")
 }
 
-fn valid_coach_checkpoint_metadata(
-    session_state: &str,
-    version: f64,
-    field_count: u32,
-) -> bool {
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn valid_coach_checkpoint_metadata(session_state: &str, version: f64, field_count: u32) -> bool {
     field_count == 2
         && version == 1.0
         && !session_state.is_empty()
         && session_state.encode_utf16().count() <= COACH_CHECKPOINT_MAX_CHARS
         && session_state.trim() == session_state
         && !session_state.chars().any(char::is_control)
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn valid_coach_checkpoint_keys(keys: &[String]) -> bool {
+    keys.len() == 2
+        && keys.iter().any(|key| key == "sessionState")
+        && keys.iter().any(|key| key == "version")
 }
 
 const fn valid_voice_pause_metadata(reason: &str, version: f64, field_count: u32) -> bool {
@@ -2374,9 +2388,8 @@ fn App() -> Element {
     let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
     let _first_audio_listener =
         use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
-    let _coach_checkpoint_listener = use_hook(|| {
-        cloud::install_coach_checkpoint_listener(session_state, route, coach_state)
-    });
+    let _coach_checkpoint_listener =
+        use_hook(|| cloud::install_coach_checkpoint_listener(session_state, route, coach_state));
     let _voice_interrupted_listener =
         use_hook(|| cloud::install_voice_interrupted_listener(voice_state));
     let _voice_session_paused_listener =
@@ -3175,17 +3188,17 @@ fn App() -> Element {
 mod tests {
     use super::{
         ANSWER_SUPPORT_COPY, COACH_CHECKPOINT_MAX_CHARS, CloudState, CoachAction, CoachPhase,
-        CoachState,
-        NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
-        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
-        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
-        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
+        CoachState, NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY,
+        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
+        PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
+        PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
         STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
         TALK_ONLY_COPY, VoiceReceipt, VoiceState, VoiceTurnMode, cloud_state_for_display,
         passkey_focus_target, recoverable_wait_turn_code, requires_passkey_choice,
         requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
-        turn_mode_for_gesture_epoch, valid_coach_checkpoint_metadata,
+        turn_mode_for_gesture_epoch, valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
         valid_streamed_audio_metadata, valid_voice_pause_metadata, valid_voice_privacy_metadata,
         valid_voice_receipt_metadata,
     };
@@ -3325,6 +3338,21 @@ mod tests {
 
     #[test]
     fn coach_checkpoint_metadata_is_exact_bounded_and_content_free() {
+        assert!(valid_coach_checkpoint_keys(&[
+            "sessionState".to_string(),
+            "version".to_string(),
+        ]));
+        for invalid in [
+            vec!["sessionState".to_string()],
+            vec!["sessionState".to_string(), "active".to_string()],
+            vec![
+                "sessionState".to_string(),
+                "version".to_string(),
+                "extra".to_string(),
+            ],
+        ] {
+            assert!(!valid_coach_checkpoint_keys(&invalid));
+        }
         assert!(valid_coach_checkpoint_metadata("signed-checkpoint", 1.0, 2));
         for invalid in [
             "",

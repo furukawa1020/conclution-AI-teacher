@@ -66,6 +66,7 @@ func main() {
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
 	var nativeLiveService httpapi.VoiceTurnLiveService
+	var coachStateValidator httpapi.VoiceStateTokenValidator
 	var passkeyService *passkey.Service
 	var passkeyClientRateLimiter guard.Limiter
 	var passkeyAppCircuitBreaker guard.Limiter
@@ -253,6 +254,12 @@ func main() {
 			os.Exit(1)
 		}
 		if cfg.NativeAudioEnabled {
+			validator, ok := conversationAgent.(httpapi.VoiceStateTokenValidator)
+			if !ok {
+				logger.Error("initialize native coach state validator")
+				os.Exit(1)
+			}
+			coachStateValidator = validator
 			statePreparer, ok := conversationAgent.(conversation.NativeStatePreparer)
 			if !ok {
 				logger.Error("initialize native audio state boundary")
@@ -342,6 +349,7 @@ func main() {
 			AppRateLimiter:       voiceAppRateLimiter,
 			LiveLeaseManager:     voiceLiveLeaseManager,
 			LiveHandshakeGate:    voiceLiveHandshakeGate,
+			CoachStateValidator:  coachStateValidator,
 			RequestTimeout:       cfg.VoiceTimeout,
 			MaxRequestBytes:      cfg.MaxVoiceBytes,
 			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,

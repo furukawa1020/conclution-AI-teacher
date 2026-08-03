@@ -267,6 +267,13 @@ func (s *Service) processLive(
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 				}
 				if requiresRespondentCoach(inputCaptionText) {
+					if onCoachActive == nil {
+						pooled.session.DiscardOutput()
+						event.Clear()
+						clear(inputCaption)
+						clear(caption)
+						return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+					}
 					coachStateStartedAt := s.now()
 					genericCoachStateToken, err =
 						s.coachPreparer.PrepareNativeCoachState(

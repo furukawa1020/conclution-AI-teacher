@@ -1985,6 +1985,23 @@ function hasValidCoachMetadata(assistanceTarget, phase, action) {
   );
 }
 
+function hasValidAnswerProofMetadata(
+  proof,
+  assistanceTarget,
+  respondentStage,
+  coachPhase,
+  coachAction,
+) {
+  if (proof === "none") return true;
+  if (proof !== "question_bound_input_answer_first") return false;
+  return (
+    assistanceTarget === "respondent" &&
+    respondentStage === "restructure" &&
+    ((coachPhase === "complete" && coachAction === "complete") ||
+      (coachPhase === "expanding" && coachAction === "expand"))
+  );
+}
+
 function clearPendingDocument(reason = "cleared") {
   const hadPendingDocument = pendingDocument !== undefined;
   pendingDocument = undefined;
@@ -2028,6 +2045,8 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     fail("voice_response_invalid");
   }
   const hasAudio = payload.audioBase64 !== "";
+  const answerProof =
+    payload.answerProof === undefined ? "none" : payload.answerProof;
   if (
     !isBase64(payload.audioBase64) ||
     payload.audioBase64.length > RESPONSE_AUDIO_MAX_BASE64_CHARS ||
@@ -2048,6 +2067,13 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     ) ||
     !hasValidCoachMetadata(
       payload.assistanceTarget,
+      payload.coachPhase,
+      payload.coachAction,
+    ) ||
+    !hasValidAnswerProofMetadata(
+      answerProof,
+      payload.assistanceTarget,
+      payload.respondentStage,
       payload.coachPhase,
       payload.coachAction,
     ) ||
@@ -2085,6 +2111,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
         payload.respondentStage !== "none" ||
         payload.coachPhase !== "none" ||
         payload.coachAction !== "none" ||
+        answerProof !== "none" ||
         research.status !== "none" ||
         research.records.length !== 0 ||
         payload.route !== "strict-privacy-blocked" ||
@@ -2106,6 +2133,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     respondentStage: payload.respondentStage,
     coachPhase: payload.coachPhase,
     coachAction: payload.coachAction,
+    answerProof,
     needsPaper: payload.needsPaper,
     privacyStatus: payload.privacyStatus,
     researchStatus: research.status,

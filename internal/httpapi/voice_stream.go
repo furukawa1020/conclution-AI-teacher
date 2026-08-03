@@ -195,6 +195,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		"respondentStage":  result.RespondentStage,
 		"coachPhase":       result.CoachPhase,
 		"coachAction":      result.CoachAction,
+		"answerProof":      normalizedAnswerProof(result.AnswerProof),
 		"researchStatus":   result.ResearchStatus,
 		"researchRecords":  result.ResearchRecords,
 		"privacyStatus":    result.PrivacyStatus,

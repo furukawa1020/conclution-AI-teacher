@@ -217,6 +217,19 @@ func (agent *vertexAgent) coachQuestionContinuityTag(anchor string) string {
 	return tag
 }
 
+func (agent *vertexAgent) coachQuestionInstanceTag(anchor string) string {
+	if agent == nil || len(agent.continuityKey) != sha256.Size || anchor == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, agent.continuityKey)
+	_, _ = mac.Write([]byte("reported-question-instance-anchor-v1\x00"))
+	_, _ = mac.Write([]byte(anchor))
+	full := mac.Sum(nil)
+	tag := base64.RawURLEncoding.EncodeToString(full[:coachContinuityTagBytes])
+	wipe(full)
+	return tag
+}
+
 func (agent *vertexAgent) nativeCoachScopeTag(scopeID string) string {
 	if agent == nil || len(agent.continuityKey) != sha256.Size || scopeID == "" {
 		return ""

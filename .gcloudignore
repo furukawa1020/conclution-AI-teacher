@@ -5,6 +5,7 @@
 .tools
 .cache
 .tmp
+.tmp-*
 .gocache
 .gocache-*
 .tmp-gocache-*

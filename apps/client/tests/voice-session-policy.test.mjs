@@ -444,7 +444,7 @@ return Object.freeze({
   maybeAbortPlaybackTransportOnInterrupt,
   setActiveRecording: (recording) => { activeRecording = recording; },
   shouldAbortPlaybackTransportOnInterrupt,
-  shouldDiscardInterruptedHTTPRecording,
+  shouldDiscardInterruptedPlaybackRecording,
   stopSession,
 });`,
   );
@@ -1266,7 +1266,7 @@ test("executable pre-final and post-final barge races keep their ownership", asy
 
     await assert.rejects(consume, /voice_response_invalid/u);
     assert.equal(
-      runtime.shouldDiscardInterruptedHTTPRecording(playback),
+      runtime.shouldDiscardInterruptedPlaybackRecording(playback),
       true,
     );
     runtime.discardInterruptedPlaybackRecording(playback);
@@ -1312,7 +1312,7 @@ test("executable pre-final and post-final barge races keep their ownership", asy
     assert.equal(context.sources[0].stopped, true);
     assert.equal(playback.interruptRecording, heldRecording);
     assert.equal(
-      runtime.shouldDiscardInterruptedHTTPRecording(playback),
+      runtime.shouldDiscardInterruptedPlaybackRecording(playback),
       false,
     );
     assert.equal(state.abandonedInterrupts, 0);
@@ -1351,6 +1351,57 @@ test("executable pre-final and post-final barge races keep their ownership", asy
       true,
     );
     assert.equal(requestController.signal.aborted, true);
+  });
+
+  await t.test("a dynamically activated Native coach drains and binds its held turn", async () => {
+    const { context, runtime, state } =
+      await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1, true, "live");
+    playback.activateCoach();
+    assert.equal(playback.coachActive, true);
+    playback.schedulePcm(fakePcmEvent(0));
+    const heldRecording = playback.interruptRecording;
+    assert.notEqual(heldRecording, undefined);
+    assert.equal(heldRecording.coachActive, true);
+
+    const requestController = new AbortController();
+    playback.interruptedBeforeFinal = true;
+    playback.interrupted = true;
+    runtime.setActiveRecording(heldRecording);
+    assert.equal(
+      runtime.maybeAbortPlaybackTransportOnInterrupt(
+        playback,
+        requestController,
+      ),
+      false,
+    );
+    runtime.haltStreamingPlayback(
+      playback,
+      new Error("voice_interrupted"),
+    );
+
+    assert.equal(requestController.signal.aborted, false);
+    assert.equal(context.sources[0].stopped, true);
+    assert.equal(playback.interruptRecording, heldRecording);
+    assert.equal(
+      runtime.shouldDiscardInterruptedPlaybackRecording(playback),
+      true,
+      "a failed stateful drain cannot submit audio against stale state",
+    );
+    runtime.discardInterruptedPlaybackRecording(playback);
+    assert.equal(playback.interruptRecording, undefined);
+    assert.equal(state.abandonedInterrupts, 1);
+    assert.equal(state.micEnabled, false);
+  });
+
+  await t.test("coach activation fails closed after response audio begins", async () => {
+    const { runtime } = await createExecutablePlaybackHarness();
+    const playback = runtime.createStreamingPlayback(1, true, "live");
+    playback.schedulePcm(fakePcmEvent(0));
+    assert.throws(
+      () => playback.activateCoach(),
+      /voice_response_invalid/u,
+    );
   });
 });
 
@@ -2843,6 +2894,7 @@ test("live server protocol gates binary on ready and commit", () => {
 test("a committed native turn replays only on the reviewed zero-audio sentinel", () => {
   const eligible = {
     audioEventCount: 0,
+    coachActivated: false,
     code: "voice_native_fallback",
     committed: true,
     interrupted: false,
@@ -2851,6 +2903,7 @@ test("a committed native turn replays only on the reviewed zero-audio sentinel",
   assert.equal(shouldReplayCommittedNativeTurn(eligible), true);
   for (const unsafe of [
     { ...eligible, audioEventCount: 1 },
+    { ...eligible, coachActivated: true },
     { ...eligible, code: "voice_api_unavailable" },
     { ...eligible, committed: false },
     { ...eligible, interrupted: true },
@@ -2861,6 +2914,133 @@ test("a committed native turn replays only on the reviewed zero-audio sentinel",
   assert.throws(
     () => shouldReplayCommittedNativeTurn({ ...eligible, audioEventCount: -1 }),
     /native_fallback_state_invalid/u,
+  );
+});
+
+test("a first-turn Native coach preserves signed state without replaying the utterance", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const liveStart = bridge.indexOf("async function startVoiceLiveSession(");
+  const liveEnd = bridge.indexOf("\n}\n\nfunction isNdjsonContentType", liveStart);
+  assert.notEqual(liveStart, -1);
+  assert.notEqual(liveEnd, -1);
+  const live = bridge.slice(liveStart, liveEnd);
+
+  assert.match(
+    live,
+    /message\.type === "coach"[\s\S]*state !== "committed"[\s\S]*session\.playback\.activateCoach\(\)/u,
+  );
+  assert.match(
+    live,
+    /coachActivated: snapshot\.coachActivated/u,
+  );
+  assert.match(
+    live,
+    /const audioEvent = protocol\.acceptBinary\(event\.data\);[\s\S]*session\.playback\.interrupted[\s\S]*session\.playback\.coachActive[\s\S]*new Uint8Array\(audioEvent\.pcm\)\.fill\(0\);[\s\S]*return;/u,
+  );
+  assert.match(
+    live,
+    /session\.playback\.finalReceived = true;\s*if \(!session\.playback\.interrupted\) \{\s*session\.playback\.seal\(\);/u,
+  );
+  assert.match(
+    live,
+    /requiresStatefulLiveDrain\(\)[\s\S]*state === "committed"[\s\S]*session\.playback\?\.coachActive === true[\s\S]*session\.playback\.finalReceived === false/u,
+  );
+
+  const confirmStart = bridge.indexOf("function confirmBargeIn(");
+  const confirmEnd = bridge.indexOf(
+    "\n}\n\nfunction startBargeInMonitoring(",
+    confirmStart,
+  );
+  const confirm = bridge.slice(confirmStart, confirmEnd);
+  assert.match(
+    confirm,
+    /const preserveLiveCoachState = Boolean\([\s\S]*requiresStatefulLiveDrain\(\)/u,
+  );
+  assert.match(
+    confirm,
+    /const handoffPromise =\s*!preserveLiveCoachState[\s\S]*interruptedLiveSession\.handoffAmbient/u,
+  );
+  assert.match(
+    confirm,
+    /if \(!preserveLiveCoachState\) \{\s*interruptedLiveSession\?\.interrupt\(interruption\);\s*\}/u,
+  );
+  assert.match(confirm, /haltStreamingPlayback\(playback, interruption\)/u);
+
+  const recordingStart = bridge.indexOf("function createRecordingState(");
+  const recordingEnd = bridge.indexOf("\n}\n\nfunction createRecording(", recordingStart);
+  const recording = bridge.slice(recordingStart, recordingEnd);
+  assert.doesNotMatch(recording, /nativeAudio && coachActive/u);
+
+  const finishStart = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf("\n}\n\nfunction safeDocumentName", finishStart);
+  const finish = bridge.slice(finishStart, finishEnd);
+  assert.match(
+    finish,
+    /shouldDiscardInterruptedPlaybackRecording\(playback\)[\s\S]*discardInterruptedPlaybackRecording\(playback\)/u,
+  );
+});
+
+test("a Native coach control is exact, one-shot, and precedes response audio", () => {
+  const createCommitted = () => {
+    const protocol = createVoiceLiveServerProtocol((result) => result);
+    protocol.acceptText(JSON.stringify({ type: "ready", version: 1 }));
+    protocol.markCommitted();
+    return protocol;
+  };
+
+  const protocol = createCommitted();
+  assert.deepEqual(
+    protocol.acceptText(
+      JSON.stringify({
+        type: "coach",
+        active: true,
+        version: 1,
+      }),
+    ),
+    { type: "coach", active: true, version: 1 },
+  );
+  assert.equal(protocol.snapshot().coachActivated, true);
+  assert.throws(
+    () =>
+      protocol.acceptText(
+        JSON.stringify({ type: "coach", active: true, version: 1 }),
+      ),
+    /voice_response_invalid/u,
+  );
+
+  for (const invalid of [
+    { type: "coach", active: false, version: 1 },
+    { type: "coach", active: true, version: 2 },
+    { type: "coach", active: true, version: 1, phase: "elicit" },
+  ]) {
+    const candidate = createCommitted();
+    assert.throws(
+      () => candidate.acceptText(JSON.stringify(invalid)),
+      /voice_response_invalid/u,
+    );
+  }
+
+  const beforeCommit = createVoiceLiveServerProtocol((result) => result);
+  beforeCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
+  assert.throws(
+    () =>
+      beforeCommit.acceptText(
+        JSON.stringify({ type: "coach", active: true, version: 1 }),
+      ),
+    /voice_response_invalid/u,
+  );
+
+  const afterAudio = createCommitted();
+  afterAudio.acceptBinary(new ArrayBuffer(4));
+  assert.throws(
+    () =>
+      afterAudio.acceptText(
+        JSON.stringify({ type: "coach", active: true, version: 1 }),
+      ),
+    /voice_response_invalid/u,
   );
 });
 
@@ -3628,7 +3808,7 @@ test("barge-in starts with audible output and preserves foreground response mode
   );
   assert.match(
     finish,
-    /if \(shouldDiscardInterruptedHTTPRecording\(playback\)\) \{\s*discardInterruptedPlaybackRecording\(playback\);\s*\}/u,
+    /if \(shouldDiscardInterruptedPlaybackRecording\(playback\)\) \{\s*discardInterruptedPlaybackRecording\(playback\);\s*\}/u,
   );
   const scheduleAt = bridge.indexOf("function scheduleBuffer(");
   const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);

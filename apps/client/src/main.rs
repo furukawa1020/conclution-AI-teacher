@@ -6,8 +6,10 @@ use serde::Deserialize;
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、KOTAEが話題を持つ";
 const ANSWER_SUPPORT_COPY: &str = "人に聞かれた質問も、そのまま話していい";
 const TALK_ONLY_COPY: &str = "ぼやきや相づちでは止めず、続けて話すと止める";
-const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。PDF・接続不能時・人に聞かれた質問への回答支援を明示した時はSpeech-to-Text・Vertex AI・TTSの段階経路へ切り替えます。回答支援では、Native応答音声を出さずに破棄し、同じ録音をSpeech-to-Textへ送り直す場合があります。";
-const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。PDF・接続不能時・人に聞かれた質問への回答支援を明示した時はSpeech-to-Text・Vertex AI・Text-to-Speechで処理します。回答支援では、Native応答音声を出さずに破棄し、同じ録音をSpeech-to-Textへ送り直す場合があります。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+const STANDARD_MODE_ROUTE_LABEL: &str =
+    "通常・初回の回答支援はNative Audio / 回答保留中の後続は段階経路";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。人に聞かれた質問への回答支援を明示した初回も、同じ原音を送り直さずNative音声を返します。同時に、その一度だけ得た確定した入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ並行利用し、回答保留中の次の一歩を守る署名済み状態を作ります。回答保留中の後続ターンはSpeech-to-Text・Vertex AI・TTSの段階経路を使い、完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。人に聞かれた質問への回答支援を明示した初回は、同じ原音をSpeech-to-Textへ送り直さずNative音声を返しながら、その一度だけ得た確定した入力字幕をglobalの文字列Vertex AI・LAC・Respondent Coachへ並行利用して署名済み状態を作ります。回答保留中の後続ターンとPDF・接続不能時はSpeech-to-Text・Vertex AI・Text-to-Speechで処理します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
@@ -2872,7 +2874,7 @@ fn App() -> Element {
                                     if strict_mode {
                                         "検査不能も停止 / PDF・外部検索・会話状態なし"
                                     } else {
-                                        "通常はNative Audio / 回答支援時は段階経路"
+                                        {STANDARD_MODE_ROUTE_LABEL}
                                     }
                                 }
                             }
@@ -3084,9 +3086,9 @@ mod tests {
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
-        STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, VoiceReceipt,
-        VoiceState, VoiceTurnMode, cloud_state_for_display, passkey_focus_target,
-        recoverable_wait_turn_code, requires_passkey_choice,
+        STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
+        TALK_ONLY_COPY, VoiceReceipt, VoiceState, VoiceTurnMode, cloud_state_for_display,
+        passkey_focus_target, recoverable_wait_turn_code, requires_passkey_choice,
         requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
         turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
         valid_voice_privacy_metadata, valid_voice_receipt_metadata,
@@ -3201,13 +3203,24 @@ mod tests {
     }
 
     #[test]
-    fn standard_privacy_copy_discloses_the_answer_support_audio_reprocessing() {
+    fn standard_privacy_copy_discloses_the_direct_native_answer_support_switch() {
         for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
-            assert!(copy.contains("人に聞かれた質問への回答支援を明示した時"));
-            assert!(copy.contains("Native応答音声を出さずに破棄"));
-            assert!(copy.contains("同じ録音"));
-            assert!(copy.contains("Speech-to-Textへ送り直す"));
+            assert!(copy.contains("人に聞かれた質問への回答支援を明示した初回"));
+            assert!(copy.contains("確定した入力字幕"));
+            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coach"));
+            assert!(copy.contains("並行利用"));
+            assert!(copy.contains("署名済み状態"));
+            assert!(copy.contains("回答保留中の後続ターン"));
         }
+        assert_eq!(
+            STANDARD_MODE_ROUTE_LABEL,
+            "通常・初回の回答支援はNative Audio / 回答保留中の後続は段階経路"
+        );
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("同じ原音を送り直さずNative音声"));
+        assert!(
+            STANDARD_VOICE_PRIVACY_COPY.contains("同じ原音をSpeech-to-Textへ送り直さずNative音声")
+        );
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("PDF・接続不能時"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("保存しません"));
     }
 

@@ -114,6 +114,7 @@ type voiceLiveCommitFrame struct {
 type voiceLiveOutboundFrame struct {
 	Type    string                `json:"type"`
 	Version int                   `json:"version"`
+	Active  bool                  `json:"active,omitempty"`
 	Code    string                `json:"code,omitempty"`
 	Result  *voiceLiveFinalResult `json:"result,omitempty"`
 }
@@ -496,7 +497,33 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		}
 		var result VoiceTurnResult
 		var processErr error
-		if endpointService, supportsEndpoint :=
+		if controlService, supportsControl :=
+			selectedLiveService.(VoiceTurnLiveControlService); supportsControl {
+			result, processErr = controlService.ProcessLiveWithControl(
+				liveCtx,
+				principal.UID,
+				input,
+				audioInput,
+				onAudio,
+				func() {
+					select {
+					case endpointChannel <- struct{}{}:
+					default:
+					}
+				},
+				func() error {
+					return writeVoiceLiveJSON(
+						liveCtx,
+						conn,
+						voiceLiveOutboundFrame{
+							Type:    "coach",
+							Version: voiceLiveVersion,
+							Active:  true,
+						},
+					)
+				},
+			)
+		} else if endpointService, supportsEndpoint :=
 			selectedLiveService.(VoiceTurnLiveEndpointService); supportsEndpoint {
 			result, processErr = endpointService.ProcessLiveWithEndpoint(
 				liveCtx,
@@ -620,6 +647,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				outputMetrics,
 				outcome.result.LiveTimings,
 				true,
+				outcome.result,
 			)
 			return
 		case <-endpointChannel:
@@ -841,6 +869,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			outputMetrics,
 			outcome.result.LiveTimings,
 			false,
+			outcome.result,
 		)
 		return
 	}
@@ -905,6 +934,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		outputMetrics,
 		outcome.result.LiveTimings,
 		false,
+		outcome.result,
 	)
 	_ = conn.Close(websocket.StatusNormalClosure, "complete")
 }
@@ -1130,7 +1160,17 @@ func (s *Server) logVoiceLiveSession(
 	outputMetrics *voiceLiveOutputMetrics,
 	timings VoiceLiveTimings,
 	cancelled bool,
+	results ...VoiceTurnResult,
 ) {
+	route := "unknown"
+	coachActive := false
+	if len(results) > 0 {
+		route = results[0].Route
+		if route == "" {
+			route = "unknown"
+		}
+		coachActive = results[0].AssistanceTarget == "respondent"
+	}
 	firstOutputAt, outputFrames, outputBytes := outputMetrics.snapshot()
 	firstInputMS := durationFrom(started, firstInputAt)
 	commitMS := durationFrom(started, commitAt)
@@ -1143,6 +1183,8 @@ func (s *Server) logVoiceLiveSession(
 	}
 	s.logger.InfoContext(ctx, "voice live session completed",
 		"request_id", requestIDFromContext(ctx),
+		"route", route,
+		"coach_active", coachActive,
 		"auth_ready_ms", finiteLatency(authReadyMS),
 		"first_input_pcm_ms", firstInputMS,
 		"commit_ms", commitMS,

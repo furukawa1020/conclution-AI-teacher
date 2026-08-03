@@ -18,6 +18,62 @@ type fakePreparer struct {
 	err            error
 }
 
+type fakeCoachPlanner struct {
+	mu     sync.Mutex
+	result conversation.VoiceTurnResult
+	err    error
+	calls  int
+	turn   conversation.VoiceTurn
+}
+
+func (f *fakeCoachPlanner) Process(
+	_ context.Context,
+	_ string,
+	turn conversation.VoiceTurn,
+) (conversation.VoiceTurnResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.turn = turn
+	return f.result, f.err
+}
+
+func validCoachPlan(token string) conversation.VoiceTurnResult {
+	return conversation.VoiceTurnResult{
+		SchemaVersion:      conversation.SchemaVersion,
+		Domain:             "daily",
+		AssistanceTarget:   "respondent",
+		RespondentStage:    "awaiting_answer",
+		CoachPhase:         "awaiting_answer",
+		CoachAction:        "elicit",
+		ResearchStatus:     "none",
+		ResearchRecords:    []conversation.ResearchRecord{},
+		SpokenReply:        "まず、あなた自身は何を一番伝えたいですか？",
+		InterventionPolicy: "clarify",
+		StateToken:         token,
+	}
+}
+
+type blockingCoachPlanner struct {
+	started chan struct{}
+	release chan struct{}
+	result  conversation.VoiceTurnResult
+}
+
+func (p *blockingCoachPlanner) Process(
+	ctx context.Context,
+	_ string,
+	_ conversation.VoiceTurn,
+) (conversation.VoiceTurnResult, error) {
+	close(p.started)
+	select {
+	case <-p.release:
+		return p.result, nil
+	case <-ctx.Done():
+		return conversation.VoiceTurnResult{}, ctx.Err()
+	}
+}
+
 func (f fakePreparer) PrepareNativeState(string, string) (string, bool, error) {
 	return f.token, f.requiresStaged, f.err
 }
@@ -143,6 +199,7 @@ func TestNativeFlowRejectsInvalidStateBeforeOpeningProvider(t *testing.T) {
 	service, err := New(
 		opener,
 		fakePreparer{err: conversation.ErrInvalidStateToken},
+		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +238,11 @@ func TestNativeFlowReleasesMeaningfulAudioOnlyAfterFinalInputGate(t *testing.T) 
 		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
 	)
 	opener := &fakeOpener{session: session}
-	service, err := New(opener, fakePreparer{token: "opaque-state"})
+	service, err := New(
+		opener,
+		fakePreparer{token: "opaque-state"},
+		&fakeCoachPlanner{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,6 +286,7 @@ func TestNativeFlowBlocksHighRiskCaptionBeforeAnyAudio(t *testing.T) {
 	service, err := New(
 		&fakeOpener{session: session},
 		fakePreparer{token: "unused"},
+		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -249,6 +311,7 @@ func TestNativeFlowKeepsSignedPendingCoachOutOfNativeProvider(t *testing.T) {
 	service, err := New(
 		opener,
 		fakePreparer{token: "unchanged-state", requiresStaged: true},
+		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +364,7 @@ func TestNativeFlowKeepsSignedPendingCoachOutOfNativeProvider(t *testing.T) {
 	}
 }
 
-func TestNativeFlowRoutesExplicitRespondentCoachRequestBeforeAnyAudio(t *testing.T) {
+func TestNativeFlowRoutesExplicitRespondentCoachRequestDirectlyThroughNativeAudio(t *testing.T) {
 	for _, value := range []string{
 		"上司に目的を聞かれた。答え方を一問だけ手伝って",
 		"上司に「この企画の目的は？」と聞かれました。どう答えればいいですか",
@@ -309,36 +372,269 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestBeforeAnyAudio(t *testing
 		"My manager asked me why the change was needed. How should I answer?",
 	} {
 		t.Run(value, func(t *testing.T) {
-			session := newScriptedSession(nativevoice.Event{
-				Kind:         nativevoice.EventInputCaption,
-				CaptionUTF8:  []byte(value),
-				CaptionFinal: true,
-			})
+			session := newScriptedSession(
+				nativevoice.Event{
+					Kind:         nativevoice.EventInputCaption,
+					CaptionUTF8:  []byte(value),
+					CaptionFinal: true,
+				},
+				nativevoice.Event{
+					Kind:            nativevoice.EventAudioPCM,
+					PCM:             []byte{1, 2, 3, 4},
+					SampleRateHertz: nativevoice.OutputSampleRateHertz,
+				},
+				nativevoice.Event{
+					Kind:         nativevoice.EventOutputCaption,
+					CaptionUTF8:  []byte("まず、あなたは何を伝えたいですか？"),
+					CaptionFinal: true,
+				},
+				nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+			)
+			planner := &fakeCoachPlanner{
+				result: validCoachPlan("signed-coach-state"),
+			}
 			service, err := New(
 				&fakeOpener{session: session},
-				fakePreparer{token: "unused"},
+				fakePreparer{token: "advanced-native-state"},
+				planner,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer service.Close()
 
-			delivered := false
-			_, err = service.ProcessLive(
+			input := nativeInput()
+			input.StateToken = "original-state"
+			order := make([]string, 0, 2)
+			result, err := service.ProcessLiveWithControl(
 				context.Background(),
 				"uid-respondent-"+value,
-				nativeInput(),
+				input,
 				oneFrame(),
-				func([]byte) error { delivered = true; return nil },
+				func([]byte) error {
+					order = append(order, "audio")
+					return nil
+				},
+				nil,
+				func() error {
+					order = append(order, "coach")
+					return nil
+				},
 			)
-			if !errors.Is(err, httpapi.ErrVoiceNativeFallback) || delivered || session.commits != 0 {
-				t.Fatalf("err=%v delivered=%v commits=%d", err, delivered, session.commits)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(order) != 2 || order[0] != "coach" || order[1] != "audio" ||
+				session.commits != 1 {
+				t.Fatalf("order=%v commits=%d", order, session.commits)
+			}
+			if result.Route != routeNativeRespondentCoach ||
+				result.StateToken != "signed-coach-state" ||
+				result.AssistanceTarget != "respondent" ||
+				result.RespondentStage != "awaiting_answer" ||
+				result.CoachPhase != "awaiting_answer" ||
+				result.CoachAction != "elicit" {
+				t.Fatalf("result=%+v", result)
+			}
+			planner.mu.Lock()
+			plannedTurn := planner.turn
+			planner.mu.Unlock()
+			if plannedTurn.StateToken != "original-state" ||
+				plannedTurn.Utterance != value ||
+				!plannedTurn.ResearchDisabled {
+				t.Fatalf("planned turn=%+v", plannedTurn)
 			}
 		})
 	}
 }
 
-func TestRespondentCoachFallbackUsesAuditedDirectConsentBoundary(t *testing.T) {
+func TestNativeRespondentCoachFirstAudioDoesNotWaitForPlanner(t *testing.T) {
+	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
+	session := newScriptedSession(
+		nativevoice.Event{
+			Kind:         nativevoice.EventInputCaption,
+			CaptionUTF8:  []byte(utterance),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{
+			Kind:            nativevoice.EventAudioPCM,
+			PCM:             []byte{1, 2},
+			SampleRateHertz: nativevoice.OutputSampleRateHertz,
+		},
+		nativevoice.Event{
+			Kind:         nativevoice.EventOutputCaption,
+			CaptionUTF8:  []byte("一番伝えたいことは何ですか？"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+	)
+	planner := &blockingCoachPlanner{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		result:  validCoachPlan("signed-coach-state"),
+	}
+	service, err := New(
+		&fakeOpener{session: session},
+		fakePreparer{token: "advanced-native-state"},
+		planner,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	controlSeen := make(chan struct{})
+	audioSeen := make(chan struct{})
+	outcome := make(chan struct {
+		result httpapi.VoiceTurnResult
+		err    error
+	}, 1)
+	go func() {
+		result, processErr := service.ProcessLiveWithControl(
+			context.Background(),
+			"uid-native-coach-concurrent",
+			nativeInput(),
+			oneFrame(),
+			func([]byte) error {
+				select {
+				case <-controlSeen:
+				default:
+					t.Error("audio arrived before coach control")
+				}
+				close(audioSeen)
+				return nil
+			},
+			nil,
+			func() error {
+				close(controlSeen)
+				return nil
+			},
+		)
+		outcome <- struct {
+			result httpapi.VoiceTurnResult
+			err    error
+		}{result: result, err: processErr}
+	}()
+
+	select {
+	case <-planner.started:
+	case <-time.After(time.Second):
+		t.Fatal("coach planner did not start")
+	}
+	select {
+	case <-audioSeen:
+	case <-time.After(time.Second):
+		t.Fatal("first Native audio waited for the blocked coach planner")
+	}
+	select {
+	case completed := <-outcome:
+		t.Fatalf("turn completed before planner: %+v, %v", completed.result, completed.err)
+	default:
+	}
+	close(planner.release)
+	select {
+	case completed := <-outcome:
+		if completed.err != nil ||
+			completed.result.Route != routeNativeRespondentCoach {
+			t.Fatalf("completed=%+v err=%v", completed.result, completed.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn did not publish planner metadata")
+	}
+}
+
+func TestNativeRespondentCoachInvalidPlannerMetadataShrinksToNativeCompanion(t *testing.T) {
+	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
+	session := newScriptedSession(
+		nativevoice.Event{
+			Kind:         nativevoice.EventInputCaption,
+			CaptionUTF8:  []byte(utterance),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{
+			Kind:            nativevoice.EventAudioPCM,
+			PCM:             []byte{1, 2},
+			SampleRateHertz: nativevoice.OutputSampleRateHertz,
+		},
+		nativevoice.Event{
+			Kind:         nativevoice.EventOutputCaption,
+			CaptionUTF8:  []byte("話してください。"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+	)
+	invalid := validCoachPlan("")
+	service, err := New(
+		&fakeOpener{session: session},
+		fakePreparer{token: "advanced-native-state"},
+		&fakeCoachPlanner{result: invalid},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	controls := 0
+	result, err := service.ProcessLiveWithControl(
+		context.Background(),
+		"uid-invalid-coach-plan",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { return nil },
+		nil,
+		func() error { controls++; return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if controls != 1 || result.Route != nativevoice.RouteNativeAudio ||
+		result.StateToken != "advanced-native-state" ||
+		result.AssistanceTarget != "assistant" ||
+		result.RespondentStage != "none" ||
+		result.CoachPhase != "none" || result.CoachAction != "none" {
+		t.Fatalf("controls=%d result=%+v", controls, result)
+	}
+}
+
+func TestNativeRespondentCoachControlWriteFailureReleasesNoAudio(t *testing.T) {
+	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
+	session := newScriptedSession(nativevoice.Event{
+		Kind:         nativevoice.EventInputCaption,
+		CaptionUTF8:  []byte(utterance),
+		CaptionFinal: true,
+	})
+	service, err := New(
+		&fakeOpener{session: session},
+		fakePreparer{token: "advanced-native-state"},
+		&fakeCoachPlanner{result: validCoachPlan("signed-coach-state")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	delivered := false
+	_, err = service.ProcessLiveWithControl(
+		context.Background(),
+		"uid-coach-control-failed",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { delivered = true; return nil },
+		nil,
+		func() error { return errors.New("control write failed") },
+	)
+	if err == nil || delivered || session.commits != 0 || session.discards == 0 {
+		t.Fatalf(
+			"err=%v delivered=%v commits=%d discards=%d",
+			err,
+			delivered,
+			session.commits,
+			session.discards,
+		)
+	}
+}
+
+func TestNativeRespondentCoachUsesAuditedDirectConsentBoundary(t *testing.T) {
 	for _, value := range []string{
 		"上司に目的を聞かれた。答え方を一問だけ手伝って",
 		"上司から目的を質問されました。どう答えればいいですか",
@@ -350,7 +646,7 @@ func TestRespondentCoachFallbackUsesAuditedDirectConsentBoundary(t *testing.T) {
 		"答え方を一問だけ手伝って",
 		"どう答えればいいですか",
 	} {
-		if !requiresRespondentCoachFallback(value) {
+		if !requiresRespondentCoach(value) {
 			t.Errorf("explicit respondent request did not fall back: %q", value)
 		}
 	}
@@ -368,7 +664,7 @@ func TestRespondentCoachFallbackUsesAuditedDirectConsentBoundary(t *testing.T) {
 		"「上司に目的を聞かれた。どう答えればいい？」と友達が言っていた",
 		"上司に「目的を聞かれた。どう答えればいいですか",
 	} {
-		if requiresRespondentCoachFallback(value) {
+		if requiresRespondentCoach(value) {
 			t.Errorf("ambiguous or unowned request entered respondent coach: %q", value)
 		}
 	}
@@ -386,6 +682,7 @@ func TestNativeFlowRejectsProviderAudioBeforeFinalCaption(t *testing.T) {
 	service, err := New(
 		&fakeOpener{session: session},
 		fakePreparer{token: "unused"},
+		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)

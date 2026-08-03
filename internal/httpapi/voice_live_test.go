@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -276,6 +277,11 @@ type liveEndpointTestService struct {
 	endpointOnce sync.Once
 }
 
+type liveControlTestService struct {
+	liveTestVoiceService
+	controlCalls int
+}
+
 type liveLifecycleTestService struct {
 	started     chan struct{}
 	canceled    chan struct{}
@@ -355,6 +361,50 @@ func (service *liveEndpointTestService) ProcessLiveWithEndpoint(
 			service.audio = append(service.audio, copied)
 			service.mu.Unlock()
 			service.endpointOnce.Do(onEndpoint)
+		}
+	}
+}
+
+func (service *liveControlTestService) ProcessLiveWithControl(
+	ctx context.Context,
+	uid string,
+	input VoiceTurnInput,
+	audio <-chan []byte,
+	onAudio func([]byte) error,
+	_ func(),
+	onCoachActive func() error,
+) (VoiceTurnResult, error) {
+	if uid != "user-123" {
+		return VoiceTurnResult{}, errors.New("unexpected uid")
+	}
+	service.mu.Lock()
+	service.processLiveCalls++
+	service.input = input
+	service.mu.Unlock()
+	for {
+		select {
+		case <-ctx.Done():
+			service.signalCanceled()
+			return VoiceTurnResult{}, ctx.Err()
+		case chunk, open := <-audio:
+			if !open {
+				service.mu.Lock()
+				service.controlCalls++
+				service.mu.Unlock()
+				if err := onCoachActive(); err != nil {
+					return VoiceTurnResult{}, err
+				}
+				for _, output := range service.output {
+					if err := onAudio(output); err != nil {
+						return VoiceTurnResult{}, err
+					}
+				}
+				return service.result, service.err
+			}
+			copied := append([]byte(nil), chunk...)
+			service.mu.Lock()
+			service.audio = append(service.audio, copied)
+			service.mu.Unlock()
 		}
 	}
 }
@@ -648,6 +698,104 @@ func TestVoiceLiveRoutesExplicitNativeAudioToNativeService(t *testing.T) {
 	native.mu.Unlock()
 	if legacyCalls != 0 || nativeCalls != 1 || !nativeInput.NativeAudio {
 		t.Fatalf("legacy calls=%d native calls=%d input=%+v", legacyCalls, nativeCalls, nativeInput)
+	}
+}
+
+func TestVoiceLiveCoachControlPrecedesNativeAudioAndCompletesNormally(t *testing.T) {
+	t.Parallel()
+	legacy := &liveTestVoiceService{}
+	native := &liveControlTestService{liveTestVoiceService: liveTestVoiceService{
+		output: [][]byte{{4, 0, 5, 0}},
+		result: VoiceTurnResult{
+			StateToken:       "signed-native-coach-state",
+			DetectedDomain:   "daily",
+			AssistanceTarget: "respondent",
+			RespondentStage:  "awaiting_answer",
+			CoachPhase:       "awaiting_answer",
+			CoachAction:      "elicit",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "native-respondent-coach",
+			Caption:          "まず、一番伝えたいことは何ですか？",
+		},
+	}}
+	server := newVoiceLiveControlledTestServer(
+		t,
+		legacy,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		guard.NewMemoryVoiceLiveLeaseManager(),
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		nil,
+		native,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type: "commit", Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+
+	messageType, payload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("first response type=%v, want coach text", messageType)
+	}
+	var coach map[string]any
+	if err := json.Unmarshal(payload, &coach); err != nil {
+		t.Fatal(err)
+	}
+	if len(coach) != 3 || coach["type"] != "coach" ||
+		coach["version"] != float64(voiceLiveVersion) ||
+		coach["active"] != true {
+		t.Fatalf("coach=%#v", coach)
+	}
+
+	messageType, payload, err = conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageBinary ||
+		!bytes.Equal(payload, []byte{4, 0, 5, 0}) {
+		t.Fatalf("audio type=%v payload=%v", messageType, payload)
+	}
+	final := readVoiceLiveJSON(t, ctx, conn)
+	if final["type"] != "final" {
+		t.Fatalf("final=%#v", final)
+	}
+	_, _, err = conn.Read(ctx)
+	if websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+		t.Fatalf("close status=%v err=%v", websocket.CloseStatus(err), err)
+	}
+
+	native.mu.Lock()
+	controlCalls := native.controlCalls
+	nativeCalls := native.processLiveCalls
+	native.mu.Unlock()
+	if controlCalls != 1 || nativeCalls != 1 {
+		t.Fatalf("control calls=%d native calls=%d", controlCalls, nativeCalls)
 	}
 }
 

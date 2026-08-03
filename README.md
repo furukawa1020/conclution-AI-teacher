@@ -24,7 +24,7 @@ Rust / Dioxus / Wasm UI
             └─ WebSocket、HTTPS stream、またはPOST /api/v1/voice/turns
                  └─ Cloud Run / Go
                   ├─ 標準live・PDFなし: raw PCM ──→ Vertex AI Native Audio（us-central1）──→ PCM + caption
-                  └─ 厳格 / PDF / 回答支援切替 / 接続fallback
+                  └─ 厳格 / PDF / 回答支援の継続turn / 接続fallback
                        ├─ Cloud Speech-to-Text V2（asia-northeast1）
                        ├─ 厳格モード: Cloud Run内の決定論的検査 + Sensitive Data Protection（asia-northeast1）
                        ├─ 文字列 ──→ Vertex AI（global）: KOTAE Reflex + LAC
@@ -32,15 +32,15 @@ Rust / Dioxus / Wasm UI
                        └─ Cloud Text-to-Speech（asia-northeast1）
 ```
 
-マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。最後の声から700 ms無音になった時点で、内容を理解したとは主張しない「ここまで届いています」を端末上に表示し、発話再開時は即座に消します。標準liveの短い明瞭な発話はNative Audioで段階的なSTT・推論・TTS待ちを避け、1秒で話し始めることを目標にしますが、回線とmanaged modelを含む絶対1秒保証ではありません。
+マイクは利用者が明示的に開始したセッション中だけ使います。端末側VADが一つの発話を区切り、認証済みのWebSocketを優先し、使えない時だけ認証済みHTTPSへ退避します。低遅延streamとWebSocketは固定したCloud Run URLへ直接CORS/TLSで接続し、同じ仮名アカウントのlive接続はFirestoreの短命leaseで同時に1本へ制限します。長い独話はクライアント最大3分30秒、サーバー最大4分で安全に区切り、Cloud Runの420秒timeoutより内側で終了します。最後の声から700 ms無音になった時点で、内容を理解したとは主張しない「ここまで届いています」を端末上に表示し、発話再開時は即座に消します。標準liveの短い明瞭な発話はNative Audioで段階的なSTT・推論・TTS待ちを避けます。通常会話と初回回答支援は、発話commitから最初の音声frameまで1,000 ms以内を同じ運用SLOとして経路別に計測します。回線とmanaged modelを含む絶対上限ではありませんが、初回回答支援だけ構造的に数秒遅くなる再送経路は使いません。
 
 標準liveでPDFを添付しないturnは、raw audioをCloud Runから`us-central1`のVertex AI Native Audioへstreamし、音声とcaptionを受け取ります。GA endpointは一度のsetupで応答modalityを一つだけ受け付けるため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionの確定前には生成音声を解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけ利用者へ送ります。このscreenはregional DLPでも、Vertex AIへ送信する前の原音検査でもありません。
 
-本人が相手から聞かれた質問について回答支援を明示的に頼んだ場合、初回turnは通常どおりNative Audioで入力音声を処理した後、Nativeの応答音声を一frameも利用者へ送らず、同じ端末captureを東京リージョンSTT、`global`の文字列Vertex AI、LAC、Respondent Coach、東京リージョンTTSの段階経路へ再送することがあります。この切替turnは二つの音声処理経路を通り得るため、通常のNative turnより遅くなる場合があり、1秒開始を保証しません。以後、回答が保留中の間はサーバーが認証した状態とクライアントの明示的な経路判定の両方で段階経路を維持し、`complete`または`release`後の次turnからNative Audioへ戻ります。画面の「聞かれたことへの答えが届きました」は今回のturnだけの受領表示であり、Aを先に言えたこと、能力向上、他場面への転移を証明する表示ではありません。
+本人が相手から聞かれた質問について回答支援を明示的に頼んだ場合、初回turnはNative Audioの最終入力captionをCloud Runで決定論的に検査します。明示支援なら、同じ原音をSTTへ送り直さず、回答を代作しないよう固定promptで制約したNative音声を直ちに解放します。同時に、その一度だけ得たcaptionを`global`の文字列Vertex AI、LAC、Respondent Coachへ渡し、次turnを守る署名済みの有限stateとcoach metadataを作ります。状態生成はNative音声の開始を待たせません。以後、回答が保留中の間はサーバーが認証した状態とクライアントの明示的な経路判定の両方で段階経路を維持し、`complete`または`release`後の次turnからNative Audioへ戻ります。画面の「聞かれたことへの答えが届きました」は今回のturnだけの受領表示であり、Aを先に言えたこと、能力向上、他場面への転移を証明する表示ではありません。
 
-厳格モード、PDF turn、回答支援中、Native Audioを使えない接続fallbackは段階的な経路を使います。厳格モードは別のrequest型として束縛し、文字起こしと応答文の両方がCloud Run内の決定論的検査とregional DLPで`clear`になった時だけ後段へ進め、PDF、外部検索、cross-turn stateを許可しません。標準モードの回答支援切替に厳格モードと同じregional DLP保証はありません。どちらもE2EEでも完全なPII除去でもありません。
+厳格モード、PDF turn、回答支援の保留中に続くturn、Native Audioを使えない接続fallbackは段階的な経路を使います。厳格モードは別のrequest型として束縛し、文字起こしと応答文の両方がCloud Run内の決定論的検査とregional DLPで`clear`になった時だけ後段へ進め、PDF、外部検索、cross-turn stateを許可しません。標準モードの初回回答支援に厳格モードと同じregional DLP保証はありません。どちらもE2EEでも完全なPII除去でもありません。
 
-原音、文字起こし、Native Audioのcaption、モデル応答、PDF本文、研究query・候補はKOTAEのFirestore、Cloud Storage、アプリログへ保存しません。これはクラウド事業者全体の絶対的なゼロ保持保証ではありません。回答支援への初回切替では、同じ発話の原音が`us-central1`のNative Audio入力処理後に`asia-northeast1`のSTTへ再送され得ます。Native Audio turnが返す状態tokenは発話本文を含まず、段階的な標準経路の会話状態も自由文要約を避け、短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返します。ただし、後者には未検出の機微情報が残る可能性があり、Cloud Runは復号できます。厳格モードでは会話状態自体を返しません。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
+原音、文字起こし、Native Audioのcaption、モデル応答、PDF本文、研究query・候補はKOTAEのFirestore、Cloud Storage、アプリログへ保存しません。これはクラウド事業者全体の絶対的なゼロ保持保証ではありません。初回回答支援の原音は`us-central1`のNative Audioだけで処理し、東京リージョンSTTへ再送しません。ただし、Native Audioが作った入力captionは署名済みcoach stateを作るため`global`の文字列Vertex AIへ渡ります。Native Audio turnが返す状態tokenは発話本文を含まず、段階的な標準経路の会話状態も自由文要約を避け、短い意味nodeと制御メタデータだけをAES-256-GCMで暗号化してブラウザメモリへ返します。ただし、後者には未検出の機微情報が残る可能性があり、Cloud Runは復号できます。厳格モードでは会話状態自体を返しません。正確な境界は [音声セキュリティ設計](docs/audio-security.md) を参照してください。
 
 ## 構成
 
@@ -86,7 +86,7 @@ PDFの課題との対応と未解決点は [「Aと聞かれてAと答えられ�
 - `turnMode`を各turnで明示し、UID単位とFirebase App単位のquotaを本文デコード前に消費する
 - サービスアカウントJSON鍵を作らず、Cloud Runの専用サービスIDを使う
 - 原音、文字起こし、モデル応答、PDF本文、token、秘密鍵をKOTAEのアプリログへ出さない。Google Cloud全体の絶対的なゼロ保持とは表現しない
-- 厳格 / PDF / 回答支援切替 / Native Audioを使えないfallbackのSTT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する。回答支援の初回切替では、その前に同じ発話が`us-central1`のNative Audio入力処理を通り得る
+- 厳格 / PDF / 回答支援の継続turn / Native Audioを使えないfallbackのSTT / TTSは`asia-northeast1`のリージョナルエンドポイントへ固定する。初回回答支援の原音は`us-central1`のNative Audioだけへ送り、確定captionだけを`global`の文字列推論へ渡す
 - 厳格モードはSTT文字列と応答文のCloud Run内決定論検査 + regional DLP検査が`clear`の時だけ後段へ進め、失敗時は停止する。標準モードに同じ保証があるとは表現しない
 - 標準liveのVertex AI Native Audioは`us-central1`、文字列推論のVertex AIは`global`であり、raw audio、評価APIで置換した文字列、厳格音声で検査済みの文字列や応答が日本リージョン内に限定されるとは説明しない
 - 標準モードのPDFは利用者が選んだ次の一turnだけVertex AIへ渡し、応答後に参照を解放する。厳格モードでは選択・読込・送信を止め、APIでも拒否する

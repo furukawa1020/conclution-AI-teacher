@@ -281,6 +281,7 @@ func main() {
 			nativeService, nativeErr := nativeflow.New(
 				nativeOpener,
 				statePreparer,
+				conversationAgent,
 			)
 			if nativeErr != nil {
 				logger.Error("initialize native audio flow", "error", nativeErr)

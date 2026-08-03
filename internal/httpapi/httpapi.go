@@ -172,6 +172,24 @@ type VoiceTurnLiveEndpointService interface {
 	) (VoiceTurnResult, error)
 }
 
+// VoiceTurnLiveControlService optionally publishes server-authoritative
+// control state before response audio. The callback is synchronous: a service
+// must not release any audio for the announced state unless the transport has
+// accepted the control frame. Implementations must invoke onCoachActive at
+// most once per turn, only after deterministic explicit opt-in is accepted,
+// and while the corresponding signed coach plan is still pending.
+type VoiceTurnLiveControlService interface {
+	ProcessLiveWithControl(
+		ctx context.Context,
+		uid string,
+		input VoiceTurnInput,
+		audio <-chan []byte,
+		onAudio func([]byte) error,
+		onEndpoint func(),
+		onCoachActive func() error,
+	) (VoiceTurnResult, error)
+}
+
 type VoiceOptions struct {
 	Service              VoiceTurnService
 	NativeLiveService    VoiceTurnLiveService

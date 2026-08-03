@@ -706,6 +706,7 @@ const LIVE_SERVER_ERROR_CODES = Object.freeze([
 
 export function shouldReplayCommittedNativeTurn({
   audioEventCount,
+  coachActivated,
   code,
   committed,
   interrupted,
@@ -714,6 +715,7 @@ export function shouldReplayCommittedNativeTurn({
   if (
     !Number.isSafeInteger(audioEventCount) ||
     audioEventCount < 0 ||
+    typeof coachActivated !== "boolean" ||
     typeof code !== "string" ||
     typeof committed !== "boolean" ||
     typeof interrupted !== "boolean" ||
@@ -726,6 +728,7 @@ export function shouldReplayCommittedNativeTurn({
     nativeAudio &&
     committed &&
     !interrupted &&
+    !coachActivated &&
     audioEventCount === 0
   );
 }
@@ -735,6 +738,7 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
     throw new TypeError("validateFinalResult must be a function");
   }
   let audioEventCount = 0;
+  let coachActivated = false;
   let endpointReceived = false;
   let state = "awaiting-ready";
   let totalAudioBytes = 0;
@@ -792,6 +796,23 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
       }
       endpointReceived = true;
       return Object.freeze({ type: "endpoint", version: 1 });
+    }
+    if (state === "committed" && value.type === "coach") {
+      if (
+        coachActivated ||
+        audioEventCount !== 0 ||
+        !hasExactKeys(value, ["active", "type", "version"]) ||
+        value.active !== true ||
+        value.version !== 1
+      ) {
+        invalid();
+      }
+      coachActivated = true;
+      return Object.freeze({
+        active: true,
+        type: "coach",
+        version: 1,
+      });
     }
     if (
       state !== "committed" ||
@@ -856,6 +877,7 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
     snapshot() {
       return Object.freeze({
         audioEventCount,
+        coachActivated,
         endpointReceived,
         state,
         totalAudioBytes,

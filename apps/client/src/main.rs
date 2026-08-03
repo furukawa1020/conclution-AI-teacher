@@ -3174,7 +3174,8 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSWER_SUPPORT_COPY, CloudState, CoachAction, CoachPhase, CoachState,
+        ANSWER_SUPPORT_COPY, COACH_CHECKPOINT_MAX_CHARS, CloudState, CoachAction, CoachPhase,
+        CoachState,
         NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
         PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
@@ -3184,8 +3185,9 @@ mod tests {
         TALK_ONLY_COPY, VoiceReceipt, VoiceState, VoiceTurnMode, cloud_state_for_display,
         passkey_focus_target, recoverable_wait_turn_code, requires_passkey_choice,
         requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
-        turn_mode_for_gesture_epoch, valid_streamed_audio_metadata, valid_voice_pause_metadata,
-        valid_voice_privacy_metadata, valid_voice_receipt_metadata,
+        turn_mode_for_gesture_epoch, valid_coach_checkpoint_metadata,
+        valid_streamed_audio_metadata, valid_voice_pause_metadata, valid_voice_privacy_metadata,
+        valid_voice_receipt_metadata,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -3300,10 +3302,13 @@ mod tests {
     fn standard_privacy_copy_discloses_the_direct_native_answer_support_switch() {
         for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
             assert!(copy.contains("人に聞かれた質問への回答支援を明示した初回"));
-            assert!(copy.contains("確定した入力字幕"));
-            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coach"));
-            assert!(copy.contains("並行利用"));
-            assert!(copy.contains("署名済み状態"));
+            assert!(copy.contains("Cloud Run内の決定論的規則"));
+            assert!(copy.contains("モデル"));
+            assert!(copy.contains("汎用の署名済みcheckpoint"));
+            assert!(copy.contains("具体的な質問・答え・文字起こし"));
+            assert!(copy.contains("初回の入力字幕"));
+            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coachへ"));
+            assert!(copy.contains("送りません"));
             assert!(copy.contains("回答保留中の後続ターン"));
         }
         assert_eq!(
@@ -3316,6 +3321,36 @@ mod tests {
         );
         assert!(STANDARD_MODE_ROUTE_COPY.contains("PDF・接続不能時"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("保存しません"));
+    }
+
+    #[test]
+    fn coach_checkpoint_metadata_is_exact_bounded_and_content_free() {
+        assert!(valid_coach_checkpoint_metadata("signed-checkpoint", 1.0, 2));
+        for invalid in [
+            "",
+            " signed-checkpoint",
+            "signed-checkpoint ",
+            "signed\ncheckpoint",
+            "signed\u{007f}checkpoint",
+            "signed\u{0085}checkpoint",
+        ] {
+            assert!(!valid_coach_checkpoint_metadata(invalid, 1.0, 2));
+        }
+        assert!(!valid_coach_checkpoint_metadata(
+            &"x".repeat(COACH_CHECKPOINT_MAX_CHARS + 1),
+            1.0,
+            2
+        ));
+        assert!(!valid_coach_checkpoint_metadata(
+            "signed-checkpoint",
+            2.0,
+            2
+        ));
+        assert!(!valid_coach_checkpoint_metadata(
+            "signed-checkpoint",
+            1.0,
+            3
+        ));
     }
 
     #[test]

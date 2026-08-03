@@ -310,3 +310,50 @@ func TestPreparedNativeCoachStateExchangesScopeForBoundRestatement(t *testing.T)
 		t.Fatalf("Native scope returned after first substantive answer: %+v", secondState.PendingAnswer)
 	}
 }
+
+func TestPreparedNativeCoachStateSurvivesOnlyAnAwaitingAnswerFiller(t *testing.T) {
+	const (
+		uid     = "native-coach-filler-user"
+		request = "上司に目的を聞かれました。答え方を一問だけ手伝ってください"
+	)
+	plan := respondentAwaitingPlan()
+	plan.AnswerContract = respondentDraftContract(
+		answercontract.OperatorOpen,
+		pendingSubjectForOperator(answercontract.OperatorOpen),
+		[]answercontract.RequiredSlot{answercontract.SlotPosition},
+		"",
+		"",
+	)
+	fake := &fakeGenerator{generations: []fakeGeneration{{body: encodePlan(t, plan)}}}
+	agent := newTestAgent(t, fake)
+	token, err := agent.PrepareNativeCoachState(uid, "", request)
+	if err != nil {
+		t.Fatalf("prepare Native coach state: %v", err)
+	}
+	initial, err := agent.codec.open(uid, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialTag := initial.PendingAnswer.NativeCoachScopeTag
+
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "えっと……うーん。",
+		StateToken:    token,
+	})
+	if err != nil {
+		t.Fatalf("process filler: %v", err)
+	}
+	if result.CoachPhase != "awaiting_answer" || result.CoachAction != "elicit" {
+		t.Fatalf("filler changed Native awaiting-answer state: %+v", result)
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !next.PendingAnswer.Active ||
+		next.PendingAnswer.Phase != respondent.CoachPhaseAwaitingAnswer ||
+		next.PendingAnswer.NativeCoachScopeTag != initialTag || initialTag == "" {
+		t.Fatalf("filler did not preserve the exact Native scope: %+v", next.PendingAnswer)
+	}
+}

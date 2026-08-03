@@ -100,6 +100,7 @@ type voiceLiveStartFrame struct {
 	Version                 int           `json:"version"`
 	IDToken                 string        `json:"idToken"`
 	AppCheckToken           string        `json:"appCheckToken"`
+	NativeCoachControl      bool          `json:"nativeCoachControl,omitempty"`
 	SessionState            string        `json:"sessionState"`
 	TurnMode                VoiceTurnMode `json:"turnMode"`
 	SampleRateHz            int           `json:"sampleRateHz"`
@@ -515,7 +516,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		var result VoiceTurnResult
 		var processErr error
 		if controlService, supportsControl :=
-			selectedLiveService.(VoiceTurnLiveControlService); supportsControl {
+			selectedLiveService.(VoiceTurnLiveControlService); input.NativeAudio &&
+			start.NativeCoachControl && supportsControl {
 			result, processErr = controlService.ProcessLiveWithControl(
 				liveCtx,
 				principal.UID,
@@ -1004,7 +1006,8 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		!utf8.ValidString(start.SessionState) ||
 		strings.TrimSpace(start.SessionState) != start.SessionState ||
 		(start.StrictCloudMinimization && start.SessionState != "") ||
-		(start.StrictCloudMinimization && start.NativeAudio) {
+		(start.StrictCloudMinimization && start.NativeAudio) ||
+		(start.NativeCoachControl && !start.NativeAudio) {
 		return false
 	}
 	switch start.TurnMode {

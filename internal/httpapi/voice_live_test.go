@@ -372,7 +372,7 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 	_ func(),
-	onCoachActive func() error,
+	onCoachActive func(sessionState string) error,
 ) (VoiceTurnResult, error) {
 	if uid != "user-123" {
 		return VoiceTurnResult{}, errors.New("unexpected uid")
@@ -391,7 +391,7 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 				service.mu.Lock()
 				service.controlCalls++
 				service.mu.Unlock()
-				if err := onCoachActive(); err != nil {
+				if err := onCoachActive(service.result.StateToken); err != nil {
 					return VoiceTurnResult{}, err
 				}
 				for _, output := range service.output {
@@ -767,9 +767,10 @@ func TestVoiceLiveCoachControlPrecedesNativeAudioAndCompletesNormally(t *testing
 	if err := json.Unmarshal(payload, &coach); err != nil {
 		t.Fatal(err)
 	}
-	if len(coach) != 3 || coach["type"] != "coach" ||
+	if len(coach) != 4 || coach["type"] != "coach" ||
 		coach["version"] != float64(voiceLiveVersion) ||
-		coach["active"] != true {
+		coach["active"] != true ||
+		coach["sessionState"] != "signed-native-coach-state" {
 		t.Fatalf("coach=%#v", coach)
 	}
 
@@ -784,6 +785,10 @@ func TestVoiceLiveCoachControlPrecedesNativeAudioAndCompletesNormally(t *testing
 	final := readVoiceLiveJSON(t, ctx, conn)
 	if final["type"] != "final" {
 		t.Fatalf("final=%#v", final)
+	}
+	finalResult, ok := final["result"].(map[string]any)
+	if !ok || finalResult["sessionState"] != coach["sessionState"] {
+		t.Fatalf("coach=%#v final=%#v", coach, final)
 	}
 	_, _, err = conn.Read(ctx)
 	if websocket.CloseStatus(err) != websocket.StatusNormalClosure {

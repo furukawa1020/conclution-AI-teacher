@@ -16,66 +16,20 @@ type fakePreparer struct {
 	token          string
 	requiresStaged bool
 	err            error
-}
-
-type fakeCoachPlanner struct {
-	mu     sync.Mutex
-	result conversation.VoiceTurnResult
-	err    error
-	calls  int
-	turn   conversation.VoiceTurn
-}
-
-func (f *fakeCoachPlanner) Process(
-	_ context.Context,
-	_ string,
-	turn conversation.VoiceTurn,
-) (conversation.VoiceTurnResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls++
-	f.turn = turn
-	return f.result, f.err
-}
-
-func validCoachPlan(token string) conversation.VoiceTurnResult {
-	return conversation.VoiceTurnResult{
-		SchemaVersion:      conversation.SchemaVersion,
-		Domain:             "daily",
-		AssistanceTarget:   "respondent",
-		RespondentStage:    "awaiting_answer",
-		CoachPhase:         "awaiting_answer",
-		CoachAction:        "elicit",
-		ResearchStatus:     "none",
-		ResearchRecords:    []conversation.ResearchRecord{},
-		SpokenReply:        "まず、あなた自身は何を一番伝えたいですか？",
-		InterventionPolicy: "clarify",
-		StateToken:         token,
-	}
-}
-
-type blockingCoachPlanner struct {
-	started chan struct{}
-	release chan struct{}
-	result  conversation.VoiceTurnResult
-}
-
-func (p *blockingCoachPlanner) Process(
-	ctx context.Context,
-	_ string,
-	_ conversation.VoiceTurn,
-) (conversation.VoiceTurnResult, error) {
-	close(p.started)
-	select {
-	case <-p.release:
-		return p.result, nil
-	case <-ctx.Done():
-		return conversation.VoiceTurnResult{}, ctx.Err()
-	}
+	coachToken     string
+	coachErr       error
 }
 
 func (f fakePreparer) PrepareNativeState(string, string) (string, bool, error) {
 	return f.token, f.requiresStaged, f.err
+}
+
+func (f fakePreparer) PrepareNativeCoachState(
+	string,
+	string,
+	string,
+) (string, error) {
+	return f.coachToken, f.coachErr
 }
 
 type fakeOpener struct {
@@ -199,7 +153,6 @@ func TestNativeFlowRejectsInvalidStateBeforeOpeningProvider(t *testing.T) {
 	service, err := New(
 		opener,
 		fakePreparer{err: conversation.ErrInvalidStateToken},
-		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +194,6 @@ func TestNativeFlowReleasesMeaningfulAudioOnlyAfterFinalInputGate(t *testing.T) 
 	service, err := New(
 		opener,
 		fakePreparer{token: "opaque-state"},
-		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +238,6 @@ func TestNativeFlowBlocksHighRiskCaptionBeforeAnyAudio(t *testing.T) {
 	service, err := New(
 		&fakeOpener{session: session},
 		fakePreparer{token: "unused"},
-		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +262,6 @@ func TestNativeFlowKeepsSignedPendingCoachOutOfNativeProvider(t *testing.T) {
 	service, err := New(
 		opener,
 		fakePreparer{token: "unchanged-state", requiresStaged: true},
-		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -390,13 +340,12 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestDirectlyThroughNativeAudi
 				},
 				nativevoice.Event{Kind: nativevoice.EventTurnComplete},
 			)
-			planner := &fakeCoachPlanner{
-				result: validCoachPlan("signed-coach-state"),
-			}
 			service, err := New(
 				&fakeOpener{session: session},
-				fakePreparer{token: "advanced-native-state"},
-				planner,
+				fakePreparer{
+					token:      "advanced-native-state",
+					coachToken: "generic-signed-coach-state",
+				},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -416,7 +365,10 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestDirectlyThroughNativeAudi
 					return nil
 				},
 				nil,
-				func() error {
+				func(sessionState string) error {
+					if sessionState != "generic-signed-coach-state" {
+						t.Errorf("control state = %q", sessionState)
+					}
 					order = append(order, "coach")
 					return nil
 				},
@@ -429,26 +381,21 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestDirectlyThroughNativeAudi
 				t.Fatalf("order=%v commits=%d", order, session.commits)
 			}
 			if result.Route != routeNativeRespondentCoach ||
-				result.StateToken != "signed-coach-state" ||
+				result.StateToken != "generic-signed-coach-state" ||
 				result.AssistanceTarget != "respondent" ||
 				result.RespondentStage != "awaiting_answer" ||
 				result.CoachPhase != "awaiting_answer" ||
-				result.CoachAction != "elicit" {
+				result.CoachAction != "elicit" ||
+				result.LiveTimings.ConversationMS < 0 ||
+				result.LiveTimings.TTSFirstChunkMS < 0 ||
+				result.LiveTimings.FinalToFirstAudioMS < 0 {
 				t.Fatalf("result=%+v", result)
-			}
-			planner.mu.Lock()
-			plannedTurn := planner.turn
-			planner.mu.Unlock()
-			if plannedTurn.StateToken != "original-state" ||
-				plannedTurn.Utterance != value ||
-				!plannedTurn.ResearchDisabled {
-				t.Fatalf("planned turn=%+v", plannedTurn)
 			}
 		})
 	}
 }
 
-func TestNativeRespondentCoachFirstAudioDoesNotWaitForPlanner(t *testing.T) {
+func TestNativeRespondentCoachCompletesWithoutConversationPlanner(t *testing.T) {
 	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
 	session := newScriptedSession(
 		nativevoice.Event{
@@ -468,15 +415,12 @@ func TestNativeRespondentCoachFirstAudioDoesNotWaitForPlanner(t *testing.T) {
 		},
 		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
 	)
-	planner := &blockingCoachPlanner{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-		result:  validCoachPlan("signed-coach-state"),
-	}
 	service, err := New(
 		&fakeOpener{session: session},
-		fakePreparer{token: "advanced-native-state"},
-		planner,
+		fakePreparer{
+			token:      "advanced-native-state",
+			coachToken: "generic-signed-coach-state",
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -505,7 +449,10 @@ func TestNativeRespondentCoachFirstAudioDoesNotWaitForPlanner(t *testing.T) {
 				return nil
 			},
 			nil,
-			func() error {
+			func(sessionState string) error {
+				if sessionState != "generic-signed-coach-state" {
+					t.Errorf("control state = %q", sessionState)
+				}
 				close(controlSeen)
 				return nil
 			},
@@ -517,33 +464,23 @@ func TestNativeRespondentCoachFirstAudioDoesNotWaitForPlanner(t *testing.T) {
 	}()
 
 	select {
-	case <-planner.started:
-	case <-time.After(time.Second):
-		t.Fatal("coach planner did not start")
-	}
-	select {
 	case <-audioSeen:
 	case <-time.After(time.Second):
-		t.Fatal("first Native audio waited for the blocked coach planner")
+		t.Fatal("first Native audio did not follow the local signed-state gate")
 	}
-	select {
-	case completed := <-outcome:
-		t.Fatalf("turn completed before planner: %+v, %v", completed.result, completed.err)
-	default:
-	}
-	close(planner.release)
 	select {
 	case completed := <-outcome:
 		if completed.err != nil ||
-			completed.result.Route != routeNativeRespondentCoach {
+			completed.result.Route != routeNativeRespondentCoach ||
+			completed.result.StateToken != "generic-signed-coach-state" {
 			t.Fatalf("completed=%+v err=%v", completed.result, completed.err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("turn did not publish planner metadata")
+		t.Fatal("turn waited for an external conversation plan")
 	}
 }
 
-func TestNativeRespondentCoachInvalidPlannerMetadataShrinksToNativeCompanion(t *testing.T) {
+func TestNativeRespondentCoachReturnsGenericSignedAuthority(t *testing.T) {
 	const utterance = "上司に目的を聞かれた。答え方を一問だけ手伝って"
 	session := newScriptedSession(
 		nativevoice.Event{
@@ -563,11 +500,12 @@ func TestNativeRespondentCoachInvalidPlannerMetadataShrinksToNativeCompanion(t *
 		},
 		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
 	)
-	invalid := validCoachPlan("")
 	service, err := New(
 		&fakeOpener{session: session},
-		fakePreparer{token: "advanced-native-state"},
-		&fakeCoachPlanner{result: invalid},
+		fakePreparer{
+			token:      "advanced-native-state",
+			coachToken: "generic-signed-coach-state",
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -582,16 +520,22 @@ func TestNativeRespondentCoachInvalidPlannerMetadataShrinksToNativeCompanion(t *
 		oneFrame(),
 		func([]byte) error { return nil },
 		nil,
-		func() error { controls++; return nil },
+		func(sessionState string) error {
+			controls++
+			if sessionState != "generic-signed-coach-state" {
+				t.Errorf("control state = %q", sessionState)
+			}
+			return nil
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if controls != 1 || result.Route != nativevoice.RouteNativeAudio ||
-		result.StateToken != "advanced-native-state" ||
-		result.AssistanceTarget != "assistant" ||
-		result.RespondentStage != "none" ||
-		result.CoachPhase != "none" || result.CoachAction != "none" {
+	if controls != 1 || result.Route != routeNativeRespondentCoach ||
+		result.StateToken != "generic-signed-coach-state" ||
+		result.AssistanceTarget != "respondent" ||
+		result.RespondentStage != "awaiting_answer" ||
+		result.CoachPhase != "awaiting_answer" || result.CoachAction != "elicit" {
 		t.Fatalf("controls=%d result=%+v", controls, result)
 	}
 }
@@ -605,8 +549,10 @@ func TestNativeRespondentCoachControlWriteFailureReleasesNoAudio(t *testing.T) {
 	})
 	service, err := New(
 		&fakeOpener{session: session},
-		fakePreparer{token: "advanced-native-state"},
-		&fakeCoachPlanner{result: validCoachPlan("signed-coach-state")},
+		fakePreparer{
+			token:      "advanced-native-state",
+			coachToken: "generic-signed-coach-state",
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -621,13 +567,56 @@ func TestNativeRespondentCoachControlWriteFailureReleasesNoAudio(t *testing.T) {
 		oneFrame(),
 		func([]byte) error { delivered = true; return nil },
 		nil,
-		func() error { return errors.New("control write failed") },
+		func(string) error { return errors.New("control write failed") },
 	)
 	if err == nil || delivered || session.commits != 0 || session.discards == 0 {
 		t.Fatalf(
 			"err=%v delivered=%v commits=%d discards=%d",
 			err,
 			delivered,
+			session.commits,
+			session.discards,
+		)
+	}
+}
+
+func TestNativeRespondentCoachStatePreparationFailureReleasesNothing(t *testing.T) {
+	const utterance = "My manager asked why this change was needed. How should I answer?"
+	session := newScriptedSession(nativevoice.Event{
+		Kind:         nativevoice.EventInputCaption,
+		CaptionUTF8:  []byte(utterance),
+		CaptionFinal: true,
+	})
+	service, err := New(
+		&fakeOpener{session: session},
+		fakePreparer{
+			token:    "advanced-native-state",
+			coachErr: errors.New("state issuance unavailable"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	delivered := false
+	controls := 0
+	_, err = service.ProcessLiveWithControl(
+		context.Background(),
+		"uid-coach-state-failed",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { delivered = true; return nil },
+		nil,
+		func(string) error { controls++; return nil },
+	)
+	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) || delivered ||
+		controls != 0 || session.commits != 0 || session.discards == 0 {
+		t.Fatalf(
+			"err=%v delivered=%v controls=%d commits=%d discards=%d",
+			err,
+			delivered,
+			controls,
 			session.commits,
 			session.discards,
 		)
@@ -682,7 +671,6 @@ func TestNativeFlowRejectsProviderAudioBeforeFinalCaption(t *testing.T) {
 	service, err := New(
 		&fakeOpener{session: session},
 		fakePreparer{token: "unused"},
-		&fakeCoachPlanner{},
 	)
 	if err != nil {
 		t.Fatal(err)

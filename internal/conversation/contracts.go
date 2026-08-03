@@ -159,10 +159,13 @@ type ThoughtStateDelta struct {
 // reply, or model-written prompt. RestatementTag is retained as a compatibility
 // reader for the preceding rollout. QuestionContinuityTag and ContinuityTag
 // are domain-separated, truncated HMACs of a screened question subject and the
-// person's exact target answer. None of these server-only proofs is included
-// in a model prompt. ExpansionOptIn records only the person's deterministic,
-// question-scoped request for one bounded follow-up; it carries no question or
-// answer text and is never model-writable.
+// person's exact target answer. NativeCoachScopeTag is a separately
+// domain-separated HMAC proving only that this user explicitly opened one
+// generic Native coach scope; it is never interpreted as question or answer
+// continuity. None of these server-only proofs is included in a model prompt.
+// ExpansionOptIn records only the person's deterministic, question-scoped
+// request for one bounded follow-up; it carries no question or answer text and
+// is never model-writable.
 type PendingAnswerFrame struct {
 	Active                bool                          `json:"active"`
 	Operator              answercontract.Operator       `json:"operator,omitempty"`
@@ -176,6 +179,7 @@ type PendingAnswerFrame struct {
 	RestatementTag        string                        `json:"restatement_tag,omitempty"`
 	QuestionContinuityTag string                        `json:"question_continuity_tag,omitempty"`
 	ContinuityTag         string                        `json:"continuity_tag,omitempty"`
+	NativeCoachScopeTag   string                        `json:"native_coach_scope_tag,omitempty"`
 }
 
 func (turn VoiceTurn) Validate() error {
@@ -292,6 +296,7 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 	_, expansionOK := answercontract.TargetSlot(frame.ExpansionOperator)
 	continuityProtected := frame.QuestionContinuityTag != "" ||
 		frame.ContinuityTag != ""
+	nativeCoachScope := frame.NativeCoachScopeTag != ""
 	if continuityProtected {
 		// Once continuity proofs exist, cross-turn identity is carried only by
 		// those non-reversible values. Never renew model-written subject prose.
@@ -300,6 +305,8 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		} else {
 			frame.Subject = pendingSubjectForOperator(frame.Operator)
 		}
+	} else if nativeCoachScope {
+		frame.Subject = pendingSubjectForOperator(answercontract.OperatorOpen)
 	} else {
 		// Compatibility readers preserve the bounded legacy label so rolling
 		// traffic does not mutate otherwise authenticated v1 state.
@@ -318,6 +325,17 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		(frame.ExpansionOptIn &&
 			(frame.AssistantFollowUp || frame.QuestionContinuityTag == "")) ||
 		(frame.AssistantFollowUp && frame.Phase == respondent.CoachPhaseExpanding) ||
+		(nativeCoachScope &&
+			(frame.Operator != answercontract.OperatorOpen ||
+				frame.ExpansionOperator != answercontract.Operator(
+					respondent.ExpansionOperator(respondent.Operator(answercontract.OperatorOpen)),
+				) ||
+				len(frame.RequiredSlots) != 1 ||
+				frame.RequiredSlots[0] != answercontract.SlotPosition ||
+				frame.AssistantFollowUp || frame.ExpansionOptIn ||
+				frame.RestatementTag != "" ||
+				frame.QuestionContinuityTag != "" ||
+				frame.ContinuityTag != "")) ||
 		(frame.RestatementTag != "" &&
 			(frame.Phase != respondent.CoachPhaseAwaitingRestatement ||
 				!validCoachRestatementTag(frame.RestatementTag))) ||
@@ -328,6 +346,7 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 	for _, encodedTag := range []string{
 		frame.QuestionContinuityTag,
 		frame.ContinuityTag,
+		frame.NativeCoachScopeTag,
 	} {
 		if encodedTag == "" {
 			continue

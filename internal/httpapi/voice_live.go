@@ -112,11 +112,12 @@ type voiceLiveCommitFrame struct {
 }
 
 type voiceLiveOutboundFrame struct {
-	Type    string                `json:"type"`
-	Version int                   `json:"version"`
-	Active  bool                  `json:"active,omitempty"`
-	Code    string                `json:"code,omitempty"`
-	Result  *voiceLiveFinalResult `json:"result,omitempty"`
+	Type         string                `json:"type"`
+	Version      int                   `json:"version"`
+	Active       bool                  `json:"active,omitempty"`
+	SessionState string                `json:"sessionState,omitempty"`
+	Code         string                `json:"code,omitempty"`
+	Result       *voiceLiveFinalResult `json:"result,omitempty"`
 }
 
 type voiceLiveFinalResult struct {
@@ -511,14 +512,15 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					default:
 					}
 				},
-				func() error {
+				func(sessionState string) error {
 					return writeVoiceLiveJSON(
 						liveCtx,
 						conn,
 						voiceLiveOutboundFrame{
-							Type:    "coach",
-							Version: voiceLiveVersion,
-							Active:  true,
+							Type:         "coach",
+							Version:      voiceLiveVersion,
+							Active:       true,
+							SessionState: sessionState,
 						},
 					)
 				},

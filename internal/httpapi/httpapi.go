@@ -177,7 +177,9 @@ type VoiceTurnLiveEndpointService interface {
 // must not release any audio for the announced state unless the transport has
 // accepted the control frame. Implementations must invoke onCoachActive at
 // most once per turn, only after deterministic explicit opt-in is accepted,
-// and while the corresponding signed coach plan is still pending.
+// and only after the corresponding signed coach state has been issued. The
+// callback receives that opaque state token so the transport can checkpoint it
+// before any binary response audio is released.
 type VoiceTurnLiveControlService interface {
 	ProcessLiveWithControl(
 		ctx context.Context,
@@ -186,7 +188,7 @@ type VoiceTurnLiveControlService interface {
 		audio <-chan []byte,
 		onAudio func([]byte) error,
 		onEndpoint func(),
-		onCoachActive func() error,
+		onCoachActive func(sessionState string) error,
 	) (VoiceTurnResult, error)
 }
 

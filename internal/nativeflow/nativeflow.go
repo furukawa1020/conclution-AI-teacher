@@ -21,13 +21,13 @@ import (
 )
 
 const (
-	maxCaptionRunes              = 480
-	nativeExtendedSpeechMinRunes = 160
-	routeNativeRespondentCoach   = "native-respondent-coach"
+	maxCaptionRunes            = 480
+	routeNativeRespondentCoach = "native-respondent-coach"
 )
 
-// DefaultSystemPrompt defines the fast companion lane. It intentionally has
-// no tools, exercise scoring, diagnosis, or pressure to leave home.
+// defaultCompanionSystemPrompt defines the fast companion lane. It
+// intentionally has no tools, exercise scoring, diagnosis, or pressure to
+// leave home.
 const defaultCompanionSystemPrompt = `あなたはKOTAEの日本語音声会話相手です。
 最優先は、家にいる時間が長い人や人との会話に不安がある人でも、話題や練習の準備なしに安心して話せることです。
 返答は前置きや「考えます」を挟まず、相手の発話の中心に関係する意味のある言葉からすぐ始めてください。
@@ -39,12 +39,12 @@ const defaultCompanionSystemPrompt = `あなたはKOTAEの日本語音声会話�
 
 // DefaultSystemPrompt keeps ordinary conversation low-pressure and gives the
 // Native Audio model one narrow Respondent Coach behavior. The deterministic
-// caption gate and signed conversation planner remain authoritative; this
+// caption gate and signed generic coach state remain authoritative; this
 // prompt controls only the already-gated audio wording.
 const DefaultSystemPrompt = defaultCompanionSystemPrompt + `
 
 人から聞かれた質問への答え方を本人が明示的に手伝ってほしいと頼んだ場合だけ、答えを代作したり模範回答を提示したりしないでください。
-その場合は、本人がまず伝えたいことを自分の言葉で話せるように、短く穏やかな質問を一つだけしてください。
+その場合の返答は「まず、あなた自身が一番伝えたいことは何ですか？」の一文だけにしてください。
 評価、採点、訓練という言い方はせず、質問を重ねず、本人の答えを推測しないでください。
 明示的な依頼がない通常会話では、この回答支援を始めないでください。`
 
@@ -54,18 +54,12 @@ type pooledSession struct {
 	session nativevoice.Session
 }
 
-type coachPlanOutcome struct {
-	result     conversation.VoiceTurnResult
-	err        error
-	finishedAt time.Time
-}
-
 // Service implements only the live service contract. Buffered audio, PDF,
 // strict mode, tools, and research continue through the audited legacy flow.
 type Service struct {
-	opener   nativevoice.Opener
-	preparer conversation.NativeStatePreparer
-	planner  conversation.Agent
+	opener        nativevoice.Opener
+	preparer      conversation.NativeStatePreparer
+	coachPreparer conversation.NativeCoachStatePreparer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -79,20 +73,23 @@ type Service struct {
 func New(
 	opener nativevoice.Opener,
 	preparer conversation.NativeStatePreparer,
-	planner conversation.Agent,
 ) (*Service, error) {
-	if opener == nil || preparer == nil || planner == nil {
+	if opener == nil || preparer == nil {
 		return nil, errors.New("native audio dependencies are required")
+	}
+	coachPreparer, ok := preparer.(conversation.NativeCoachStatePreparer)
+	if !ok {
+		return nil, errors.New("native coach state boundary is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
-		opener:   opener,
-		preparer: preparer,
-		planner:  planner,
-		ctx:      ctx,
-		cancel:   cancel,
-		now:      time.Now,
-		sessions: make(map[string]*pooledSession),
+		opener:        opener,
+		preparer:      preparer,
+		coachPreparer: coachPreparer,
+		ctx:           ctx,
+		cancel:        cancel,
+		now:           time.Now,
+		sessions:      make(map[string]*pooledSession),
 	}, nil
 }
 
@@ -146,7 +143,7 @@ func (s *Service) ProcessLiveWithControl(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 	onEndpoint func(),
-	onCoachActive func() error,
+	onCoachActive func(sessionState string) error,
 ) (httpapi.VoiceTurnResult, error) {
 	if onCoachActive == nil {
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
@@ -169,7 +166,7 @@ func (s *Service) processLive(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 	onEndpoint func(),
-	onCoachActive func() error,
+	onCoachActive func(sessionState string) error,
 ) (httpapi.VoiceTurnResult, error) {
 	if s == nil || ctx == nil || uid == "" || audio == nil || onAudio == nil ||
 		!input.NativeAudio || input.StrictCloudMinimization ||
@@ -218,8 +215,8 @@ func (s *Service) processLive(
 	endpointPublished := false
 	inputGatePassed := false
 	coachActive := false
-	var coachPlan <-chan coachPlanOutcome
-	var coachPlanStartedAt time.Time
+	genericCoachStateToken := ""
+	coachStateMS := int64(-1)
 	sendResultRead := false
 	spoke := false
 	turnComplete := false
@@ -270,19 +267,28 @@ func (s *Service) processLive(
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 				}
 				if requiresRespondentCoach(inputCaptionText) {
-					coachActive = true
-					coachPlanStartedAt = s.now()
-					planChannel := make(chan coachPlanOutcome, 1)
-					coachPlan = planChannel
-					go s.planRespondentCoach(
-						ctx,
-						uid,
-						input,
-						inputCaptionText,
-						planChannel,
+					coachStateStartedAt := s.now()
+					genericCoachStateToken, err =
+						s.coachPreparer.PrepareNativeCoachState(
+							uid,
+							input.StateToken,
+							inputCaptionText,
+						)
+					coachStateMS = millisecondsBetween(
+						coachStateStartedAt,
+						s.now(),
 					)
+					if err != nil || genericCoachStateToken == "" ||
+						len(genericCoachStateToken) > conversation.MaxStateTokenBytes {
+						pooled.session.DiscardOutput()
+						event.Clear()
+						clear(inputCaption)
+						clear(caption)
+						return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+					}
+					coachActive = true
 					if onCoachActive != nil {
-						if err := onCoachActive(); err != nil {
+						if err := onCoachActive(genericCoachStateToken); err != nil {
 							pooled.session.DiscardOutput()
 							event.Clear()
 							clear(inputCaption)
@@ -390,26 +396,14 @@ func (s *Service) processLive(
 	route := nativevoice.RouteNativeAudio
 	conversationMS := int64(-1)
 	if coachActive {
-		var planned coachPlanOutcome
-		select {
-		case planned = <-coachPlan:
-			conversationMS = millisecondsBetween(
-				coachPlanStartedAt,
-				planned.finishedAt,
-			)
-		case <-ctx.Done():
-			clear(caption)
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
-		}
-		if planned.err == nil && validNativeCoachPlan(planned.result) {
-			stateToken = planned.result.StateToken
-			detectedDomain = planned.result.Domain
-			assistanceTarget = planned.result.AssistanceTarget
-			respondentStage = planned.result.RespondentStage
-			coachPhase = planned.result.CoachPhase
-			coachAction = planned.result.CoachAction
-			route = routeNativeRespondentCoach
-		}
+		stateToken = genericCoachStateToken
+		detectedDomain = "daily"
+		assistanceTarget = "respondent"
+		respondentStage = "awaiting_answer"
+		coachPhase = "awaiting_answer"
+		coachAction = "elicit"
+		route = routeNativeRespondentCoach
+		conversationMS = coachStateMS
 	}
 	result := httpapi.VoiceTurnResult{
 		StateToken:       stateToken,
@@ -434,62 +428,6 @@ func (s *Service) processLive(
 	clear(inputCaption)
 	clear(caption)
 	return result, nil
-}
-
-func (s *Service) planRespondentCoach(
-	ctx context.Context,
-	uid string,
-	input httpapi.VoiceTurnInput,
-	caption string,
-	result chan<- coachPlanOutcome,
-) {
-	decision, err := s.planner.Process(ctx, uid, conversation.VoiceTurn{
-		SchemaVersion:    conversation.SchemaVersion,
-		Utterance:        caption,
-		StateToken:       input.StateToken,
-		RequestID:        input.RequestID,
-		Ambient:          input.Ambient,
-		Foreground:       input.Foreground,
-		ExtendedSpeech:   utf8.RuneCountInString(caption) >= nativeExtendedSpeechMinRunes,
-		ResearchDisabled: true,
-	})
-	result <- coachPlanOutcome{
-		result:     decision,
-		err:        err,
-		finishedAt: s.now(),
-	}
-}
-
-func validNativeCoachPlan(result conversation.VoiceTurnResult) bool {
-	if result.SchemaVersion != conversation.SchemaVersion ||
-		result.StateToken == "" ||
-		len(result.StateToken) > conversation.MaxStateTokenBytes ||
-		result.Domain == "" || len(result.Domain) > 40 ||
-		result.AssistanceTarget != "respondent" ||
-		(result.RespondentStage != "awaiting_answer" &&
-			result.RespondentStage != "restructure") ||
-		result.ResearchStatus != "none" ||
-		len(result.ResearchRecords) != 0 ||
-		result.SpokenReply == "" ||
-		result.InterventionPolicy == "safety" ||
-		result.InterventionPolicy == "paper_check" {
-		return false
-	}
-	switch result.CoachPhase {
-	case "awaiting_answer":
-		return result.CoachAction == "elicit"
-	case "awaiting_restatement":
-		return result.CoachAction == "restate"
-	case "expanding":
-		return result.CoachAction == "expand"
-	case "complete":
-		return result.CoachAction == "complete"
-	case "blocked":
-		return result.CoachAction == "retry" ||
-			result.CoachAction == "release"
-	default:
-		return false
-	}
 }
 
 func discardNativeInputUntilCommit(ctx context.Context, audio <-chan []byte) error {

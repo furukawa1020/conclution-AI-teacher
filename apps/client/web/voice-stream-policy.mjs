@@ -53,6 +53,7 @@ export const VOICE_LIVE_LIMITS = Object.freeze({
   inputFrameBytes: 640,
   inputSampleRateHz: 16_000,
   maximumQueuedInputFrames: 200,
+  maximumSessionStateCharacters: 16 * 1024,
   maximumServerTextCharacters: 64 * 1024,
   maximumSocketBufferedBytes: 16 * 1024,
   outboundChunkBytes: 640,
@@ -733,12 +734,22 @@ export function shouldReplayCommittedNativeTurn({
   );
 }
 
-export function createVoiceLiveServerProtocol(validateFinalResult) {
-  if (typeof validateFinalResult !== "function") {
+export function createVoiceLiveServerProtocol(
+  validateFinalResult,
+  expectations,
+) {
+  if (
+    typeof validateFinalResult !== "function" ||
+    !isPlainRecord(expectations) ||
+    !hasExactKeys(expectations, ["nativeAudio"]) ||
+    typeof expectations.nativeAudio !== "boolean"
+  ) {
     throw new TypeError("validateFinalResult must be a function");
   }
+  const expectedNativeAudio = expectations.nativeAudio;
   let audioEventCount = 0;
   let coachActivated = false;
+  let coachCheckpoint;
   let endpointReceived = false;
   let state = "awaiting-ready";
   let totalAudioBytes = 0;
@@ -799,17 +810,31 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
     }
     if (state === "committed" && value.type === "coach") {
       if (
+        !expectedNativeAudio ||
         coachActivated ||
         audioEventCount !== 0 ||
-        !hasExactKeys(value, ["active", "type", "version"]) ||
+        !hasExactKeys(value, [
+          "active",
+          "sessionState",
+          "type",
+          "version",
+        ]) ||
         value.active !== true ||
-        value.version !== 1
+        value.version !== 1 ||
+        typeof value.sessionState !== "string" ||
+        value.sessionState.length === 0 ||
+        value.sessionState.length >
+          VOICE_LIVE_LIMITS.maximumSessionStateCharacters ||
+        value.sessionState.trim() !== value.sessionState ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value.sessionState)
       ) {
         invalid();
       }
       coachActivated = true;
+      coachCheckpoint = value.sessionState;
       return Object.freeze({
         active: true,
+        sessionState: coachCheckpoint,
         type: "coach",
         version: 1,
       });
@@ -832,6 +857,27 @@ export function createVoiceLiveServerProtocol(validateFinalResult) {
       invalid();
     }
     const result = validateFinalResult(value.result);
+    const directCoachFinal =
+      result?.route === "native-respondent-coach" ||
+      result?.assistanceTarget === "respondent" ||
+      (typeof result?.respondentStage === "string" &&
+        result.respondentStage !== "none") ||
+      (typeof result?.coachPhase === "string" &&
+        result.coachPhase !== "none") ||
+      (typeof result?.coachAction === "string" &&
+        result.coachAction !== "none");
+    if (
+      (coachActivated &&
+        (result?.route !== "native-respondent-coach" ||
+          result?.assistanceTarget !== "respondent" ||
+          result?.respondentStage !== "awaiting_answer" ||
+          result?.coachPhase !== "awaiting_answer" ||
+          result?.coachAction !== "elicit" ||
+          result?.sessionState !== coachCheckpoint)) ||
+      (expectedNativeAudio && !coachActivated && directCoachFinal)
+    ) {
+      invalid();
+    }
     state = "final";
     return Object.freeze({
       result,

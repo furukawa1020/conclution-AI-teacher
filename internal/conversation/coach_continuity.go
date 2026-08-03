@@ -217,6 +217,19 @@ func (agent *vertexAgent) coachQuestionContinuityTag(anchor string) string {
 	return tag
 }
 
+func (agent *vertexAgent) nativeCoachScopeTag(anchor string) string {
+	if agent == nil || len(agent.continuityKey) != sha256.Size || anchor == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, agent.continuityKey)
+	_, _ = mac.Write([]byte("native-explicit-coach-scope-v1\x00"))
+	_, _ = mac.Write([]byte(anchor))
+	full := mac.Sum(nil)
+	tag := base64.RawURLEncoding.EncodeToString(full[:coachContinuityTagBytes])
+	wipe(full)
+	return tag
+}
+
 // utteranceLinksCoachQuestionTag proves that the current turn uses the same
 // bounded question subject as the grammatical topic of the exact target A.
 // It does not accept a mere mention of the subject. Candidate work is bounded

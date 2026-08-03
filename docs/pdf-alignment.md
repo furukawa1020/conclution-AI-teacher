@@ -15,9 +15,9 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 
 ## 公開音声経路での回答支援切替
 
-標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、本人自身が相手から聞かれた質問への回答支援を明示的に頼んだとサーバーが判定した場合は、回答を代作せず本人の考えを一問だけ尋ねる固定promptのNative音声をそのまま解放する。同じ原音を東京リージョンSTTへ再送せず、一度得たcaptionだけを`global`の文字列推論、LAC、Respondent Coachへ並行投入し、次turnを束縛する署名済み有限stateを作る。これは厳格モードではなく、regional DLPを通過してからNative Audioへ送る経路でもない。
+標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、本人自身が相手から聞かれた質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、回答を代作せず本人の考えを一問だけ尋ねる固定promptのNative音声をそのまま解放する。同じ原音を東京リージョンSTTへ再送せず、初回captionも別の文字列modelへ送らない。音声より先に、Cloud Run内でモデルを呼ばず「明示支援を開始し本人の最初の一言を待つ」という最小の署名済み有限stateを発行してブラウザへcheckpointする。これは厳格モードではなく、regional DLPを通過してからNative Audioへ送る経路でもない。
 
-Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。初回支援では状態生成を音声開始と並行し、commitから最初の音声frameまで1,000 ms以内を通常Nativeと同じ運用SLOとして計測する。
+Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。初回支援ではモデル待ちのないstate発行とcontrol checkpointを音声より先に終え、commitから最初の音声frameまで1,000 ms以内を通常Nativeと同じ運用SLOとして計測する。
 
 UIの`complete`は「聞かれたことへの答えが届きました」という今回限りのreceiptに留める。これは当該turnで質問に対応するevidenceを受け取ったという状態表示であり、「Aを先に言えた」「上達した」「別の人にも同じように答えられる」と判定・実証する表示ではない。
 
@@ -79,7 +79,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 
 - PasskeyのWebAuthn ceremonyを実装し、仮名Firebase accountの操作をuser verification付き署名で確認する。秘密鍵はPasskey providerが管理し、KOTAEのブラウザコードとサーバーは受け取らない（同期や保管の方式はproviderに依存する）。これは法的な本人確認や現在の話者認証ではない
 - 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をCloud Run内の決定論的検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
-- 標準モードで回答支援を明示した初回turnは、`us-central1`のNative Audio音声を即時解放し、同じcaptionから署名済みcoach stateを並行生成する。同じcaptureは`asia-northeast1`のSTTへ再送しない。保留中の後続turnは段階経路を維持し、`complete` / `release`後の次turnからNativeへ戻る
+- 標準モードで回答支援を明示した初回turnは、モデルなしで署名済みcoach checkpointを発行してから`us-central1`のNative Audio音声を解放する。同じcaptureは`asia-northeast1`のSTTへ再送せず、captionも別の文字列modelへ送らない。保留中の後続turnは段階経路を維持し、`complete` / `release`後の次turnからNativeへ戻る
 - DLPにも検出漏れがあり得るため、完全なPII除去とは呼ばない。Cloud Run、Speech-to-Text、DLPが平文を扱うためE2EEとも呼ばない
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
 - 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する

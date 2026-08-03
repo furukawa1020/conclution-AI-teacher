@@ -165,6 +165,18 @@ type NativeStatePreparer interface {
 	)
 }
 
+// NativeCoachStatePreparer synchronously issues the only cross-turn authority
+// for a newly detected Native Respondent Coach turn. It stores no transcript
+// or generated question: only a finite open-answer shape and a dedicated,
+// non-reversible scope proof derived from the current explicit request.
+type NativeCoachStatePreparer interface {
+	PrepareNativeCoachState(
+		uid string,
+		token string,
+		utterance string,
+	) (string, error)
+}
+
 type ContentGenerator interface {
 	GenerateContent(
 		ctx context.Context,
@@ -470,6 +482,7 @@ func (agent *vertexAgent) sealState(
 		state.Support = nil
 		if state.PendingAnswer.QuestionContinuityTag != "" ||
 			state.PendingAnswer.ContinuityTag != "" ||
+			state.PendingAnswer.NativeCoachScopeTag != "" ||
 			state.PendingAnswer.ExpansionOptIn {
 			state.PendingAnswer = emptyPendingAnswer()
 		} else {
@@ -575,7 +588,8 @@ func (agent *vertexAgent) Process(
 			state.PendingAnswer = emptyPendingAnswer()
 		case agent.coachRestatementBinding &&
 			state.PendingAnswer.Phase == respondent.CoachPhaseAwaitingRestatement &&
-			state.PendingAnswer.RestatementTag == "":
+			state.PendingAnswer.RestatementTag == "" &&
+			state.PendingAnswer.NativeCoachScopeTag == "":
 			// Compatibility revisions can decode the new field without issuing
 			// it. Once issuance is enabled, never renew an unbound legacy
 			// restatement scope; return the utterance to ordinary conversation.
@@ -1543,6 +1557,7 @@ func (agent *vertexAgent) Process(
 			}
 			if agent.coachRestatementBinding &&
 				storedPhase == respondent.CoachPhaseAwaitingRestatement &&
+				storedFrame.NativeCoachScopeTag == "" &&
 				storedFrame.RestatementTag == "" {
 				fingerprint, ok := coachRestatementFingerprint(
 					finalPlan,
@@ -2472,6 +2487,12 @@ func coachRestatementMatches(
 	utterance string,
 ) bool {
 	if frame.Phase != respondent.CoachPhaseAwaitingRestatement {
+		return true
+	}
+	if frame.NativeCoachScopeTag != "" {
+		// A Native scope intentionally represents only the person's explicit
+		// request for generic answer help. It is not an answer-continuity proof,
+		// so do not reinterpret its dedicated tag as a missing restatement tag.
 		return true
 	}
 	if frame.RestatementTag == "" {

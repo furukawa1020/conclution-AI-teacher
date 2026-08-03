@@ -2845,8 +2845,9 @@ test("live commit preserves exact frames and fails on backpressure", () => {
 });
 
 test("live server protocol gates binary on ready and commit", () => {
-  const protocol = createVoiceLiveServerProtocol((result) =>
-    Object.freeze({ ...result }),
+  const protocol = createVoiceLiveServerProtocol(
+    (result) => Object.freeze({ ...result }),
+    { nativeAudio: true },
   );
   assert.throws(
     () => protocol.acceptBinary(new ArrayBuffer(4)),
@@ -2984,8 +2985,28 @@ test("a first-turn Native coach preserves signed state without replaying the utt
 });
 
 test("a Native coach control is exact, one-shot, and precedes response audio", () => {
-  const createCommitted = () => {
-    const protocol = createVoiceLiveServerProtocol((result) => result);
+  const checkpoint = "signed-coach-checkpoint";
+  const coachControl = Object.freeze({
+    type: "coach",
+    active: true,
+    sessionState: checkpoint,
+    version: 1,
+  });
+  const coachFinal = (overrides = {}) => ({
+    ...finalVoiceResult(),
+    assistanceTarget: "respondent",
+    coachAction: "elicit",
+    coachPhase: "awaiting_answer",
+    respondentStage: "awaiting_answer",
+    route: "native-respondent-coach",
+    sessionState: checkpoint,
+    ...overrides,
+  });
+  const createCommitted = (nativeAudio = true) => {
+    const protocol = createVoiceLiveServerProtocol(
+      (result) => result,
+      { nativeAudio },
+    );
     protocol.acceptText(JSON.stringify({ type: "ready", version: 1 }));
     protocol.markCommitted();
     return protocol;
@@ -2993,28 +3014,28 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
 
   const protocol = createCommitted();
   assert.deepEqual(
-    protocol.acceptText(
-      JSON.stringify({
-        type: "coach",
-        active: true,
-        version: 1,
-      }),
-    ),
-    { type: "coach", active: true, version: 1 },
+    protocol.acceptText(JSON.stringify(coachControl)),
+    coachControl,
   );
   assert.equal(protocol.snapshot().coachActivated, true);
   assert.throws(
-    () =>
-      protocol.acceptText(
-        JSON.stringify({ type: "coach", active: true, version: 1 }),
-      ),
+    () => protocol.acceptText(JSON.stringify(coachControl)),
     /voice_response_invalid/u,
   );
 
   for (const invalid of [
-    { type: "coach", active: false, version: 1 },
-    { type: "coach", active: true, version: 2 },
-    { type: "coach", active: true, version: 1, phase: "elicit" },
+    { ...coachControl, active: false },
+    { ...coachControl, version: 2 },
+    { ...coachControl, phase: "elicit" },
+    { ...coachControl, sessionState: "" },
+    { ...coachControl, sessionState: ` ${checkpoint}` },
+    { ...coachControl, sessionState: `${checkpoint}\n` },
+    {
+      ...coachControl,
+      sessionState: "x".repeat(
+        VOICE_LIVE_LIMITS.maximumSessionStateCharacters + 1,
+      ),
+    },
   ]) {
     const candidate = createCommitted();
     assert.throws(
@@ -3023,24 +3044,92 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     );
   }
 
-  const beforeCommit = createVoiceLiveServerProtocol((result) => result);
+  const beforeCommit = createVoiceLiveServerProtocol(
+    (result) => result,
+    { nativeAudio: true },
+  );
   beforeCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   assert.throws(
-    () =>
-      beforeCommit.acceptText(
-        JSON.stringify({ type: "coach", active: true, version: 1 }),
-      ),
+    () => beforeCommit.acceptText(JSON.stringify(coachControl)),
     /voice_response_invalid/u,
   );
 
   const afterAudio = createCommitted();
   afterAudio.acceptBinary(new ArrayBuffer(4));
   assert.throws(
+    () => afterAudio.acceptText(JSON.stringify(coachControl)),
+    /voice_response_invalid/u,
+  );
+
+  const staged = createCommitted(false);
+  assert.throws(
+    () => staged.acceptText(JSON.stringify(coachControl)),
+    /voice_response_invalid/u,
+  );
+
+  const completed = createCommitted();
+  completed.acceptText(JSON.stringify(coachControl));
+  completed.acceptBinary(new ArrayBuffer(4));
+  assert.equal(
+    completed.acceptText(
+      JSON.stringify({
+        type: "final",
+        version: 1,
+        result: coachFinal(),
+      }),
+    ).type,
+    "final",
+  );
+
+  for (const mismatch of [
+    { sessionState: `${checkpoint}-mismatch` },
+    { route: "native-audio" },
+    { assistanceTarget: "assistant" },
+    { respondentStage: "restructure" },
+    { coachPhase: "complete" },
+    { coachAction: "complete" },
+  ]) {
+    const candidate = createCommitted();
+    candidate.acceptText(JSON.stringify(coachControl));
+    candidate.acceptBinary(new ArrayBuffer(4));
+    assert.throws(
+      () =>
+        candidate.acceptText(
+          JSON.stringify({
+            type: "final",
+            version: 1,
+            result: coachFinal(mismatch),
+          }),
+        ),
+      /voice_response_invalid/u,
+    );
+  }
+
+  const unannouncedNativeCoach = createCommitted();
+  unannouncedNativeCoach.acceptBinary(new ArrayBuffer(4));
+  assert.throws(
     () =>
-      afterAudio.acceptText(
-        JSON.stringify({ type: "coach", active: true, version: 1 }),
+      unannouncedNativeCoach.acceptText(
+        JSON.stringify({
+          type: "final",
+          version: 1,
+          result: coachFinal(),
+        }),
       ),
     /voice_response_invalid/u,
+  );
+
+  const stagedRespondent = createCommitted(false);
+  stagedRespondent.acceptBinary(new ArrayBuffer(4));
+  assert.equal(
+    stagedRespondent.acceptText(
+      JSON.stringify({
+        type: "final",
+        version: 1,
+        result: coachFinal(),
+      }),
+    ).type,
+    "final",
   );
 });
 
@@ -3167,7 +3256,10 @@ test("bridge forwards soft-voice confirmation to hybrid endpoint policy", async 
 });
 
 test("live endpoint is rejected before ready and ignored after commit", () => {
-  const beforeReady = createVoiceLiveServerProtocol((result) => result);
+  const beforeReady = createVoiceLiveServerProtocol(
+    (result) => result,
+    { nativeAudio: true },
+  );
   assert.throws(
     () =>
       beforeReady.acceptText(
@@ -3176,7 +3268,10 @@ test("live endpoint is rejected before ready and ignored after commit", () => {
     /voice_response_invalid/,
   );
 
-  const afterCommit = createVoiceLiveServerProtocol((result) => result);
+  const afterCommit = createVoiceLiveServerProtocol(
+    (result) => result,
+    { nativeAudio: true },
+  );
   afterCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   afterCommit.markCommitted();
   assert.deepEqual(
@@ -3194,7 +3289,10 @@ test("live endpoint is rejected before ready and ignored after commit", () => {
     /voice_response_invalid/,
   );
 
-  const afterAudio = createVoiceLiveServerProtocol((result) => result);
+  const afterAudio = createVoiceLiveServerProtocol(
+    (result) => result,
+    { nativeAudio: true },
+  );
   afterAudio.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   afterAudio.markCommitted();
   afterAudio.acceptBinary(new ArrayBuffer(4));

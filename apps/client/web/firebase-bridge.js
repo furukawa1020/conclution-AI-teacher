@@ -97,7 +97,8 @@ const passkeyRegistrationRecovery = createPasskeyRegistrationRecoveryLatch(
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 4 * Math.ceil(AUDIO_MAX_BYTES / 3);
-const SESSION_STATE_MAX_CHARS = 16 * 1024;
+const SESSION_STATE_MAX_CHARS =
+  VOICE_LIVE_LIMITS.maximumSessionStateCharacters;
 const VAD_INTERVAL_MS = VOICE_SESSION_LIMITS.vadIntervalMs;
 const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;
 
@@ -2215,8 +2216,9 @@ async function startVoiceLiveSession({
       turnMode,
       sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
     });
-    protocol = createVoiceLiveServerProtocol((result) =>
-      safeVoiceResponse(result, strictCloudMinimization),
+    protocol = createVoiceLiveServerProtocol(
+      (result) => safeVoiceResponse(result, strictCloudMinimization),
+      { nativeAudio },
     );
   } catch {
     socket.close(1000, "http_fallback");
@@ -2756,6 +2758,14 @@ async function startVoiceLiveSession({
             fail("voice_response_invalid");
           }
           session.playback.activateCoach();
+          globalThis.dispatchEvent(
+            new CustomEvent("kotae:coach-checkpoint", {
+              detail: Object.freeze({
+                sessionState: message.sessionState,
+                version: 1,
+              }),
+            }),
+          );
           return;
         }
         if (message.type === "final") {

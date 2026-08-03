@@ -47,7 +47,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
                ├─ standard live / no PDF
                │    raw PCM ──→ Vertex AI Native Audio（us-central1）
                │                ├─ final input caption gate後のPCM + caption
-               │                └─ 初回回答支援: captionから署名coach stateを並行生成
+               │                └─ 初回回答支援: 音声前にローカル署名coach checkpointを発行
                │
                └─ strict / PDF / answer-coach continuation / connection fallback
                     raw audio ──→ Cloud STT V2（asia-northeast1）
@@ -58,11 +58,11 @@ KOTAE ReflexとLatent Answer Contract（LAC）はこのプロジェクトで設�
 
 利用者のintentional turn全体が「外部検索で、テーマは何々の最新論文を探して」または「Crossrefで DOI … を調べて」という固定形式に完全一致した場合だけ、Cloud Runの独立tool-policy gateが許可します。自然文から検索同意を推測せず、追記、取消し、複数命令、ambient turnから外部queryは作りません。topicは「テーマは」と「の最新論文」の間全体、DOIは空白で区切ったbare DOI全体を決定論的に抽出し、モデル出力と取得結果へ完全に結びつけます。送信前にはNFKC差とUnicode format文字をfail-closedで拒否し、可逆encodingを再検査し、topic文字を限定し、topic内の節区切り・取消語とDOIに付いたcomma・semicolon・取消語も拒否します。固定hostのCrossref REST APIから返ったtitle、DOI、日付は候補発見にだけ使い、本文を読んだ証拠やclaimの支持根拠にはしません。topic探索は発表日ではなくCrossrefのindex date filterを使うため、「Crossrefの索引日が指定期間内の書誌候補」と表示します。任意の語が氏名か未知の技術名かを完全には区別できないため、固定発話のtopicそのものがCrossrefへ送られることもUIで明示します。
 
-標準liveでPDFを添付しないturnはraw audioを`us-central1`のVertex AI Native Audioへ直接streamします。GA endpointのsetupは`responseModalities`を`AUDIO`一つだけに固定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`は応答modalityへ併記しません。provider出力は最終入力captionが確定し、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通るまで利用者へ解放しません。このscreenはregional DLPでも、Vertex AI送信前の原音検査でもありません。初回回答支援は同じraw audioをSTTへ再送せず、Native音声の解放とfinal input captionからの署名済みcoach state生成を並行します。厳格モード、PDF turn、回答支援の保留中に続くturn、Native Audioを使えない接続fallbackだけがCloud STTへraw audioを渡す段階的な経路を使います。厳格モードは文字起こしとモデル応答をCloud Run内の決定論的検査と東京リージョンのSensitive Data Protectionへ通し、両方が明示的に`clear`の時だけ`global`の文字列Vertex AIまたは東京リージョンのCloud TTSへ進めます。標準モードに同じ保証があるとは表示しません。標準モードのPDFは本人が明示選択した次の一ターンだけCloud Runと`global`の文字列Vertex AIへ渡し、応答後に参照を解放します。厳格モードではブラウザのfile read前とCloud RunのSTT・モデル推論前の両方で拒否します。音声、逐語録、caption、PDF、応答文はアプリのDBやStorageへ保存しません。この構成では管理サービスが処理に必要な平文を扱うためE2EEではなく、DLPにも漏れがあり得るため完全なPII除去でもありません。
+標準liveでPDFを添付しないturnはraw audioを`us-central1`のVertex AI Native Audioへ直接streamします。GA endpointのsetupは`responseModalities`を`AUDIO`一つだけに固定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`は応答modalityへ併記しません。provider出力は最終入力captionが確定し、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通るまで利用者へ解放しません。このscreenはregional DLPでも、Vertex AI送信前の原音検査でもありません。初回回答支援は同じraw audioをSTTへ再送せず、final input captionから明示支援を決定論的に確認した後、モデルなしで最小の署名済みcoach checkpointを作ってcontrol frameで音声より先に返します。captionを別の文字列modelへ送らず、tokenにもcaption、外部質問、生成質問、回答候補を含めません。厳格モード、PDF turn、回答支援の保留中に続くturn、Native Audioを使えない接続fallbackだけがCloud STTへraw audioを渡す段階的な経路を使います。厳格モードは文字起こしとモデル応答をCloud Run内の決定論的検査と東京リージョンのSensitive Data Protectionへ通し、両方が明示的に`clear`の時だけ`global`の文字列Vertex AIまたは東京リージョンのCloud TTSへ進めます。標準モードに同じ保証があるとは表示しません。標準モードのPDFは本人が明示選択した次の一ターンだけCloud Runと`global`の文字列Vertex AIへ渡し、応答後に参照を解放します。厳格モードではブラウザのfile read前とCloud RunのSTT・モデル推論前の両方で拒否します。音声、逐語録、caption、PDF、応答文はアプリのDBやStorageへ保存しません。この構成では管理サービスが処理に必要な平文を扱うためE2EEではなく、DLPにも漏れがあり得るため完全なPII除去でもありません。
 
 ## 状態
 
-標準モードでは長い会話履歴をサーバーへ永続化しません。通常のNative Audio turnは発話本文を含まない暗号化state leaseを返します。初回回答支援はNative captionから作った短い意味状態と有限coach制御metadataを、段階的な標準turnも短い意味状態だけを暗号化tokenとしてブラウザメモリへ返します。厳格モードはcross-turn stateを受け取らず、返しません。
+標準モードでは長い会話履歴をサーバーへ永続化しません。通常のNative Audio turnは発話本文を含まない暗号化state leaseを返します。初回回答支援は明示的な支援開始を示す用途分離した非可逆tagと有限coach制御metadataだけを暗号化tokenとして音声前にブラウザメモリへ返し、段階的な標準turnも短い意味状態だけを返します。厳格モードはcross-turn stateを受け取らず、返しません。
 
 ```text
 AES-256-GCM token

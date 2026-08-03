@@ -321,6 +321,7 @@ function Assert-PromotedBackendBoundary {
         "KOTAE_ALLOWED_APP_IDS" = $expectedAppId
         "KOTAE_STATE_V2_WRITES" = "true"
         "KOTAE_COACH_RESTATEMENT_BINDING" = "true"
+        "KOTAE_ANSWER_PROOF_WRITES" = "true"
         "KOTAE_SPEECH_LOCATION" = $expectedRunRegion
         "KOTAE_NATIVE_AUDIO_ENABLED" = "true"
         "KOTAE_NATIVE_AUDIO_LOCATION" = "us-central1"

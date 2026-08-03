@@ -1555,9 +1555,18 @@ func (agent *vertexAgent) Process(
 				storedFrame.RestatementTag = ""
 				storedFrame.ContinuityTag = ""
 			}
-			if agent.coachRestatementBinding &&
+			nativeRestatementTransition :=
 				storedPhase == respondent.CoachPhaseAwaitingRestatement &&
-				storedFrame.NativeCoachScopeTag == "" &&
+				storedFrame.NativeCoachScopeTag != ""
+			if nativeRestatementTransition {
+				// The Native tag authorizes only the first generic answer slot. A
+				// substantive answer that needs another try must exchange it for the
+				// ordinary verifier bound to that answer; it must never become a
+				// restatement-continuity shortcut.
+				storedFrame.NativeCoachScopeTag = ""
+			}
+			if (agent.coachRestatementBinding || nativeRestatementTransition) &&
+				storedPhase == respondent.CoachPhaseAwaitingRestatement &&
 				storedFrame.RestatementTag == "" {
 				fingerprint, ok := coachRestatementFingerprint(
 					finalPlan,
@@ -2487,12 +2496,6 @@ func coachRestatementMatches(
 	utterance string,
 ) bool {
 	if frame.Phase != respondent.CoachPhaseAwaitingRestatement {
-		return true
-	}
-	if frame.NativeCoachScopeTag != "" {
-		// A Native scope intentionally represents only the person's explicit
-		// request for generic answer help. It is not an answer-continuity proof,
-		// so do not reinterpret its dedicated tag as a missing restatement tag.
 		return true
 	}
 	if frame.RestatementTag == "" {

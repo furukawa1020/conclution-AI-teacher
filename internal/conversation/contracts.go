@@ -326,7 +326,8 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 			(frame.AssistantFollowUp || frame.QuestionContinuityTag == "")) ||
 		(frame.AssistantFollowUp && frame.Phase == respondent.CoachPhaseExpanding) ||
 		(nativeCoachScope &&
-			(frame.Operator != answercontract.OperatorOpen ||
+			(frame.Phase != respondent.CoachPhaseAwaitingAnswer ||
+				frame.Operator != answercontract.OperatorOpen ||
 				frame.ExpansionOperator != answercontract.Operator(
 					respondent.ExpansionOperator(respondent.Operator(answercontract.OperatorOpen)),
 				) ||

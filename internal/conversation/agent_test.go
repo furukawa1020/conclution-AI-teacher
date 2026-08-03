@@ -262,7 +262,7 @@ func TestAgentStandaloneGreetingUsesDeterministicWelcome(t *testing.T) {
 		t.Fatalf("welcome called model %d times, want zero", len(fake.calls))
 	}
 	if phaticLocalSpokenReply !=
-		"こんにちは。今日は私から一つ。音楽は、同じ曲でも朝と夜で印象が変わることがあります。思いつけば一言、聞くだけでも大丈夫です。" {
+		"こんにちは。朝と夜で同じ音楽も少し違って聞こえますが、浮かべば一言、聞くだけでも大丈夫です。" {
 		t.Fatalf("unexpected local greeting copy: %q", phaticLocalSpokenReply)
 	}
 	if result.Route != "phatic-local" ||
@@ -1113,9 +1113,13 @@ func TestSystemInstructionMakesInitialGreetingUsefulAndBrief(t *testing.T) {
 		"簡潔にする",
 		"最初のターンが挨拶だけでも",
 		"挨拶を反復するだけで終えず",
-		"KOTAE側から低開示の小話を一つ出し",
-		"質問、考え途中、ぼやき、パスもそのまま返せる",
-		"spoken_reply全体は二文から四文",
+		"KOTAE側から低開示の話題を一つだけ短く出す",
+		"spoken_reply全体は一文から二文",
+		"すぐ本人へ話す番を返す",
+		"本人の次の言葉を最優先",
+		"25〜70文字程度",
+		"答えやすい任意の一問まで",
+		"考え途中には質問を足さず",
 	} {
 		if !strings.Contains(systemInstruction, required) {
 			t.Fatalf("system instruction is missing %q", required)
@@ -1282,7 +1286,7 @@ func TestSystemInstructionKeepsProactiveConversationLowPressureAndNonDependent(
 	t *testing.T,
 ) {
 	for _, required := range []string{
-		"KOTAE側から低開示の具体的な話題を一つ出す",
+		"KOTAE側から低開示の具体的な話題を一つだけ短く出す",
 		"短い観察や小話を先に一つ述べ",
 		"選択肢は二つまで",
 		"「特にない」「分からない」「パス」",

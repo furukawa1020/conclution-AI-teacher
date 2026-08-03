@@ -31,6 +31,10 @@ const (
 	InputAudioMIMEType  = "audio/pcm;rate=16000"
 	OutputAudioMIMEType = "audio/pcm;rate=24000"
 
+	// DefaultMaxOutputTokens leaves headroom for the requested 25-70 Japanese
+	// character reply while imposing a finite provider-side monologue ceiling.
+	DefaultMaxOutputTokens int32 = 384
+
 	defaultSetupTimeout       = 12 * time.Second
 	defaultSessionTimeout     = 2 * time.Minute
 	defaultSendTimeout        = 5 * time.Second
@@ -50,6 +54,8 @@ const (
 	hardMaxPendingEvents     = 1_024
 	hardMaxTranscriptBytes   = 1 << 20
 	hardMaxSystemPromptBytes = 32 << 10
+	minMaxOutputTokens       = 128
+	hardMaxOutputTokens      = 512
 )
 
 var (
@@ -87,6 +93,7 @@ type Config struct {
 	MaxPendingBytes     int
 	MaxPendingEvents    int
 	MaxTranscriptBytes  int
+	MaxOutputTokens     int32
 }
 
 // EventKind identifies sanitized events emitted by Session.Receive.
@@ -260,6 +267,9 @@ func normalizeConfig(config Config) (Config, error) {
 	applyIntDefault(&config.MaxPendingBytes, defaultMaxPendingBytes)
 	applyIntDefault(&config.MaxPendingEvents, defaultMaxPendingEvents)
 	applyIntDefault(&config.MaxTranscriptBytes, defaultMaxTranscriptBytes)
+	if config.MaxOutputTokens == 0 {
+		config.MaxOutputTokens = DefaultMaxOutputTokens
+	}
 
 	if config.SetupTimeout <= 0 || config.SetupTimeout > hardMaxSetupTimeout ||
 		config.SessionTimeout <= 0 || config.SessionTimeout > hardMaxSessionTimeout ||
@@ -282,6 +292,10 @@ func normalizeConfig(config Config) (Config, error) {
 		config.MaxTranscriptBytes > config.MaxPendingBytes {
 		return Config{}, errors.New("native voice transcript limit is invalid")
 	}
+	if config.MaxOutputTokens < minMaxOutputTokens ||
+		config.MaxOutputTokens > hardMaxOutputTokens {
+		return Config{}, errors.New("native voice response token budget is invalid")
+	}
 	return config, nil
 }
 
@@ -302,6 +316,7 @@ func (s *Service) connectConfig() *genai.LiveConnectConfig {
 		// The GA Live endpoint accepts one response modality. Input and output
 		// captions are enabled independently by the transcription configs below.
 		ResponseModalities: []genai.Modality{genai.ModalityAudio},
+		MaxOutputTokens:    s.config.MaxOutputTokens,
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{{Text: s.config.SystemPrompt}},
 		},

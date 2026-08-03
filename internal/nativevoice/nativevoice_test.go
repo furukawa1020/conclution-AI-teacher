@@ -44,6 +44,13 @@ func TestOpenUsesReviewedNativeAudioConfiguration(t *testing.T) {
 		got[0] != genai.ModalityAudio {
 		t.Fatalf("ResponseModalities = %#v", got)
 	}
+	if config.MaxOutputTokens != DefaultMaxOutputTokens {
+		t.Fatalf(
+			"MaxOutputTokens = %d, want default %d",
+			config.MaxOutputTokens,
+			DefaultMaxOutputTokens,
+		)
+	}
 	if config.SystemInstruction == nil || len(config.SystemInstruction.Parts) != 1 ||
 		config.SystemInstruction.Parts[0].Text != "安心できる短い日本語で答える。" ||
 		config.SystemInstruction.Role != "" {
@@ -81,6 +88,63 @@ func TestOpenUsesReviewedNativeAudioConfiguration(t *testing.T) {
 	}
 	if len(config.SafetySettings) != 4 {
 		t.Fatalf("len(SafetySettings) = %d, want 4", len(config.SafetySettings))
+	}
+}
+
+func TestOpenPassesExactConfiguredNativeAudioResponseBudget(t *testing.T) {
+	provider := newFakeProviderSession()
+	provider.push(&genai.LiveServerMessage{
+		SetupComplete: &genai.LiveServerSetupComplete{},
+	}, nil)
+	dialer := &fakeDialer{session: provider}
+	service := newTestService(t, Config{MaxOutputTokens: 320}, dialer)
+
+	session, err := service.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	dialer.mu.Lock()
+	config := dialer.config
+	dialer.mu.Unlock()
+	if config == nil {
+		t.Fatal("Connect() config is nil")
+	}
+	if config.MaxOutputTokens != 320 {
+		t.Fatalf("MaxOutputTokens = %d, want 320", config.MaxOutputTokens)
+	}
+}
+
+func TestConfigurationBoundsNativeAudioResponseBudget(t *testing.T) {
+	dialer := &fakeDialer{session: newFakeProviderSession()}
+	for _, budget := range []int32{minMaxOutputTokens, DefaultMaxOutputTokens, hardMaxOutputTokens} {
+		service, err := NewWithDialer(Config{
+			ProjectID:       "project",
+			SystemPrompt:    "prompt",
+			MaxOutputTokens: budget,
+		}, dialer)
+		if err != nil {
+			t.Fatalf("MaxOutputTokens %d rejected: %v", budget, err)
+		}
+		if service.config.MaxOutputTokens != budget {
+			t.Fatalf(
+				"normalized MaxOutputTokens = %d, want %d",
+				service.config.MaxOutputTokens,
+				budget,
+			)
+		}
+	}
+
+	for _, budget := range []int32{-1, minMaxOutputTokens - 1, hardMaxOutputTokens + 1} {
+		_, err := NewWithDialer(Config{
+			ProjectID:       "project",
+			SystemPrompt:    "prompt",
+			MaxOutputTokens: budget,
+		}, dialer)
+		if err == nil || !strings.Contains(err.Error(), "response token budget") {
+			t.Fatalf("MaxOutputTokens %d error = %v, want budget validation error", budget, err)
+		}
 	}
 }
 

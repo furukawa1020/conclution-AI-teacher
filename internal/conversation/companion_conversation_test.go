@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func lowConfidenceCompanionPlan() modelPlan {
@@ -19,7 +20,7 @@ func lowConfidenceCompanionPlan() modelPlan {
 	return plan
 }
 
-func TestConversationPromptMakesShortSpeechValidAndLetsAICarryMoreLoad(
+func TestConversationPromptMakesShortSpeechValidAndPrioritizesNextUserWords(
 	t *testing.T,
 ) {
 	for _, required := range []string{
@@ -27,10 +28,13 @@ func TestConversationPromptMakesShortSpeechValidAndLetsAICarryMoreLoad(
 		"同じ発話の言い直しを求めない",
 		"何について話すかを聞き返さず",
 		"質問だけで返して尋問にしない",
-		"AI側から足す",
+		"本人が次に話せる余白を優先",
+		"短い相づち、ぼやき、考え途中には内容を短く受け取って本人へ話す番を返す",
 		"companionでは内容への応答と話題一つ",
 		"listenでは利用者の直接質問へAから答え",
-		"二文から四文",
+		"原則一文から二文",
+		"25〜70文字程度",
+		"答えやすい任意の一問まで",
 		"AI自身の実体験",
 	} {
 		if !strings.Contains(systemInstruction, required) {
@@ -45,6 +49,38 @@ func TestConversationPromptMakesShortSpeechValidAndLetsAICarryMoreLoad(
 		if !strings.Contains(lacCriticSystemInstruction, required) {
 			t.Fatalf("critic support contract missing %q", required)
 		}
+	}
+}
+
+func TestLocalCompanionRepliesStayWithinAirtimeBudget(t *testing.T) {
+	replies := map[string]string{
+		"greeting":                 phaticLocalSpokenReply,
+		"listen only":              listenOnlyLocalSpokenReply,
+		"interpretation choice":    interpretationClarificationSpokenReply,
+		"interpretation listening": interpretationListenSpokenReply,
+		"planner unavailable":      plannerUnavailableSpokenReply,
+		"verification unavailable": verificationUnavailableSpokenReply,
+	}
+	for turn := 0; turn < 4; turn++ {
+		replies["proactive topic "+string(rune('0'+turn))] =
+			proactiveTopicReply(turn)
+	}
+	for name, reply := range replies {
+		t.Run(name, func(t *testing.T) {
+			length := utf8.RuneCountInString(reply)
+			if length < 25 || length > 70 {
+				t.Fatalf("reply length = %d, want 25..70: %q", length, reply)
+			}
+			sentenceEnds := strings.Count(reply, "。") +
+				strings.Count(reply, "？") + strings.Count(reply, "?")
+			if sentenceEnds < 1 || sentenceEnds > 2 {
+				t.Fatalf("sentence endings = %d, want 1..2: %q", sentenceEnds, reply)
+			}
+			questions := strings.Count(reply, "？") + strings.Count(reply, "?")
+			if questions > 1 {
+				t.Fatalf("questions = %d, want at most 1: %q", questions, reply)
+			}
+		})
 	}
 }
 

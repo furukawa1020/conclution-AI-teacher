@@ -31,13 +31,13 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   // Keep every provisional candidate local for a finite window. A short
   // acknowledgement, cough, or mutter is discarded without stopping the
   // reply; sustained speech can still survive a few natural gaps.
-  candidateCaptureLimitMs: 800,
+  candidateCaptureLimitMs: 1_400,
   candidateGapMs: 120,
   // Four voiced frames only enter a reversible, local provisional state and
-  // do not change playback. Ten voiced frames plus a density check are
+  // do not change playback. Twenty voiced frames plus a density check are
   // required before the current response is actually interrupted.
   provisionalMs: 160,
-  confirmationMs: 400,
+  confirmationMs: 800,
   minimumVoiceDensity: 0.65,
   guardMs: 320,
   intervalMs: 40,
@@ -69,10 +69,10 @@ export const BARGE_PCM_LIMITS = Object.freeze({
   frameDurationMs: 20,
   // Cover the complete finite provisional window plus 100 ms of pre-roll.
   // Unconfirmed PCM never leaves the device and is zeroized on discard.
-  historyMs: 900,
+  historyMs: 1_500,
   leadInMs: 100,
-  maximumBytes: 28_800,
-  maximumFrames: 45,
+  maximumBytes: 48_000,
+  maximumFrames: 75,
 });
 
 export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({

@@ -66,8 +66,8 @@ LACを次の制御と組み合わせ、誤った訂正より沈黙を優先し�
 Cloud Run / Go（asia-northeast1）
   ├─ 標準live・PDFなし: raw PCM → Vertex AI Native Audio（us-central1）
   │    ├─ 通常: gate後のPCM + caption → ブラウザ再生
-  │    └─ 初回の明示回答支援: 署名checkpointを音声前に返してNative音声を解放
-  └─ 厳格 / PDF / 回答支援の継続turn / 接続fallback: raw audio → Cloud STT V2（asia-northeast1）
+  │    └─ 明示回答支援を検出: Native出力を破棄して下の段階経路へ一度だけ引継ぎ
+  └─ 厳格 / PDF / 明示回答支援 / 接続fallback: raw audio → Cloud STT V2（asia-northeast1）
        ├─ transcript → 厳格時だけCloud Run内決定論的検査 + DLP（asia-northeast1）
        ├─ clearまたは標準transcript → 文字列Vertex AI（global）: Thought State Graph / LAC / EVI
        ├─ 標準時の明示PDF → 一ターンだけ文字列Vertex AI、厳格時は読込・推論前に拒否
@@ -75,7 +75,7 @@ Cloud Run / Go（asia-northeast1）
                                                                                       └─ MP3 → ブラウザ再生
 ```
 
-raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。標準モードのPDFは本人が選んだ次の一ターンだけ扱い、応答後に参照を解放します。厳格モードではクライアントのfile read前とAPIのSTT・モデル推論前に拒否します。標準モードで本人が回答支援を明示した初回turnは、`us-central1`のNative Audioが返したfinal input captionをCloud Runの決定論的な同意境界で検査します。通過時は同じ発話の原音を東京リージョンSTTへ再送せず、captionも別の文字列modelへ送らず、回答を代作しない固定promptのNative音声を解放します。その前に、モデルを呼ばず「明示支援を開始し本人の最初の一言を待つ」という有限stateを署名してcontrol frameでブラウザへcheckpointします。この初回経路は厳格モードのregional DLP保証を持ちません。初回のstateには逐語録、外部質問、生成質問、回答候補、自由文要約を入れず、用途分離した非可逆scope tagと有限coach制御metadataだけを入れます。段階的な標準turnのcross-turn stateにも逐語録・発話本文、モデル応答本文、`extended_speech`の今回限りの判定値、自由文要約を入れません。一方、長い発話も通常会話と同じ状態更新の対象であり、Cloud Runの決定論的規則で検査した、抽象化済みで件数・長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionと制御メタデータは残り得ます。これらだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。厳格モードは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`の時だけ後段へ進み、cross-turn stateを返しません。Native Audioは`us-central1`、文字列Vertex AIは`global`なので、raw audioや段階経路で渡した文字列が東京リージョンだけに留まるとは保証しません。どちらもE2EEでも完全なPII除去でもありません。
+raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化しません。標準モードのPDFは本人が選んだ次の一ターンだけ扱い、応答後に参照を解放します。厳格モードではクライアントのfile read前とAPIのSTT・モデル推論前に拒否します。標準モードで本人が回答支援を明示した初回turnは、`us-central1`のNative Audioが返したfinal input captionをCloud Runの決定論的な同意境界で検査します。通過時はNative出力を破棄し、同じ確定発話を東京リージョンSTTから段階経路へ一度だけ再処理します。段階経路は実際の外部質問からoperator、required slot、非可逆の質問継続tagを作り、次の無関係な発話を回答完了にしません。短期stateには逐語録、外部質問本文、生成質問、回答候補、自由文要約を入れません。段階的な標準turnのcross-turn stateにも逐語録・発話本文、モデル応答本文、`extended_speech`の今回限りの判定値、自由文要約を入れません。一方、長い発話も通常会話と同じ状態更新の対象であり、Cloud Runの決定論的規則で検査した、抽象化済みで件数・長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionと制御メタデータは残り得ます。これらだけをAES-256-GCMで暗号化したUID-bound tokenとしてブラウザメモリへ返し、15分で失効させます。氏名など未検出の機微情報がnodeへ残る可能性はあります。厳格モードは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`の時だけ後段へ進み、cross-turn stateを返しません。Native Audioは`us-central1`、文字列Vertex AIは`global`なので、raw audioや段階経路で渡した文字列が東京リージョンだけに留まるとは保証しません。どちらもE2EEでも完全なPII除去でもありません。
 
 会話の足場を調整する状態は、意味nodeと分けます。保持するのは、通常会話だけにする選択、`guided / light / natural`の段階、質問のcooldown、明示支援turnで質問に対応するevidenceを受け取った直近回数という短期の列挙・上限付きメタデータだけです。発話本文、答え、話題、性格・健康推定、能力scoreを入れず、15分のTTLまたはセッション終了で破棄します。この内部状態から点数、連続成功、順位をUIへ表示しません。
 
@@ -84,17 +84,17 @@ raw audio、文字起こし、モデル応答、PDFはアプリ側で永続化�
 ブラウザだけで高精度な日本語ASR、意味推論、自然なfull-duplex音声をすべて端末内処理するのは、対応端末、電力、モデル配布量の面でまだ不安定です。そのため現在のMVPは次の境界です。
 
 - 利用者が最初にタップして開始したsession中だけマイクを使う。
-- 端末VADで一発話を区切り、録音開始から最大3分30秒まで認証付きWebSocketでCloud Runへ20 ms PCMを増分送信する。標準のPDFなしlive turnはまず`us-central1`のVertex AI Native Audioへ中継する。本人自身が回答支援を明示したことをfinal入力captionから検証した場合は、同じcaptureを再送せず、モデルなしで署名済みcoach checkpointを同期発行してからNative音声を解放する。厳格モード・PDF・回答支援の保留中・live接続fallbackは段階経路を使う。発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。Cloud Run側は最大4分、12,000 frame・7,680,000 byteまで受ける。Goのlive接続deadlineは6分、Cloud Runのrequest timeoutは420秒で、4分のcapture後にもcommitとモデル処理の時間を残す。
-- WebSocket接続が利用不能な時、または高リスク・tool要求などreview済みのNative zero-output sentinelを受けた時は、同じ認証境界のHTTPS requestへ退避する。初回の明示回答支援そのものはsentinelを発生させない。圧縮音声fallbackは2 MiB上限であり、codecとbitrateがブラウザごとに異なるため約3分を保証しない。2 MiBを超えたfallback chunkは全て破棄し、先頭だけの不完全な音声をuploadしない。live PCMが継続している場合はfallback超過だけを理由に発話を止めない。
+- 端末VADで一発話を区切り、録音開始から最大3分30秒まで認証付きWebSocketでCloud Runへ20 ms PCMを増分送信する。標準のPDFなしlive turnはまず`us-central1`のVertex AI Native Audioへ中継する。本人自身が回答支援を明示したことをfinal入力captionから検証した場合は、Native出力を破棄して同じcaptureを段階経路へ一度だけ引き継ぐ。厳格モード・PDF・回答支援中・live接続fallbackも段階経路を使う。発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。Cloud Run側は最大4分、12,000 frame・7,680,000 byteまで受ける。Goのlive接続deadlineは6分、Cloud Runのrequest timeoutは420秒で、4分のcapture後にもcommitとモデル処理の時間を残す。
+- WebSocket接続が利用不能な時、高リスク・tool要求、または明示回答支援を検出してreview済みのNative zero-output sentinelを受けた時は、同じ認証境界のHTTPS requestへ一度だけ退避する。圧縮音声fallbackは2 MiB上限であり、codecとbitrateがブラウザごとに異なるため約3分を保証しない。2 MiBを超えたfallback chunkは全て破棄し、先頭だけの不完全な音声をuploadしない。live PCMが継続している場合はfallback超過だけを理由に発話を止めない。
 - live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。
 - raw audio、文字起こし、prompt/response、PDFをKOTAEのDB、Storage、ログへ保存しない。
 - 標準の高速会話モードではraw audioを`us-central1`のVertex AI Native Audioへ送り、同じprovider turnのfinal入力字幕が届き、Cloud Runの決定論的risk gateを通るまで生成音声を上限付きで保持する。GA endpointのsetupは`responseModalities`を`AUDIO`一つだけにし、captionは`inputAudioTranscription` / `outputAudioTranscription`で受け取る。`TEXT`は応答modalityへ併記しない。厳格モードはraw audioをVertex AIへ送らず、STT文字列と応答文がCloud Run内の決定論的検査と東京リージョンDLPの両方で`clear`の時だけ`global`の文字列推論または後段へ進む。標準モードに厳格モードと同じPII除去保証があるとは表示しない。
 - Native Audio経路は発話の中心に関係する言葉から短く返すよう固定promptで制約する。段階経路ではcommit後のfinal transcriptが160 Unicode code point以上の時だけ、サーバーが今回限りの`extended_speech`を導出する。どちらも話した時間、能力、心理状態、習熟度の判定には使わない。
 - 最後のvoiced frameから700 ms無音になった時は、内容非依存の固定表示「ここまで届いています」を出す。発話再開で消し、理解・要約・採点とは扱わない。これはactiveな画面での受領応答budgetであり、意味音声の絶対3秒保証ではない。急ぐ場合は「ここで返して」で長い終端待ちを明示的に終えられる。
 - 厳格モード・PDF・fallbackの段階経路で応答を選んだ時だけ、短い文字列を東京リージョンTTSへ送る。標準live turnはNative Audioの24 kHz PCMを直接返す。
-- 標準live turnはVertex AI Native Audioを使うが、provider session resumptionや複数browser turn間のprovider session再利用はしない。AI応答へのbarge-inは端末内VADが400 msの持続音声と0.65以上のvoice densityを確認してからForeground turnへ引き継ぎ、短い相づちやぼやきでは停止しない。
-- Respondent Coachの`awaiting_answer`、`awaiting_restatement`、`expanding`、`blocked/retry`中は、サーバーが認証した有限stateを権限の正本とし、クライアント側もNative Audioを選ばず段階経路を維持する。`complete`と`blocked/release`後に始まる次turnからNativeへ戻す。`complete`のUIは「聞かれたことへの答えが届きました」という今回限りのreceiptであり、A-first達成、技能向上、他場面への転移を表示しない。
-- 初回回答支援はNative入力処理と音声応答をそのまま使い、captionを別の文字列modelへ送らず、モデルなしの署名state生成とclient checkpointを音声前に終える。commitから最初の音声frameまで1,000 ms以内を通常Nativeと同じ運用SLOとして`route=native-respondent-coach`で集計し、再送・STT・文字列推論・TTSの直列待ちを入れない。
+- 標準live turnはVertex AI Native Audioを使うが、provider session resumptionや複数browser turn間のprovider session再利用はしない。AI応答へのbarge-inは端末内VADが800 msの持続音声と0.65以上のvoice densityを確認してからForeground turnへ引き継ぎ、短い相づちやぼやきでは停止しない。
+- Respondent Coachの`awaiting_answer`、`awaiting_restatement`、`expanding`、`blocked/retry`中は、サーバーが認証した有限stateを権限の正本とし、クライアント側もNative Audioを選ばず段階経路を維持する。`complete`と`blocked/release`後に始まる次turnからNativeへ戻す。`complete`のUIは「自分の言葉を声に出せた」という今回限りのreceiptであり、A-first達成、技能向上、他場面への転移を表示しない。
+- 通常Native会話はcommitから最初の音声frameまで1,000 ms以内を運用SLOとして集計する。初回回答支援は実質問への結び付きを優先して段階経路へ切り替え、そのspeech-end-to-audibleを別系列で計測する。
 - AI処理中と再生中も開始済みsession内ではマイクを端末内VADへだけ接続し、確認前PCMはAudioWorklet内の固定長リングから送らない。タブ非表示、4分無発話、30分経過でsessionを止める。
 - 標準モードのPDFは一つのturnだけ送信し、本文も資料要約も暗号化状態へ残さない。厳格モードではブラウザのfile read前とAPIのモデル呼出し前に拒否する。
 
@@ -711,7 +711,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - 圧縮音声fallbackの2 MiB上限と、超過時にpartial audioをuploadしないfail-closed処理
 - 確定文字起こし160 rune以上に限定した現在turnだけの`extended speech`構成。12秒以上続いた明確な独話だけ終端の無音待ちを5秒へ延ばし、短い質問の確定待ちは増やさない
 - 標準live・PDFなしのraw audio → Vertex AI Native Audio（`us-central1`、応答modalityは`AUDIO`のみ、captionはinput/output transcription config）→ 24 kHz PCM + caption
-- 本人の明示回答支援をfinal入力captionで検証した初回turnは、モデルなしの署名coach checkpointを音声前に返してからNative音声を解放する。同じcaptureはSTTへ再送せず、captionもstructured reasonerへ送らない。保留中の次turnは東京リージョンSTT → `global` Vertex AI structured reasoner / LAC / Respondent Coach → 東京リージョンTTSを維持し、`complete` / `release`後の次turnからNativeへ戻る
+- 本人の明示回答支援をfinal入力captionで検証した初回turnは、Native音声と汎用checkpointを解放せず、同じcaptureを東京リージョンSTT → `global` Vertex AI structured reasoner / LAC / Respondent Coach → 東京リージョンTTSへ一度だけ引き継ぐ。実質問由来のoperator・required slot・非可逆tagで次turnを照合し、`complete` / `release`後の次turnからNativeへ戻る
 - raw audio、文字起こし、応答文、PDFをアプリ側で永続化しない
 - AES-256-GCM、UID-bound、15分TTL、自由文要約なしのフィルタ済み意味状態
 - Thought State Graph、規則とモデル判定を併用したEVI

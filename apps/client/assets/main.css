@@ -157,10 +157,14 @@
 
   .voice-space {
     display: grid;
-    grid-template-rows: auto 1fr auto auto auto;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(5, auto);
+    align-self: start;
+    align-content: start;
     align-items: center;
+    width: 100%;
     min-width: 0;
-    min-height: min(780px, calc(100svh - 154px));
+    min-height: 0;
   }
 
   .conversation-stage--passkey {
@@ -180,7 +184,7 @@
 
   .utility-dock {
     display: grid;
-    align-self: center;
+    align-self: start;
     gap: 14px;
     min-width: 0;
   }
@@ -340,7 +344,7 @@
     border-radius: 999px;
     background: oklch(20% 0.035 258 / 48%);
     color: var(--cyan);
-    font: 650 0.56rem/1 var(--mono);
+    font: 650 0.68rem/1.2 var(--mono);
     letter-spacing: 0.09em;
     backdrop-filter: blur(14px);
   }
@@ -363,8 +367,8 @@
   .orb-field {
     display: grid;
     position: relative;
-    width: min(49vw, 430px);
-    min-width: 300px;
+    width: min(42vw, 360px);
+    min-width: 270px;
     aspect-ratio: 1;
     place-self: center;
     place-items: center;
@@ -516,8 +520,10 @@
 
   .voice-status {
     display: grid;
+    width: 100%;
+    min-width: 0;
     justify-items: center;
-    margin-top: -18px;
+    margin-top: 4px;
     text-align: center;
   }
 
@@ -541,26 +547,56 @@
   }
 
   .voice-status h1 {
-    max-width: 20em;
+    width: min(100%, 20em);
+    max-width: 100%;
     margin-top: 12px;
     font: 600 clamp(1.85rem, 3.2vw, 3.35rem)/1.38 var(--display);
     letter-spacing: 0.045em;
+    overflow-wrap: anywhere;
     text-wrap: balance;
   }
 
   .voice-status__hint {
-    max-width: 54ch;
+    width: min(100%, 54ch);
+    max-width: 100%;
     margin-top: 14px;
     color: var(--white-soft);
-    font-size: clamp(0.73rem, 0.9vw, 0.84rem);
+    font-size: clamp(0.86rem, 1vw, 0.98rem);
     text-wrap: pretty;
   }
 
   .voice-status__transport {
     margin-top: 7px;
     color: var(--white-faint);
-    font: 600 0.58rem/1.5 var(--mono);
+    font: 600 0.68rem/1.5 var(--mono);
     letter-spacing: 0.07em;
+  }
+
+  .turn-notice {
+    display: grid;
+    justify-self: center;
+    gap: 4px;
+    width: min(680px, calc(100% - 24px));
+    margin-top: 14px;
+    padding: 13px 16px;
+    border: 1px solid oklch(83% 0.17 83 / 42%);
+    border-radius: 13px;
+    background: oklch(28% 0.07 82 / 32%);
+    box-shadow: 0 16px 42px oklch(5% 0.02 260 / 22%);
+    text-align: center;
+    backdrop-filter: blur(16px);
+  }
+
+  .turn-notice strong {
+    color: var(--amber);
+    font-size: 0.92rem;
+  }
+
+  .turn-notice p {
+    color: var(--white-soft);
+    font-size: 0.82rem;
+    line-height: 1.65;
+    text-wrap: pretty;
   }
 
   .passkey-gate {
@@ -670,7 +706,7 @@
     border: 1px solid var(--line);
     border-radius: 11px;
     background: oklch(20% 0.04 258 / 44%);
-    font-size: 0.62rem;
+    font-size: 0.75rem;
     backdrop-filter: blur(12px);
   }
 
@@ -741,13 +777,13 @@
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    min-height: 38px;
+    min-height: 44px;
     padding: 9px 13px;
     border: 1px solid var(--line);
     border-radius: 999px;
     background: var(--glass);
     color: var(--white-soft);
-    font-size: 0.68rem;
+    font-size: 0.76rem;
     font-weight: 650;
     backdrop-filter: blur(15px);
     transition:
@@ -936,6 +972,34 @@
     margin-top: 4px;
     color: var(--white-faint);
     font-size: 0.58rem;
+  }
+
+  .mode-summary {
+    margin-top: 15px;
+    color: var(--white-soft);
+    font-size: 0.72rem;
+    line-height: 1.75;
+    text-wrap: pretty;
+  }
+
+  .mode-route {
+    margin-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+
+  .mode-route summary {
+    padding-top: 11px;
+    color: var(--cyan);
+    font: 650 0.62rem/1.4 var(--mono);
+    list-style-position: inside;
+  }
+
+  .mode-route p {
+    margin-top: 9px;
+    color: var(--white-faint);
+    font-size: 0.62rem;
+    line-height: 1.75;
+    overflow-wrap: anywhere;
   }
 
   .paper-picker {
@@ -1185,7 +1249,7 @@
     }
 
     .voice-space {
-      min-height: min(720px, calc(100svh - 128px));
+      min-height: 0;
     }
 
     .voice-space--passkey {
@@ -1221,7 +1285,7 @@
     }
 
     .voice-space {
-      min-height: calc(100svh - 112px);
+      min-height: 0;
     }
 
     .voice-space--passkey {
@@ -1250,13 +1314,13 @@
     }
 
     .orb-field {
-      width: min(94vw, 370px);
-      min-width: 280px;
+      width: min(86vw, 320px);
+      min-width: 260px;
       margin-block: -8px;
     }
 
     .voice-status {
-      margin-top: -10px;
+      margin-top: 4px;
     }
 
     .voice-status h1 {
@@ -1270,7 +1334,7 @@
 
     .capability-strip {
       grid-template-columns: 1fr;
-      width: min(340px, 94%);
+      width: min(340px, 100%);
       margin-top: 18px;
     }
 
@@ -1308,7 +1372,7 @@
     }
 
     .voice-space {
-      min-height: 590px;
+      min-height: 0;
     }
 
     .voice-space--passkey {

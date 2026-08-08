@@ -517,7 +517,7 @@ func TestAgentReservesTimeForCriticAndSpeechResponse(t *testing.T) {
 			"uid-pending-budget",
 			VoiceTurn{
 				SchemaVersion: SchemaVersion,
-				Utterance:     "can you explain something else?",
+				Utterance:     "KOTAE, can you explain something else?",
 				StateToken:    token,
 			},
 		)

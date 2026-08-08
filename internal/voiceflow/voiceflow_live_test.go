@@ -39,6 +39,15 @@ func newFakeLiveTranscriptionSession(
 	}
 }
 
+func appendProviderSpeechEnd(session *fakeLiveTranscriptionSession) {
+	session.events = append(
+		session.events,
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionSpeechEnd,
+		},
+	)
+}
+
 func (session *fakeLiveTranscriptionSession) SendPCM(audio []byte) error {
 	session.mu.Lock()
 	ctx := session.ctx
@@ -376,6 +385,51 @@ func TestPipelineLiveAggregatesOnlyFinalsWhenConfidenceIsUnavailable(t *testing.
 		len(session.audio) != 1 ||
 		!bytes.Equal(session.audio[0], []byte{1, 0, 2, 0}) {
 		t.Fatalf("session close=%d audio=%v", session.closeCalls, session.audio)
+	}
+}
+
+func TestPipelineLiveDoesNotCountDigitalSilenceAsFirstAudio(t *testing.T) {
+	t.Parallel()
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: "確定字幕",
+		},
+	)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			fakeSpeech: fakeSpeech{},
+			chunks:     [][]byte{{0, 0, 0, 0}},
+		},
+		session: session,
+	}
+	pipeline, err := New(
+		speech,
+		&fakeAgent{result: liveTestDecision("通常回答", "sealed-state")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	var delivered []byte
+	result, err := pipeline.ProcessLive(
+		context.Background(),
+		"uid-silent-output-metric",
+		httpapi.VoiceTurnInput{RequestID: "silent-output-metric"},
+		audio,
+		func(chunk []byte) error {
+			delivered = append(delivered, chunk...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(delivered, []byte{0, 0, 0, 0}) ||
+		result.LiveTimings.FinalToFirstAudioMS != -1 {
+		t.Fatalf("delivered=%v timings=%+v", delivered, result.LiveTimings)
 	}
 }
 
@@ -1377,10 +1431,11 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 		},
 	)
 	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	appendProviderSpeechEnd(session)
 	speech := &fakeLiveSpeech{
 		fakeStreamingSpeech: fakeStreamingSpeech{
 			fakeSpeech: fakeSpeech{},
-			chunks:     [][]byte{{7, 0}},
+			chunks:     [][]byte{{33, 0}},
 		},
 		session: session,
 	}
@@ -1454,7 +1509,7 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 	if outcome.err != nil {
 		t.Fatal(outcome.err)
 	}
-	if chunk := <-delivered; !bytes.Equal(chunk, []byte{7, 0}) {
+	if chunk := <-delivered; !bytes.Equal(chunk, []byte{33, 0}) {
 		t.Fatalf("delivered=%v", chunk)
 	}
 	if outcome.result.StateToken != "spec-state" ||
@@ -1483,6 +1538,88 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 	}
 }
 
+func TestPipelineLiveExactFinalWithoutProviderSpeechEndCannotAdoptSpeculation(
+	t *testing.T,
+) {
+	t.Parallel()
+	const utterance = "SpeechEndなしの確定字幕です"
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.91,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			fakeSpeech: fakeSpeech{},
+			chunks:     [][]byte{{33, 0}},
+		},
+		session: session,
+	}
+	speculative := liveTestDecision("採用してはいけない先読み", "spec-state")
+	speculative.AnswerProofCandidate =
+		conversation.AnswerProofQuestionBoundInputAnswerFirst
+	normal := liveTestDecision("確定後の通常回答", "normal-state")
+	normal.AnswerProof = conversation.AnswerProofNone
+	agent := &speculativeTestAgent{
+		speculativeResult: speculative,
+		normalResult:      normal,
+		started:           make(chan struct{}),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(250, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	var delivered [][]byte
+	result, err := pipeline.ProcessLive(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{RequestID: "spec-no-speech-end"},
+		audio,
+		func(chunk []byte) error {
+			delivered = append(delivered, append([]byte(nil), chunk...))
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StateToken != "normal-state" ||
+		result.Caption != "確定後の通常回答" ||
+		result.AnswerProof != string(conversation.AnswerProofNone) ||
+		result.LiveTimings.SpecHit != 0 ||
+		result.LiveTimings.SpecMiss != 1 ||
+		result.LiveTimings.SpecCancel != 1 {
+		t.Fatalf("speculation crossed missing SpeechEnd gate: result=%+v", result)
+	}
+	if len(delivered) != 1 || !bytes.Equal(delivered[0], []byte{33, 0}) {
+		t.Fatalf("delivered=%v", delivered)
+	}
+	turns := agent.recordedTurns()
+	if len(turns) != 2 || !turns[0].Speculative || turns[1].Speculative ||
+		turns[1].FloorEvidence == conversation.FloorEvidenceHybridCommitted {
+		t.Fatalf("turns=%+v", turns)
+	}
+}
+
 func TestPipelineLiveReleasesFullPrestartedTTSInOrder(t *testing.T) {
 	t.Parallel()
 	const utterance = "長い先読み音声の順序を確認する"
@@ -1504,6 +1641,7 @@ func TestPipelineLiveReleasesFullPrestartedTTSInOrder(t *testing.T) {
 		},
 	)
 	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	appendProviderSpeechEnd(session)
 	first := bytes.Repeat([]byte{5, 0}, maxSpeculativeTTSBufferBytes/2)
 	second := []byte{6, 0}
 	speech := &scriptedLiveSpeech{
@@ -1786,6 +1924,7 @@ func TestPipelineLivePrestartFailureRetriesOnlyTTSBeforeRelease(t *testing.T) {
 				},
 			)
 			session.eventGates = map[int]<-chan struct{}{2: finalGate}
+			appendProviderSpeechEnd(session)
 			speech := &scriptedLiveSpeech{
 				session: session,
 				scripts: []scriptedSynthesis{
@@ -1913,6 +2052,7 @@ func TestPipelineLiveLatePrestartFailureDoesNotDoubleSpeak(t *testing.T) {
 		},
 	)
 	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	appendProviderSpeechEnd(session)
 	first := bytes.Repeat([]byte{4, 0}, maxSpeculativeTTSBufferBytes/2)
 	speech := &scriptedLiveSpeech{
 		session: session,
@@ -2126,6 +2266,7 @@ func TestPipelineLiveSpeculationUsesFinalsPlusLatestInterim(t *testing.T) {
 			Text: second,
 		},
 	)
+	appendProviderSpeechEnd(session)
 	speech := &fakeLiveSpeech{
 		fakeStreamingSpeech: fakeStreamingSpeech{
 			fakeSpeech: fakeSpeech{},
@@ -2183,6 +2324,7 @@ func TestPipelineLiveTreatsFinalAsStableSpeculativeObservation(t *testing.T) {
 			Text: utterance,
 		},
 	)
+	appendProviderSpeechEnd(session)
 	speech := &fakeLiveSpeech{
 		fakeStreamingSpeech: fakeStreamingSpeech{
 			fakeSpeech: fakeSpeech{},
@@ -2450,9 +2592,8 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndDisablesForDocuments(t *
 				MIMEType: "application/pdf",
 				Data:     []byte("pdf"),
 			},
-			wantTurns: 1,
-			wantMiss:  1,
-			wantRoute: "fast",
+			wantTurns: 0,
+			wantRoute: routeRuntimeDocumentRejected,
 		},
 	} {
 		test := test
@@ -2475,12 +2616,15 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndDisablesForDocuments(t *
 					Text: utterance,
 				},
 			)
+			appendProviderSpeechEnd(session)
+			opened := make(chan struct{})
 			speech := &fakeLiveSpeech{
 				fakeStreamingSpeech: fakeStreamingSpeech{
 					fakeSpeech: fakeSpeech{},
 					chunks:     [][]byte{{12, 0}},
 				},
 				session: session,
+				opened:  opened,
 			}
 			agent := &speculativeTestAgent{
 				speculativeResult: liveTestDecision(
@@ -2501,6 +2645,7 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndDisablesForDocuments(t *
 			audio := make(chan []byte, 1)
 			audio <- []byte{1, 0}
 			close(audio)
+			deliveredAudio := 0
 			result, err := pipeline.ProcessLive(
 				context.Background(),
 				"uid",
@@ -2510,7 +2655,10 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndDisablesForDocuments(t *
 					Document:   test.document,
 				},
 				audio,
-				func([]byte) error { return nil },
+				func(chunk []byte) error {
+					deliveredAudio += len(chunk)
+					return nil
+				},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -2524,15 +2672,26 @@ func TestPipelineLiveSpeculationRequiresReplyExpectedAndDisablesForDocuments(t *
 					turns[0].Foreground != test.foreground) {
 				t.Fatalf("turns=%+v", turns)
 			}
-			if test.document != nil &&
-				(turns[0].PDF == nil || turns[0].PDF.MIMEType != "application/pdf") {
-				t.Fatalf("document was not passed to the normal turn: %+v", turns[0])
-			}
 			if test.wantRoute != "" && result.Route != test.wantRoute {
 				t.Fatalf("route=%q; want %q", result.Route, test.wantRoute)
 			}
-			if test.document != nil && len(test.document.Data) != 0 {
-				t.Fatalf("document bytes were retained: %d", len(test.document.Data))
+			if test.document != nil {
+				assertRuntimeDocumentRejected(t, result)
+				select {
+				case <-opened:
+					t.Fatal("live document opened streaming STT")
+				default:
+				}
+				if speech.streamCalls != 0 || deliveredAudio != 0 {
+					t.Fatalf(
+						"live document crossed TTS boundary: tts=%d audio=%d",
+						speech.streamCalls,
+						deliveredAudio,
+					)
+				}
+				if len(test.document.Data) != 0 {
+					t.Fatalf("document bytes were retained: %d", len(test.document.Data))
+				}
 			}
 			if result.LiveTimings.SpecHit != test.wantHit ||
 				result.LiveTimings.SpecMiss != test.wantMiss ||

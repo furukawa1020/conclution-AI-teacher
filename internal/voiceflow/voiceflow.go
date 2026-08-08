@@ -34,6 +34,7 @@ const (
 	routeSilentNoSpeech          = "stt-silent-no-speech"
 	routeSilentLowConfidence     = "stt-silent-low-confidence"
 	routeStrictPrivacyBlocked    = "strict-privacy-blocked"
+	routeRuntimeDocumentRejected = "runtime-document-rejected"
 	privacyStatusBlocked         = "blocked"
 )
 
@@ -305,6 +306,10 @@ func (p *Pipeline) processLive(
 	onAudio func([]byte) error,
 	onEndpoint func(),
 ) (httpapi.VoiceTurnResult, error) {
+	if input.Document != nil {
+		clearDocument(input.Document)
+		return runtimeDocumentRejectedResult(), nil
+	}
 	if audio == nil || onAudio == nil {
 		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
@@ -325,13 +330,16 @@ func (p *Pipeline) processLive(
 	}
 	var firstOutputMu sync.Mutex
 	firstOutputAt := time.Time{}
+	outputDelivered := false
 	deliverAudio := func(chunk []byte) error {
 		deliveredAt := time.Now()
+		meaningful := speechio.PCM16HasMeaningfulSample(chunk)
 		if err := onAudio(chunk); err != nil {
 			return err
 		}
 		firstOutputMu.Lock()
-		if firstOutputAt.IsZero() {
+		outputDelivered = true
+		if meaningful && firstOutputAt.IsZero() {
 			firstOutputAt = deliveredAt
 		}
 		firstOutputMu.Unlock()
@@ -609,6 +617,7 @@ func (p *Pipeline) processLive(
 		}
 	}
 	sendResult := <-sendDone
+	hybridFloorCommitted := sendResult.committed && providerSpeechEndPending
 	processingBudget := liveProcessingBudget{
 		reserveTimer: sendResult.reserveTimer,
 	}
@@ -779,7 +788,7 @@ func (p *Pipeline) processLive(
 				case <-ctx.Done():
 					outcome.err = ctx.Err()
 				}
-				synthesisReady := outcome.err == nil &&
+				synthesisReady := hybridFloorCommitted && outcome.err == nil &&
 					(outcome.decision.SpokenReply == "" ||
 						outcome.synthesis != nil)
 				if outcome.err == nil {
@@ -825,9 +834,9 @@ func (p *Pipeline) processLive(
 					} else {
 						outcome.synthesis.abort(err)
 						firstOutputMu.Lock()
-						outputDelivered := !firstOutputAt.IsZero()
+						crossedOutputBoundary := outputDelivered
 						firstOutputMu.Unlock()
-						if releaseAttempted || outputDelivered {
+						if releaseAttempted || crossedOutputBoundary {
 							synthesisReady = false
 							terminalSynthesisFailure = true
 						} else {
@@ -884,6 +893,7 @@ func (p *Pipeline) processLive(
 				input,
 				finalTranscript,
 				finalConfidence,
+				floorEvidenceForHybridCommit(hybridFloorCommitted),
 			)
 			conversationMS = time.Since(conversationStarted).Milliseconds()
 		}
@@ -969,8 +979,11 @@ func (p *Pipeline) startLiveSpeculation(
 	streamingSpeech speechio.StreamingService,
 	deliverAudio func([]byte) error,
 ) *liveSpeculation {
+	candidate = canonicalSpeculationText(candidate)
 	if input.StrictCloudMinimization || input.Document != nil ||
-		liveProcessingCommitted(input) {
+		liveProcessingCommitted(input) ||
+		candidate == "" ||
+		!speculationPreservesFinalMetadata(candidate) {
 		return nil
 	}
 	speculationCtx, cancel := context.WithCancel(ctx)
@@ -1417,6 +1430,14 @@ func canonicalSpeculationText(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
+func speculationPreservesFinalMetadata(value string) bool {
+	// ExtendedSpeech is trusted metadata granted only after final recognition.
+	// A provisional run at or beyond this boundary would see a materially
+	// different turn from the committed pass even when its text matched exactly.
+	return utf8.RuneCountInString(canonicalSpeculationText(value)) <
+		extendedSpeechMinRunes
+}
+
 func speculationTextsMatch(candidate string, finalTranscript string) bool {
 	return canonicalSpeculationText(candidate) ==
 		canonicalSpeculationText(finalTranscript)
@@ -1427,6 +1448,10 @@ func (p *Pipeline) prepareTurn(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, string, error) {
+	if input.Document != nil {
+		clearDocument(input.Document)
+		return runtimeDocumentRejectedResult(), "", nil
+	}
 	if strictInputBlocked(input) {
 		clearDocument(input.Document)
 		return strictPrivacyBlockedResult(), "", nil
@@ -1504,7 +1529,14 @@ func (p *Pipeline) prepareTurn(
 		"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
 		"recognized", true,
 	)
-	return p.prepareRecognizedTurn(ctx, uid, input, transcript, confidence)
+	return p.prepareRecognizedTurn(
+		ctx,
+		uid,
+		input,
+		transcript,
+		confidence,
+		conversation.FloorEvidenceUnknown,
+	)
 }
 
 func transcriptionContextWithResponseReserve(
@@ -1564,6 +1596,7 @@ func (p *Pipeline) prepareRecognizedTurn(
 	input httpapi.VoiceTurnInput,
 	transcript string,
 	confidence float32,
+	floorEvidence conversation.FloorEvidence,
 ) (httpapi.VoiceTurnResult, string, error) {
 	if input.StrictCloudMinimization {
 		if p.strictBoundary == nil ||
@@ -1587,6 +1620,7 @@ func (p *Pipeline) prepareRecognizedTurn(
 		), lowConfidencePrompt, nil
 	}
 	turn := conversationTurn(input, transcript, false)
+	turn.FloorEvidence = floorEvidence
 	conversationStarted := time.Now()
 	decision, err := p.agent.Process(ctx, uid, turn)
 	if errors.Is(err, conversation.ErrExpiredStateToken) &&
@@ -1610,6 +1644,7 @@ func (p *Pipeline) prepareRecognizedTurn(
 		)
 		input.StateToken = ""
 		turn = conversationTurn(input, transcript, false)
+		turn.FloorEvidence = floorEvidence
 		decision, err = p.agent.Process(ctx, uid, turn)
 	}
 	if err != nil {
@@ -1687,15 +1722,19 @@ func conversationTurn(
 		Speculative:      speculative,
 		InputOrigin:      inputOrigin,
 		ResearchDisabled: input.StrictCloudMinimization,
+		OutputCancelable: input.ProcessingCommitted != nil,
 	}
-	if input.Document == nil {
-		return turn
-	}
-	turn.PDF = &conversation.InlinePDF{
-		MIMEType: input.Document.MIMEType,
-		Data:     input.Document.Data,
+	if speculative && input.ProcessingCommitted != nil {
+		turn.FloorEvidence = conversation.FloorEvidenceProvisionalCommitGate
 	}
 	return turn
+}
+
+func floorEvidenceForHybridCommit(committed bool) conversation.FloorEvidence {
+	if committed {
+		return conversation.FloorEvidenceHybridCommitted
+	}
+	return conversation.FloorEvidenceUnknown
 }
 
 func voiceResultFromDecision(
@@ -1713,11 +1752,7 @@ func voiceResultFromDecision(
 		ResearchStatus:   decision.ResearchStatus,
 		ResearchRecords:  researchRecords(decision.ResearchRecords),
 		Route:            decision.Route,
-		NeedsPaper: (decision.Intervention.Act == "paper_check" &&
-			input.Document == nil) ||
-			((decision.Route == "planner-unavailable" ||
-				decision.Route == "planner-unavailable-silent") &&
-				input.Document != nil),
+		NeedsPaper:       decision.Intervention.Act == "paper_check",
 	}
 }
 
@@ -1790,6 +1825,20 @@ func strictPrivacyBlockedResult() httpapi.VoiceTurnResult {
 		ResearchStatus:   "none",
 		ResearchRecords:  []httpapi.ResearchRecord{},
 		Route:            routeStrictPrivacyBlocked,
+		PrivacyStatus:    privacyStatusBlocked,
+	}
+}
+
+func runtimeDocumentRejectedResult() httpapi.VoiceTurnResult {
+	return httpapi.VoiceTurnResult{
+		DetectedDomain:   "unknown",
+		AssistanceTarget: "assistant",
+		RespondentStage:  "none",
+		CoachPhase:       "none",
+		CoachAction:      "none",
+		ResearchStatus:   "none",
+		ResearchRecords:  []httpapi.ResearchRecord{},
+		Route:            routeRuntimeDocumentRejected,
 		PrivacyStatus:    privacyStatusBlocked,
 	}
 }

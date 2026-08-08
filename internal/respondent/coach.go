@@ -44,6 +44,13 @@ type CoachDecision struct {
 	// that arrived later is accepted without another task but must not advance
 	// adaptive fading.
 	VerifiedFirst bool
+	// Posterior and ReasonCode are content-free verifier-progress evidence. They
+	// may be retained only inside the encrypted, question-bounded state. The
+	// update bit distinguishes a real policy update from zero values returned by
+	// non-policy helpers such as HoldForHesitation.
+	Posterior               VerifierProgressPosterior
+	VerifierProgressUpdated bool
+	ReasonCode              AnswerReasonCode
 }
 
 // GuideAwaiting asks only for the answer type requested by the question.
@@ -185,6 +192,105 @@ func GuideAttemptWithRestatement(
 		oneShot,
 		requireRestatement,
 	)
+}
+
+// GuideAttemptWithVerifierProgress renders a fixed coach response from an
+// already-projected, content-free policy input. Raw verifier assessments are
+// intentionally impossible to pass through this boundary.
+func GuideAttemptWithVerifierProgress(
+	operator Operator,
+	abstained bool,
+	input AnswerControllerInput,
+) CoachDecision {
+	control := PlanAnswerSupport(input)
+	phase := coachPhaseFromAnswerPhase(control.Observation.Phase)
+	decision := CoachDecision{
+		Attempts:                control.NextAttempts,
+		KeepPending:             control.KeepPending,
+		VerifiedFirst:           control.VerifiedFirst,
+		Posterior:               control.Posterior,
+		VerifierProgressUpdated: true,
+		ReasonCode:              control.ReasonCode,
+	}
+
+	switch control.Action {
+	case AnswerSupportComplete:
+		decision.Phase = CoachPhaseComplete
+		decision.Action = CoachActionComplete
+		decision.KeepPending = false
+		switch {
+		case control.ReasonCode == AnswerReasonLateAccepted:
+			decision.SpokenReply = lateAnswerContinuationReply()
+		case phase == CoachPhaseExpanding || abstained:
+			decision.SpokenReply = completionReply(abstained)
+		default:
+			decision.SpokenReply = naturalContinuationReply(operator, abstained)
+		}
+		return decision
+	case AnswerSupportRelease:
+		released := releaseDecision(control.NextAttempts)
+		released.Posterior = control.Posterior
+		released.VerifierProgressUpdated = true
+		released.ReasonCode = control.ReasonCode
+		return released
+	case AnswerSupportRestate:
+		decision.Phase = CoachPhaseAwaitingRestatement
+		decision.Action = CoachActionRestate
+		decision.SpokenReply = gentleReaskPrompt(operator)
+		return decision
+	case AnswerSupportElicit:
+		if phase == CoachPhaseExpanding {
+			decision.Phase = CoachPhaseExpanding
+			decision.Action = CoachActionExpand
+			decision.SpokenReply = expansionPrompt(operator)
+			return decision
+		}
+		decision.Phase = CoachPhaseAwaitingAnswer
+		decision.Action = CoachActionElicit
+		decision.SpokenReply = corePrompt(operator)
+		return decision
+	case AnswerSupportWait:
+		decision.KeepPending = true
+		decision.Action = CoachActionNone
+		decision.SpokenReply = ""
+		switch phase {
+		case CoachPhaseNone,
+			CoachPhaseAwaitingAnswer,
+			CoachPhaseAwaitingRestatement,
+			CoachPhaseExpanding,
+			CoachPhaseComplete,
+			CoachPhaseBlocked:
+			decision.Phase = phase
+		default:
+			decision.Phase = CoachPhaseBlocked
+		}
+		return decision
+	default:
+		released := releaseDecision(MaxCoachAttempts)
+		released.Posterior = control.Posterior
+		released.VerifierProgressUpdated = true
+		released.ReasonCode = AnswerReasonInvalidPhase
+		return released
+	}
+}
+
+func coachPhaseFromAnswerPhase(phase AnswerPhase) CoachPhase {
+	switch phase {
+	case AnswerPhaseNone:
+		return CoachPhaseNone
+	case AnswerPhaseAwaitingAnswer:
+		return CoachPhaseAwaitingAnswer
+	case AnswerPhaseAwaitingRestatement:
+		return CoachPhaseAwaitingRestatement
+	case AnswerPhaseExpanding:
+		return CoachPhaseExpanding
+	case AnswerPhaseComplete:
+		return CoachPhaseComplete
+	case AnswerPhaseBlocked:
+		return CoachPhaseBlocked
+	default:
+		return CoachPhaseBlocked
+	}
 }
 
 func guideAttempt(
@@ -389,7 +495,7 @@ func corePrompt(operator Operator) string {
 	case OperatorChoice:
 		return "ひとつだけ選ぶなら、どれですか？"
 	case OperatorQuantity:
-		return "数字だけなら、いくつですか？"
+		return "数字と単位だけなら、いくつですか？"
 	case OperatorState:
 		return "今どうなっているか、一言だけなら？"
 	case OperatorCause:

@@ -22,6 +22,27 @@ type fakeSpeech struct {
 	synthesizedText string
 }
 
+func assertRuntimeDocumentRejected(
+	t *testing.T,
+	result httpapi.VoiceTurnResult,
+) {
+	t.Helper()
+	if result.Route != routeRuntimeDocumentRejected ||
+		result.PrivacyStatus != privacyStatusBlocked ||
+		result.DetectedDomain != "unknown" ||
+		result.AssistanceTarget != "assistant" ||
+		result.RespondentStage != "none" ||
+		result.CoachPhase != "none" || result.CoachAction != "none" ||
+		result.ResearchStatus != "none" ||
+		len(result.Audio) != 0 || result.AudioMIMEType != "" ||
+		result.Caption != "" || result.StateToken != "" ||
+		result.AnswerProof != "" || result.NeedsPaper ||
+		len(result.ResearchRecords) != 0 ||
+		result.LiveTimings != (httpapi.VoiceLiveTimings{}) {
+		t.Fatalf("runtime document rejection leaked output or authority: %+v", result)
+	}
+}
+
 func TestConversationTurnMarksOnlyFinalizedExtendedSpeech(t *testing.T) {
 	t.Parallel()
 	input := httpapi.VoiceTurnInput{RequestID: "request-long-form"}
@@ -48,6 +69,71 @@ func TestConversationTurnMarksOnlyFinalizedExtendedSpeech(t *testing.T) {
 	)
 	if speculative.ExtendedSpeech {
 		t.Fatal("provisional transcript received finalized long-form authority")
+	}
+	if final.OutputCancelable {
+		t.Fatal("buffered turn received live output-cancel authority")
+	}
+	processingCommitted := make(chan struct{})
+	input.ProcessingCommitted = processingCommitted
+	live := conversationTurn(input, "live", false)
+	if !live.OutputCancelable {
+		t.Fatal("live server-authored commit signal did not grant output cancellation")
+	}
+}
+
+func TestStartLiveSpeculationStopsAtFinalizedExtendedSpeechBoundary(t *testing.T) {
+	t.Parallel()
+	speech := &scriptedLiveSpeech{}
+	agent := &speculativeTestAgent{
+		speculativeResult: conversation.VoiceTurnResult{
+			ResearchRecords: []conversation.ResearchRecord{},
+		},
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := httpapi.VoiceTurnInput{RequestID: "speculation-boundary"}
+
+	shortCandidate := "  " + strings.Repeat("界", extendedSpeechMinRunes-1) + "  "
+	speculation := pipeline.startLiveSpeculation(
+		context.Background(),
+		"uid-speculation-boundary",
+		input,
+		shortCandidate,
+		speech,
+		func([]byte) error { return nil },
+	)
+	if speculation == nil {
+		t.Fatal("159 canonical runes did not start eligible speculation")
+	}
+	select {
+	case outcome := <-speculation.outcome:
+		if outcome.err != nil {
+			t.Fatalf("159-rune speculative outcome: %v", outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("159-rune speculative outcome did not complete")
+	}
+	speculation.cancel()
+
+	longCandidate := "  " + strings.Repeat("界", extendedSpeechMinRunes) + "  "
+	if got := pipeline.startLiveSpeculation(
+		context.Background(),
+		"uid-speculation-boundary",
+		input,
+		longCandidate,
+		speech,
+		func([]byte) error { return nil },
+	); got != nil {
+		got.cancel()
+		t.Fatal("160 canonical runes started metadata-unsafe speculation")
+	}
+
+	turns := agent.recordedTurns()
+	if len(turns) != 1 || !turns[0].Speculative || turns[0].ExtendedSpeech ||
+		turns[0].Utterance != strings.Repeat("界", extendedSpeechMinRunes-1) {
+		t.Fatalf("speculative turns = %+v", turns)
 	}
 }
 
@@ -573,9 +659,12 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	}
 }
 
-func TestPipelinePassesPDFToPlannerInStandardMode(t *testing.T) {
+func TestPipelineRejectsPDFBeforeSpeechOrPlannerInStandardMode(t *testing.T) {
 	t.Parallel()
-	speech := &fakeSpeech{transcript: "この内容に答えてください", confidence: 0.95}
+	speech := &countedSpeech{fakeSpeech: fakeSpeech{
+		transcript: "この内容に答えてください",
+		confidence: 0.95,
+	}}
 	agent := &fakeAgent{result: conversation.VoiceTurnResult{
 		Route:       "fast",
 		StateToken:  "next-state",
@@ -597,14 +686,16 @@ func TestPipelinePassesPDFToPlannerInStandardMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Route != "fast" || result.StateToken != "next-state" ||
-		result.Caption != "PDFの内容に沿った返答" || result.NeedsPaper ||
-		agent.calls != 1 || agent.turn.PDF == nil ||
-		agent.turn.PDF.MIMEType != "application/pdf" ||
-		speech.synthesizeCalls != 1 ||
-		speech.synthesizedText != "PDFの内容に沿った返答" ||
-		len(document.Data) != 0 {
-		t.Fatalf("standard PDF result=%+v agent=%d turn=%+v synth=%d text=%q doc=%d", result, agent.calls, agent.turn, speech.synthesizeCalls, speech.synthesizedText, len(document.Data))
+	assertRuntimeDocumentRejected(t, result)
+	if speech.transcribeCalls != 0 || speech.synthesizeCalls != 0 ||
+		agent.calls != 0 || len(document.Data) != 0 {
+		t.Fatalf(
+			"standard PDF crossed a service boundary: stt=%d agent=%d tts=%d doc=%d",
+			speech.transcribeCalls,
+			agent.calls,
+			speech.synthesizeCalls,
+			len(document.Data),
+		)
 	}
 }
 

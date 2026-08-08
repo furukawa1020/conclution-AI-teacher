@@ -45,15 +45,15 @@ func TestGuideAttemptUsesOperatorPromptForAmbiguousTarget(t *testing.T) {
 		Frame: QuestionFrame{
 			Operator:      OperatorQuantity,
 			Subject:       "件数",
-			RequiredSlots: []Slot{SlotQuantity},
+			RequiredSlots: []Slot{SlotQuantity, SlotUnit},
 			Ambiguous:     true,
 		},
 		Attempt: AnswerAttempt{
 			Text: "三件です。",
-			SlotEvidence: []SlotBinding{{
-				Slot: SlotQuantity,
-				Span: "三件です。",
-			}},
+			SlotEvidence: []SlotBinding{
+				{Slot: SlotQuantity, Span: "三件です。"},
+				{Slot: SlotUnit, Span: "件"},
+			},
 		},
 	})
 	critic := successfulCritic()
@@ -73,7 +73,7 @@ func TestGuideAttemptUsesOperatorPromptForAmbiguousTarget(t *testing.T) {
 	)
 	if decision.Action != CoachActionElicit ||
 		decision.Phase != CoachPhaseAwaitingAnswer ||
-		!strings.Contains(decision.SpokenReply, "数字だけ") ||
+		!strings.Contains(decision.SpokenReply, "数字と単位だけ") ||
 		strings.Contains(decision.SpokenReply, "三件") {
 		t.Fatalf("ambiguous target was not narrowed structurally: %#v", decision)
 	}

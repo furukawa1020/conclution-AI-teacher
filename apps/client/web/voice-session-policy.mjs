@@ -35,9 +35,14 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   hybridEndpointAgreementWindowMs: 2_000,
   hybridSoftVoiceAgreementWindowMs: 3_500,
   hybridMonologueEndpointAgreementWindowMs: 6_000,
-  // The native-audio lane consumes PCM while the person is speaking. Only a
-  // short clear utterance uses this fast endpoint; reflective, quiet, and
-  // monologue pauses retain their wider existing windows.
+  // Respondent Coach asks for one bounded answer slot. Only a short, clear
+  // continuing answer may use the earlier local endpoint; reflective, quiet,
+  // and monologue speech still select their wider windows below.
+  coachEndOfTurnSilenceMs: 640,
+  coachHybridEndpointSilenceMs: 440,
+  // The native-audio lane consumes PCM while the person is speaking. Clear
+  // speech uses the fast endpoint regardless of ordinary answer length;
+  // confirmed quiet speech and monologues retain their wider windows.
   nativeAudioEndOfTurnSilenceMs: 520,
   nativeAudioHybridEndpointSilenceMs: 400,
   // A voice candidate must either reach the 120 ms confirmation threshold
@@ -777,6 +782,7 @@ export function createVadState(startedAt) {
 }
 
 export function shouldCommitHybridEndpoint({
+  coachActive = false,
   firstVoiceAt,
   hasSpeech,
   lastVoiceAt,
@@ -786,6 +792,7 @@ export function shouldCommitHybridEndpoint({
   softVoiceConfirmed = false,
 }) {
   if (
+    typeof coachActive !== "boolean" ||
     typeof hasSpeech !== "boolean" ||
     typeof nativeAudio !== "boolean" ||
     typeof softVoiceConfirmed !== "boolean" ||
@@ -818,14 +825,21 @@ export function shouldCommitHybridEndpoint({
     VOICE_SESSION_LIMITS.vadIntervalMs;
   const monologue =
     speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
-  const shortRequiredSilence = nativeAudio
-    ? VOICE_SESSION_LIMITS.nativeAudioHybridEndpointSilenceMs
-    : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+  // Native can be promoted to Coach after commit. In that legal dynamic
+  // state, retain Coach's slightly wider floor instead of regressing to the
+  // 400 ms Native endpoint.
+  const shortRequiredSilence = coachActive
+    ? VOICE_SESSION_LIMITS.coachHybridEndpointSilenceMs
+    : nativeAudio
+      ? VOICE_SESSION_LIMITS.nativeAudioHybridEndpointSilenceMs
+      : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
   const requiredSilence = monologue
     ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
     : softVoiceConfirmed
       ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
-      : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+      : nativeAudio && !coachActive
+        ? VOICE_SESSION_LIMITS.nativeAudioHybridEndpointSilenceMs
+        : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
         ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
         : shortRequiredSilence;
   const agreementWindow = monologue
@@ -858,6 +872,9 @@ export function advanceVad(
       VOICE_SESSION_LIMITS.softVoiceMinimumEvidenceSpanMs,
     softVoiceContinuationEvidenceSpanMs =
       VOICE_SESSION_LIMITS.softVoiceContinuationEvidenceSpanMs,
+    coachActive = false,
+    coachEndOfTurnSilenceMs =
+      VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
     softCandidateCaptureLimitMs =
       VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs,
     endOfTurnSilenceMs = VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
@@ -878,7 +895,10 @@ export function advanceVad(
   if (
     previous === null ||
     typeof previous !== "object" ||
-    !Number.isFinite(previous.startedAt)
+    !Number.isFinite(previous.startedAt) ||
+    typeof coachActive !== "boolean" ||
+    !Number.isFinite(coachEndOfTurnSilenceMs) ||
+    coachEndOfTurnSilenceMs <= 0
   ) {
     throw new TypeError("vad_state_invalid");
   }
@@ -1120,6 +1140,9 @@ export function advanceVad(
     firstVoiceAt === null || lastVoiceAt === null
       ? 0
       : lastVoiceAt - firstVoiceAt + intervalMs;
+  const shortEndOfTurnSilenceMs = coachActive
+    ? coachEndOfTurnSilenceMs
+    : endOfTurnSilenceMs;
   const trailingSilenceMs =
     speechSpanMs >= monologueSpeechSpanMs
       ? monologueEndOfTurnSilenceMs
@@ -1127,7 +1150,7 @@ export function advanceVad(
         ? softVoiceEndOfTurnSilenceMs
         : speechSpanMs >= reflectiveSpeechSpanMs
           ? reflectiveEndOfTurnSilenceMs
-          : endOfTurnSilenceMs;
+          : shortEndOfTurnSilenceMs;
   // Keep direct questions fast, while giving a longer, think-aloud utterance
   // enough room for a natural Japanese pause before committing the turn.
   if (

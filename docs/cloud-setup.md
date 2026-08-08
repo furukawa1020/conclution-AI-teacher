@@ -27,14 +27,14 @@ FirebaseとGoogle Cloudは、別々のプロジェクトをURLやAPI keyで接�
 |---|---|---|
 | Hosting / API | Hosting / Cloud Run `asia-northeast1` | 静的asset、voice request |
 | Firestore | `asia-northeast1` | TTL付き評価メタデータ・rate counter・live接続lease・Passkeyのpublic credentialと短命ceremony |
-| Speech-to-Text | `asia-northeast1` regional endpoint | 厳格モード、PDF turn、Native Audioを使えないfallbackのraw audio |
+| Speech-to-Text | `asia-northeast1` regional endpoint | 厳格モードとNative Audioを使えないfallbackのraw audio。回答支援は初回・継続ともNative caption handoffを使い、2回目のSTTを使わない |
 | Sensitive Data Protection | `asia-northeast1` regional endpoint | 厳格モードの文字起こしと応答文 |
 | Vertex AI Native Audio | `us-central1` | 標準liveのraw audioと音声応答 |
-| Vertex AI文字列推論 | `global` | 回答支援とfallbackの文字起こし、標準モードの短い状態要約と今回添付したPDF |
-| Text-to-Speech | `asia-northeast1` regional endpoint | 回答支援、厳格モード、PDF turn、Native Audioを使えないfallbackで選ばれた短い応答文 |
+| Vertex AI文字列推論 | `global` | 初回・継続回答支援で直接handoffしたNative input caption、fallbackの文字起こし、標準モードの短い状態要約。runtime PDFは推論前に拒否する |
+| Text-to-Speech | `asia-northeast1` regional endpoint | 初回・継続caption handoff、厳格モード、Native Audioを使えないfallbackで選ばれた短い応答文。Q-ARCの有限template ID/slotは別の監査済みclosed rendererだけがcueへ変換し、その文も同じendpointでstreaming合成する。安定した暫定captionではprivate commit buffer内だけで先行可能 |
 | Crossref | Google Cloud外の公開REST API | intentional turnで明示し、tool-policyとPII screenを通過したDOIまたは最小topicだけ |
 
-標準live会話では、PDFを添付せず厳格モードでもないturnだけ、Cloud Runから`us-central1`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。GA endpointはsetupごとに応答modalityを一つだけ許すため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。利用者が入力内で外部の質問として報告した問いへの回答支援を明示した初回turnは、Native出力を破棄し、同じ確定発話を東京リージョンSTTから`global`文字列Vertex AI、LAC、Respondent Coach、東京リージョンTTSの段階経路へ一度だけ再処理します。同じ解析済み質問spanからoperatorとrequired slotを作り、確定入力の回答evidenceと用途分離した非可逆tagへ束縛するため、無関係な次turnを回答完了にしません。外部で質問された事実や現在の話者は検証せず、具体的な質問・答え・逐語録はstateやDBへ保存しません。厳格モード、PDF turn、Native Audioが利用できない接続fallback、高リスク・tool要求も、応答音声を解放していない場合だけ明示sentinelで段階経路へ切り替えます。したがって、標準liveのraw audioは`us-central1`、fallbackと回答支援の文字列、明示添付したPDFは`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進み、PDFは読込前とAPI推論前に拒否します。
+標準live会話では、Cloud Runから`us-central1`のVertex AI Native Audioへraw audioを直接streamし、音声とcaptionを受け取ります。GA endpointはsetupごとに応答modalityを一つだけ許すため、`responseModalities`には`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。`TEXT`を応答modalityへ併記しません。最終入力captionが確定するまでは生成音声を利用者へ解放せず、Cloud Run内の決定論的なPII・高リスク・tool要求screenを通過した時だけcommitします。このscreenはregional DLP検査でも、Vertex AIへ送る前の原音検査でもありません。利用者が入力内で外部の質問として報告した問いへの回答支援を明示した初回turnはNative出力を破棄します。対象条件を満たす新規scopeでは、質問本文・回答候補を入力に取らない質問拘束済みQ-ARCが有限template IDとslotを選び、監査済みrendererだけがopen-slot cueへ変換します。安定した暫定captionからdecisionとstreaming TTSをprivate commit buffer内で先行できますが、空白だけを正規化した候補byte列がfinal captionと完全一致し、browser commitが確定し、同じ報告質問由来の用途分離HMACへ束縛したAES-256-GCM認証暗号stateを含む有限coach checkpointを発行した後だけPCMを解放します。汎用scope、汎用checkpoint、cached cueは使いません。不一致なら先読みした状態とPCMを破棄してfinal captionを一度だけ処理します。それ以外はNative final input captionを監査済み文字列plannerへ直接handoffし、同じ原音を東京リージョンSTTへ再送しません。保留中の継続turnもNativeでfinal captionを確定し、監査済み段階controllerへ直接donateします。継続コーチのために同じ原音を東京STTへ二重通過させません。監査済みplanner経路では、同じ解析済み質問spanからoperatorとrequired slotを作り、確定入力の回答evidenceと用途分離した非可逆tagへ束縛するため、無関係な次turnを回答完了にしません。外部で質問された事実や現在の話者は検証せず、具体的な質問・答え・逐語録はstateやDBへ保存しません。厳格モード、Native Audioが利用できない接続fallback、高リスク・tool要求だけがraw audioから段階経路へ入り、東京リージョンSTTを一度だけ使います。runtime PDF uploadは全モードでstate decode・STT・モデル推論前にbackendが拒否し、PDF payloadをbase64 decodeせず下流へ渡さず、request終了時に参照を破棄します。提供PDFは設計参照であり、公開runtimeの添付機能ではありません。したがって、標準liveのraw audioは`us-central1`、fallbackと回答支援の文字列は`global`のVertex AIで処理され得て、明示した研究queryはCrossrefへ送られるため、「すべての会話データが日本国内だけで処理される」とは説明しません。厳格モードでは文字起こしと応答文がCloud Run内の決定論的検査とregional DLPの両方で`clear`になった時だけ後段へ進みます。
 
 ## 必要なAPI
 
@@ -163,10 +163,13 @@ KOTAE_VERTEX_PRIORITY=false
 KOTAE_STATE_V2_WRITES=true
 KOTAE_COACH_RESTATEMENT_BINDING=true
 KOTAE_ANSWER_PROOF_WRITES=true
+KOTAE_VERIFIER_PROGRESS_WRITES=true
+KOTAE_RETRIEVAL_POLICY_ENABLED=true
 KOTAE_SPEECH_LOCATION=asia-northeast1
 KOTAE_SPEECH_MODEL=long
 KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore
 KOTAE_NATIVE_AUDIO_ENABLED=true
+KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED=true
 KOTAE_NATIVE_AUDIO_LOCATION=us-central1
 KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio
 KOTAE_NATIVE_AUDIO_VOICE=Kore
@@ -190,27 +193,32 @@ KOTAE_STATE_KEY_BASE64=<Secret Managerから注入>
 
 `KOTAE_SPEECH_LOCATION`は実装側でも`asia-northeast1`以外を拒否します。`GOOGLE_CLOUD_LOCATION=global`は文字列Vertex専用、`KOTAE_NATIVE_AUDIO_LOCATION=us-central1`はNative Audio専用で、Speechの東京リージョンを含めて設定値を兼用しません。
 
-既存のAuth / App Check設定を保ったまま更新する例:
+既存のAuth / App Check設定を保ったまま更新する例です。4段階rolloutでは先に一度だけimageをbuildし、検証済みArtifact Registry imageを`@sha256:`付きのimmutable digestへ解決します。各段階で`--source=.`を再実行してbuildし直してはいけません。全revisionへ同じ`$ImageDigest`を渡し、変えるのはrevision名と下表の3 flagだけです。
 
 ```powershell
+$Gcloud = (Resolve-Path ".\.tools\gcloud-577.0.0\google-cloud-sdk\bin\gcloud.cmd").Path
 $ProjectId = "kotae-ai-u22-2026"
 $RuntimeSa = "kotae-api-runtime@$ProjectId.iam.gserviceaccount.com"
-$BuildSa = "kotae-api-builder@$ProjectId.iam.gserviceaccount.com"
 $WebAppId = "<Firebase Web App ID>"
+$ImageDigest = "asia-northeast1-docker.pkg.dev/$ProjectId/<repository>/kotae-api@sha256:<verified-digest>"
+$StateSecretVersion = "<現在の本番revisionが参照しているnumeric version>"
 $GitSha = (git rev-parse --verify HEAD).Trim()
-$RevisionSuffix = "native-$($GitSha.Substring(0, 7))-$([DateTime]::UtcNow.ToString('MMddHHmmss'))"
+$Stage = "reader"
+$VerifierProgressWrites = "false"
+$RetrievalPolicyEnabled = "false"
+$NativeCaptionHandoffEnabled = "false"
+$RevisionSuffix = "$Stage-$($GitSha.Substring(0, 7))-$([DateTime]::UtcNow.ToString('MMddHHmmss'))"
 
-gcloud run deploy kotae-api `
-  --source=. `
+& $Gcloud run deploy kotae-api `
+  --image=$ImageDigest `
   --project=$ProjectId `
   --region=asia-northeast1 `
   --revision-suffix=$RevisionSuffix `
-  --tag=native-audio-candidate `
+  --tag="$Stage-candidate" `
   --no-traffic `
   --ingress=all `
   --allow-unauthenticated `
   --service-account=$RuntimeSa `
-  --build-service-account="projects/$ProjectId/serviceAccounts/$BuildSa" `
   --cpu=1 `
   --memory=1Gi `
   --concurrency=4 `
@@ -219,22 +227,69 @@ gcloud run deploy kotae-api `
   --max=3 `
   --max-instances=3 `
   --timeout=420 `
-  --remove-env-vars="KOTAE_SPEECH_FALLBACK_MODEL,KOTAE_COACHING_ROLLOUT,KOTAE_PRIVACY_LOCATION,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY" `
-  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_ANSWER_PROOF_WRITES=false,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_NATIVE_AUDIO_ENABLED=true,KOTAE_NATIVE_AUDIO_LOCATION=us-central1,KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio,KOTAE_NATIVE_AUDIO_VOICE=Kore,KOTAE_REQUEST_TIMEOUT=25s,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_REQUEST_BYTES=32768,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200,KOTAE_PASSKEY_RP_ID=kotae-ai.web.app,KOTAE_PASSKEY_ORIGIN=https://kotae-ai.web.app,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE=10,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY=100,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE=300,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY=20000,KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true" `
-  --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:1"
+  --remove-env-vars="KOTAE_RETRIEVAL_BELIEF_WRITES,KOTAE_SPEECH_FALLBACK_MODEL,KOTAE_COACHING_ROLLOUT,KOTAE_PRIVACY_LOCATION,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE,KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY" `
+  --update-env-vars="KOTAE_ENV=production,KOTAE_ALLOW_INSECURE_DEV=false,GOOGLE_CLOUD_PROJECT=$ProjectId,GOOGLE_CLOUD_LOCATION=global,KOTAE_ALLOWED_APP_IDS=$WebAppId,KOTAE_FAST_MODEL=vertexai/gemini-3.6-flash,KOTAE_PRECISION_MODEL=vertexai/gemini-3.1-pro-preview,KOTAE_VERTEX_PRIORITY=false,KOTAE_STATE_V2_WRITES=true,KOTAE_COACH_RESTATEMENT_BINDING=true,KOTAE_ANSWER_PROOF_WRITES=true,KOTAE_VERIFIER_PROGRESS_WRITES=$VerifierProgressWrites,KOTAE_RETRIEVAL_POLICY_ENABLED=$RetrievalPolicyEnabled,KOTAE_SPEECH_LOCATION=asia-northeast1,KOTAE_SPEECH_MODEL=long,KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore,KOTAE_NATIVE_AUDIO_ENABLED=true,KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED=$NativeCaptionHandoffEnabled,KOTAE_NATIVE_AUDIO_LOCATION=us-central1,KOTAE_NATIVE_AUDIO_MODEL=gemini-live-2.5-flash-native-audio,KOTAE_NATIVE_AUDIO_VOICE=Kore,KOTAE_REQUEST_TIMEOUT=25s,KOTAE_VOICE_TIMEOUT=50s,KOTAE_MAX_REQUEST_BYTES=32768,KOTAE_MAX_VOICE_BYTES=13631488,KOTAE_VOICE_RATE_LIMIT_PER_MINUTE=12,KOTAE_VOICE_RATE_LIMIT_PER_DAY=120,KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE=20,KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY=200,KOTAE_PASSKEY_RP_ID=kotae-ai.web.app,KOTAE_PASSKEY_ORIGIN=https://kotae-ai.web.app,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE=10,KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY=100,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE=300,KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY=20000,KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true" `
+  --update-secrets="KOTAE_STATE_KEY_BASE64=kotae-conversation-state:$StateSecretVersion"
 ```
+
+source buildはreaderの一回だけです。上のdeploy blockの`--image=$ImageDigest`を次の2引数へ置き換え、ほかの引数は同一にして実行します。実行前にworktreeがcleanであることを確認し、`& $Gcloud meta list-files-for-upload`の結果が`.gcloudignore`で許可した`Dockerfile`、`go.mod`、`go.sum`、`cmd/**`、`internal/**`とignore metadataだけであることを目視します。`.tmp*`、cache、`apps`、`dist`、`docs`、`scripts`、log、監査出力が一つでも含まれたらbuildを停止します。
+
+```powershell
+  --source=. `
+  --build-service-account="projects/$ProjectId/serviceAccounts/kotae-api-builder@$ProjectId.iam.gserviceaccount.com" `
+```
+
+reader revisionがreadyになった後、そのrevisionの完全なimmutable image URLだけを採用します。`status.imageDigest`が期待したArtifact Registry hostと64桁digestでなければ停止します。writer以降では上のdeploy blockを`--image=$ImageDigest`のまま使い、`--source`やbuild service accountを再指定しません。
+
+```powershell
+$ReaderRevision = "kotae-api-$RevisionSuffix"
+$Reader = (((& $Gcloud run revisions describe $ReaderRevision `
+  --project=$ProjectId --region=asia-northeast1 `
+  --format=json --quiet --verbosity=error) -join "`n") | ConvertFrom-Json)
+$ImageDigest = [string] $Reader.status.imageDigest
+if ($ImageDigest -notmatch '^asia-northeast1-docker\.pkg\.dev/kotae-ai-u22-2026/.+@sha256:[0-9a-f]{64}$') {
+  throw "reader image is not an immutable production Artifact Registry URL"
+}
+```
+
+`$StateSecretVersion`は配備開始前に現在の本番revisionから読み取り、4段階すべてで同じnumeric versionを維持します。rolloutの都合で`:1`や`latest`へ戻しません。鍵rotateはこのrolloutと分け、明示した別手順でだけ行います。
 
 Native Audioのlocationは`KOTAE_NATIVE_AUDIO_LOCATION=us-central1`へ固定し、`GOOGLE_CLOUD_LOCATION=global`は文字列Vertex AI専用のまま維持します。
 
-`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。環境変数として注入するSecretは`latest`ではなく確認済みversionへ固定し、鍵rotate時だけ新versionへ更新します。`KOTAE_NATIVE_AUDIO_ENABLED=true`は本番の高速会話経路を有効にし、location、model、voiceは実装が許可する固定値から変更しません。起動時に内容を含まないNative Audio setup probeを`us-central1`へ実行するため、location、model、IAM、`AUDIO`単独の応答modality、input/output transcription configのいずれかが不適合なcandidateはreadyにならずtrafficへ昇格できません。Cloud Runのtimeoutは、アプリ側の6分live deadlineより1分長い420秒にします。これで最長4分のcapture、認証、終了処理、内部の50秒voice timeoutを収め、アプリがdeadline処理する前に基盤側が接続を切る競合を避けます。Go HTTP serverの通常routeは従来どおりread/write/idle各120秒を維持し、検証済み`/api/v1/voice/live`だけがWebSocket upgrade前に接続deadlineを6分へ延長します。deadline更新不能時はupgrade前にfail-closedで拒否します。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。最小instanceはservice単位で1にし、revision単位の最小instanceは`default`へ戻します。これにより、tag付き旧revisionをすべて常時起動する設定を残しません。
+`--set-env-vars`や`--set-secrets`は既存設定を消す可能性があるため、再配備では現在値を確認して`--update-*`を使います。環境変数として注入するSecretは`latest`ではなく現在の本番が参照する確認済みversionへ固定し、鍵rotate時だけ別rolloutで新versionへ更新します。`KOTAE_NATIVE_AUDIO_ENABLED=true`は本番の高速会話経路を有効にし、`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED=true`は初回だけでなく保留中の継続コーチでもNative final captionを同じ監査済みplanner/controllerへ直接donateして2回目のSTTを省く経路を有効にします。handoff flagはNative flag、verifier-progress writer、retrieval policyがすべて`true`の時だけ有効です。location、model、voiceは実装が許可する固定値から変更しません。起動時に内容を含まないNative Audio setup probeを`us-central1`へ実行するため、location、model、IAM、`AUDIO`単独の応答modality、input/output transcription configのいずれかが不適合なcandidateはreadyにならずtrafficへ昇格できません。Cloud Runのtimeoutは、アプリ側の6分live deadlineより1分長い420秒にします。これで最長4分のcapture、認証、終了処理、内部の50秒voice timeoutを収め、アプリがdeadline処理する前に基盤側が接続を切る競合を避けます。Go HTTP serverの通常routeは従来どおりread/write/idle各120秒を維持し、検証済み`/api/v1/voice/live`だけがWebSocket upgrade前に接続deadlineを6分へ延長します。deadline更新不能時はupgrade前にfail-closedで拒否します。音声と複数回のモデル呼び出しが同時にメモリへ載るため、既定の高いconcurrencyへ任せず、1 instanceあたり4 request、最大3 instanceへ明示的に制限します。最小instanceはservice単位で1にし、revision単位の最小instanceは`default`へ戻します。これにより、tag付き旧revisionをすべて常時起動する設定を残しません。
 
 本番では`KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true`を維持し、未指定でもsecure defaultとして`true`になります。まずcandidate backendを検証し、必須7 collectionのTTLをすべて`ACTIVE`にしてからservice rootへ昇格し、その後にPasskey UIを含むHostingを最終公開します。これにより、短命データを期限管理できないrevisionへ本番trafficを流さず、新しいUIが未対応の旧backendへ接続する時間も作りません。音声APIのbuffered、streaming、WebSocketすべてが、Passkey由来claimと5分以内の署名検証時刻`kotae_passkey_at`を要求します。Firebaseの`auth_time`はcustom token交換時に新しくなり得るため、freshness根拠には使いません。`false`は認証を迂回できるため、明示的なローカル開発以外では使いません。
 
-`KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行、`KOTAE_ANSWER_PROOF_WRITES`はQBA Proof用の質問インスタンスtag発行を制御します。長期運用値は3つとも`true`です。QBA Proofはreader-firstで移行します。まず新fieldを読める同じ新binaryを`KOTAE_ANSWER_PROOF_WRITES=false`でcandidate検証して100%へ昇格し、次に同じbinaryを`true`で別candidateとして検証して100%へ昇格します。切替後に戻せるのは新fieldを読めるrevisionだけです。これにより新しい暗号化stateが旧readerへ届く時間を作りません。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
+`KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行、`KOTAE_ANSWER_PROOF_WRITES`はQBA Proof用の質問インスタンスtag発行を制御します。`KOTAE_VERIFIER_PROGRESS_WRITES`は、現在の質問に対する検証の進行だけを表す5個の固定小数verifier-progress audit-posterior massをstateへ発行するwriter flagです。本人のretrieval状態を推定するflagではありません。`KOTAE_RETRIEVAL_POLICY_ENABLED`は、質問拘束済みQ-ARCと回答後の有限型controllerを使うbehavior flagであり、writer flagとは独立です。`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED`はNative final captionを監査済みplanner/controllerへ直接donateするbehavior flagです。policyを`true`にするには`KOTAE_STATE_V2_WRITES=true`、`KOTAE_ANSWER_PROOF_WRITES=true`、`KOTAE_COACH_RESTATEMENT_BINDING=true`が必要です。これによりA-laterは設定で即時completeへ迂回できず、質問boundな一度だけの再質問を必ず使います。caption handoffを`true`にするにはさらにverifier-progress writerとretrieval policyがともに`true`でなければなりません。長期運用ではこの6 flagをすべて`true`にします。progressには質問、回答、逐語録、診断、人物特性を入れません。本番Hostingのpreflightは、昇格済みCloud Run revisionで`KOTAE_VERIFIER_PROGRESS_WRITES=true`、`KOTAE_RETRIEVAL_POLICY_ENABLED=true`、`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED=true`を必須とし、一つでも欠ける、または`false`なら公開前に停止します。
+
+verifier progress、policy、Native caption handoffは次の4段階でreader-first移行します。tupleの順序は常に`(KOTAE_VERIFIER_PROGRESS_WRITES, KOTAE_RETRIEVAL_POLICY_ENABLED, KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED)`です。
+
+| 段階 | tuple | 動作 |
+|---|---|---|
+| **reader** | `(false, false, false)` | 新fieldとpolicy versionを読んで検証できる新binaryをcandidate検証し、revision名を指定して100%へ昇格する |
+| **writer** | `(true, false, false)` | 同一digestの別revisionで新progressだけを発行する。会話行動は旧policyのまま |
+| **policy** | `(true, true, false)` | 同一digestの別revisionでQ-ARCと回答後controllerを有効にする。Native caption handoffはまだ閉じる |
+| **caption** | `(true, true, true)` | 同一digestの別revisionで初回・継続Native final captionの直接handoffを有効にし、最終candidate検証後に100%へ昇格する |
+
+各段階で上のdeploy例の`$Stage`と3変数だけを表どおり変更し、`$ImageDigest`と`$StateSecretVersion`は固定します。各revisionをtag URLでcandidate検証し、前段を100%へ昇格してから次段を作ります。readerを100%へ昇格した後は、旧binaryへ接続済みの最長420秒WebSocketを排出するため430秒以上待ち、30〜60秒間隔で旧revisionのrequest/logを監視してからwriterを作ります。このdrainを省略して新fieldを書き始めません。
+
+captionだけは100%へ直行させません。candidate検証後、明示したrevision名で`policy=99 / caption=1`、`policy=90 / caption=10`、`caption=100`の順にtrafficを動かし、各段階で`/health`、startup probe、error log、first-meaningful-audio telemetryを確認します。異常時は直前の同一digest revisionへ100%を明示して戻し、opaque sessionを破棄します。`--to-latest`は使いません。
+
+```powershell
+& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="$PolicyRevision=99,$CaptionRevision=1"
+# 観測後
+& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="$PolicyRevision=90,$CaptionRevision=10"
+# 観測後
+& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="$CaptionRevision=100"
+```
+
+最終昇格前後に4 revisionを再取得し、`status.imageDigest`のunique数と`KOTAE_STATE_KEY_BASE64`のnumeric keyのunique数がそれぞれ1で、Secret keyが開始時の`$StateSecretVersion`と一致することをassertします。また`KOTAE_RETRIEVAL_BELIEF_WRITES`、`KOTAE_SPEECH_FALLBACK_MODEL`、`KOTAE_COACHING_ROLLOUT`、`KOTAE_PRIVACY_LOCATION`、`KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE`、`KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY`の6変数が全revisionから消えていなければ公開を停止します。最終trafficはcaption revisionだけ100%、tagなしでなければなりません。
+
+writer以降に戻せるのは新fieldを読める同一digestのreader以降のrevisionだけです。caption段階からのbehavior rollbackは同一digestのpolicy revisionへ、policyからはwriterへ戻せますが、opaque stateは破棄して新しいセッションから始めます。これにより新しい認証暗号stateが旧readerへ届く時間を作りません。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
 
 rollback時も`v1`と`v2`の状態は相互利用しません。revisionを戻した後はブラウザのopaque stateを破棄して新しいセッションから始めます。
 
-このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認し、さらに`configure-firestore-ttl.ps1`が必須7 policyの`ACTIVE`を確認した後だけ、`gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へ100% trafficを移し、全tag URLを同時に外します。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。Hosting scriptも、service rootが最新ready revisionへ100%昇格済みでPasskey gateが`true`、timeout・service account・build identityが固定値、必須TTLがすべて`ACTIVE`、`/health`が正常であることを再検証してからreleaseを作ります。
+このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認し、さらに`configure-firestore-ttl.ps1`が必須7 policyの`ACTIVE`を確認した後だけ、`& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へtrafficを移し、全tag URLを同時に外します。caption以外の段階は100%、captionは前述の1%→10%→100% canaryを使います。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。Hosting scriptも、service rootが最新ready revisionへ100%昇格済みでPasskey gateが`true`、timeout・service account・build identityが固定値、必須TTLがすべて`ACTIVE`、`/health`が正常であることを再検証してからreleaseを作ります。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 

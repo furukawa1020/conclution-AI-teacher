@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -264,6 +265,34 @@ func (agent *vertexAgent) nativeCoachScopeTag(scopeID string) string {
 	mac := hmac.New(sha256.New, agent.continuityKey)
 	_, _ = mac.Write([]byte("native-explicit-coach-scope-v1\x00"))
 	_, _ = mac.Write([]byte(scopeID))
+	full := mac.Sum(nil)
+	tag := base64.RawURLEncoding.EncodeToString(full[:coachContinuityTagBytes])
+	wipe(full)
+	return tag
+}
+
+func (agent *vertexAgent) voiceCheckpointTag(
+	requestID string,
+	sessionID string,
+	turn int,
+	scopeTag string,
+) string {
+	if agent == nil || len(agent.continuityKey) != sha256.Size ||
+		requestID == "" || len(requestID) > 64 ||
+		requestID != strings.TrimSpace(requestID) ||
+		!validSessionID(sessionID) || turn < 1 || turn > maxStateTurns ||
+		!validCoachControlTag(scopeTag) {
+		return ""
+	}
+	mac := hmac.New(sha256.New, agent.continuityKey)
+	_, _ = mac.Write([]byte("voice-respondent-checkpoint-v1\x00"))
+	_, _ = mac.Write([]byte(requestID))
+	_, _ = mac.Write([]byte("\x00"))
+	_, _ = mac.Write([]byte(sessionID))
+	_, _ = mac.Write([]byte("\x00"))
+	_, _ = mac.Write([]byte(strconv.Itoa(turn)))
+	_, _ = mac.Write([]byte("\x00"))
+	_, _ = mac.Write([]byte(scopeTag))
 	full := mac.Sum(nil)
 	tag := base64.RawURLEncoding.EncodeToString(full[:coachContinuityTagBytes])
 	wipe(full)
@@ -3178,8 +3207,11 @@ func coachDirectQuestionEndOutsideQuote(source string) int {
 			return -1
 		}
 		if !coachTextPositionInsideQuote(lower, next) &&
-			!coachQuestionMarkLocallyReported(lower, next+width) &&
-			shouldRecoverOutsideCoach(lower[:next+width]) {
+			!coachQuestionMarkLocallyReported(lower, next+width) {
+			// Binding an A is deliberately more conservative than leaving an
+			// active coach scope. Any unreported question can invalidate a proof
+			// span, but only an explicitly addressed KOTAE/AI question may hand
+			// the open A slot back to the assistant.
 			return next + width
 		}
 		position = next + width

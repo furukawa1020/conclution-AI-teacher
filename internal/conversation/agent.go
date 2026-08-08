@@ -145,6 +145,23 @@ type StateTokenValidator interface {
 	ValidateStateToken(uid string, token string) error
 }
 
+// RespondentCheckpointTransitionValidator authenticates both sides of the
+// finite voice-control transition. The transport supplies its own request ID;
+// the validator never accepts a merely well-formed output token in isolation.
+type RespondentCheckpointTransitionValidator interface {
+	ValidateRespondentCheckpointTransition(
+		uid string,
+		requestToken string,
+		preparedToken string,
+		nextToken string,
+		requestID string,
+		assistanceTarget string,
+		respondentStage string,
+		coachPhase string,
+		coachAction string,
+	) error
+}
+
 // StateTokenRefresher advances only the opaque session lease and turn count.
 // Native-audio sessions keep conversational continuity inside their bounded
 // provider connection; this capability gives HTTP fallback a valid token
@@ -163,20 +180,6 @@ type NativeStatePreparer interface {
 		requiresStaged bool,
 		err error,
 	)
-}
-
-// NativeCoachStatePreparer synchronously issues the only cross-turn authority
-// for a newly detected Native Respondent Coach turn. It stores no transcript
-// or generated question: only a finite open-answer shape and a dedicated,
-// non-reversible scope marker bound to the random session and turn. The
-// deterministic issuance path, not a persisted utterance fingerprint, proves
-// that the current request passed explicit-consent gating.
-type NativeCoachStatePreparer interface {
-	PrepareNativeCoachState(
-		uid string,
-		token string,
-		utterance string,
-	) (string, error)
 }
 
 type ContentGenerator interface {
@@ -212,6 +215,8 @@ type vertexAgent struct {
 	continuityKey           []byte
 	stateV2Writes           bool
 	answerProofWrites       bool
+	verifierProgressWrites  bool
+	retrievalPolicyEnabled  bool
 	research                *securityflow.CrossrefExecutor
 	security                *securityflow.Guard
 	now                     func() time.Time
@@ -331,6 +336,8 @@ func NewVertexAgent(
 	coachRestatementBinding bool,
 	stateV2Writes bool,
 	answerProofWrites bool,
+	verifierProgressWrites bool,
+	retrievalPolicyEnabled bool,
 ) (Agent, error) {
 	if ctx == nil || strings.TrimSpace(project) == "" {
 		return nil, errors.New("conversation: Vertex AI project is required")
@@ -371,6 +378,8 @@ func NewVertexAgent(
 		coachRestatementBinding,
 		stateV2Writes,
 		answerProofWrites,
+		verifierProgressWrites,
+		retrievalPolicyEnabled,
 	)
 }
 
@@ -391,7 +400,7 @@ func NewAgent(
 	precisionModel string,
 	stateKey []byte,
 ) (Agent, error) {
-	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true, true, true)
+	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true, true, true, true, true)
 }
 
 func newAgent(
@@ -403,6 +412,8 @@ func newAgent(
 	coachRestatementBinding bool,
 	stateV2Writes bool,
 	answerProofWrites bool,
+	verifierProgressWrites bool,
+	retrievalPolicyEnabled bool,
 ) (Agent, error) {
 	if generator == nil {
 		return nil, errors.New("conversation: content generator is required")
@@ -444,6 +455,8 @@ func newAgent(
 		continuityKey:           continuityKey,
 		stateV2Writes:           stateV2Writes,
 		answerProofWrites:       answerProofWrites,
+		verifierProgressWrites:  verifierProgressWrites,
+		retrievalPolicyEnabled:  retrievalPolicyEnabled,
 		security:                securityGuard,
 		now:                     time.Now,
 	}
@@ -491,7 +504,15 @@ func (agent *vertexAgent) sealState(
 		// writes only after all traffic is on a compatible reader.
 		state.PendingAnswer.QuestionInstanceTag = ""
 	}
+	if !agent.verifierProgressWrites || !agent.stateV2Writes {
+		// Reader-first rollout for the fixed-size, content-free posterior. Older
+		// revisions never see this additive JSON field until every live reader
+		// understands and validates its version and exact mass.
+		state.PendingAnswer.VerifierProgress = nil
+	}
 	if !agent.stateV2Writes {
+		state.VoiceCheckpointTag = ""
+		state.VoiceCheckpointScopeTag = ""
 		state.Support = nil
 		if state.PendingAnswer.QuestionInstanceTag != "" ||
 			state.PendingAnswer.QuestionContinuityTag != "" ||
@@ -509,6 +530,29 @@ func (agent *vertexAgent) sealState(
 	return agent.codec.seal(uid, state)
 }
 
+func (agent *vertexAgent) sealVoiceCheckpointState(
+	uid string,
+	requestID string,
+	scopeTag string,
+	state conversationState,
+) (string, error) {
+	if agent == nil || !agent.stateV2Writes || requestID == "" ||
+		!validCoachControlTag(scopeTag) {
+		return "", ErrInvalidStateToken
+	}
+	state.VoiceCheckpointScopeTag = scopeTag
+	state.VoiceCheckpointTag = agent.voiceCheckpointTag(
+		requestID,
+		state.SessionID,
+		state.Turn,
+		scopeTag,
+	)
+	if state.VoiceCheckpointTag == "" {
+		return "", ErrInvalidStateToken
+	}
+	return agent.sealState(uid, state)
+}
+
 // ValidateStateToken authenticates the token, its Firebase UID binding,
 // schema, and expiry without exposing decrypted state to the voice layer.
 func (agent *vertexAgent) ValidateStateToken(uid string, token string) error {
@@ -517,6 +561,149 @@ func (agent *vertexAgent) ValidateStateToken(uid string, token string) error {
 	}
 	_, err := agent.codec.open(uid, token)
 	return err
+}
+
+func (agent *vertexAgent) ValidateRespondentCheckpointTransition(
+	uid string,
+	requestToken string,
+	preparedToken string,
+	nextToken string,
+	requestID string,
+	assistanceTarget string,
+	respondentStage string,
+	coachPhase string,
+	coachAction string,
+) error {
+	if agent == nil || agent.codec == nil || nextToken == "" || requestID == "" ||
+		assistanceTarget != "respondent" ||
+		(respondentStage != "awaiting_answer" && respondentStage != "restructure") ||
+		!validRespondentCheckpointControl(coachPhase, coachAction) {
+		return ErrInvalidStateToken
+	}
+	next, err := agent.codec.open(uid, nextToken)
+	if err != nil || next.VoiceCheckpointTag == "" ||
+		next.VoiceCheckpointScopeTag == "" {
+		return ErrInvalidStateToken
+	}
+	expectedTag := agent.voiceCheckpointTag(
+		requestID,
+		next.SessionID,
+		next.Turn,
+		next.VoiceCheckpointScopeTag,
+	)
+	if expectedTag == "" || !hmac.Equal(
+		[]byte(next.VoiceCheckpointTag),
+		[]byte(expectedTag),
+	) {
+		return ErrInvalidStateToken
+	}
+	previous, err := agent.validatePreparedNativeStateTransition(
+		uid,
+		requestToken,
+		preparedToken,
+	)
+	if err != nil {
+		return ErrInvalidStateToken
+	}
+
+	if previous.SessionID != next.SessionID ||
+		previous.Turn >= maxStateTurns || next.Turn != previous.Turn+1 {
+		return ErrInvalidStateToken
+	}
+
+	nextScope := voiceCheckpointScopeTag(next.PendingAnswer)
+	switch coachAction {
+	case string(respondent.CoachActionElicit):
+		if !next.PendingAnswer.Active ||
+			next.PendingAnswer.Phase != respondent.CoachPhaseAwaitingAnswer ||
+			nextScope == "" || nextScope != next.VoiceCheckpointScopeTag {
+			return ErrInvalidStateToken
+		}
+	case string(respondent.CoachActionRestate):
+		if !next.PendingAnswer.Active ||
+			next.PendingAnswer.Phase != respondent.CoachPhaseAwaitingRestatement ||
+			next.PendingAnswer.RestatementTag == "" ||
+			nextScope != next.VoiceCheckpointScopeTag {
+			return ErrInvalidStateToken
+		}
+	case string(respondent.CoachActionExpand):
+		if !next.PendingAnswer.Active ||
+			next.PendingAnswer.Phase != respondent.CoachPhaseExpanding ||
+			nextScope == "" || nextScope != next.VoiceCheckpointScopeTag {
+			return ErrInvalidStateToken
+		}
+	case string(respondent.CoachActionRetry):
+		if !next.PendingAnswer.Active || nextScope == "" ||
+			nextScope != next.VoiceCheckpointScopeTag {
+			return ErrInvalidStateToken
+		}
+	case string(respondent.CoachActionComplete),
+		string(respondent.CoachActionRelease):
+		if next.PendingAnswer.Active {
+			return ErrInvalidStateToken
+		}
+	default:
+		return ErrInvalidStateToken
+	}
+
+	if previous.PendingAnswer.Active && next.PendingAnswer.Active &&
+		!sameVoiceCheckpointScope(previous.PendingAnswer, next.PendingAnswer) {
+		return ErrInvalidStateToken
+	}
+	if (coachAction == string(respondent.CoachActionComplete) ||
+		coachAction == string(respondent.CoachActionRelease)) &&
+		previous.PendingAnswer.Active {
+		previousScope := voiceCheckpointScopeTag(previous.PendingAnswer)
+		if previousScope == "" || previousScope != next.VoiceCheckpointScopeTag {
+			return ErrInvalidStateToken
+		}
+	}
+	return nil
+}
+
+func validRespondentCheckpointControl(phase string, action string) bool {
+	switch respondent.CoachPhase(phase) {
+	case respondent.CoachPhaseAwaitingAnswer:
+		return action == string(respondent.CoachActionElicit)
+	case respondent.CoachPhaseAwaitingRestatement:
+		return action == string(respondent.CoachActionRestate)
+	case respondent.CoachPhaseExpanding:
+		return action == string(respondent.CoachActionExpand)
+	case respondent.CoachPhaseComplete:
+		return action == string(respondent.CoachActionComplete)
+	case respondent.CoachPhaseBlocked:
+		return action == string(respondent.CoachActionRetry) ||
+			action == string(respondent.CoachActionRelease)
+	default:
+		return false
+	}
+}
+
+func voiceCheckpointScopeTag(frame PendingAnswerFrame) string {
+	for _, tag := range []string{
+		frame.QuestionInstanceTag,
+		frame.NativeCoachScopeTag,
+		frame.RestatementTag,
+	} {
+		if tag != "" && validCoachControlTag(tag) {
+			return tag
+		}
+	}
+	return ""
+}
+
+func sameVoiceCheckpointScope(previous PendingAnswerFrame, next PendingAnswerFrame) bool {
+	previousScope := voiceCheckpointScopeTag(previous)
+	nextScope := voiceCheckpointScopeTag(next)
+	if previousScope == "" || nextScope == "" {
+		return false
+	}
+	if hmac.Equal([]byte(previousScope), []byte(nextScope)) {
+		return true
+	}
+	// A generic Native slot is intentionally one turn only. Its sole legal
+	// continuation exchanges that scope tag for an answer-bound restatement tag.
+	return previous.NativeCoachScopeTag != "" && next.RestatementTag != ""
 }
 
 func (agent *vertexAgent) Process(
@@ -632,7 +819,11 @@ func (agent *vertexAgent) Process(
 		state.PendingAnswer.Phase == respondent.CoachPhaseExpanding &&
 		state.PendingAnswer.ExpansionOptIn &&
 		!substantiveCoachAttempt(normalized.Utterance) {
-		return agent.completeCoachExpansionHoldLocal(uid, state)
+		return agent.completeCoachExpansionHoldLocal(
+			uid,
+			state,
+			normalized.RequestID,
+		)
 	}
 	preTurnState := state
 	if isStandalonePhaticGreeting(normalized, state) {
@@ -647,6 +838,16 @@ func (agent *vertexAgent) Process(
 	}
 	if isProactiveTopicRequest(normalized) {
 		return agent.completeProactiveTopicLocal(uid, state, normalized)
+	}
+	if retrieval, handled, retrievalErr :=
+		agent.completeQARCRetrievalStartLocal(uid, state, normalized); handled ||
+		retrievalErr != nil {
+		return retrieval, retrievalErr
+	}
+	if openSlot, handled, openSlotErr :=
+		agent.completeGenericCoachStartLocal(uid, state, normalized); handled ||
+		openSlotErr != nil {
+		return openSlot, openSlotErr
 	}
 
 	plannerStarted := time.Now()
@@ -1050,6 +1251,20 @@ func (agent *vertexAgent) Process(
 	if normalized.Speculative && finalPlan.ResearchAction != "none" {
 		return VoiceTurnResult{}, ErrSpeculativeExternalAction
 	}
+	if agent.retrievalPolicyEnabled &&
+		qarcBoundQuestionScope(state.PendingAnswer) &&
+		normalized.Speculative &&
+		finalPlan.AssistanceTarget != "respondent" &&
+		!shouldRecoverOutsideCoach(normalized.Utterance) {
+		// A model classification cannot silently erase a signed, question-bound
+		// exercise. Only a deterministic topic-change/opt-out signal may leave
+		// the scope; otherwise preserve it through the fail-closed recovery path.
+		return agent.completePlannerUnavailable(
+			uid,
+			preTurnState,
+			normalized,
+		)
+	}
 	if !precisionUnavailable && finalPlan.ResearchAction != "none" {
 		var researchErr error
 		researchStatus, researchRecords, researchReply, researchErr =
@@ -1279,13 +1494,29 @@ func (agent *vertexAgent) Process(
 		Phase:  respondent.CoachPhaseNone,
 		Action: respondent.CoachActionNone,
 	}
+	coachPrior := respondent.DefaultVerifierProgressPosterior()
+	if coachFrame.VerifierProgress != nil {
+		if restored, ok := coachFrame.VerifierProgress.Posterior(); ok {
+			coachPrior = restored
+		}
+	}
 	coachContinuityVerified := false
 	coachVerificationPlan := finalPlan
 	if coachTurn && !verificationUnavailable {
 		operator := authoritativeCoachOperator(coachFrame)
 		switch finalPlan.RespondentStage {
 		case "awaiting_answer":
-			if state.PendingAnswer.Active &&
+			if agent.retrievalPolicyEnabled &&
+				qarcBoundQuestionScope(coachFrame) &&
+				qarcTurnHasSpeechAuthority(normalized) {
+				coachDecision = qarcCoachPrompt(
+					operator,
+					coachFrame.Phase,
+					coachFrame.Attempts,
+					normalized,
+					substantiveCoachAttempt(normalized.Utterance),
+				)
+			} else if state.PendingAnswer.Active &&
 				!substantiveCoachAttempt(normalized.Utterance) {
 				coachDecision = respondent.HoldForHesitation(
 					coachFrame.Phase,
@@ -1382,17 +1613,47 @@ func (agent *vertexAgent) Process(
 				)
 				gate = failedCoachContinuityAssessment()
 			}
-			coachDecision = respondent.GuideAttemptWithRestatement(
-				operator,
-				coachFrame.Phase,
-				coachFrame.Attempts,
+			progressInput := verifierProgressInput(
+				coachPrior,
 				gate,
 				finalPlan.answerAssessment,
-				!verificationUnavailable,
-				explicitAbstention(finalPlan.AnswerAttempt),
+				coachFrame.Phase,
+				coachFrame.Attempts,
 				coachFrame.AssistantFollowUp,
-				agent.coachRestatementBinding,
+				false,
+				!verificationUnavailable,
 			)
+			if agent.retrievalPolicyEnabled &&
+				qarcBoundQuestionScope(coachFrame) &&
+				qarcTurnHasSpeechAuthority(normalized) {
+				coachDecision = qarcCoachAttempt(
+					operator,
+					normalized,
+					explicitAbstention(finalPlan.AnswerAttempt),
+					progressInput,
+				)
+			} else if agent.retrievalPolicyEnabled {
+				coachDecision = respondent.GuideAttemptWithVerifierProgress(
+					operator,
+					explicitAbstention(finalPlan.AnswerAttempt),
+					progressInput,
+				)
+			} else {
+				// The behavior canary is independent from the additive state
+				// writer. Reader and writer rollout revisions retain the established
+				// coach policy until the canary is explicitly enabled.
+				coachDecision = respondent.GuideAttemptWithRestatement(
+					operator,
+					coachFrame.Phase,
+					coachFrame.Attempts,
+					gate,
+					finalPlan.answerAssessment,
+					!verificationUnavailable,
+					explicitAbstention(finalPlan.AnswerAttempt),
+					coachFrame.AssistantFollowUp,
+					agent.coachRestatementBinding,
+				)
+			}
 			coachContinuityVerified = continuityOK
 		}
 		if coachFrame.Phase == respondent.CoachPhaseExpanding &&
@@ -1622,10 +1883,25 @@ func (agent *vertexAgent) Process(
 				storedPhase,
 				coachDecision.Attempts,
 			)
+			if agent.verifierProgressWrites {
+				posterior := coachPrior
+				if coachDecision.VerifierProgressUpdated {
+					posterior = coachDecision.Posterior
+				}
+				posterior = verifierProgressForControlTransition(
+					coachFrame,
+					pendingAnswer,
+					posterior,
+				)
+				stored := respondent.StoreVerifierProgress(posterior)
+				pendingAnswer.VerifierProgress = &stored
+			}
 			if coachDecision.VerifiedFirst {
 				nextSupport = recordVerifiedFirstAnswer(nextSupport)
 			}
 		} else {
+			// Complete and release terminate the question-bounded controller as a
+			// unit, including its posterior. It must not seed a later question.
 			pendingAnswer = emptyPendingAnswer()
 			if coachDecision.Action == respondent.CoachActionComplete &&
 				coachDecision.VerifiedFirst {
@@ -1698,7 +1974,24 @@ func (agent *vertexAgent) Process(
 		SelfCorrectionGrace: nextSelfCorrectionGrace,
 		LastIntervention:    nextLastIntervention,
 	}
-	stateToken, err := agent.sealState(uid, nextState)
+	checkpointScope := voiceCheckpointScopeTag(pendingAnswer)
+	if checkpointScope == "" {
+		checkpointScope = voiceCheckpointScopeTag(coachFrame)
+	}
+	var stateToken string
+	if normalized.RequestID != "" &&
+		finalPlan.AssistanceTarget == "respondent" &&
+		!passiveRespondentObservation && !verificationUnavailable &&
+		checkpointScope != "" {
+		stateToken, err = agent.sealVoiceCheckpointState(
+			uid,
+			normalized.RequestID,
+			checkpointScope,
+			nextState,
+		)
+	} else {
+		stateToken, err = agent.sealState(uid, nextState)
+	}
 	if err != nil {
 		return VoiceTurnResult{}, err
 	}
@@ -2670,6 +2963,7 @@ func pendingAnswerWithControl(
 	phase respondent.CoachPhase,
 	attempts uint8,
 ) PendingAnswerFrame {
+	previous := frame
 	frame.Active = true
 	frame.Phase = phase
 	frame.Attempts = attempts
@@ -2679,7 +2973,45 @@ func pendingAnswerWithControl(
 	if phase == respondent.CoachPhaseExpanding {
 		frame.ContinuityTag = ""
 	}
+	if !sameVerifierProgressScope(previous, frame) {
+		frame.VerifierProgress = nil
+	}
 	return frame
+}
+
+// verifierProgressForControlTransition prevents evidence from one finite
+// question controller from becoming the prior of another. A phase or bounded
+// operator change (notably expansion), a new question identity, completion, or
+// release starts from the non-clinical default prior.
+func verifierProgressForControlTransition(
+	previous PendingAnswerFrame,
+	next PendingAnswerFrame,
+	posterior respondent.VerifierProgressPosterior,
+) respondent.VerifierProgressPosterior {
+	if !sameVerifierProgressScope(previous, next) {
+		return respondent.DefaultVerifierProgressPosterior()
+	}
+	return posterior
+}
+
+func sameVerifierProgressScope(
+	left PendingAnswerFrame,
+	right PendingAnswerFrame,
+) bool {
+	if !left.Active || !right.Active || left.Phase != right.Phase ||
+		left.Subject != right.Subject ||
+		left.QuestionInstanceTag != right.QuestionInstanceTag ||
+		left.QuestionContinuityTag != right.QuestionContinuityTag ||
+		left.ContinuityTag != right.ContinuityTag ||
+		left.RestatementTag != right.RestatementTag ||
+		left.NativeCoachScopeTag != right.NativeCoachScopeTag ||
+		left.AssistantFollowUp != right.AssistantFollowUp {
+		return false
+	}
+	leftQuestion := authoritativeCoachQuestion(left)
+	rightQuestion := authoritativeCoachQuestion(right)
+	return leftQuestion.Operator == rightQuestion.Operator &&
+		sameRequiredSlots(leftQuestion.RequiredSlots, rightQuestion.RequiredSlots)
 }
 
 func pendingAnswerForPrompt(
@@ -3336,6 +3668,11 @@ func (agent *vertexAgent) infer(
 		promptPendingAnswer.Active,
 		(!turn.Ambient || turn.Foreground) && turn.PDF == nil,
 	) && !support.CompanionOnly
+	respondentRequired := respondentAllowed &&
+		((!promptPendingAnswer.Active && explicitCoachOptIn(turn.Utterance)) ||
+			(promptPendingAnswer.Active &&
+				voiceCheckpointScopeTag(state.PendingAnswer) != "" &&
+				!shouldRecoverOutsideCoach(turn.Utterance)))
 	payload := inferencePayload{
 		Ambient:               turn.Ambient,
 		Foreground:            turn.Foreground,
@@ -3443,6 +3780,18 @@ func (agent *vertexAgent) infer(
 		turn.Ambient,
 	); err != nil {
 		return modelPlan{}, err
+	}
+	if respondentRequired &&
+		plan.AssistanceTarget != "respondent" &&
+		plan.InterventionPolicy != "safety" {
+		// A current-speaker request for answer help is authority to open a
+		// respondent slot, never authority for the model to answer in the
+		// person's place. Reject a hostile or mistaken assistant classification
+		// before its draft or critic reconstruction can reach the actuator.
+		return modelPlan{}, errors.Join(
+			ErrModelOutputInvalid,
+			errInferenceRespondentGuard,
+		)
 	}
 	if !respondentAllowed &&
 		(plan.AssistanceTarget != "assistant" ||
@@ -4636,21 +4985,97 @@ func respondentModeAllowed(
 }
 
 func shouldRecoverOutsideCoach(utterance string) bool {
-	lower := strings.ToLower(collapseSpace(utterance))
-	for _, signal := range []string{
-		"話題を変", "別の話", "別件", "雑談",
-		"質問です", "質問があります", "教えて", "説明して", "どう思う", "どうですか", "何ですか",
-		"なぜですか", "どこですか", "いつですか", "誰ですか",
-		"どっちですか", "どちらですか", "できますか",
-		"change the subject", "different topic", "just chat", "tell me",
-		"what do you think", "can you explain", "stop coaching",
+	_, optOut := coachOptOutReply(utterance)
+	if optOut || hasExplicitCoachRecoveryEnding(utterance) {
+		return true
+	}
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	for _, exact := range []string{
+		"話題を変えたい", "話題を変えて", "話題を変えてください",
+		"別の話をしたい", "別の話にしたい", "別件を話したい",
+		"今日は別の話をしたい", "今日は別の話をしたいです",
+		"雑談したい", "雑談に戻りたい",
+		"続きの質問です",
+		"change the subject", "please change the subject",
+		"i want to change the subject", "let's change the subject",
+		"different topic", "i want to talk about something else",
+		"stop coaching", "please stop coaching",
 	} {
-		if strings.Contains(lower, signal) {
+		if phrase == exact {
 			return true
 		}
 	}
-	_, optOut := coachOptOutReply(utterance)
-	return optOut || hasExplicitCoachRecoveryEnding(utterance)
+	for _, prefix := range []string{
+		"話題を変えて、", "話題を変えてください、",
+		"別の話をすると", "別の話ですが", "別件ですが",
+	} {
+		if strings.HasPrefix(phrase, prefix) {
+			return true
+		}
+	}
+	return explicitDirectQuestionOutsideCoach(utterance)
+}
+
+// explicitDirectQuestionOutsideCoach deliberately recognizes only a complete,
+// direct request to KOTAE. Answer prose often contains words such as
+// 「説明して」「どう思う」「何ですか」; substring matching those fragments
+// would let an assistant classification steal the person's still-open A slot.
+func explicitDirectQuestionOutsideCoach(utterance string) bool {
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	for _, exact := range []string{
+		"kotaeに質問です", "kotaeに質問があります",
+		"あなたに質問です", "あなたに質問があります", "aiに質問です", "aiに質問があります",
+	} {
+		if phrase == exact {
+			return true
+		}
+	}
+
+	directAddress := false
+	for _, prefix := range []string{
+		"kotae、", "kotae,", "kotaeに", "kotaeへ",
+		"あなたに", "あなたへ", "aiに", "aiへ",
+	} {
+		if strings.HasPrefix(phrase, prefix) {
+			directAddress = true
+			break
+		}
+	}
+	if !directAddress {
+		return false
+	}
+	// A question-shaped A is still the person's answer (for example, what
+	// they would ask a customer first). A terminal question mark can exit the
+	// slot only after an explicit KOTAE/AI address established above.
+	raw := strings.ToLower(collapseSpace(utterance))
+	raw = strings.TrimRight(raw, " \t\r\n。.!！")
+	questionAt := -1
+	questionWidth := 0
+	switch {
+	case strings.HasSuffix(raw, "?"):
+		questionAt = len(raw) - len("?")
+		questionWidth = len("?")
+	case strings.HasSuffix(raw, "？"):
+		questionAt = len(raw) - len("？")
+		questionWidth = len("？")
+	}
+	if questionAt >= 0 &&
+		!coachTextPositionInsideQuote(raw, questionAt) &&
+		!coachQuestionMarkLocallyReported(raw, questionAt+questionWidth) {
+		return true
+	}
+	for _, ending := range []string{
+		"教えて", "教えてください", "説明して", "説明してください",
+		"どう思う", "どう思いますか", "どうですか", "何ですか",
+		"なぜですか", "どこですか", "いつですか", "誰ですか",
+		"どっちですか", "どちらですか", "できますか",
+		"tell me", "what do you think", "can you explain",
+	} {
+		if strings.HasSuffix(phrase, ending) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasExplicitCoachRecoveryEnding(utterance string) bool {
@@ -4658,6 +5083,7 @@ func hasExplicitCoachRecoveryEnding(utterance string) bool {
 	for _, ending := range []string{
 		"なんとなく話したい", "なんとなく話したいです",
 		"ただ話したい", "ただ話したいです",
+		"雑談したい", "雑談したいです",
 		"今日は話すだけ", "今日は話すだけです", "今日は話すだけにしたい", "今日は話すだけにしたいです",
 		"話したくない", "話したくないです", "話したくありません",
 		"聞くだけにしたい", "聞くだけにしたいです",

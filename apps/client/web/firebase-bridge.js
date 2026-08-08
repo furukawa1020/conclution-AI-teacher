@@ -190,34 +190,48 @@ function boundedLatency(value) {
   return Math.min(120_000, Math.round(value * 10) / 10);
 }
 
+function nullableLatency(value) {
+  return Number.isFinite(value) && value >= 0
+    ? boundedLatency(value)
+    : null;
+}
+
 function dispatchVoiceLatency({
-  authReadyMs = 0,
-  bargeHaltMs = 0,
-  commitToEstimatedAudibleMs = 0,
-  commitToFirstAudioMs = 0,
-  firstBinaryMs = 0,
-  speechEndToEstimatedAudibleMs = 0,
-  turnTotalMs = 0,
-  wsOpenMs = 0,
+  authReadyMs,
+  bargeHaltMs,
+  commitToEstimatedAudibleMs,
+  commitToFirstAudioMs,
+  firstBinaryMs,
+  substantiveAudio = false,
+  speechEndToEstimatedAudibleMs,
+  turnTotalMs,
+  wsOpenMs,
 }) {
   globalThis.dispatchEvent(
     new CustomEvent("kotae:voice-latency", {
       detail: Object.freeze({
-        auth_ready_ms: boundedLatency(authReadyMs),
-        barge_halt_ms: boundedLatency(bargeHaltMs),
-        commit_to_estimated_audible_ms: boundedLatency(
-          commitToEstimatedAudibleMs,
-        ),
-        commit_to_first_audio_ms: boundedLatency(
-          commitToFirstAudioMs,
-        ),
-        first_binary_ms: boundedLatency(firstBinaryMs),
-        speech_end_to_estimated_audible_ms: boundedLatency(
-          speechEndToEstimatedAudibleMs,
-        ),
-        turn_total_ms: boundedLatency(turnTotalMs),
-        version: 2,
-        ws_open_ms: boundedLatency(wsOpenMs),
+        auth_ready_ms: nullableLatency(authReadyMs),
+        barge_halt_ms: nullableLatency(bargeHaltMs),
+        commit_to_estimated_audible_ms:
+          substantiveAudio
+            ? nullableLatency(commitToEstimatedAudibleMs)
+            : null,
+        // Transport arrival remains useful even when the decoded response is
+        // silent. Only audible metrics below require a meaningful sample.
+        commit_to_first_audio_ms: nullableLatency(commitToFirstAudioMs),
+        first_binary_ms: nullableLatency(firstBinaryMs),
+        speech_end_to_estimated_audible_ms:
+          substantiveAudio &&
+          Number.isFinite(speechEndToEstimatedAudibleMs)
+          ? nullableLatency(speechEndToEstimatedAudibleMs)
+          : null,
+        // A content-free receipt never flips this bit. It becomes true only
+        // after decoded PCM contains a meaningful sample and is scheduled on
+        // the output device timeline.
+        substantive_audio: substantiveAudio,
+        turn_total_ms: nullableLatency(turnTotalMs),
+        version: 4,
+        ws_open_ms: nullableLatency(wsOpenMs),
       }),
     }),
   );
@@ -1278,8 +1292,14 @@ function rejectRecording(recording, code) {
     recording.stopLatch.request("failed");
   }
   stopVad(recording);
-  setStreamTracksEnabled(recording.stream, false);
+  if (activeRecording === recording && activePlayback === undefined) {
+    setStreamTracksEnabled(recording.stream, false);
+  }
   discardCurrentCandidate(recording);
+  if (!recording.turnEnded) {
+    recording.turnEnded = true;
+    recording.rejectTurnEnded(new Error(code));
+  }
   recording.rejectEnd(new Error(code));
 }
 
@@ -1294,7 +1314,12 @@ function resolveRecording(recording, candidate) {
   }
   recording.settled = true;
   stopVad(recording);
-  setStreamTracksEnabled(recording.stream, false);
+  // MediaRecorder may publish its final Blob after live response playback has
+  // already re-enabled this shared stream for barge-in. A stale fallback
+  // completion must never revoke the newer microphone owner.
+  if (activeRecording === recording && activePlayback === undefined) {
+    setStreamTracksEnabled(recording.stream, false);
+  }
   const captured =
     candidate === undefined || !recording.fallbackAudioComplete
       ? Object.freeze({ chunks: [], totalBytes: 0 })
@@ -1343,6 +1368,15 @@ function requestRecordingStop(recording, reason) {
   }
 
   const candidate = recording.candidate;
+  if (!recording.turnEnded) {
+    recording.turnEnded = true;
+    recording.resolveTurnEnded(
+      Object.freeze({
+        hasSpeech: Boolean(candidate?.confirmed),
+        reason,
+      }),
+    );
+  }
   if (!candidate || !candidate.confirmed) {
     if (!discardCurrentCandidate(recording)) {
       rejectRecording(recording, "voice_turn_invalid");
@@ -1557,6 +1591,7 @@ function maybeCommitHybridEndpoint(recording, now) {
   }
   if (
     !shouldCommitHybridEndpoint({
+      coachActive: recording.coachActive,
       firstVoiceAt: recording.firstVoiceAt,
       hasSpeech: recording.vadHasSpeech,
       lastVoiceAt: recording.lastVoiceAt,
@@ -1601,12 +1636,22 @@ function armVad(recording) {
     vadState = advanceVad(
       vadState,
       { now, peak, rms },
-      recording.nativeAudio
-        ? {
-            endOfTurnSilenceMs:
-              VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-          }
-        : undefined,
+      {
+        coachActive: recording.coachActive,
+        ...(recording.coachActive
+          ? {
+              endOfTurnSilenceMs:
+                VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
+            }
+          : recording.nativeAudio
+            ? {
+              endOfTurnSilenceMs:
+                VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+              reflectiveEndOfTurnSilenceMs:
+                VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+            }
+            : {}),
+      },
     );
     recording.firstVoiceAt = vadState.firstVoiceAt;
     const hadConfirmedSpeech = recording.vadHasSpeech;
@@ -1714,13 +1759,20 @@ function createRecordingState(
   }
   let resolveEnd;
   let rejectEnd;
+  let resolveTurnEnded;
+  let rejectTurnEnded;
   const endPromise = new Promise((resolve, reject) => {
     resolveEnd = resolve;
     rejectEnd = reject;
   });
+  const turnEndedPromise = new Promise((resolve, reject) => {
+    resolveTurnEnded = resolve;
+    rejectTurnEnded = reject;
+  });
   // A stop can race the Rust caller before it starts awaiting the turn.
   // Mark the rejection handled without changing what later awaiters observe.
   void endPromise.catch(() => {});
+  void turnEndedPromise.catch(() => {});
   const recording = {
     candidate: undefined,
     discard: false,
@@ -1735,7 +1787,9 @@ function createRecordingState(
     coachActive,
     providerEndpointAt: null,
     resolveEnd,
+    resolveTurnEnded,
     rejectEnd,
+    rejectTurnEnded,
     settled: false,
     sessionSpeechMarked: false,
     startedAt: performance.now(),
@@ -1744,6 +1798,8 @@ function createRecordingState(
     stream,
     softVoiceConfirmed: false,
     totalBytes: 0,
+    turnEnded: false,
+    turnEndedPromise,
     vadHasSpeech: false,
     vadPcm: undefined,
     vadTimer: undefined,
@@ -1830,14 +1886,14 @@ async function beginTurn(
         }
 
         setStreamTracksEnabled(stream, true);
-        // A continuing Respondent Coach turn needs the authoritative staged
-        // path. The boolean is validated above and captured once at this
-        // session-start boundary, so reconnect/fallback code cannot reinterpret
-        // a truthy value or change lanes halfway through the turn.
+        // A continuing Respondent Coach can keep the low-latency Native input
+        // path. Its caption is handed to the bounded coach controller; the
+        // server must publish the exact authenticated checkpoint before response PCM.
         const nativeAudio =
-          !strictCloudMinimization && !pendingDocument && !coachActive;
+          !strictCloudMinimization && !pendingDocument;
         const liveSession = await startVoiceLiveSession({
           ...credentials,
+          coachActive,
           expectedEpoch,
           nativeAudio,
           sessionState: serializedSessionState,
@@ -1885,7 +1941,7 @@ async function waitForTurnEnd() {
   }
   let capture;
   try {
-    capture = await recording.endPromise;
+    capture = await recording.turnEndedPromise;
   } catch (error) {
     activeLiveSession?.cancel(
       error instanceof Error ? error : new Error("request_cancelled"),
@@ -2201,6 +2257,7 @@ function liveCredential(value) {
 async function startVoiceLiveSession({
   appCheckToken,
   captureHandoff,
+  coachActive = false,
   expectedEpoch,
   idToken,
   nativeAudio,
@@ -2218,7 +2275,9 @@ async function startVoiceLiveSession({
     sessionState.length > SESSION_STATE_MAX_CHARS ||
     typeof strictCloudMinimization !== "boolean" ||
     typeof nativeAudio !== "boolean" ||
+    typeof coachActive !== "boolean" ||
     (nativeAudio && strictCloudMinimization) ||
+    (coachActive && !nativeAudio) ||
     !isValidTurnMode(turnMode) ||
     (captureHandoff !== undefined &&
       (captureHandoff === null ||
@@ -2256,7 +2315,7 @@ async function startVoiceLiveSession({
     });
     protocol = createVoiceLiveServerProtocol(
       (result) => safeVoiceResponse(result, strictCloudMinimization),
-      { nativeAudio },
+      { coachActive, nativeAudio },
     );
   } catch {
     socket.close(1000, "http_fallback");
@@ -2604,6 +2663,8 @@ async function startVoiceLiveSession({
       commitToEstimatedAudibleMs,
       commitToFirstAudioMs,
       firstBinaryMs,
+      substantiveAudio:
+        Number.isFinite(commitToEstimatedAudibleMs),
       speechEndToEstimatedAudibleMs,
       turnTotalMs: performance.now() - liveStartedAt,
       wsOpenMs,
@@ -2802,6 +2863,11 @@ async function startVoiceLiveSession({
           globalThis.dispatchEvent(
             new CustomEvent("kotae:coach-checkpoint", {
               detail: Object.freeze({
+                assistanceTarget: message.assistanceTarget,
+                coachAction: message.coachAction,
+                coachPhase: message.coachPhase,
+                respondentStage: message.respondentStage,
+                route: message.route,
                 sessionState: message.sessionState,
                 version: 1,
               }),
@@ -2922,6 +2988,7 @@ async function startVoiceLiveSession({
       return startVoiceLiveSession({
         appCheckToken,
         captureHandoff: nextCapture,
+        coachActive: session.playback.coachActive,
         expectedEpoch,
         idToken,
         nativeAudio,
@@ -3249,6 +3316,10 @@ function abandonInterruptRecording(recording) {
   recording.settled = true;
   stopVad(recording);
   discardCurrentCandidate(recording, "interrupt-abandoned");
+  if (!recording.turnEnded) {
+    recording.turnEnded = true;
+    recording.rejectTurnEnded?.(new Error("request_cancelled"));
+  }
   recording.resolveEnd(
     Object.freeze({
       blob: new Blob([], { type: "audio/webm" }),
@@ -4067,8 +4138,7 @@ function createStreamingPlayback(
     typeof nativeAudio !== "boolean" ||
     typeof coachActive !== "boolean" ||
     (transportKind !== "http" && transportKind !== "live") ||
-    (nativeAudio && transportKind !== "live") ||
-    (nativeAudio && coachActive)
+    (nativeAudio && transportKind !== "live")
   ) {
     fail("audio_playback_blocked");
   }
@@ -4498,6 +4568,7 @@ async function finishTurn(
   }
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
+  let capture;
   let documentForTurn;
   let liveSession;
   let playback;
@@ -4530,12 +4601,9 @@ async function finishTurn(
     if (!recording.stopLatch.isRequested()) {
       requestRecordingStop(recording, "manual");
     }
-    const capture = await recording.endPromise;
-    if (!capture.hasSpeech) {
+    const turnEnd = await recording.turnEndedPromise;
+    if (!turnEnd.hasSpeech) {
       fail("no_speech");
-    }
-    if (capture.blob.size > AUDIO_MAX_BYTES) {
-      fail("voice_turn_too_large");
     }
     if (!beginSessionResponse(expectedEpoch)) {
       fail(stoppedSessionCode(expectedEpoch));
@@ -4642,6 +4710,16 @@ async function finishTurn(
         }
         liveSession = undefined;
       }
+    }
+    capture = await awaitVoiceTurnResult(
+      recording.endPromise,
+      () => rejectRecording(recording, "voice_turn_timeout"),
+    );
+    if (!capture.hasSpeech) {
+      fail("no_speech");
+    }
+    if (capture.blob.size > AUDIO_MAX_BYTES) {
+      fail("voice_turn_too_large");
     }
     if (capture.fallbackAudioComplete !== true) {
       // Never upload an empty suffix or prefix after the bounded recorder
@@ -4804,59 +4882,10 @@ function safeDocumentName(name) {
 }
 
 async function attachDocument(inputId) {
-  if (typeof inputId !== "string" || inputId !== "paper-input") {
-    fail("document_not_selected");
-  }
-  const input = document.getElementById(inputId);
-  if (!(input instanceof HTMLInputElement) || input.files?.length !== 1) {
-    fail("document_not_selected");
-  }
-  const file = input.files[0];
-  if (
-    file.type !== "application/pdf" ||
-    !file.name.toLowerCase().endsWith(".pdf")
-  ) {
-    input.value = "";
-    fail("document_type_invalid");
-  }
-  if (file.size === 0 || file.size > DOCUMENT_MAX_BYTES) {
-    input.value = "";
-    fail("document_too_large");
-  }
-
-  documentEpoch += 1;
-  const expectedEpoch = documentEpoch;
-  let base64;
-  try {
-    base64 = arrayBufferToBase64(await file.arrayBuffer());
-  } catch {
-    input.value = "";
-    fail("document_read_failed");
-  }
-  if (expectedEpoch !== documentEpoch) {
-    input.value = "";
-    fail("request_cancelled");
-  }
-
-  const name = safeDocumentName(file.name);
-  clearPendingDocument("replaced");
-  const attachedAt = performance.now();
-  pendingDocument = Object.freeze({
-    base64,
-    mimeType: "application/pdf",
-    name,
-  });
-  if (activeLiveSession?.canFallback()) {
-    activeLiveSession.cancel(new Error("voice_live_pdf_fallback"));
-    activeLiveSession = undefined;
-  }
-  retirePendingLiveSession(new Error("voice_live_pdf_fallback"));
-  armPendingDocumentExpiry(pendingDocument, attachedAt);
-  base64 = "";
-  return Object.freeze({
-    name,
-    sizeBytes: file.size,
-  });
+	// Runtime PDF has no reviewed de-identification boundary. Fail before DOM
+	// lookup or File access so an older cached UI cannot read or send bytes.
+	void inputId;
+	fail("document_unavailable");
 }
 
 function stopSession(reason = "request_cancelled") {

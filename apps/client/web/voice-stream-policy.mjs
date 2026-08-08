@@ -31,14 +31,20 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   // Keep every provisional candidate local for a finite window. A short
   // acknowledgement, cough, or mutter is discarded without stopping the
   // reply; sustained speech can still survive a few natural gaps.
-  candidateCaptureLimitMs: 1_400,
-  candidateGapMs: 120,
+  candidateCaptureLimitMs: 2_400,
+  candidateGapMs: 200,
   // Four voiced frames only enter a reversible, local provisional state and
-  // do not change playback. Twenty voiced frames plus a density check are
-  // required before the current response is actually interrupted.
+  // do not change playback. Strong, foreground-quality speech confirms after
+  // 720 ms; quiet speech stays reversible for 1.2 seconds so a brief mutter,
+  // cough, or acknowledgement cannot stop the response.
   provisionalMs: 160,
-  confirmationMs: 800,
-  minimumVoiceDensity: 0.65,
+  confirmationMs: 720,
+  quietConfirmationMs: 1_200,
+  minimumVoiceDensity: 0.68,
+  minimumForegroundDensity: 0.72,
+  // Once a candidate has started, keep a small release hysteresis so a
+  // syllable boundary does not repeatedly fall out of the voice floor.
+  continuationThresholdRatio: 0.86,
   guardMs: 320,
   intervalMs: 40,
   maximumCaptureMs: 3 * 60_000 + 30_000,
@@ -69,10 +75,10 @@ export const BARGE_PCM_LIMITS = Object.freeze({
   frameDurationMs: 20,
   // Cover the complete finite provisional window plus 100 ms of pre-roll.
   // Unconfirmed PCM never leaves the device and is zeroized on discard.
-  historyMs: 1_500,
+  historyMs: INTERRUPT_VAD_LIMITS.candidateCaptureLimitMs + 100,
   leadInMs: 100,
-  maximumBytes: 48_000,
-  maximumFrames: 75,
+  maximumBytes: 80_000,
+  maximumFrames: 125,
 });
 
 export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
@@ -761,11 +767,14 @@ export function createVoiceLiveServerProtocol(
   }
   if (
     !isPlainRecord(expectations) ||
-    !hasExactKeys(expectations, ["nativeAudio"]) ||
-    typeof expectations.nativeAudio !== "boolean"
+    !hasExactKeys(expectations, ["coachActive", "nativeAudio"]) ||
+    typeof expectations.coachActive !== "boolean" ||
+    typeof expectations.nativeAudio !== "boolean" ||
+    (expectations.coachActive && !expectations.nativeAudio)
   ) {
     throw new TypeError("voice_live_protocol_expectation_invalid");
   }
+  const expectedCoachActive = expectations.coachActive;
   const expectedNativeAudio = expectations.nativeAudio;
   let audioEventCount = 0;
   let coachActivated = false;
@@ -835,12 +844,30 @@ export function createVoiceLiveServerProtocol(
         audioEventCount !== 0 ||
         !hasExactKeys(value, [
           "active",
+          "assistanceTarget",
+          "coachAction",
+          "coachPhase",
+          "respondentStage",
+          "route",
           "sessionState",
           "type",
           "version",
         ]) ||
         value.active !== true ||
         value.version !== 1 ||
+        value.route !== "native-respondent-coach" ||
+        value.assistanceTarget !== "respondent" ||
+        !["awaiting_answer", "restructure"].includes(
+          value.respondentStage,
+        ) ||
+        ![
+          "awaiting_answer:elicit",
+          "awaiting_restatement:restate",
+          "expanding:expand",
+          "complete:complete",
+          "blocked:retry",
+          "blocked:release",
+        ].includes(`${value.coachPhase}:${value.coachAction}`) ||
         typeof value.sessionState !== "string" ||
         value.sessionState.length === 0 ||
         value.sessionState.length >
@@ -851,10 +878,17 @@ export function createVoiceLiveServerProtocol(
         invalid();
       }
       coachActivated = true;
-      coachCheckpoint = value.sessionState;
+      coachCheckpoint = Object.freeze({
+        assistanceTarget: value.assistanceTarget,
+        coachAction: value.coachAction,
+        coachPhase: value.coachPhase,
+        respondentStage: value.respondentStage,
+        route: value.route,
+        sessionState: value.sessionState,
+      });
       return Object.freeze({
         active: true,
-        sessionState: coachCheckpoint,
+        ...coachCheckpoint,
         type: "coach",
         version: 1,
       });
@@ -888,12 +922,15 @@ export function createVoiceLiveServerProtocol(
         result.coachAction !== "none");
     if (
       (coachActivated &&
-        (result?.route !== "native-respondent-coach" ||
-          result?.assistanceTarget !== "respondent" ||
-          result?.respondentStage !== "awaiting_answer" ||
-          result?.coachPhase !== "awaiting_answer" ||
-          result?.coachAction !== "elicit" ||
-          result?.sessionState !== coachCheckpoint)) ||
+        (result?.route !== coachCheckpoint.route ||
+          result?.assistanceTarget !==
+            coachCheckpoint.assistanceTarget ||
+          result?.respondentStage !==
+            coachCheckpoint.respondentStage ||
+          result?.coachPhase !== coachCheckpoint.coachPhase ||
+          result?.coachAction !== coachCheckpoint.coachAction ||
+          result?.sessionState !== coachCheckpoint.sessionState)) ||
+      (expectedCoachActive && !coachActivated) ||
       (expectedNativeAudio && !coachActivated && directCoachFinal)
     ) {
       invalid();
@@ -909,6 +946,7 @@ export function createVoiceLiveServerProtocol(
   function acceptBinary(value) {
     if (
       state !== "committed" ||
+      (expectedCoachActive && !coachActivated) ||
       !(value instanceof ArrayBuffer) ||
       value.byteLength === 0 ||
       value.byteLength % 2 !== 0 ||
@@ -1191,6 +1229,7 @@ export function createInterruptVadState(startedAt) {
     candidateSilenceMs: 0,
     candidateStartedAt: null,
     firstVoiceAt: null,
+    foregroundVoiceMs: 0,
     lastVoiceAt: null,
     noiseFloor: 0.004,
     phase: "guard",
@@ -1214,6 +1253,9 @@ export function advanceInterruptVad(
     state.candidateSilenceMs < 0 ||
     !Number.isFinite(state.voiceRunMs) ||
     state.voiceRunMs < 0 ||
+    !Number.isFinite(state.foregroundVoiceMs) ||
+    state.foregroundVoiceMs < 0 ||
+    state.foregroundVoiceMs > state.voiceRunMs ||
     !finiteOrNull(state.candidateStartedAt) ||
     !finiteOrNull(state.firstVoiceAt) ||
     !finiteOrNull(state.lastVoiceAt) ||
@@ -1241,6 +1283,7 @@ export function advanceInterruptVad(
     candidateSilenceMs,
     candidateStartedAt,
     firstVoiceAt,
+    foregroundVoiceMs,
     lastVoiceAt,
     noiseFloor,
     phase,
@@ -1263,6 +1306,7 @@ export function advanceInterruptVad(
       candidateSilenceMs: 0,
       candidateStartedAt: null,
       firstVoiceAt: null,
+      foregroundVoiceMs: 0,
       lastVoiceAt: null,
       noiseFloor,
       phase:
@@ -1285,11 +1329,13 @@ export function advanceInterruptVad(
         phase = "candidate";
         candidateStartedAt = now;
         candidateSilenceMs = 0;
+        foregroundVoiceMs = 0;
         voiceRunMs = 0;
         action = "start";
       }
       candidateSilenceMs = 0;
       voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      foregroundVoiceMs += INTERRUPT_VAD_LIMITS.intervalMs;
       if (
         phase === "candidate" &&
         voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
@@ -1306,6 +1352,7 @@ export function advanceInterruptVad(
         phase = "guard";
         candidateStartedAt = null;
         candidateSilenceMs = 0;
+        foregroundVoiceMs = 0;
         voiceRunMs = 0;
       }
     } else {
@@ -1316,6 +1363,7 @@ export function advanceInterruptVad(
       candidateSilenceMs,
       candidateStartedAt,
       firstVoiceAt: null,
+      foregroundVoiceMs,
       lastVoiceAt: null,
       noiseFloor,
       phase,
@@ -1333,7 +1381,24 @@ export function advanceInterruptVad(
     outputActive ? 0.065 : 0.035,
     noiseFloor * (outputActive ? 7 : 5),
   );
-  const voiced = rms >= rmsThreshold && peak >= peakThreshold;
+  const candidateActive = ["candidate", "provisional"].includes(
+    phase,
+  );
+  const thresholdRatio = candidateActive
+    ? INTERRUPT_VAD_LIMITS.continuationThresholdRatio
+    : 1;
+  const voiced =
+    rms >= rmsThreshold * thresholdRatio &&
+    peak >= peakThreshold * thresholdRatio;
+  // Absolute thresholds reject playback leakage; the noise-floor multiples
+  // keep the fast path calibrated in both quiet and noisy rooms. This is only
+  // accumulated evidence: one loud cough cannot latch the foreground floor.
+  const foregroundVoiced =
+    voiced &&
+    rms >=
+      Math.max(outputActive ? 0.045 : 0.026, noiseFloor * 5) &&
+    peak >=
+      Math.max(outputActive ? 0.12 : 0.07, noiseFloor * 9);
 
   if (phase === "confirmed") {
     if (voiced) {
@@ -1358,11 +1423,15 @@ export function advanceInterruptVad(
       phase = "candidate";
       candidateStartedAt = now;
       candidateSilenceMs = 0;
+      foregroundVoiceMs = 0;
       voiceRunMs = 0;
       action = "start";
     }
     candidateSilenceMs = 0;
     voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
+    if (foregroundVoiced) {
+      foregroundVoiceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+    }
     if (
       phase === "candidate" &&
       voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
@@ -1373,8 +1442,16 @@ export function advanceInterruptVad(
     const candidateElapsedMs =
       now - candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs;
     const voiceDensity = voiceRunMs / candidateElapsedMs;
+    const foregroundDensity =
+      foregroundVoiceMs / candidateElapsedMs;
+    const foregroundConfirmed =
+      foregroundVoiceMs >= INTERRUPT_VAD_LIMITS.confirmationMs &&
+      foregroundDensity >=
+        INTERRUPT_VAD_LIMITS.minimumForegroundDensity;
+    const quietConfirmed =
+      voiceRunMs >= INTERRUPT_VAD_LIMITS.quietConfirmationMs;
     if (
-      voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs &&
+      (foregroundConfirmed || quietConfirmed) &&
       voiceDensity >= INTERRUPT_VAD_LIMITS.minimumVoiceDensity
     ) {
       phase = "confirmed";
@@ -1394,6 +1471,7 @@ export function advanceInterruptVad(
           candidateSilenceMs,
           candidateStartedAt,
           firstVoiceAt,
+          foregroundVoiceMs,
           lastVoiceAt,
           noiseFloor,
           phase,
@@ -1406,6 +1484,7 @@ export function advanceInterruptVad(
     phase = "armed";
     candidateSilenceMs = 0;
     candidateStartedAt = null;
+    foregroundVoiceMs = 0;
     voiceRunMs = 0;
   }
 
@@ -1414,6 +1493,7 @@ export function advanceInterruptVad(
     candidateSilenceMs,
     candidateStartedAt,
     firstVoiceAt,
+    foregroundVoiceMs,
     lastVoiceAt,
     noiseFloor,
     phase,

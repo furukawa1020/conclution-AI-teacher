@@ -43,10 +43,13 @@ type Config struct {
 	CoachRestatementBinding      bool
 	StateV2Writes                bool
 	AnswerProofWrites            bool
+	VerifierProgressWrites       bool
+	RetrievalPolicyEnabled       bool
 	SpeechLocation               string
 	SpeechModel                  string
 	SpeechVoice                  string
 	NativeAudioEnabled           bool
+	NativeCaptionHandoffEnabled  bool
 	NativeAudioLocation          string
 	NativeAudioModel             string
 	NativeAudioVoice             string
@@ -67,7 +70,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	if err := rejectLegacyPasskeyRateLimitEnvironment(); err != nil {
+	if err := rejectLegacyEnvironment(); err != nil {
 		return Config{}, err
 	}
 	perMinute, err := envBoundedInt(
@@ -186,8 +189,29 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	verifierProgressWrites, err := envStrictBool(
+		"KOTAE_VERIFIER_PROGRESS_WRITES",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	retrievalPolicyEnabled, err := envStrictBool(
+		"KOTAE_RETRIEVAL_POLICY_ENABLED",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	nativeAudioEnabled, err := envStrictBool(
 		"KOTAE_NATIVE_AUDIO_ENABLED",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	nativeCaptionHandoffEnabled, err := envStrictBool(
+		"KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED",
 		false,
 	)
 	if err != nil {
@@ -202,31 +226,34 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		AppEnv:                  envOr("KOTAE_ENV", "production"),
-		Port:                    envOr("PORT", defaultPort),
-		ProjectID:               firstNonEmpty(os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GCLOUD_PROJECT")),
-		AllowedAppIDs:           csvValues(os.Getenv("KOTAE_ALLOWED_APP_IDS")),
-		VertexLocation:          envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
-		FastModel:               envOr("KOTAE_FAST_MODEL", defaultFastModel),
-		PrecisionModel:          envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
-		VertexPriority:          vertexPriority,
-		CoachRestatementBinding: coachRestatementBinding,
-		StateV2Writes:           stateV2Writes,
-		AnswerProofWrites:       answerProofWrites,
-		SpeechLocation:          envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
-		SpeechModel:             envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
-		SpeechVoice:             envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
-		NativeAudioEnabled:      nativeAudioEnabled,
-		NativeAudioLocation:     envOr("KOTAE_NATIVE_AUDIO_LOCATION", defaultNativeAudioLocation),
-		NativeAudioModel:        envOr("KOTAE_NATIVE_AUDIO_MODEL", defaultNativeAudioModel),
-		NativeAudioVoice:        envOr("KOTAE_NATIVE_AUDIO_VOICE", defaultNativeAudioVoice),
-		StateKey:                stateKey,
-		RequestTimeout:          envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
-		VoiceTimeout:            envDurationOr("KOTAE_VOICE_TIMEOUT", 50*time.Second),
-		MaxRequestBytes:         envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
-		MaxVoiceBytes:           envInt64Or("KOTAE_MAX_VOICE_BYTES", 13*1024*1024),
-		RateLimits:              guard.Limits{PerMinute: perMinute, PerDay: perDay},
-		VoiceRateLimits:         guard.Limits{PerMinute: voicePerMinute, PerDay: voicePerDay},
+		AppEnv:                      envOr("KOTAE_ENV", "production"),
+		Port:                        envOr("PORT", defaultPort),
+		ProjectID:                   firstNonEmpty(os.Getenv("GOOGLE_CLOUD_PROJECT"), os.Getenv("GCLOUD_PROJECT")),
+		AllowedAppIDs:               csvValues(os.Getenv("KOTAE_ALLOWED_APP_IDS")),
+		VertexLocation:              envOr("GOOGLE_CLOUD_LOCATION", defaultVertexLocation),
+		FastModel:                   envOr("KOTAE_FAST_MODEL", defaultFastModel),
+		PrecisionModel:              envOr("KOTAE_PRECISION_MODEL", defaultPrecisionModel),
+		VertexPriority:              vertexPriority,
+		CoachRestatementBinding:     coachRestatementBinding,
+		StateV2Writes:               stateV2Writes,
+		AnswerProofWrites:           answerProofWrites,
+		VerifierProgressWrites:      verifierProgressWrites,
+		RetrievalPolicyEnabled:      retrievalPolicyEnabled,
+		SpeechLocation:              envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
+		SpeechModel:                 envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
+		SpeechVoice:                 envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
+		NativeAudioEnabled:          nativeAudioEnabled,
+		NativeCaptionHandoffEnabled: nativeCaptionHandoffEnabled,
+		NativeAudioLocation:         envOr("KOTAE_NATIVE_AUDIO_LOCATION", defaultNativeAudioLocation),
+		NativeAudioModel:            envOr("KOTAE_NATIVE_AUDIO_MODEL", defaultNativeAudioModel),
+		NativeAudioVoice:            envOr("KOTAE_NATIVE_AUDIO_VOICE", defaultNativeAudioVoice),
+		StateKey:                    stateKey,
+		RequestTimeout:              envDurationOr("KOTAE_REQUEST_TIMEOUT", 25*time.Second),
+		VoiceTimeout:                envDurationOr("KOTAE_VOICE_TIMEOUT", 50*time.Second),
+		MaxRequestBytes:             envInt64Or("KOTAE_MAX_REQUEST_BYTES", 32*1024),
+		MaxVoiceBytes:               envInt64Or("KOTAE_MAX_VOICE_BYTES", 13*1024*1024),
+		RateLimits:                  guard.Limits{PerMinute: perMinute, PerDay: perDay},
+		VoiceRateLimits:             guard.Limits{PerMinute: voicePerMinute, PerDay: voicePerDay},
 		VoiceAppRateLimits: guard.Limits{
 			PerMinute: voiceAppPerMinute,
 			PerDay:    voiceAppPerDay,
@@ -250,6 +277,29 @@ func Load() (Config, error) {
 	}
 	if cfg.AllowInsecureDev && cfg.AppEnv != "local" && cfg.AppEnv != "test" {
 		return Config{}, errors.New("KOTAE_ALLOW_INSECURE_DEV is only allowed when KOTAE_ENV is local or test")
+	}
+	if cfg.RetrievalPolicyEnabled &&
+		(!cfg.StateV2Writes || !cfg.AnswerProofWrites ||
+			!cfg.CoachRestatementBinding) {
+		return Config{}, errors.New(
+			"KOTAE_RETRIEVAL_POLICY_ENABLED requires KOTAE_STATE_V2_WRITES, KOTAE_ANSWER_PROOF_WRITES, and KOTAE_COACH_RESTATEMENT_BINDING",
+		)
+	}
+	if cfg.VerifierProgressWrites && !cfg.StateV2Writes {
+		return Config{}, errors.New(
+			"KOTAE_VERIFIER_PROGRESS_WRITES requires KOTAE_STATE_V2_WRITES",
+		)
+	}
+	if cfg.NativeCaptionHandoffEnabled && !cfg.NativeAudioEnabled {
+		return Config{}, errors.New(
+			"KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED requires KOTAE_NATIVE_AUDIO_ENABLED",
+		)
+	}
+	if cfg.NativeCaptionHandoffEnabled &&
+		(!cfg.RetrievalPolicyEnabled || !cfg.VerifierProgressWrites) {
+		return Config{}, errors.New(
+			"KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED requires KOTAE_RETRIEVAL_POLICY_ENABLED and KOTAE_VERIFIER_PROGRESS_WRITES",
+		)
 	}
 	if !cfg.AllowInsecureDev && strings.TrimSpace(cfg.ProjectID) == "" {
 		return Config{}, errors.New("GOOGLE_CLOUD_PROJECT is required")
@@ -332,7 +382,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func rejectLegacyPasskeyRateLimitEnvironment() error {
+func rejectLegacyEnvironment() error {
 	legacy := []struct {
 		old string
 		new string
@@ -344,6 +394,10 @@ func rejectLegacyPasskeyRateLimitEnvironment() error {
 		{
 			old: "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY",
 			new: "KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY and KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_DAY",
+		},
+		{
+			old: "KOTAE_RETRIEVAL_BELIEF_WRITES",
+			new: "KOTAE_VERIFIER_PROGRESS_WRITES",
 		},
 	}
 	for _, migration := range legacy {

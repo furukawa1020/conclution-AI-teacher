@@ -114,12 +114,17 @@ type voiceLiveCommitFrame struct {
 }
 
 type voiceLiveOutboundFrame struct {
-	Type         string                `json:"type"`
-	Version      int                   `json:"version"`
-	Active       bool                  `json:"active,omitempty"`
-	SessionState string                `json:"sessionState,omitempty"`
-	Code         string                `json:"code,omitempty"`
-	Result       *voiceLiveFinalResult `json:"result,omitempty"`
+	Type             string                `json:"type"`
+	Version          int                   `json:"version"`
+	Active           bool                  `json:"active,omitempty"`
+	SessionState     string                `json:"sessionState,omitempty"`
+	Route            string                `json:"route,omitempty"`
+	AssistanceTarget string                `json:"assistanceTarget,omitempty"`
+	RespondentStage  string                `json:"respondentStage,omitempty"`
+	CoachPhase       string                `json:"coachPhase,omitempty"`
+	CoachAction      string                `json:"coachAction,omitempty"`
+	Code             string                `json:"code,omitempty"`
+	Result           *voiceLiveFinalResult `json:"result,omitempty"`
 }
 
 type voiceLiveFinalResult struct {
@@ -488,7 +493,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		var controlGateMu sync.Mutex
 		controlAttempted := false
 		controlRejected := false
-		controlCheckpoint := ""
+		var controlCheckpoint VoiceRespondentCheckpoint
+		controlAccepted := false
 		rejectControl := func() {
 			controlGateMu.Lock()
 			controlRejected = true
@@ -497,8 +503,12 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		onAudio := func(audio []byte) error {
 			controlGateMu.Lock()
 			rejected := controlRejected
+			checkpointInFlight := controlAttempted && !controlAccepted
+			if checkpointInFlight {
+				controlRejected = true
+			}
 			controlGateMu.Unlock()
-			if rejected {
+			if rejected || checkpointInFlight {
 				return errors.New("voice coach control state was rejected")
 			}
 			if input.StrictCloudMinimization {
@@ -531,7 +541,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					default:
 					}
 				},
-				func(sessionState string) error {
+				func(transition VoiceRespondentCheckpointTransition) error {
+					checkpoint := transition.Checkpoint
 					controlGateMu.Lock()
 					if controlAttempted {
 						controlRejected = true
@@ -540,33 +551,64 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 					}
 					controlAttempted = true
 					controlGateMu.Unlock()
-					if !validVoiceLiveCoachSessionState(sessionState) {
+					if !validVoiceRespondentCheckpoint(checkpoint) ||
+						!validVoiceLiveCoachSessionState(checkpoint.SessionState) ||
+						!validVoiceLiveCoachSessionState(
+							transition.PreviousSessionState,
+						) {
 						rejectControl()
-						return errors.New("invalid voice coach session state")
+						return errors.New("invalid voice respondent checkpoint")
 					}
 					if s.voice.CoachStateValidator == nil ||
-						s.voice.CoachStateValidator.ValidateStateToken(
-							principal.UID,
-							sessionState,
-						) != nil {
+						s.voice.CoachStateValidator.
+							ValidateRespondentCheckpointTransition(
+								principal.UID,
+								input.StateToken,
+								transition.PreviousSessionState,
+								checkpoint.SessionState,
+								input.RequestID,
+								checkpoint.AssistanceTarget,
+								checkpoint.RespondentStage,
+								checkpoint.CoachPhase,
+								checkpoint.CoachAction,
+							) != nil {
 						rejectControl()
-						return errors.New("unauthenticated voice coach session state")
+						return errors.New("unauthenticated voice coach state transition")
+					}
+					_, outputFrames, _ := outputMetrics.snapshot()
+					if outputFrames != 0 {
+						rejectControl()
+						return errors.New("voice respondent checkpoint followed response audio")
+					}
+					// Serialize checkpoint publication with response delivery. Once a
+					// checkpoint attempt starts, onAudio either observes the accepted
+					// frame or fails closed; it can never race the WebSocket write.
+					controlGateMu.Lock()
+					if controlRejected {
+						controlGateMu.Unlock()
+						return errors.New("voice respondent checkpoint raced response audio")
 					}
 					if err := writeVoiceLiveJSON(
 						liveCtx,
 						conn,
 						voiceLiveOutboundFrame{
-							Type:         "coach",
-							Version:      voiceLiveVersion,
-							Active:       true,
-							SessionState: sessionState,
+							Type:             "coach",
+							Version:          voiceLiveVersion,
+							Active:           true,
+							SessionState:     checkpoint.SessionState,
+							Route:            checkpoint.Route,
+							AssistanceTarget: checkpoint.AssistanceTarget,
+							RespondentStage:  checkpoint.RespondentStage,
+							CoachPhase:       checkpoint.CoachPhase,
+							CoachAction:      checkpoint.CoachAction,
 						},
 					); err != nil {
-						rejectControl()
+						controlRejected = true
+						controlGateMu.Unlock()
 						return err
 					}
-					controlGateMu.Lock()
-					controlCheckpoint = sessionState
+					controlCheckpoint = checkpoint
+					controlAccepted = true
 					controlGateMu.Unlock()
 					return nil
 				},
@@ -574,12 +616,16 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			controlGateMu.Lock()
 			rejected := controlRejected
 			checkpoint := controlCheckpoint
+			checkpointAccepted := controlAccepted
 			controlGateMu.Unlock()
 			if rejected {
 				processErr = errors.New("voice coach control state was rejected")
-			} else if processErr == nil && checkpoint != "" &&
-				result.StateToken != checkpoint {
-				processErr = errors.New("voice coach checkpoint did not match final state")
+			} else if processErr == nil && checkpointAccepted &&
+				!checkpoint.MatchesResult(result) {
+				processErr = errors.New("voice coach checkpoint did not match final result")
+			} else if processErr == nil && !checkpointAccepted &&
+				voiceResultRequiresRespondentCheckpoint(result) {
+				processErr = errors.New("voice respondent result has no checkpoint")
 			}
 		} else if endpointService, supportsEndpoint :=
 			selectedLiveService.(VoiceTurnLiveEndpointService); supportsEndpoint {
@@ -1028,6 +1074,14 @@ func validVoiceLiveCoachSessionState(value string) bool {
 		!strings.ContainsFunc(value, unicode.IsControl)
 }
 
+func voiceResultRequiresRespondentCheckpoint(result VoiceTurnResult) bool {
+	return result.Route == VoiceNativeRespondentCoachRoute ||
+		result.AssistanceTarget == "respondent" ||
+		result.RespondentStage != "none" ||
+		result.CoachPhase != "none" ||
+		result.CoachAction != "none"
+}
+
 func decodeStrictVoiceLiveJSON(payload []byte, destination any) error {
 	if err := rejectDuplicateTopLevelJSONKeys(payload); err != nil {
 		return err
@@ -1268,6 +1322,7 @@ func (s *Server) logVoiceLiveSession(
 		"tts_prestarted", timings.TTSPrestarted,
 		"tts_buffered_bytes", timings.TTSBufferedBytes,
 		"tts_release_ms", finiteLatency(timings.TTSReleaseMS),
+		"native_caption_handoff", timings.NativeCaptionHandoff,
 		"commit_to_first_audio_ms", commitToFirstAudioMS,
 		"total_ms", finiteLatency(time.Since(started).Milliseconds()),
 		"input_frames", inputFrames,

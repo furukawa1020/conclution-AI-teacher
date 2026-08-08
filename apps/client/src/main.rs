@@ -8,9 +8,9 @@ const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言�
 const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する";
 const TALK_ONLY_COPY: &str = "届いた瞬間だけ知らせて、点数にはしない";
 const STANDARD_MODE_ROUTE_LABEL: &str =
-    "通常会話はNative Audio / 明示した回答支援はQBA Proof段階経路";
-const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud RunからVertex AI Native Audioへ送り、通常は音声を直接返します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、生成済みのNative音声を一切出さず、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・TTSの段階経路で一度だけ処理します。この経路で入力内に報告された問いの範囲、operator、required slot、今回の入力evidenceをそれぞれ非可逆tagへ結びます。確定音声入力だけを対象に、exact-span gateと独立criticが全slotとA先頭で一致した時だけ、本文を含まないQBA Proofを今回のturnへ返します。外部で実際にその問いを聞かれた事実や話者・ライブネスは確認しません。次の発話が別の話題なら回答完了にも証明にもしません。完了または通常会話へ戻った後はNative Audioへ戻ります。PDF・接続不能時も段階経路へ切り替えます。";
-const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud RunからVertex AI Native Audioへ原音を送り、通常は音声応答と字幕を直接生成します。最終入力字幕から、人に聞かれた質問への回答支援を利用者が明示したと決定論的に確認した時は、Native出力を破棄し、同じ発話をSpeech-to-Text・globalの文字列Vertex AI・LAC・Respondent Coach・Text-to-Speechで一度だけ再処理します。回答支援の短期stateには入力内に報告された問いから作ったoperator・required slot・非可逆の質問／入力tagを保持しますが、具体的な質問・答え・文字起こしは保存しません。QBA Proofも固定enumだけで本文を含みません。外部の質問事実、話者、ライブネス、正解、能力、上達は確認しません。PDF・Native接続不能時も段階経路を使います。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
+    "通常会話はNative Audio / 明示した回答支援はQ-ARC + QBA Proof";
+const STANDARD_MODE_ROUTE_COPY: &str = "ライブ会話では原音をCloud Runからus-central1のVertex AI Native Audioへ送り、通常は音声を直接返します。人に聞かれた質問への回答支援を本人が明示した時はNative生成音声を破棄し、確定入力字幕を再認識せず監査済みcontrollerへ直接渡します。発話途中に同じ字幕が安定した時は、答え本文を入力できないQ-ARCが質問の型だけの短いcueとTTSを非公開buffer内で先に準備します。Nativeの最終字幕との完全一致、browser commit、同一requestと回答scopeへ暗号学的に束縛した有限checkpointがそろった後だけ音声とstateを解放します。続く回答発話もNativeの確定入力字幕を再認識せずcontrollerへ渡し、exact-span gateと独立criticの一致後に、待つ・型だけ促す・一度だけ言い直しを頼む・完了・解放を選びます。AIはAを作らず、本人自身のAが先に出た時だけ本文を含まないQBA Proofを返します。外部で質問された事実、話者、ライブネス、正解、能力、上達は確認しません。Native接続不能時だけ東京リージョンSTTを一度使う段階経路へ切り替えます。PDF入力は公開版では推論前に拒否します。";
+const STANDARD_VOICE_PRIVACY_COPY: &str = "ライブ発話はTLSでCloud Runからus-central1のVertex AI Native Audioへ原音を送ります。回答支援中もNativeの確定入力字幕を同じ原音の再認識なしで監査済みcontrollerへ直接渡します。途中候補から準備した判断と音声は、最終字幕との完全一致、browser commit、request・回答scope拘束済みcheckpointまで外へ出しません。短期stateにはoperator・required slot・非可逆tagと本文を含まない固定長posteriorだけを保持し、具体的な質問・答え・文字起こし・診断は保存しません。AIは本人より先にAを言いません。QBA Proofも固定enumだけで、外部質問の事実、話者、ライブネス、正解、能力、上達は確認しません。Native接続不能時は東京リージョンSTTを一度使い、PDF入力は公開版の全モードで推論前に拒否します。原音・本文はKOTAEの会話履歴、Firestore、Cloud Storage、アプリログへ保存しません。";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -554,14 +554,14 @@ fn recoverable_finish_turn_code(code: Option<&str>) -> bool {
 #[cfg(target_arch = "wasm32")]
 mod cloud {
     use super::{
-        ACCOUNT_BOUNDARY_CHANGED_COPY, BridgeStatus, CloudState, CoachAction, CoachPhase,
-        CoachState, DocumentInfo, FinishTurnError, NATIVE_RESPONDENT_COACH_ROUTE,
-        PASSKEY_ACCOUNT_EXISTS_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
-        PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
-        PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
-        PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord, ResearchStatus,
-        STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState, VoiceTurnMode,
-        VoiceTurnResult, WaitTurnError, confirmed_voice_input_state, recoverable_finish_turn_code,
+        ACCOUNT_BOUNDARY_CHANGED_COPY, BridgeStatus, CloudState, CoachState, DocumentInfo,
+        FinishTurnError, PASSKEY_ACCOUNT_EXISTS_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
+        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
+        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
+        ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
+        VoiceTurnMode, VoiceTurnResult, WaitTurnError, coach_action_from_checkpoint,
+        coach_phase_from_checkpoint, confirmed_voice_input_state, recoverable_finish_turn_code,
         recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
         valid_coach_checkpoint_metadata, valid_voice_pause_metadata, valid_voice_receipt_metadata,
     };
@@ -725,9 +725,6 @@ mod cloud {
             strict_cloud_minimization: bool,
         ) -> Result<JsValue, JsValue>;
 
-        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = attachDocument)]
-        async fn attach_document_js(input_id: &str) -> Result<JsValue, JsValue>;
-
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = stopSession)]
         fn stop_session_js() -> Result<(), JsValue>;
     }
@@ -819,13 +816,6 @@ mod cloud {
         };
         serde_wasm_bindgen::from_value(value)
             .map_err(|_| FinishTurnError::Message("音声応答を確認できない　もう一度ためしてみて"))
-    }
-
-    pub async fn attach_document(input_id: &str) -> Result<DocumentInfo, &'static str> {
-        let value = attach_document_js(input_id)
-            .await
-            .map_err(document_message)?;
-        serde_wasm_bindgen::from_value(value).map_err(|_| "PDFの情報を確認できない")
     }
 
     pub fn install_document_clear_listener(
@@ -1050,32 +1040,60 @@ mod cloud {
             if !valid_coach_checkpoint_keys(&key_names) {
                 return;
             }
-            let Ok(checkpoint) = js_sys::Reflect::get(&detail, &JsValue::from_str("sessionState"))
-            else {
+            let read_string = |name: &str| {
+                js_sys::Reflect::get(&detail, &JsValue::from_str(name))
+                    .ok()?
+                    .as_string()
+            };
+            let Some(assistance_target) = read_string("assistanceTarget") else {
+                return;
+            };
+            let Some(coach_action) = read_string("coachAction") else {
+                return;
+            };
+            let Some(coach_phase) = read_string("coachPhase") else {
+                return;
+            };
+            let Some(respondent_stage) = read_string("respondentStage") else {
+                return;
+            };
+            let Some(checkpoint_route) = read_string("route") else {
+                return;
+            };
+            let Some(checkpoint) = read_string("sessionState") else {
                 return;
             };
             let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
                 return;
             };
-            let Some(checkpoint) = checkpoint.as_string() else {
+            let Some(coach_phase) = coach_phase_from_checkpoint(&coach_phase) else {
+                return;
+            };
+            let Some(coach_action) = coach_action_from_checkpoint(&coach_action) else {
                 return;
             };
             let Some(version) = version.as_f64() else {
                 return;
             };
-            if !valid_coach_checkpoint_metadata(&checkpoint, version, keys.length()) {
+            if !valid_coach_checkpoint_metadata(
+                &checkpoint,
+                &checkpoint_route,
+                &assistance_target,
+                &respondent_stage,
+                coach_phase,
+                coach_action,
+                version,
+                keys.length(),
+            ) {
                 return;
             }
 
-            // Commit the opaque server-signed checkpoint before activating
-            // the staged route. A network failure after this event can rearm
-            // from the generic pending state without the original transcript.
+            // Commit the complete finite, server-authoritative tuple. A
+            // network failure after this event can rearm without reconstructing
+            // state from response prose or hardcoded client assumptions.
             session_state.set(checkpoint);
-            route.set(NATIVE_RESPONDENT_COACH_ROUTE.to_string());
-            coach_state.set(CoachState::from_result(
-                CoachPhase::AwaitingAnswer,
-                CoachAction::Elicit,
-            ));
+            route.set(checkpoint_route);
+            coach_state.set(CoachState::from_result(coach_phase, coach_action));
         });
         window
             .add_event_listener_with_callback(
@@ -1221,18 +1239,6 @@ mod cloud {
             _ => "音声エージェントにつながらない　もう一度ためしてみて",
         }
     }
-    fn document_message(error: JsValue) -> &'static str {
-        match error_code(error).as_deref() {
-            Some("document_privacy_blocked") => {
-                "厳格モードではPDFを端末で読み込まず送信もしません　標準モードなら次の応答だけに添付できます"
-            }
-            Some("document_not_selected") => "PDFを選んでみて",
-            Some("document_type_invalid") => "ここではPDFだけを読める",
-            Some("document_too_large") => "PDFは7MBまで",
-            Some("document_read_failed") => "PDFを読めなかった　別のファイルをためしてみて",
-            _ => "PDFを添付できなかった",
-        }
-    }
 }
 
 fn requires_passkey_choice(cloud_state: CloudState, voice_state: VoiceState) -> bool {
@@ -1375,10 +1381,6 @@ mod cloud {
         _strict_cloud_minimization: bool,
     ) -> Result<VoiceTurnResult, FinishTurnError> {
         Err(FinishTurnError::Message("WebAssembly版で使ってみて"))
-    }
-
-    pub async fn attach_document(_input_id: &str) -> Result<DocumentInfo, &'static str> {
-        Err("WebAssembly版で使ってみて")
     }
 
     pub fn install_document_clear_listener(
@@ -2037,14 +2039,6 @@ fn start_or_resume(
     );
 }
 
-fn human_file_size(bytes: u64) -> String {
-    if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else {
-        format!("{:.0} KB", bytes as f64 / 1_024.0)
-    }
-}
-
 const fn turn_mode_for_gesture_epoch(fresh_gesture: bool) -> VoiceTurnMode {
     if fresh_gesture {
         VoiceTurnMode::Intentional
@@ -2101,20 +2095,76 @@ fn valid_answer_proof_metadata(
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-fn valid_coach_checkpoint_metadata(session_state: &str, version: f64, field_count: u32) -> bool {
-    field_count == 2
+fn coach_phase_from_checkpoint(value: &str) -> Option<CoachPhase> {
+    match value {
+        "awaiting_answer" => Some(CoachPhase::AwaitingAnswer),
+        "awaiting_restatement" => Some(CoachPhase::AwaitingRestatement),
+        "expanding" => Some(CoachPhase::Expanding),
+        "complete" => Some(CoachPhase::Complete),
+        "blocked" => Some(CoachPhase::Blocked),
+        _ => None,
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn coach_action_from_checkpoint(value: &str) -> Option<CoachAction> {
+    match value {
+        "elicit" => Some(CoachAction::Elicit),
+        "restate" => Some(CoachAction::Restate),
+        "expand" => Some(CoachAction::Expand),
+        "complete" => Some(CoachAction::Complete),
+        "retry" => Some(CoachAction::Retry),
+        "release" => Some(CoachAction::Release),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn valid_coach_checkpoint_metadata(
+    session_state: &str,
+    route: &str,
+    assistance_target: &str,
+    respondent_stage: &str,
+    coach_phase: CoachPhase,
+    coach_action: CoachAction,
+    version: f64,
+    field_count: u32,
+) -> bool {
+    field_count == 7
         && version == 1.0
         && !session_state.is_empty()
         && session_state.encode_utf16().count() <= COACH_CHECKPOINT_MAX_CHARS
         && session_state.trim() == session_state
         && !session_state.chars().any(char::is_control)
+        && route == NATIVE_RESPONDENT_COACH_ROUTE
+        && assistance_target == "respondent"
+        && matches!(respondent_stage, "awaiting_answer" | "restructure")
+        && matches!(
+            (coach_phase, coach_action),
+            (CoachPhase::AwaitingAnswer, CoachAction::Elicit)
+                | (CoachPhase::AwaitingRestatement, CoachAction::Restate)
+                | (CoachPhase::Expanding, CoachAction::Expand)
+                | (CoachPhase::Complete, CoachAction::Complete)
+                | (CoachPhase::Blocked, CoachAction::Retry)
+                | (CoachPhase::Blocked, CoachAction::Release)
+        )
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn valid_coach_checkpoint_keys(keys: &[String]) -> bool {
-    keys.len() == 2
-        && keys.iter().any(|key| key == "sessionState")
-        && keys.iter().any(|key| key == "version")
+    const EXPECTED: [&str; 7] = [
+        "assistanceTarget",
+        "coachAction",
+        "coachPhase",
+        "respondentStage",
+        "route",
+        "sessionState",
+        "version",
+    ];
+    keys.len() == EXPECTED.len()
+        && EXPECTED
+            .iter()
+            .all(|expected| keys.iter().any(|key| key == expected))
 }
 
 const fn valid_voice_pause_metadata(reason: &str, version: f64, field_count: u32) -> bool {
@@ -2691,11 +2741,6 @@ fn App() -> Element {
     let research_snapshot = research_records.read().clone();
     let passkey_setup_is_busy = *passkey_setup_busy.read();
     let passkey_setup_feedback_snapshot = *passkey_setup_feedback.read();
-    let document_is_busy = strict_mode
-        || matches!(
-            state_snapshot,
-            VoiceState::RequestingPermission | VoiceState::Thinking | VoiceState::Speaking
-        );
     let prepared_cloud_state = cloud_status
         .read()
         .as_ref()
@@ -3089,11 +3134,7 @@ fn App() -> Element {
                     if *needs_paper.read() && document_snapshot.is_none() {
                         p { class: "paper-request", role: "status",
                             span { "↳" }
-                            if strict_mode {
-                                "厳格モードではPDFを送りません　標準モードへ戻すと今回だけ添付できます"
-                            } else {
-                                "論文の中身まで読むなら　下からPDFを今回だけ"
-                            }
+                            "公開版はPDFを受け取りません　必要な箇所を一言で話してください"
                         }
                     }
 
@@ -3346,69 +3387,21 @@ fn App() -> Element {
                         }
                     }
 
-                    section { class: "paper-drop",
+                    section { class: "paper-drop", aria_label: "PDF入力の提供状況",
                         div { class: "paper-drop__heading",
                             span { class: "utility-index", "01" }
                             div {
-                                h2 { "論文を、今回だけ" }
-                                p {
-                                    if strict_mode {
-                                        "厳格モードでは選択・読込・送信しません"
-                                    } else {
-                                        "PDF / 最大7MB / 次の応答後に参照を解除"
-                                    }
-                                }
+                                h2 { "PDF入力" }
+                                p { "公開版では未提供" }
                             }
                         }
-                        if strict_mode {
-                            div {
-                                class: "paper-picker is-disabled",
-                                aria_disabled: "true",
-                                span { class: "paper-picker__icon", aria_hidden: "true", "—" }
-                                span {
-                                    strong { "厳格モードではPDFを送らない" }
-                                    small { "標準モードへ戻すと、次の応答だけに添付できます" }
-                                }
-                            }
-                        } else {
-                            input {
-                                id: "paper-input",
-                                class: "sr-only",
-                                r#type: "file",
-                                accept: "application/pdf,.pdf",
-                                disabled: document_is_busy,
-                                onchange: move |_| {
-                                    document_error.set(None);
-                                    spawn(async move {
-                                        match cloud::attach_document("paper-input").await {
-                                            Ok(info) => {
-                                                document_info.set(Some(info));
-                                                needs_paper.set(false);
-                                            }
-                                            Err(message) => document_error.set(Some(message)),
-                                        }
-                                    });
-                                },
-                            }
-                            label {
-                                class: if document_is_busy {
-                                    "paper-picker is-disabled"
-                                } else {
-                                    "paper-picker"
-                                },
-                                r#for: "paper-input",
-                                span { class: "paper-picker__icon", aria_hidden: "true", "＋" }
-                                if let Some(info) = document_snapshot.as_ref() {
-                                    span {
-                                        strong { {info.name.clone()} }
-                                        small { "{human_file_size(info.size_bytes)} / 次の応答だけに使用" }
-                                    }
-                                } else {
-                                    span {
-                                        strong { "PDFを渡す" }
-                                        small { "保存せず、文脈を読む" }
-                                    }
-                                }
+                        div {
+                            class: "paper-picker is-disabled",
+                            aria_disabled: "true",
+                            span { class: "paper-picker__icon", aria_hidden: "true", "—" }
+                            span {
+                                strong { "ファイルを選択しません" }
+                                small { "全モードで読込・送信・推論前に拒否" }
                             }
                         }
                         if let Some(message) = *document_error.read() {
@@ -3441,7 +3434,7 @@ fn App() -> Element {
                                 if strict_mode {
                                     "厳格モードでは端末で選択・読込・送信しません。"
                                 } else {
-                                    "自分で選んだ時だけ次の応答へ添付し、応答後にブラウザ上の参照を解除します。処理中はCloud RunとVertex AIが本文を扱います。"
+                                    "公開版では全モードで選択・読込・送信できず、APIへ直接指定しても推論前に拒否します。"
                                 }
                             }
                             p {
@@ -3501,8 +3494,8 @@ fn App() -> Element {
 mod tests {
     use super::{
         ANSWER_SUPPORT_COPY, AnswerProof, COACH_CHECKPOINT_MAX_CHARS, CloudState, CoachAction,
-        CoachPhase, CoachState, NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY,
-        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
+        CoachPhase, CoachState, NATIVE_RESPONDENT_COACH_ROUTE, NEW_PASSKEY_ACCOUNT_ACTION,
+        ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
         PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
         PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
         PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
@@ -3767,47 +3760,60 @@ mod tests {
     }
 
     #[test]
-    fn standard_privacy_copy_discloses_the_question_bound_staged_switch() {
+    fn standard_privacy_copy_discloses_native_handoff_and_pdf_rejection() {
         for copy in [STANDARD_MODE_ROUTE_COPY, STANDARD_VOICE_PRIVACY_COPY] {
-            assert!(copy.contains("最終入力字幕"));
-            assert!(copy.contains("人に聞かれた質問への回答支援"));
-            assert!(copy.contains("利用者が明示"));
+            assert!(copy.contains("入力字幕"));
             assert!(copy.contains("QBA Proof"));
             assert!(copy.contains("質問"));
-            assert!(copy.contains("非可逆"));
             assert!(copy.contains("Native"));
-            assert!(copy.contains("Speech-to-Text"));
-            assert!(copy.contains("globalの文字列Vertex AI・LAC・Respondent Coach"));
-            assert!(copy.contains("一度だけ"));
-            assert!(copy.contains("operator"));
-            assert!(copy.contains("required slot"));
-            assert!(copy.contains("tag"));
+            assert!(copy.contains("再認識"));
+            assert!(copy.contains("us-central1"));
+            assert!(copy.contains("PDF入力"));
+            assert!(copy.contains("推論前に拒否"));
             assert!(copy.contains("話者"));
             assert!(copy.contains("ライブネス"));
+            assert!(copy.contains("正解"));
+            assert!(copy.contains("能力"));
+            assert!(copy.contains("上達"));
         }
         assert_eq!(
             STANDARD_MODE_ROUTE_LABEL,
-            "通常会話はNative Audio / 明示した回答支援はQBA Proof段階経路"
+            "通常会話はNative Audio / 明示した回答支援はQ-ARC + QBA Proof"
         );
-        assert!(STANDARD_MODE_ROUTE_COPY.contains("生成済みのNative音声を一切出さず"));
-        assert!(STANDARD_MODE_ROUTE_COPY.contains("別の話題なら回答完了にも証明にもしません"));
-        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("Native出力を破棄"));
-        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("具体的な質問・答え・文字起こし"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("人に聞かれた質問への回答支援"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("Native生成音声を破棄"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("再認識せず"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("Q-ARC"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("controller"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("完全一致"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("AIはAを作らず"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("AIは本人より先にAを言いません"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("固定長posterior"));
+        assert!(STANDARD_VOICE_PRIVACY_COPY.contains("具体的な質問・答え・文字起こし・診断"));
         assert!(!STANDARD_MODE_ROUTE_COPY.contains("汎用の署名済みcheckpoint"));
-        assert!(STANDARD_MODE_ROUTE_COPY.contains("PDF・接続不能時"));
+        assert!(STANDARD_MODE_ROUTE_COPY.contains("Native接続不能時だけ東京リージョンSTT"));
         assert!(STANDARD_VOICE_PRIVACY_COPY.contains("保存しません"));
     }
 
     #[test]
     fn coach_checkpoint_metadata_is_exact_bounded_and_content_free() {
         assert!(valid_coach_checkpoint_keys(&[
+            "assistanceTarget".to_string(),
+            "coachAction".to_string(),
+            "coachPhase".to_string(),
+            "respondentStage".to_string(),
+            "route".to_string(),
             "sessionState".to_string(),
             "version".to_string(),
         ]));
         for invalid in [
             vec!["sessionState".to_string()],
-            vec!["sessionState".to_string(), "active".to_string()],
             vec![
+                "assistanceTarget".to_string(),
+                "coachAction".to_string(),
+                "coachPhase".to_string(),
+                "respondentStage".to_string(),
+                "route".to_string(),
                 "sessionState".to_string(),
                 "version".to_string(),
                 "extra".to_string(),
@@ -3815,7 +3821,45 @@ mod tests {
         ] {
             assert!(!valid_coach_checkpoint_keys(&invalid));
         }
-        assert!(valid_coach_checkpoint_metadata("signed-checkpoint", 1.0, 2));
+        let valid = |session_state: &str,
+                     route: &str,
+                     assistance_target: &str,
+                     respondent_stage: &str,
+                     phase: CoachPhase,
+                     action: CoachAction,
+                     version: f64,
+                     fields: u32| {
+            valid_coach_checkpoint_metadata(
+                session_state,
+                route,
+                assistance_target,
+                respondent_stage,
+                phase,
+                action,
+                version,
+                fields,
+            )
+        };
+        assert!(valid(
+            "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
+            1.0,
+            7,
+        ));
+        assert!(valid(
+            "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "restructure",
+            CoachPhase::Expanding,
+            CoachAction::Expand,
+            1.0,
+            7,
+        ));
         for invalid in [
             "",
             " signed-checkpoint",
@@ -3824,22 +3868,86 @@ mod tests {
             "signed\u{007f}checkpoint",
             "signed\u{0085}checkpoint",
         ] {
-            assert!(!valid_coach_checkpoint_metadata(invalid, 1.0, 2));
+            assert!(!valid(
+                invalid,
+                NATIVE_RESPONDENT_COACH_ROUTE,
+                "respondent",
+                "awaiting_answer",
+                CoachPhase::AwaitingAnswer,
+                CoachAction::Elicit,
+                1.0,
+                7,
+            ));
         }
-        assert!(!valid_coach_checkpoint_metadata(
+        assert!(!valid(
             &"x".repeat(COACH_CHECKPOINT_MAX_CHARS + 1),
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
             1.0,
-            2
+            7,
         ));
-        assert!(!valid_coach_checkpoint_metadata(
+        assert!(!valid(
             "signed-checkpoint",
+            "native-audio",
+            "respondent",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
+            1.0,
+            7,
+        ));
+        assert!(!valid(
+            "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "assistant",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
+            1.0,
+            7,
+        ));
+        assert!(!valid(
+            "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "none",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
+            1.0,
+            7,
+        ));
+        assert!(!valid(
+            "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Retry,
+            1.0,
+            7,
+        ));
+        assert!(!valid(
+            "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
             2.0,
-            2
+            7,
         ));
-        assert!(!valid_coach_checkpoint_metadata(
+        assert!(!valid(
             "signed-checkpoint",
+            NATIVE_RESPONDENT_COACH_ROUTE,
+            "respondent",
+            "awaiting_answer",
+            CoachPhase::AwaitingAnswer,
+            CoachAction::Elicit,
             1.0,
-            3
+            8,
         ));
     }
 

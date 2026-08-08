@@ -35,18 +35,20 @@ type StateCodec struct {
 }
 
 type conversationState struct {
-	Version             int                  `json:"v"`
-	IssuedAt            int64                `json:"iat"`
-	ExpiresAt           int64                `json:"exp"`
-	SessionID           string               `json:"sid,omitempty"`
-	Turn                int                  `json:"turn"`
-	Graph               ThoughtStateGraph    `json:"thought_state_graph"`
-	ConversationSummary string               `json:"conversation_summary,omitempty"`
-	DocumentSummary     string               `json:"document_summary,omitempty"`
-	PendingAnswer       PendingAnswerFrame   `json:"pending_answer"`
-	Support             *conversationSupport `json:"support,omitempty"`
-	SelfCorrectionGrace bool                 `json:"self_correction_grace"`
-	LastIntervention    ArbiterDecision      `json:"last_intervention"`
+	Version                 int                  `json:"v"`
+	IssuedAt                int64                `json:"iat"`
+	ExpiresAt               int64                `json:"exp"`
+	SessionID               string               `json:"sid,omitempty"`
+	Turn                    int                  `json:"turn"`
+	VoiceCheckpointTag      string               `json:"voice_checkpoint_tag,omitempty"`
+	VoiceCheckpointScopeTag string               `json:"voice_checkpoint_scope_tag,omitempty"`
+	Graph                   ThoughtStateGraph    `json:"thought_state_graph"`
+	ConversationSummary     string               `json:"conversation_summary,omitempty"`
+	DocumentSummary         string               `json:"document_summary,omitempty"`
+	PendingAnswer           PendingAnswerFrame   `json:"pending_answer"`
+	Support                 *conversationSupport `json:"support,omitempty"`
+	SelfCorrectionGrace     bool                 `json:"self_correction_grace"`
+	LastIntervention        ArbiterDecision      `json:"last_intervention"`
 }
 
 func NewStateCodec(key []byte) (*StateCodec, error) {
@@ -198,6 +200,13 @@ func normalizeConversationState(state conversationState) (conversationState, err
 	if state.SessionID != "" && !validSessionID(state.SessionID) {
 		return conversationState{}, ErrInvalidStateToken
 	}
+	if (state.VoiceCheckpointTag == "") !=
+		(state.VoiceCheckpointScopeTag == "") ||
+		(state.VoiceCheckpointTag != "" &&
+			(!validCoachControlTag(state.VoiceCheckpointTag) ||
+				!validCoachControlTag(state.VoiceCheckpointScopeTag))) {
+		return conversationState{}, ErrInvalidStateToken
+	}
 	graph, err := normalizeGraph(state.Graph)
 	if err != nil {
 		return conversationState{}, err
@@ -247,11 +256,15 @@ func validSessionID(value string) bool {
 }
 
 func validCoachRestatementTag(value string) bool {
+	return validCoachControlTag(value)
+}
+
+func validCoachControlTag(value string) bool {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
 		return false
 	}
-	valid := len(raw) == coachRestatementTagBytes &&
+	valid := len(raw) == coachContinuityTagBytes &&
 		base64.RawURLEncoding.EncodeToString(raw) == value
 	wipe(raw)
 	return valid

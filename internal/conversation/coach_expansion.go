@@ -131,6 +131,7 @@ func (agent *vertexAgent) completeCoachExpansionOptInLocal(
 func (agent *vertexAgent) completeCoachExpansionHoldLocal(
 	uid string,
 	state conversationState,
+	requestID string,
 ) (VoiceTurnResult, error) {
 	nextState := conversationState{
 		SessionID:           state.SessionID,
@@ -141,7 +142,19 @@ func (agent *vertexAgent) completeCoachExpansionHoldLocal(
 		SelfCorrectionGrace: state.SelfCorrectionGrace,
 		LastIntervention:    state.LastIntervention,
 	}
-	stateToken, err := agent.sealState(uid, nextState)
+	var stateToken string
+	var err error
+	checkpointScope := voiceCheckpointScopeTag(state.PendingAnswer)
+	if requestID != "" && checkpointScope != "" {
+		stateToken, err = agent.sealVoiceCheckpointState(
+			uid,
+			requestID,
+			checkpointScope,
+			nextState,
+		)
+	} else {
+		stateToken, err = agent.sealState(uid, nextState)
+	}
 	if err != nil {
 		return VoiceTurnResult{}, err
 	}

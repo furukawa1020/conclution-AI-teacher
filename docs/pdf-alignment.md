@@ -15,9 +15,9 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 
 ## 公開音声経路での回答支援切替
 
-標準のPDFなしlive turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、利用者が入力内で相手から聞かれたものとして報告した質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、生成済みのNative音声と汎用stateを一切解放せず、同じ確定発話を東京リージョンSTTから段階経路へ一度だけ再処理する。段階経路は、同じ解析済み質問span、質問主題、確定入力内の全required-slot evidenceを用途分離した非可逆tagへ束縛するため、同じ主題の別質問や次の無関係な発話を「Aへの回答」として完了にしない。質問・回答・逐語録はDBへ永続化せず、短期stateにも具体的な質問本文を入れない。第三者が現実にその質問をした事実や現在の話者は検証しない。
+標準live turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、利用者が入力内で相手から聞かれたものとして報告した質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、生成済みのNative音声を破棄する。対象条件を満たす新規scopeでは、質問本文・回答候補・transcriptを入力に持たない質問拘束済みQ-ARCが有限template IDとslotを選び、監査済みrendererだけがopen-slot cueへ変換する。繰り返し同一になった暫定captionからdecisionとstreaming TTSをprivate commit buffer内で先行できるが、空白だけを正規化した候補byte列とfinal captionの完全一致、browser commit、同じ報告質問由来の用途分離HMACへ束縛したAES-256-GCM認証暗号stateを含む有限coach checkpointがそろうまで判断・state・PCMを非公開に保つ。汎用scope、汎用checkpoint、cached cueは使わない。不一致は先読みした状態とPCMを破棄し、final captionを一度だけ処理する。それ以外はNativeのfinal input captionを監査済み段階plannerへ直接渡し、同じ原音を東京リージョンSTTへもう一度通さない。段階plannerは、同じ解析済み質問span、質問主題、確定入力内の全required-slot evidenceを用途分離した非可逆tagへ束縛するため、同じ主題の別質問や次の無関係な発話を「Aへの回答」として完了にしない。質問・回答・逐語録はDBへ永続化せず、短期stateにも具体的な質問本文を入れない。第三者が現実にその質問をした事実や現在の話者は検証しない。
 
-Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とし、クライアントもそのphase/actionを明示的なbooleanへ写してNative Audioを選ばない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audioへ戻る。通常Native会話はcommitから最初の音声frameまで1,000 ms以内を運用SLOとして計測するが、報告質問を結ぶ初回回答支援は正確性を優先して段階経路の遅延を別に計測する。
+Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とする。継続turnもNative Audioでfinal captionを確定し、そのcaptionを監査済み段階controllerへ直接donateする。同じ原音を東京リージョンSTTへ二重通過させない。本人が答えた後は、Meaning Gateと独立LAC criticを有限signalへ射影し、現在の質問に対する検証の進行だけを表す5状態verifier-progress audit posteriorをBayes更新する。`wait / elicit / restate / complete / release`の全候補に対するutilityと安全maskから制御を選ぶが、本人のretrieval状態は推定せず、progressには質問、回答、逐語録、診断、人物特性を入れない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audio応答へ戻る。通常Native会話、初回回答支援、継続turnは別系列で、commitまたはspeech-endから最初の実質音声frameまで1,000 ms以内を運用SLOとして計測する。現行のroute metadataでは初回Q-ARCと初回caption handoffを互いに分離できないため、両者は初回回答支援へ合算する。視覚的な受領表示や無音`wait`は実質音声へ数えず、ダミーの固定音声は生成も再生もしない。1秒は回線・端末・managed modelを含む絶対上限の保証ではない。
 
 一般の`complete`は「あなたの言葉を受け取りました」「あなた自身の言葉が出ました」という今回限りのreceiptに留め、A-firstを推測しない。別のQBA Proofは、確定音声入力の現在turnについて、同じ報告質問spanと確定入力の回答evidenceの非可逆tagがそろい、決定論的Meaning Gateと独立LAC criticの双方が全required slotとA-firstで一致した場合だけ表示する。そこでも外部質問の実在、質問への正答、「上達した」「別の人にも同じように答えられる」、話者の身元は判定・実証しない。
 
@@ -79,10 +79,10 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 
 - PasskeyのWebAuthn ceremonyを実装し、仮名Firebase accountの操作をuser verification付き署名で確認する。秘密鍵はPasskey providerが管理し、KOTAEのブラウザコードとサーバーは受け取らない（同期や保管の方式はproviderに依存する）。これは法的な本人確認や現在の話者認証ではない
 - 音声はSpeech-to-Textで平文処理される。厳格モードでは、文字起こしと応答文をCloud Run内の決定論的検査とregional DLPの両方が`clear`とした場合だけ後段へ進め、検出・timeout・権限エラー・mode不一致をfail-closedにする。標準モードに同じ保証があるとは表示しない
-- 標準モードで回答支援を明示した初回turnは、`us-central1`のNative Audio出力を破棄し、同じcaptureを`asia-northeast1`のSTTから段階経路へ一度だけ再処理する。入力内の報告質問span、質問主題、確定入力の全required-slot evidenceの用途分離HMACを短期stateへ結び、無関係な後続turnをcompleteにもQBA Proofにもしない。proofのwire値は本文・tag・scoreを含まない固定enumだけである。`complete` / `release`後の次turnからNativeへ戻る
+- 標準モードで回答支援を明示した初回turnは、`us-central1`のNative Audio出力を破棄する。対象条件を満たす新規scopeは質問拘束済みQ-ARCを使い、安定した暫定captionで有限decisionとstreaming TTSをprivate commit buffer内だけで先行できる。それ以外はfinal input captionの直接handoffを使い、同じcaptureを`asia-northeast1`のSTTへ再送しない。先読みしたQ-ARC出力は、final captionの完全一致、browser commit、報告質問由来の用途分離HMACへ束縛したAES-256-GCM認証暗号stateを含む有限checkpointがそろうまで解放せず、不一致なら状態とPCMを破棄してfinalを一度だけ処理する。監査済みplanner経路では、入力内の報告質問span、質問主題、確定入力の全required-slot evidenceの用途分離HMACを短期stateへ結び、無関係な後続turnをcompleteにもQBA Proofにもしない。proofのwire値は本文・tag・scoreを含まない固定enumだけである。保留中の継続turnもNative final captionを同じcontrollerへ直接donateし、東京STTの二重通過なしで処理する。`complete` / `release`後の次turnから通常のNative応答へ戻る
 - DLPにも検出漏れがあり得るため、完全なPII除去とは呼ばない。Cloud Run、Speech-to-Text、DLPが平文を扱うためE2EEとも呼ばない
 - KOTAEのFirestore、Cloud Storage、アプリログへ原音・文字起こし・モデル本文を保存しない。第三者クラウド全体の絶対的なゼロ保持は保証しない
-- 標準モードのPDF添付は利用者が選んだ次の一ターンだけCloud RunとVertex AIへ渡し、応答後に参照を解放する。厳格モードではfile read前とAPIのSTT・推論前の両方で停止する
+- runtime PDF uploadは標準・厳格の両モードでbackendがstate decode・STT・モデル推論前に一律拒否し、PDF payloadをbase64 decodeせず下流へ渡さず、request終了時に参照を破棄する。この文書が参照する提供PDFは課題・設計の入力であり、公開runtimeで利用可能な添付機能ではない
 - 約3分の独話は、端末の録音開始から最大3分30秒、Cloud Run受信4分、Go live deadline 6分、Cloud Run request timeout 420秒の順に上限を分離して受ける。発話が確定しない無音候補は最大30秒で、その上限直前から話し始めても約3分を確保するが、3分30秒の実発話は保証しない。Cloud Speech-to-Textの5分上限まで使い切らず、provider境界まで60秒を残す
 - 圧縮音声のHTTPS fallbackは2 MiB上限で、約3分を通せる保証はない。上限を超えた場合は保持中のchunkを全て破棄し、先頭だけのpartial audioをuploadしない。live PCMが生きていればfallback超過だけでlive captureを止めない
 - live WebSocketは音声受信前にFirestoreの短命leaseを取得し、同じ仮名Firebase UIDの同時接続を1本へ制限する。接続終了時にpipelineの停止を確認できない場合は即時解放せず7分TTLまでleaseを保持する
@@ -96,7 +96,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 - 録音開始から3分30秒を超える一turn capture、Cloud Speech-to-Textのstreaming上限をまたぐsession継続、発話途中の意味へ介入する完全増分校正。端末上限には発話前の無音や発話中の間も含まれる
 - 任意Web、複数論文本文、claim単位の自動検証
 - 本人を対象にした有効性、誤修復率、負荷軽減の実証
-- 通常Native routeの実端末commitから最初の音声frameまでのp50 / p95と1,000 ms SLO達成率。初回回答支援は段階経路のspeech-end-to-audibleを別系列で計測する
+- 通常Native route、Q-ARCとcaption handoffを合算した初回回答支援、継続Coach routeそれぞれの実端末speech-end / commitから最初の実質音声frameまでのp50 / p95と1,000 ms SLO達成率。現行のroute metadataでは初回Q-ARCとcaption handoffを互いに分離できない。無音`wait`や受領表示で達成扱いにしない
 
 これらを「実装済み」「安全」とは表示しない。現在の受け答え支援では、利用者が相手の質問を自分で言い直し、その後に自分の答えを話す形だけを対象にする。長期効果は、事前登録した比較試験、未見質問、一定期間後の追跡、本人の同意と撤回・削除を含む評価が終わるまで主張しない。
 

@@ -2892,7 +2892,6 @@ func TestAgentRespondentDoesNotCountAIReconstructionAsVerifiedFirst(t *testing.T
 		))},
 	}}
 	agent := newTestAgent(t, fake)
-	agent.coachRestatementBinding = false
 
 	first, err := agent.Process(context.Background(), "uid-respondent-flow", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -2913,13 +2912,14 @@ func TestAgentRespondentDoesNotCountAIReconstructionAsVerifiedFirst(t *testing.T
 	if err != nil {
 		t.Fatalf("restructure Process: %v", err)
 	}
-	if second.Route != "respondent-complete-fast" ||
-		second.CoachPhase != "complete" ||
-		second.CoachAction != "complete" ||
+	if second.Route != "respondent-restate-fast" ||
+		second.CoachPhase != "awaiting_restatement" ||
+		second.CoachAction != "restate" ||
 		second.SpokenReply == restructure.SpokenReply ||
-		second.SpokenReply != "うん、答えは聞こえました。次は今の答えを最初に置くと、もっと伝わりやすいです。そのままで大丈夫です。" ||
-		second.Intervention.Act != "reflect" ||
-		second.NeedsClarification {
+		strings.Contains(second.SpokenReply, restructure.AnswerAttempt) ||
+		second.Intervention.Act != "clarify" ||
+		!second.NeedsClarification ||
+		second.AnswerProof != AnswerProofNone {
 		t.Fatalf("AI reconstruction stood in for the person's answer: %#v", second)
 	}
 	if len(fake.calls) != 3 ||
@@ -2933,10 +2933,9 @@ func TestAgentRespondentDoesNotCountAIReconstructionAsVerifiedFirst(t *testing.T
 	if err != nil {
 		t.Fatalf("open resolved state: %v", err)
 	}
-	if state.PendingAnswer.Active ||
-		state.Support == nil ||
-		state.Support.VerifiedFirstAnswers != 0 ||
-		state.Support.QuestionCooldown != questionCooldownAfterPass {
+	if !state.PendingAnswer.Active ||
+		!validCoachRestatementTag(state.PendingAnswer.RestatementTag) ||
+		(state.Support != nil && state.Support.VerifiedFirstAnswers != 0) {
 		t.Fatalf("AI reconstruction advanced adaptive success: %#v", state)
 	}
 	stateJSON, err := json.Marshal(state)
@@ -2968,7 +2967,6 @@ func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
 		))},
 	}}
 	agent := newTestAgent(t, fake)
-	agent.coachRestatementBinding = false
 
 	result, err := agent.Process(context.Background(), "uid-respondent-reject", VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -2977,9 +2975,9 @@ func TestAgentRespondentRejectsMeaningChangingReconstruction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	if result.Route != "respondent-complete-fast" ||
-		result.CoachPhase != "complete" ||
-		result.CoachAction != "complete" ||
+	if result.Route != "respondent-release-fast" ||
+		result.CoachPhase != "blocked" ||
+		result.CoachAction != "release" ||
 		result.Intervention.Act != "reflect" ||
 		result.NeedsClarification ||
 		result.SpokenReply == plan.SpokenReply ||
@@ -3003,7 +3001,6 @@ func TestAgentCompletedRespondentStateRetainsNoAnswerAttempt(t *testing.T) {
 		))},
 	}}
 	agent := newTestAgent(t, fake)
-	agent.coachRestatementBinding = false
 	utterance := "回答を整えるのを手伝ってください。回答としては「" + plan.AnswerAttempt + "」と伝えたい"
 
 	result, err := agent.Process(context.Background(), "uid-respondent-retention", VoiceTurn{
@@ -3019,8 +3016,7 @@ func TestAgentCompletedRespondentStateRetainsNoAnswerAttempt(t *testing.T) {
 	}
 	if state.PendingAnswer.Active ||
 		state.Support == nil ||
-		state.Support.VerifiedFirstAnswers != 0 ||
-		state.Support.QuestionCooldown != questionCooldownAfterPass {
+		state.Support.VerifiedFirstAnswers != 0 {
 		t.Fatalf("completed late answer retained respondent control: %#v", state)
 	}
 	stateJSON, err := json.Marshal(state)

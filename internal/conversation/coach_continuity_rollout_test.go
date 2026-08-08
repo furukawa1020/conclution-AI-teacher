@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -138,6 +139,123 @@ func TestAnswerProofReaderFirstSealOmitsOnlyNewInstanceField(t *testing.T) {
 	}
 }
 
+func TestVerifierProgressReaderFirstSealAndWriterRollout(t *testing.T) {
+	agent := newTestAgent(t, &fakeGenerator{})
+	agent.stateV2Writes = true
+	agent.verifierProgressWrites = false
+	const uid = "uid-verifier-progress-reader-first"
+	state := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	)
+	stored := respondent.StoreVerifierProgress(
+		respondent.DefaultVerifierProgressPosterior(),
+	)
+	state.PendingAnswer.VerifierProgress = &stored
+
+	readerToken, err := agent.sealState(uid, state)
+	if err != nil {
+		t.Fatalf("reader-first seal: %v", err)
+	}
+	readerJSON := decryptedStateJSON(t, agent.codec, uid, readerToken)
+	if bytes.Contains(readerJSON, []byte("verifier_progress")) {
+		t.Fatalf("reader-first revision emitted posterior: %s", readerJSON)
+	}
+
+	agent.verifierProgressWrites = true
+	writerToken, err := agent.sealState(uid, state)
+	if err != nil {
+		t.Fatalf("writer seal: %v", err)
+	}
+	writerJSON := decryptedStateJSON(t, agent.codec, uid, writerToken)
+	if !bytes.Contains(writerJSON, []byte("verifier_progress")) {
+		t.Fatalf("writer omitted posterior: %s", writerJSON)
+	}
+	decoded, err := agent.codec.open(uid, writerToken)
+	if err != nil {
+		t.Fatalf("writer token did not decode: %v", err)
+	}
+	if decoded.PendingAnswer.VerifierProgress == nil ||
+		!decoded.PendingAnswer.VerifierProgress.Valid() {
+		t.Fatalf("posterior did not round trip: %#v", decoded.PendingAnswer)
+	}
+}
+
+func TestPendingAnswerRejectsMalformedVerifierProgress(t *testing.T) {
+	frame := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	).PendingAnswer
+	invalid := respondent.StoreVerifierProgress(
+		respondent.DefaultVerifierProgressPosterior(),
+	)
+	invalid.Mass[0]++
+	frame.VerifierProgress = &invalid
+	if _, err := normalizePendingAnswer(frame); !errors.Is(err, ErrInvalidStateToken) {
+		t.Fatalf("malformed verifier progress error = %v", err)
+	}
+}
+
+func TestVerifierProgressResetsAcrossSemanticControlTransitions(t *testing.T) {
+	frame := coachState(
+		answercontract.OperatorPurpose,
+		respondent.CoachPhaseAwaitingAnswer,
+		0,
+	).PendingAnswer
+	stale := respondent.StoreVerifierProgress(respondent.VerifierProgressPosterior{
+		CommittedFirst: 1,
+	})
+	frame.VerifierProgress = &stale
+
+	same := pendingAnswerWithControl(
+		frame,
+		respondent.CoachPhaseAwaitingAnswer,
+		1,
+	)
+	if same.VerifierProgress == nil {
+		t.Fatal("attempt-only transition discarded the current-scope posterior")
+	}
+
+	for name, next := range map[string]PendingAnswerFrame{
+		"phase": pendingAnswerWithControl(
+			frame,
+			respondent.CoachPhaseAwaitingRestatement,
+			1,
+		),
+		"expansion": pendingAnswerWithControl(
+			frame,
+			respondent.CoachPhaseExpanding,
+			0,
+		),
+		"complete or release": emptyPendingAnswer(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if next.VerifierProgress != nil {
+				t.Fatalf("semantic transition retained stale progress: %#v", next)
+			}
+			reset := verifierProgressForControlTransition(
+				frame,
+				next,
+				respondent.VerifierProgressPosterior{CommittedFirst: 1},
+			)
+			if reset != respondent.DefaultVerifierProgressPosterior() {
+				t.Fatalf("semantic transition did not reset prior: %#v", reset)
+			}
+		})
+	}
+
+	differentOperator := frame
+	differentOperator.Operator = answercontract.OperatorCause
+	differentOperator.RequiredSlots = []answercontract.RequiredSlot{
+		answercontract.SlotCause,
+	}
+	if sameVerifierProgressScope(frame, differentOperator) {
+		t.Fatal("different operator reused the previous posterior")
+	}
+}
+
 func TestPromptPendingAnswerOmitsEveryServerProofAndExpansionCapability(t *testing.T) {
 	agent := newTestAgent(t, &fakeGenerator{})
 	frame := coachState(
@@ -150,6 +268,10 @@ func TestPromptPendingAnswerOmitsEveryServerProofAndExpansionCapability(t *testi
 		agent.coachQuestionContinuityTag("日本の首都")
 	frame.ContinuityTag = agent.coachContinuityTag("state\x00東京")
 	frame.ExpansionOptIn = true
+	progress := respondent.StoreVerifierProgress(
+		respondent.VerifierProgressPosterior{CommittedFirst: 1},
+	)
+	frame.VerifierProgress = &progress
 
 	encoded, err := json.Marshal(pendingAnswerForPrompt(frame))
 	if err != nil {
@@ -160,6 +282,7 @@ func TestPromptPendingAnswerOmitsEveryServerProofAndExpansionCapability(t *testi
 		"question_continuity_tag",
 		"continuity_tag",
 		"expansion_opt_in",
+		"verifier_progress",
 		frame.RestatementTag,
 		frame.QuestionContinuityTag,
 		frame.ContinuityTag,

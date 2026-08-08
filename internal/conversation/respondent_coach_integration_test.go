@@ -241,7 +241,7 @@ func TestAgentBoundExternalQuestionCannotCompleteOnUnrelatedNextTurn(t *testing.
 	const (
 		uid          = "uid-bound-question-unrelated-turn"
 		questionText = "上司に、導入目的は何かと聞かれました"
-		unrelated    = "今日はゲームの音楽がよかったです"
+		unrelated    = "話題を変えて、今日はゲームの音楽がよかったです"
 	)
 	ordinary := validModelPlan()
 	fake := &fakeGenerator{generations: []fakeGeneration{
@@ -275,8 +275,14 @@ func TestAgentBoundExternalQuestionCannotCompleteOnUnrelatedNextTurn(t *testing.
 	if second.CoachPhase == "complete" || second.CoachAction == "complete" {
 		t.Fatalf("unrelated turn completed the bound answer: %#v", second)
 	}
-	if openCoachState(t, agent, uid, second.StateToken).PendingAnswer.Active {
-		t.Fatal("explicit topic change retained the old answer scope")
+	following := openCoachState(t, agent, uid, second.StateToken)
+	if following.PendingAnswer.Active {
+		t.Fatalf(
+			"explicit topic change retained the old answer scope: result=%#v pending=%#v calls=%d",
+			second,
+			following.PendingAnswer,
+			len(fake.calls),
+		)
 	}
 }
 
@@ -919,12 +925,12 @@ func TestAgentClearsLegacyAssistantFollowUpBeforeInference(t *testing.T) {
 	}
 }
 
-func TestAgentCompatibilityModeClosesWithoutIssuingRestatementTag(t *testing.T) {
+func TestAgentCompatibilityFlagCannotSkipLateReask(t *testing.T) {
 	const (
 		uid        = "uid-restatement-compatibility-mode"
 		lateAnswer = "背景から話します。目的は評価基準をそろえることです"
 		evidence   = "目的は評価基準をそろえることです"
-		fixedTip   = "うん、答えは聞こえました。次は今の答えを最初に置くと、もっと伝わりやすいです。そのままで大丈夫です。"
+		reask      = "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から続けても大丈夫です。"
 	)
 	late := coachAttemptPlan(
 		answercontract.OperatorPurpose,
@@ -966,13 +972,13 @@ func TestAgentCompatibilityModeClosesWithoutIssuingRestatementTag(t *testing.T) 
 	if err != nil {
 		t.Fatalf("compatibility restatement: %v", err)
 	}
-	assertCoachMetadata(t, result, "complete", "complete")
-	if result.SpokenReply != fixedTip {
-		t.Fatalf("compatibility mode did not close voluntarily: %#v", result)
+	assertCoachMetadata(t, result, "awaiting_restatement", "restate")
+	if result.SpokenReply != reask || !result.NeedsClarification {
+		t.Fatalf("compatibility flag bypassed the one late-answer reask: %#v", result)
 	}
 	state := openCoachState(t, agent, uid, result.StateToken)
-	if state.PendingAnswer.Active || state.PendingAnswer.RestatementTag != "" {
-		t.Fatalf("compatibility revision issued a new tag: %#v", state.PendingAnswer)
+	if !state.PendingAnswer.Active || state.PendingAnswer.RestatementTag != "" {
+		t.Fatalf("compatibility flag changed the bounded reask state: %#v", state.PendingAnswer)
 	}
 }
 
@@ -1043,7 +1049,7 @@ func TestAgentPendingCoachDirectQuestionEscapesToAssistant(t *testing.T) {
 
 	result, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
-		Utterance:     "日本の首都はどこですか？",
+		Utterance:     "KOTAE、日本の首都はどこですか？",
 		StateToken:    token,
 	})
 	if err != nil {
@@ -1487,13 +1493,13 @@ func TestCoachRecoveryDoesNotMistakeNazenaraForTopicChange(t *testing.T) {
 	}
 }
 
-func TestAgentExplicitRespondentCoachAcceptsLateAnswerWithoutRestatement(t *testing.T) {
+func TestAgentExplicitRespondentCoachReasksLateAnswerOnce(t *testing.T) {
 	const (
 		uid          = "uid-explicit-coach-late-answer"
 		questionText = "上司に、導入目的は何かと聞かれました"
 		lateAnswer   = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
 		proxyDraft   = "AIが本人の代わりに作った回答です。"
-		fixedTip     = "うん、答えは聞こえました。次は今の答えを最初に置くと、もっと伝わりやすいです。そのままで大丈夫です。"
+		reask        = "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から続けても大丈夫です。"
 	)
 	awaiting := respondentAwaitingPlan()
 	late := coachAttemptPlan(
@@ -1516,9 +1522,6 @@ func TestAgentExplicitRespondentCoachAcceptsLateAnswerWithoutRestatement(t *test
 		))},
 	}}
 	agent := newTestAgent(t, fake)
-	// Adaptive, voluntary coaching accepts a complete late answer and closes the
-	// exercise. Strict restatement binding remains covered independently above.
-	agent.coachRestatementBinding = false
 
 	first, err := agent.Process(context.Background(), uid, VoiceTurn{
 		SchemaVersion: SchemaVersion,
@@ -1554,23 +1557,24 @@ func TestAgentExplicitRespondentCoachAcceptsLateAnswerWithoutRestatement(t *test
 	if err != nil {
 		t.Fatalf("A later: %v", err)
 	}
-	assertCoachMetadata(t, second, "complete", "complete")
+	assertCoachMetadata(t, second, "awaiting_restatement", "restate")
 	if second.AnswerProof != AnswerProofNone {
 		t.Fatalf("late answer received a false proof: %q", second.AnswerProof)
 	}
-	if second.SpokenReply != fixedTip ||
+	if second.SpokenReply != reask ||
 		strings.Contains(second.SpokenReply, proxyDraft) ||
 		strings.Contains(second.SpokenReply, lateAnswer) ||
-		strings.HasSuffix(second.SpokenReply, "？") {
-		t.Fatalf("late answer did not close with a fixed optional tip: %#v", second)
+		!second.NeedsClarification {
+		t.Fatalf("late answer did not receive the fixed one-time reask: %#v", second)
 	}
 	following := openCoachState(t, agent, uid, second.StateToken)
-	if following.PendingAnswer.Active {
-		t.Fatalf("accepted late answer retained a follow-up: %#v", following.PendingAnswer)
+	if !following.PendingAnswer.Active ||
+		!validCoachRestatementTag(following.PendingAnswer.RestatementTag) ||
+		following.PendingAnswer.Attempts != 1 {
+		t.Fatalf("late answer did not retain one bound restatement: %#v", following.PendingAnswer)
 	}
-	if following.Support == nil ||
-		following.Support.VerifiedFirstAnswers != 0 ||
-		following.Support.QuestionCooldown != questionCooldownAfterPass {
+	if following.Support != nil &&
+		following.Support.VerifiedFirstAnswers != 0 {
 		t.Fatalf("late answer was counted as a verified first answer: %#v", following.Support)
 	}
 }
@@ -1581,7 +1585,7 @@ func TestAgentPlannerSliceCannotSpoofVerifiedFirst(t *testing.T) {
 		utterance  = "判断のばらつきを減らしたくて目的は評価基準をそろえることです。"
 		extracted  = "目的は評価基準をそろえることです。"
 		commitment = "目的は評価基準をそろえることです"
-		fixedTip   = "うん、答えは聞こえました。次は今の答えを最初に置くと、もっと伝わりやすいです。そのままで大丈夫です。"
+		reask      = "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から続けても大丈夫です。"
 	)
 	plan := coachAttemptPlan(
 		answercontract.OperatorPurpose,
@@ -1604,7 +1608,6 @@ func TestAgentPlannerSliceCannotSpoofVerifiedFirst(t *testing.T) {
 		))},
 	}}
 	agent := newTestAgent(t, fake)
-	agent.coachRestatementBinding = false
 	token, err := agent.codec.seal(
 		uid,
 		coachState(answercontract.OperatorPurpose, respondent.CoachPhaseAwaitingAnswer, 0),
@@ -1621,8 +1624,8 @@ func TestAgentPlannerSliceCannotSpoofVerifiedFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	assertCoachMetadata(t, result, "complete", "complete")
-	if result.SpokenReply != fixedTip {
+	assertCoachMetadata(t, result, "awaiting_restatement", "restate")
+	if result.SpokenReply != reask || !result.NeedsClarification {
 		t.Fatalf("planner slice changed whole-turn order: %#v", result)
 	}
 	if len(fake.calls) != 2 ||
@@ -1631,10 +1634,9 @@ func TestAgentPlannerSliceCannotSpoofVerifiedFirst(t *testing.T) {
 		t.Fatalf("critic was not bound to whole utterance: %#v", fake.calls)
 	}
 	state := openCoachState(t, agent, uid, result.StateToken)
-	if state.PendingAnswer.Active ||
-		state.Support == nil ||
-		state.Support.VerifiedFirstAnswers != 0 ||
-		state.Support.QuestionCooldown != questionCooldownAfterPass {
+	if !state.PendingAnswer.Active ||
+		!validCoachRestatementTag(state.PendingAnswer.RestatementTag) ||
+		(state.Support != nil && state.Support.VerifiedFirstAnswers != 0) {
 		t.Fatalf("planner slice advanced verified success: %#v", state)
 	}
 }

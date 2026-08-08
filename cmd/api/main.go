@@ -66,7 +66,9 @@ func main() {
 	var evaluationStore store.EvaluationStore
 	var voiceService httpapi.VoiceTurnService
 	var nativeLiveService httpapi.VoiceTurnLiveService
-	var coachStateValidator httpapi.VoiceStateTokenValidator
+	var nativeOpener nativevoice.Opener
+	var nativeStatePreparer conversation.NativeStatePreparer
+	var coachStateValidator httpapi.VoiceRespondentCheckpointValidator
 	var passkeyService *passkey.Service
 	var passkeyClientRateLimiter guard.Limiter
 	var passkeyAppCircuitBreaker guard.Limiter
@@ -249,13 +251,15 @@ func main() {
 			cfg.CoachRestatementBinding,
 			cfg.StateV2Writes,
 			cfg.AnswerProofWrites,
+			cfg.VerifierProgressWrites,
+			cfg.RetrievalPolicyEnabled,
 		)
 		if err != nil {
 			logger.Error("initialize conversation agent", "error", err)
 			os.Exit(1)
 		}
 		if cfg.NativeAudioEnabled {
-			validator, ok := conversationAgent.(httpapi.VoiceStateTokenValidator)
+			validator, ok := conversationAgent.(httpapi.VoiceRespondentCheckpointValidator)
 			if !ok {
 				logger.Error("initialize native coach state validator")
 				os.Exit(1)
@@ -266,7 +270,9 @@ func main() {
 				logger.Error("initialize native audio state boundary")
 				os.Exit(1)
 			}
-			nativeOpener, nativeErr := nativevoice.New(ctx, nativevoice.Config{
+			nativeStatePreparer = statePreparer
+			var nativeErr error
+			nativeOpener, nativeErr = nativevoice.New(ctx, nativevoice.Config{
 				ProjectID:      cfg.ProjectID,
 				Location:       cfg.NativeAudioLocation,
 				Model:          cfg.NativeAudioModel,
@@ -286,16 +292,6 @@ func main() {
 				os.Exit(1)
 			}
 			_ = probe.Close()
-			nativeService, nativeErr := nativeflow.New(
-				nativeOpener,
-				statePreparer,
-			)
-			if nativeErr != nil {
-				logger.Error("initialize native audio flow", "error", nativeErr)
-				os.Exit(1)
-			}
-			nativeLiveService = nativeService
-			closeNative = nativeService.Close
 		}
 		speechService, err := speechio.NewCloudService(
 			ctx,
@@ -317,6 +313,33 @@ func main() {
 		if err != nil {
 			logger.Error("initialize secure voice pipeline", "error", err)
 			os.Exit(1)
+		}
+		if cfg.NativeAudioEnabled {
+			var nativeService *nativeflow.Service
+			var nativeErr error
+			if cfg.NativeCaptionHandoffEnabled {
+				captionHandoff, ok := voiceService.(httpapi.VoiceCaptionHandoffService)
+				if !ok {
+					logger.Error("initialize native caption handoff")
+					os.Exit(1)
+				}
+				nativeService, nativeErr = nativeflow.NewWithCaptionHandoff(
+					nativeOpener,
+					nativeStatePreparer,
+					captionHandoff,
+				)
+			} else {
+				nativeService, nativeErr = nativeflow.New(
+					nativeOpener,
+					nativeStatePreparer,
+				)
+			}
+			if nativeErr != nil {
+				logger.Error("initialize native audio flow", "error", nativeErr)
+				os.Exit(1)
+			}
+			nativeLiveService = nativeService
+			closeNative = nativeService.Close
 		}
 	}
 	defer func() {
@@ -371,6 +394,7 @@ func main() {
 			"speech_location", cfg.SpeechLocation,
 			"speech_model", cfg.SpeechModel,
 			"native_audio_enabled", cfg.NativeAudioEnabled,
+			"native_caption_handoff_enabled", cfg.NativeCaptionHandoffEnabled,
 			"native_audio_location", cfg.NativeAudioLocation,
 			"privacy_boundary", "evaluation-deidentify-and-strict-voice-inspect-fail-closed",
 		)

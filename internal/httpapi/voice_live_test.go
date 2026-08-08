@@ -282,19 +282,54 @@ type liveControlTestService struct {
 	basicCalls         int
 	endpointCalls      int
 	controlCalls       int
+	controlPublishes   int
 	withoutControlErr  error
 	prepareErr         error
 	controlState       *string
+	controlPrevious    *string
+	controlCheckpoint  *VoiceRespondentCheckpoint
 	ignoreControlError bool
 }
 
 type liveCoachStateValidator struct{}
 
-func (*liveCoachStateValidator) ValidateStateToken(uid string, token string) error {
-	if uid != "user-123" || token == "cryptographically-invalid" {
+func (*liveCoachStateValidator) ValidateRespondentCheckpointTransition(
+	uid string,
+	_ string,
+	preparedToken string,
+	token string,
+	requestID string,
+	assistanceTarget string,
+	respondentStage string,
+	coachPhase string,
+	coachAction string,
+) error {
+	if uid != "user-123" || requestID == "" || preparedToken == "" ||
+		preparedToken == "cryptographically-invalid" ||
+		preparedToken == "signed-for-other-user" ||
+		token == "cryptographically-invalid" ||
+		token == "signed-for-other-user" ||
+		assistanceTarget != "respondent" ||
+		(respondentStage != "awaiting_answer" && respondentStage != "restructure") ||
+		!validCoachMetadata(assistanceTarget, coachPhase, coachAction) {
 		return errors.New("invalid caller-bound state")
 	}
 	return nil
+}
+
+func validLiveCoachResult() VoiceTurnResult {
+	return VoiceTurnResult{
+		StateToken:       "signed-native-coach-state",
+		DetectedDomain:   "daily",
+		AssistanceTarget: "respondent",
+		RespondentStage:  "awaiting_answer",
+		CoachPhase:       "awaiting_answer",
+		CoachAction:      "elicit",
+		ResearchStatus:   "none",
+		ResearchRecords:  []ResearchRecord{},
+		Route:            VoiceNativeRespondentCoachRoute,
+		Caption:          "one bounded question",
+	}
 }
 
 type liveLifecycleTestService struct {
@@ -387,7 +422,7 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 	_ func(),
-	onCoachActive func(sessionState string) error,
+	onCoachActive func(VoiceRespondentCheckpointTransition) error,
 ) (VoiceTurnResult, error) {
 	if uid != "user-123" {
 		return VoiceTurnResult{}, errors.New("unexpected uid")
@@ -406,16 +441,40 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 				if service.prepareErr != nil {
 					return VoiceTurnResult{}, service.prepareErr
 				}
-				service.mu.Lock()
-				service.controlCalls++
-				service.mu.Unlock()
-				controlState := service.result.StateToken
-				if service.controlState != nil {
-					controlState = *service.controlState
+				checkpoint := VoiceRespondentCheckpoint{
+					SessionState:     service.result.StateToken,
+					Route:            service.result.Route,
+					AssistanceTarget: service.result.AssistanceTarget,
+					RespondentStage:  service.result.RespondentStage,
+					CoachPhase:       service.result.CoachPhase,
+					CoachAction:      service.result.CoachAction,
 				}
-				if err := onCoachActive(controlState); err != nil &&
-					!service.ignoreControlError {
-					return VoiceTurnResult{}, err
+				if service.controlState != nil {
+					checkpoint.SessionState = *service.controlState
+				}
+				if service.controlCheckpoint != nil {
+					checkpoint = *service.controlCheckpoint
+				}
+				previous := "signed-prepared-native-state"
+				if service.controlPrevious != nil {
+					previous = *service.controlPrevious
+				}
+				transition := VoiceRespondentCheckpointTransition{
+					PreviousSessionState: previous,
+					Checkpoint:           checkpoint,
+				}
+				publishes := service.controlPublishes
+				if publishes == 0 {
+					publishes = 1
+				}
+				for range publishes {
+					service.mu.Lock()
+					service.controlCalls++
+					service.mu.Unlock()
+					if err := onCoachActive(transition); err != nil &&
+						!service.ignoreControlError {
+						return VoiceTurnResult{}, err
+					}
 				}
 				for _, output := range service.output {
 					if err := onAudio(output); err != nil {
@@ -889,10 +948,15 @@ func TestVoiceLiveCoachControlPrecedesNativeAudioAndCompletesNormally(t *testing
 	if err := json.Unmarshal(payload, &coach); err != nil {
 		t.Fatal(err)
 	}
-	if len(coach) != 4 || coach["type"] != "coach" ||
+	if len(coach) != 9 || coach["type"] != "coach" ||
 		coach["version"] != float64(voiceLiveVersion) ||
 		coach["active"] != true ||
-		coach["sessionState"] != "signed-native-coach-state" {
+		coach["sessionState"] != "signed-native-coach-state" ||
+		coach["route"] != VoiceNativeRespondentCoachRoute ||
+		coach["assistanceTarget"] != "respondent" ||
+		coach["respondentStage"] != "awaiting_answer" ||
+		coach["coachPhase"] != "awaiting_answer" ||
+		coach["coachAction"] != "elicit" {
 		t.Fatalf("coach=%#v", coach)
 	}
 
@@ -1052,15 +1116,17 @@ func TestVoiceLiveNativeCoachControlNegotiatesOldAndNewClients(t *testing.T) {
 
 func TestVoiceLiveRejectsInvalidCoachCheckpointBeforeControlOrAudio(t *testing.T) {
 	for name, invalidState := range map[string]string{
-		"empty":         "",
-		"oversize":      strings.Repeat("x", maxStateBytes+1),
-		"bad signature": "cryptographically-invalid",
+		"empty":              "",
+		"oversize":           strings.Repeat("x", maxStateBytes+1),
+		"bad signature":      "cryptographically-invalid",
+		"different UID bind": "signed-for-other-user",
 	} {
 		t.Run(name, func(t *testing.T) {
 			controlState := invalidState
 			native := &liveControlTestService{
 				liveTestVoiceService: liveTestVoiceService{
 					output: [][]byte{{4, 0, 5, 0}},
+					result: validLiveCoachResult(),
 				},
 				controlState:       &controlState,
 				ignoreControlError: true,
@@ -1114,11 +1180,40 @@ func TestVoiceLiveRejectsInvalidCoachCheckpointBeforeControlOrAudio(t *testing.T
 	}
 }
 
+func TestVoiceLiveRejectsInvalidPreparedCoachStateBeforeControlOrAudio(
+	t *testing.T,
+) {
+	for name, invalidState := range map[string]string{
+		"empty":              "",
+		"oversize":           strings.Repeat("x", maxStateBytes+1),
+		"bad signature":      "cryptographically-invalid",
+		"different UID bind": "signed-for-other-user",
+	} {
+		t.Run(name, func(t *testing.T) {
+			prepared := invalidState
+			native := &liveControlTestService{
+				liveTestVoiceService: liveTestVoiceService{
+					output: [][]byte{{4, 0, 5, 0}},
+					result: validLiveCoachResult(),
+				},
+				controlPrevious:    &prepared,
+				ignoreControlError: true,
+			}
+			_, terminal := runRejectedVoiceLiveCoachTurn(t, native, false)
+			if terminal["code"] != voiceLiveCodeAPIUnavailable {
+				t.Fatalf("terminal=%#v", terminal)
+			}
+		})
+	}
+}
+
 func TestVoiceLiveRejectsCoachCheckpointFinalStateMismatch(t *testing.T) {
 	checkpoint := "signed-native-coach-state"
+	result := validLiveCoachResult()
+	result.StateToken = "different-final-state"
 	native := &liveControlTestService{
 		liveTestVoiceService: liveTestVoiceService{
-			result: VoiceTurnResult{StateToken: "different-final-state"},
+			result: result,
 		},
 		controlState: &checkpoint,
 	}
@@ -1185,6 +1280,179 @@ func TestValidVoiceLiveCoachSessionState(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := validVoiceLiveCoachSessionState(test.value); got != test.want {
 				t.Fatalf("validVoiceLiveCoachSessionState()=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestVoiceLiveRejectsCoachCheckpointFinalMetadataMismatch(t *testing.T) {
+	tests := map[string]func(*VoiceRespondentCheckpoint){
+		"respondent stage": func(checkpoint *VoiceRespondentCheckpoint) {
+			checkpoint.RespondentStage = "restructure"
+		},
+		"phase and action": func(checkpoint *VoiceRespondentCheckpoint) {
+			checkpoint.CoachPhase = "complete"
+			checkpoint.CoachAction = "complete"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			result := validLiveCoachResult()
+			checkpoint, err := NewVoiceRespondentCheckpoint(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutate(&checkpoint)
+			native := &liveControlTestService{
+				liveTestVoiceService: liveTestVoiceService{result: result},
+				controlCheckpoint:    &checkpoint,
+			}
+			coach, terminal := runRejectedVoiceLiveCoachTurn(t, native, true)
+			if coach["sessionState"] != checkpoint.SessionState ||
+				terminal["code"] != voiceLiveCodeAPIUnavailable {
+				t.Fatalf("coach=%#v terminal=%#v", coach, terminal)
+			}
+		})
+	}
+}
+
+func TestVoiceLiveDuplicateCoachCheckpointFailsClosedBeforeAudio(t *testing.T) {
+	native := &liveControlTestService{
+		liveTestVoiceService: liveTestVoiceService{
+			result: validLiveCoachResult(),
+			output: [][]byte{{4, 0, 5, 0}},
+		},
+		controlPublishes:   2,
+		ignoreControlError: true,
+	}
+	coach, terminal := runRejectedVoiceLiveCoachTurn(t, native, true)
+	if coach["type"] != "coach" ||
+		terminal["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("coach=%#v terminal=%#v", coach, terminal)
+	}
+	native.mu.Lock()
+	controlCalls := native.controlCalls
+	native.mu.Unlock()
+	if controlCalls != 2 {
+		t.Fatalf("control calls=%d, want 2", controlCalls)
+	}
+}
+
+func runRejectedVoiceLiveCoachTurn(
+	t *testing.T,
+	native *liveControlTestService,
+	wantCoach bool,
+) (map[string]any, map[string]any) {
+	t.Helper()
+	server := newVoiceLiveControlledTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		guard.NewMemoryVoiceLiveLeaseManager(),
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		nil,
+		native,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	if ready := readVoiceLiveJSON(t, ctx, conn); ready["type"] != "ready" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type: "commit", Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	var coach map[string]any
+	if wantCoach {
+		coach = readVoiceLiveJSON(t, ctx, conn)
+		if coach["type"] != "coach" {
+			t.Fatalf("coach=%#v", coach)
+		}
+	}
+	terminal := readVoiceLiveJSON(t, ctx, conn)
+	if terminal["type"] != "error" {
+		t.Fatalf("terminal=%#v", terminal)
+	}
+	return coach, terminal
+}
+
+func TestVoiceRespondentCheckpointAcceptsEveryFiniteLegalResultShape(
+	t *testing.T,
+) {
+	stages := []string{"awaiting_answer", "restructure"}
+	pairs := []struct {
+		phase  string
+		action string
+	}{
+		{phase: "awaiting_answer", action: "elicit"},
+		{phase: "awaiting_restatement", action: "restate"},
+		{phase: "expanding", action: "expand"},
+		{phase: "complete", action: "complete"},
+		{phase: "blocked", action: "retry"},
+		{phase: "blocked", action: "release"},
+	}
+	for _, stage := range stages {
+		for _, pair := range pairs {
+			name := stage + "/" + pair.phase + "/" + pair.action
+			t.Run(name, func(t *testing.T) {
+				result := validLiveCoachResult()
+				result.RespondentStage = stage
+				result.CoachPhase = pair.phase
+				result.CoachAction = pair.action
+				checkpoint, err := NewVoiceRespondentCheckpoint(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !checkpoint.MatchesResult(result) {
+					t.Fatalf("checkpoint=%+v result=%+v", checkpoint, result)
+				}
+			})
+		}
+	}
+}
+
+func TestVoiceRespondentCheckpointRejectsNonFiniteOrNonRespondentShapes(
+	t *testing.T,
+) {
+	tests := map[string]func(*VoiceTurnResult){
+		"empty state": func(result *VoiceTurnResult) { result.StateToken = "" },
+		"wrong route": func(result *VoiceTurnResult) { result.Route = "caption-handoff" },
+		"assistant": func(result *VoiceTurnResult) {
+			result.AssistanceTarget = "assistant"
+		},
+		"unknown stage": func(result *VoiceTurnResult) {
+			result.RespondentStage = "drafting"
+		},
+		"unknown phase": func(result *VoiceTurnResult) {
+			result.CoachPhase = "future"
+		},
+		"mismatched action": func(result *VoiceTurnResult) {
+			result.CoachAction = "complete"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			result := validLiveCoachResult()
+			mutate(&result)
+			if _, err := NewVoiceRespondentCheckpoint(result); err == nil {
+				t.Fatalf("accepted invalid result: %+v", result)
 			}
 		})
 	}

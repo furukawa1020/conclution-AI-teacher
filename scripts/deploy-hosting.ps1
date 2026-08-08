@@ -322,8 +322,11 @@ function Assert-PromotedBackendBoundary {
         "KOTAE_STATE_V2_WRITES" = "true"
         "KOTAE_COACH_RESTATEMENT_BINDING" = "true"
         "KOTAE_ANSWER_PROOF_WRITES" = "true"
+        "KOTAE_VERIFIER_PROGRESS_WRITES" = "true"
+        "KOTAE_RETRIEVAL_POLICY_ENABLED" = "true"
         "KOTAE_SPEECH_LOCATION" = $expectedRunRegion
         "KOTAE_NATIVE_AUDIO_ENABLED" = "true"
+        "KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED" = "true"
         "KOTAE_NATIVE_AUDIO_LOCATION" = "us-central1"
         "KOTAE_NATIVE_AUDIO_MODEL" = "gemini-live-2.5-flash-native-audio"
         "KOTAE_NATIVE_AUDIO_VOICE" = "Kore"
@@ -342,7 +345,10 @@ function Assert-PromotedBackendBoundary {
     foreach ($legacyName in @(
             "KOTAE_PRIVACY_LOCATION",
             "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE",
-            "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY"
+            "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY",
+            "KOTAE_RETRIEVAL_BELIEF_WRITES",
+            "KOTAE_SPEECH_FALLBACK_MODEL",
+            "KOTAE_COACHING_ROLLOUT"
         )) {
         if ($environment.ContainsKey($legacyName)) {
             throw "The promoted Cloud Run service still contains a legacy security setting."

@@ -20,6 +20,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", "")
 	unsetTestEnvironment(t, "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE")
 	unsetTestEnvironment(t, "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY")
+	unsetTestEnvironment(t, "KOTAE_RETRIEVAL_BELIEF_WRITES")
 	t.Setenv("KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_MINUTE", "")
 	t.Setenv("KOTAE_PASSKEY_CLIENT_RATE_LIMIT_PER_DAY", "")
 	t.Setenv("KOTAE_PASSKEY_APP_CIRCUIT_BREAKER_PER_MINUTE", "")
@@ -31,6 +32,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "")
+	t.Setenv("KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_LOCATION", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_MODEL", "")
 	t.Setenv("KOTAE_NATIVE_AUDIO_VOICE", "")
@@ -38,6 +40,8 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "")
 	t.Setenv("KOTAE_STATE_V2_WRITES", "")
 	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "")
+	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "")
+	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "")
 }
 
 func unsetTestEnvironment(t *testing.T, key string) {
@@ -108,6 +112,9 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.NativeAudioEnabled {
 		t.Fatal("native audio must remain an explicit deployment opt-in")
 	}
+	if cfg.NativeCaptionHandoffEnabled {
+		t.Fatal("native caption handoff must remain an independent deployment opt-in")
+	}
 	if cfg.NativeAudioLocation != "us-central1" ||
 		cfg.NativeAudioModel != "gemini-live-2.5-flash-native-audio" ||
 		cfg.NativeAudioVoice != "Kore" {
@@ -126,6 +133,12 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.StateV2Writes {
 		t.Fatal("extended state writes must remain opt-in for staged rollout")
+	}
+	if cfg.VerifierProgressWrites {
+		t.Fatal("verifier progress writes must remain opt-in for staged rollout")
+	}
+	if cfg.RetrievalPolicyEnabled {
+		t.Fatal("retrieval behavior must remain opt-in for a separate canary")
 	}
 }
 
@@ -148,10 +161,11 @@ func TestLoadParsesTwoTierPasskeyLimits(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsLegacyPasskeyLimitEnvironment(t *testing.T) {
+func TestLoadRejectsLegacyEnvironment(t *testing.T) {
 	for _, key := range []string{
 		"KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE",
 		"KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY",
+		"KOTAE_RETRIEVAL_BELIEF_WRITES",
 	} {
 		t.Run(key, func(t *testing.T) {
 			setTestEnvironment(t)
@@ -260,6 +274,74 @@ func TestLoadParsesAnswerProofWritesStrictly(t *testing.T) {
 	}
 }
 
+func TestLoadParsesVerifierProgressWritesStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VerifierProgressWrites {
+		t.Fatal("verifier progress writes were not enabled")
+	}
+
+	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_VERIFIER_PROGRESS_WRITES") {
+		t.Fatalf("malformed verifier progress writes error = %v", err)
+	}
+}
+
+func TestLoadRejectsVerifierProgressWritesWithoutStateV2(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "true")
+
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "requires KOTAE_STATE_V2_WRITES") {
+		t.Fatalf("verifier progress without state v2 error = %v", err)
+	}
+}
+
+func TestLoadSeparatesRetrievalPolicyFromStateWriter(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "true")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "requires KOTAE_STATE_V2_WRITES") {
+		t.Fatalf("policy without reader/writer prerequisites error = %v", err)
+	}
+
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "true")
+	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RetrievalPolicyEnabled || cfg.VerifierProgressWrites {
+		t.Fatalf("retrieval policy was coupled to verifier progress writes: policy:%v writer:%v", cfg.RetrievalPolicyEnabled, cfg.VerifierProgressWrites)
+	}
+
+	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_RETRIEVAL_POLICY_ENABLED") {
+		t.Fatalf("malformed retrieval policy error = %v", err)
+	}
+}
+
+func TestLoadRejectsRetrievalPolicyWithoutRestatementBinding(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "true")
+	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "true")
+
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_COACH_RESTATEMENT_BINDING") {
+		t.Fatalf("policy without restatement binding error = %v", err)
+	}
+}
+
 func TestLoadParsesNativeAudioGateStrictly(t *testing.T) {
 	setTestEnvironment(t)
 	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "true")
@@ -276,6 +358,54 @@ func TestLoadParsesNativeAudioGateStrictly(t *testing.T) {
 	if _, err := Load(); err == nil ||
 		!strings.Contains(err.Error(), "KOTAE_NATIVE_AUDIO_ENABLED") {
 		t.Fatalf("malformed native audio gate error = %v", err)
+	}
+}
+
+func TestLoadParsesNativeCaptionHandoffGateStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "true")
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "true")
+	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "true")
+	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "true")
+	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "true")
+	t.Setenv("KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.NativeCaptionHandoffEnabled {
+		t.Fatal("native caption handoff gate was not enabled")
+	}
+
+	t.Setenv("KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED", "eventually")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED") {
+		t.Fatalf("malformed native caption handoff gate error = %v", err)
+	}
+}
+
+func TestLoadRejectsNativeCaptionHandoffWithoutRetrievalPolicy(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_NATIVE_AUDIO_ENABLED", "true")
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "true")
+	t.Setenv("KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED", "true")
+
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "requires KOTAE_RETRIEVAL_POLICY_ENABLED") {
+		t.Fatalf("caption handoff without retrieval policy error = %v", err)
+	}
+}
+
+func TestLoadRejectsNativeCaptionHandoffWithoutNativeAudio(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED", "true")
+
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "requires KOTAE_NATIVE_AUDIO_ENABLED") {
+		t.Fatalf("caption handoff without native audio error = %v", err)
 	}
 }
 

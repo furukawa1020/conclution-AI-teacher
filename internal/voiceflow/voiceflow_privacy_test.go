@@ -83,30 +83,57 @@ func assertStrictBlocked(t *testing.T, result httpapi.VoiceTurnResult) {
 
 func TestStrictInputStateAndPDFBlockBeforeSpeech(t *testing.T) {
 	t.Parallel()
-	for _, input := range []httpapi.VoiceTurnInput{
-		{Audio: []byte("audio"), StateToken: "state", StrictCloudMinimization: true},
-		{Audio: []byte("audio"), Document: &httpapi.VoiceDocument{
-			MIMEType: "application/pdf",
-			Data:     []byte("%PDF-private"),
-		}, StrictCloudMinimization: true},
+	for _, test := range []struct {
+		name     string
+		input    httpapi.VoiceTurnInput
+		document bool
+	}{
+		{
+			name: "state",
+			input: httpapi.VoiceTurnInput{
+				Audio:                   []byte("audio"),
+				StateToken:              "state",
+				StrictCloudMinimization: true,
+			},
+		},
+		{
+			name: "document",
+			input: httpapi.VoiceTurnInput{
+				Audio: []byte("audio"),
+				Document: &httpapi.VoiceDocument{
+					MIMEType: "application/pdf",
+					Data:     []byte("%PDF-private"),
+				},
+				StrictCloudMinimization: true,
+			},
+			document: true,
+		},
 	} {
-		speech := &countedSpeech{fakeSpeech: fakeSpeech{transcript: "safe", confidence: 0.99}}
-		agent := &fakeAgent{result: safePrivacyDecision()}
-		pipeline, err := NewWithPrivacy(speech, agent, &scriptedInspector{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		result, err := pipeline.Process(context.Background(), "uid", input)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assertStrictBlocked(t, result)
-		if speech.transcribeCalls != 0 || speech.synthesizeCalls != 0 || agent.calls != 0 {
-			t.Fatalf("blocked input crossed a service boundary: stt=%d tts=%d agent=%d", speech.transcribeCalls, speech.synthesizeCalls, agent.calls)
-		}
-		if input.Document != nil && len(input.Document.Data) != 0 {
-			t.Fatal("blocked PDF bytes were not cleared")
-		}
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			speech := &countedSpeech{fakeSpeech: fakeSpeech{transcript: "safe", confidence: 0.99}}
+			agent := &fakeAgent{result: safePrivacyDecision()}
+			pipeline, err := NewWithPrivacy(speech, agent, &scriptedInspector{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := pipeline.Process(context.Background(), "uid", test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.document {
+				assertRuntimeDocumentRejected(t, result)
+			} else {
+				assertStrictBlocked(t, result)
+			}
+			if speech.transcribeCalls != 0 || speech.synthesizeCalls != 0 || agent.calls != 0 {
+				t.Fatalf("blocked input crossed a service boundary: stt=%d tts=%d agent=%d", speech.transcribeCalls, speech.synthesizeCalls, agent.calls)
+			}
+			if test.input.Document != nil && len(test.input.Document.Data) != 0 {
+				t.Fatal("blocked PDF bytes were not cleared")
+			}
+		})
 	}
 }
 
@@ -192,7 +219,7 @@ func TestStrictClearTurnInspectsBothSidesAndDropsState(t *testing.T) {
 	}
 }
 
-func TestOrdinaryPDFAndStateRemainAvailable(t *testing.T) {
+func TestOrdinaryPDFRejectsBeforeSpeechAndDoesNotExposeState(t *testing.T) {
 	t.Parallel()
 	inspector := &scriptedInspector{}
 	speech := &countedSpeech{fakeSpeech: fakeSpeech{transcript: "このPDFを説明して", confidence: 0.99}}
@@ -210,10 +237,17 @@ func TestOrdinaryPDFAndStateRemainAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.calls != 1 || agent.turn.PDF == nil || agent.turn.ResearchDisabled ||
-		result.StateToken != safePrivacyDecision().StateToken ||
-		len(inspector.calls) != 0 || speech.synthesizeCalls != 1 {
-		t.Fatalf("ordinary features were restricted: result=%+v turn=%+v inspector=%#v", result, agent.turn, inspector.calls)
+	assertRuntimeDocumentRejected(t, result)
+	if speech.transcribeCalls != 0 || speech.synthesizeCalls != 0 ||
+		agent.calls != 0 || len(inspector.calls) != 0 || len(document.Data) != 0 {
+		t.Fatalf(
+			"ordinary PDF crossed a service boundary: stt=%d agent=%d tts=%d inspector=%d doc=%d",
+			speech.transcribeCalls,
+			agent.calls,
+			speech.synthesizeCalls,
+			len(inspector.calls),
+			len(document.Data),
+		)
 	}
 }
 

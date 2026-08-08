@@ -17,10 +17,13 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/nativevoice"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 	"golang.org/x/text/unicode/norm"
 )
 
-const maxCaptionRunes = 480
+const (
+	maxCaptionRunes = 480
+)
 
 // defaultCompanionSystemPrompt defines the fast companion lane. It
 // intentionally has no tools, exercise scoring, diagnosis, or pressure to
@@ -51,8 +54,9 @@ type pooledSession struct {
 // Service implements only the live service contract. Buffered audio, PDF,
 // strict mode, tools, and research continue through the audited legacy flow.
 type Service struct {
-	opener   nativevoice.Opener
-	preparer conversation.NativeStatePreparer
+	opener         nativevoice.Opener
+	preparer       conversation.NativeStatePreparer
+	captionHandoff httpapi.VoiceCaptionHandoffService
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -67,17 +71,40 @@ func New(
 	opener nativevoice.Opener,
 	preparer conversation.NativeStatePreparer,
 ) (*Service, error) {
+	return newService(opener, preparer, nil)
+}
+
+// NewWithCaptionHandoff reuses finalized Native Audio captions in the audited
+// staged pipeline. The legacy constructor remains fail-closed for tests and
+// deployments that have not wired the bridge yet.
+func NewWithCaptionHandoff(
+	opener nativevoice.Opener,
+	preparer conversation.NativeStatePreparer,
+	handoff httpapi.VoiceCaptionHandoffService,
+) (*Service, error) {
+	if handoff == nil {
+		return nil, errors.New("native audio caption handoff is required")
+	}
+	return newService(opener, preparer, handoff)
+}
+
+func newService(
+	opener nativevoice.Opener,
+	preparer conversation.NativeStatePreparer,
+	handoff httpapi.VoiceCaptionHandoffService,
+) (*Service, error) {
 	if opener == nil || preparer == nil {
 		return nil, errors.New("native audio dependencies are required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
-		opener:   opener,
-		preparer: preparer,
-		ctx:      ctx,
-		cancel:   cancel,
-		now:      time.Now,
-		sessions: make(map[string]*pooledSession),
+		opener:         opener,
+		preparer:       preparer,
+		captionHandoff: handoff,
+		ctx:            ctx,
+		cancel:         cancel,
+		now:            time.Now,
+		sessions:       make(map[string]*pooledSession),
 	}, nil
 }
 
@@ -120,9 +147,9 @@ func (s *Service) ProcessLiveWithEndpoint(
 	return s.processLive(ctx, uid, input, audio, onAudio, onEndpoint, nil)
 }
 
-// ProcessLiveWithControl preserves the live transport contract. Explicit
-// Respondent Coach requests are replayed through the staged path, so this
-// method never publishes a generic coach checkpoint for such a request.
+// ProcessLiveWithControl preserves the live transport contract. Native Audio
+// never substitutes a generic cached reflex for a question-bound Respondent
+// Coach turn: finalized captions cross only through the audited staged handoff.
 func (s *Service) ProcessLiveWithControl(
 	ctx context.Context,
 	uid string,
@@ -130,7 +157,7 @@ func (s *Service) ProcessLiveWithControl(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 	onEndpoint func(),
-	onCoachActive func(sessionState string) error,
+	onCoachActive func(httpapi.VoiceRespondentCheckpointTransition) error,
 ) (httpapi.VoiceTurnResult, error) {
 	if onCoachActive == nil {
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
@@ -153,7 +180,7 @@ func (s *Service) processLive(
 	audio <-chan []byte,
 	onAudio func([]byte) error,
 	onEndpoint func(),
-	onCoachActive func(sessionState string) error,
+	onCoachActive func(httpapi.VoiceRespondentCheckpointTransition) error,
 ) (httpapi.VoiceTurnResult, error) {
 	if s == nil || ctx == nil || uid == "" || audio == nil || onAudio == nil ||
 		!input.NativeAudio || input.StrictCloudMinimization ||
@@ -167,7 +194,12 @@ func (s *Service) processLive(
 		}
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 	}
-	if requiresStaged {
+	// The preparer is the authority for the state consumed by this turn. In the
+	// ordinary Native lane it advances the empty envelope; for an active answer
+	// scope it returns the same question-bound token. The caption handoff must
+	// receive that exact prepared token instead of replaying stale caller input.
+	input.StateToken = preparedStateToken
+	if requiresStaged && (s.captionHandoff == nil || onCoachActive == nil) {
 		// The WebSocket handler recognizes native fallback only after its commit
 		// frame closes audio. Drain and wipe capture without opening a provider;
 		// returning before commit would be treated as an unexpected pipeline
@@ -204,6 +236,55 @@ func (s *Service) processLive(
 	sendResultRead := false
 	spoke := false
 	turnComplete := false
+	deliverAudio := func(pcm []byte) error {
+		meaningful := speechio.PCM16HasMeaningfulSample(pcm)
+		if err := onAudio(pcm); err != nil {
+			return err
+		}
+		if meaningful && firstAudioAt.IsZero() {
+			firstAudioAt = s.now()
+		}
+		spoke = true
+		return nil
+	}
+	var stagedHandoff httpapi.VoiceCaptionHandoff
+	defer func() {
+		if stagedHandoff != nil {
+			stagedHandoff.Cancel()
+		}
+	}()
+	openStagedHandoff := func() error {
+		if stagedHandoff != nil {
+			return nil
+		}
+		if s.captionHandoff == nil {
+			return httpapi.ErrVoiceNativeFallback
+		}
+		var publishCheckpoint func(httpapi.VoiceRespondentCheckpoint) error
+		if onCoachActive != nil {
+			publishCheckpoint = func(checkpoint httpapi.VoiceRespondentCheckpoint) error {
+				return onCoachActive(httpapi.VoiceRespondentCheckpointTransition{
+					PreviousSessionState: preparedStateToken,
+					Checkpoint:           checkpoint,
+				})
+			}
+		}
+		opened, openErr := s.captionHandoff.OpenCaptionHandoff(
+			ctx,
+			uid,
+			input,
+			deliverAudio,
+			publishCheckpoint,
+		)
+		if openErr != nil {
+			return openErr
+		}
+		if opened == nil {
+			return errNativeFlowUnavailable
+		}
+		stagedHandoff = opened
+		return nil
+	}
 	for !turnComplete {
 		event, receiveErr := pooled.session.Receive(ctx)
 		if receiveErr != nil {
@@ -221,8 +302,36 @@ func (s *Service) processLive(
 				clear(caption)
 				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 			}
+			observedAt := s.now()
 			if event.CaptionFinal && inputCaptionFinalAt.IsZero() {
-				inputCaptionFinalAt = s.now()
+				inputCaptionFinalAt = observedAt
+			}
+			inputCaptionText := string(inputCaption)
+			coachObserved := requiresRespondentCoach(inputCaptionText)
+			canDonateCaption := s.captionHandoff != nil && onCoachActive != nil
+			if canDonateCaption &&
+				(requiresStaged || coachObserved || stagedHandoff != nil) {
+				if err := openStagedHandoff(); err != nil {
+					pooled.session.DiscardOutput()
+					event.Clear()
+					clear(inputCaption)
+					clear(caption)
+					if errors.Is(err, httpapi.ErrVoiceNativeFallback) {
+						return httpapi.VoiceTurnResult{}, err
+					}
+					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				}
+				if err := stagedHandoff.Observe(
+					bytes.Clone(inputCaption),
+					event.CaptionFinal,
+					observedAt,
+				); err != nil {
+					pooled.session.DiscardOutput()
+					event.Clear()
+					clear(inputCaption)
+					clear(caption)
+					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				}
 			}
 			if event.CaptionFinal && !inputGatePassed {
 				var sendErr error
@@ -242,26 +351,77 @@ func (s *Service) processLive(
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 				}
-				inputCaptionText := string(inputCaption)
 				if !nativeAudioEligible(inputCaptionText) {
 					pooled.session.DiscardOutput()
+					if stagedHandoff != nil {
+						stagedHandoff.Cancel()
+						stagedHandoff = nil
+					}
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 				}
-				if requiresRespondentCoach(inputCaptionText) {
-					// A Native checkpoint can retain only a generic operator and
-					// cannot prove which external question the next utterance
-					// answers. Release no provider output or state; the WebSocket
-					// handler replays this same captured turn once through the
-					// staged planner, which binds operator, required slots, and a
-					// non-reversible question-continuity tag.
+				if coachObserved && onCoachActive == nil {
 					pooled.session.DiscardOutput()
+					if stagedHandoff != nil {
+						stagedHandoff.Cancel()
+						stagedHandoff = nil
+					}
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+				}
+				if requiresStaged || coachObserved {
+					// A Native checkpoint can retain only a generic operator and
+					// cannot prove which external question the next utterance
+					// answers. Release no provider output. Donate the provider's
+					// already-final caption to the staged planner, which binds the
+					// operator, slots, and question-continuity tag without a second
+					// speech-recognition pass.
+					pooled.session.DiscardOutput()
+					if stagedHandoff == nil {
+						if err := openStagedHandoff(); err != nil {
+							event.Clear()
+							clear(inputCaption)
+							clear(caption)
+							if errors.Is(err, httpapi.ErrVoiceNativeFallback) {
+								return httpapi.VoiceTurnResult{}, err
+							}
+							return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+						}
+						if err := stagedHandoff.Observe(
+							bytes.Clone(inputCaption),
+							true,
+							observedAt,
+						); err != nil {
+							event.Clear()
+							clear(inputCaption)
+							clear(caption)
+							return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+						}
+					}
+					if !endpointPublished && onEndpoint != nil {
+						endpointPublished = true
+						onEndpoint()
+					}
+					result, handoffErr := stagedHandoff.Commit()
+					result.LiveTimings.STTFinalMS = millisecondsSince(
+						started,
+						inputCaptionFinalAt,
+					)
+					event.Clear()
+					clear(inputCaption)
+					clear(caption)
+					if handoffErr != nil {
+						return result, handoffErr
+					}
+					return result, nil
+				}
+				if stagedHandoff != nil {
+					stagedHandoff.Cancel()
+					stagedHandoff = nil
 				}
 				if err := pooled.session.CommitOutput(); err != nil {
 					event.Clear()
@@ -300,16 +460,12 @@ func (s *Service) processLive(
 				clear(caption)
 				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 			}
-			if firstAudioAt.IsZero() {
-				firstAudioAt = s.now()
-			}
-			if err := onAudio(event.PCM); err != nil {
+			if err := deliverAudio(event.PCM); err != nil {
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
 				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 			}
-			spoke = true
 		case nativevoice.EventTurnComplete:
 			if !inputGatePassed {
 				event.Clear()

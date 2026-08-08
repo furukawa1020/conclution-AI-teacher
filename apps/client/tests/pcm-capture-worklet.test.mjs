@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import {
+  BARGE_PCM_LIMITS,
+  VOICE_LIVE_LIMITS,
+} from "../web/voice-stream-policy.mjs";
+
 const workletSource = readFileSync(
   new URL("../web/pcm-capture-worklet.js", import.meta.url),
   "utf8",
@@ -147,6 +152,14 @@ test("processorOptions are exact and strictly bounded", () => {
     maximumQueuedFrames: 1,
   };
   assert.doesNotThrow(() => createHarness({ processorOptions: valid }));
+  assert.doesNotThrow(() =>
+    createHarness({
+      processorOptions: {
+        ...valid,
+        maximumPreConfirmFrames: 125,
+      },
+    }),
+  );
 
   for (const processorOptions of [
     undefined,
@@ -154,7 +167,7 @@ test("processorOptions are exact and strictly bounded", () => {
     { ...valid, generation: 0 },
     { ...valid, generation: 1.5 },
     { ...valid, maximumPreConfirmFrames: 0 },
-    { ...valid, maximumPreConfirmFrames: 76 },
+    { ...valid, maximumPreConfirmFrames: 126 },
     { ...valid, maximumQueuedFrames: 0 },
     { ...valid, maximumQueuedFrames: 201 },
     { ...valid, unexpected: true },
@@ -164,6 +177,22 @@ test("processorOptions are exact and strictly bounded", () => {
       /invalid_processor_options/,
     );
   }
+});
+
+test("worklet pre-confirm ceiling matches the 2.5 second 80 KB barge ring", () => {
+  assert.equal(BARGE_PCM_LIMITS.frameDurationMs, 20);
+  assert.equal(BARGE_PCM_LIMITS.historyMs, 2_500);
+  assert.equal(BARGE_PCM_LIMITS.maximumFrames, 125);
+  assert.equal(
+    BARGE_PCM_LIMITS.maximumBytes,
+    BARGE_PCM_LIMITS.maximumFrames * VOICE_LIVE_LIMITS.inputFrameBytes,
+  );
+  assert.match(
+    workletSource,
+    /const MAXIMUM_PRE_CONFIRM_FRAMES = 125;/u,
+  );
+  assert.match(workletSource, /finite 2\.5 s total/u);
+  assert.match(workletSource, /hard 80 KB PCM16 ceiling/u);
 });
 
 test("one thousand pre-confirm frames post no PCM and stay in a zeroizing fixed ring", () => {

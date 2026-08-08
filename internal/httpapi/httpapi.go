@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -31,6 +30,9 @@ import (
 
 const (
 	maxAudioBytes    = 2 * 1024 * 1024
+	// maxDocumentBytes remains only as the historical request-envelope ceiling
+	// asserted by package tests. Runtime document fields are rejected before
+	// this or any other decoder is consulted.
 	maxDocumentBytes = 7 * 1024 * 1024
 	maxStateBytes    = conversation.MaxStateTokenBytes
 	maxCaptionRunes  = 480
@@ -114,6 +116,86 @@ type VoiceTurnResult struct {
 	LiveTimings      VoiceLiveTimings
 }
 
+// VoiceRespondentCheckpoint is the finite, server-authored control envelope
+// for a Native Audio transition into Respondent Coach. It deliberately carries
+// no caption or answer-bearing text. The transport authenticates SessionState
+// for the current UID and requires every field to match the final result.
+type VoiceRespondentCheckpoint struct {
+	SessionState     string
+	Route            string
+	AssistanceTarget string
+	RespondentStage  string
+	CoachPhase       string
+	CoachAction      string
+}
+
+// VoiceRespondentCheckpointTransition is the process-local capability passed
+// from a Native Audio service to the HTTP transport. PreviousSessionState is
+// the exact authenticated token consumed by the caption handoff after native
+// state preparation; it is never serialized to the browser. Keeping it
+// separate from the finite checkpoint lets the independently wired validator
+// authenticate both hops from the caller token without trusting the live
+// service to describe its own transition.
+type VoiceRespondentCheckpointTransition struct {
+	PreviousSessionState string
+	Checkpoint           VoiceRespondentCheckpoint
+}
+
+const VoiceNativeRespondentCoachRoute = "native-respondent-coach"
+
+// NewVoiceRespondentCheckpoint projects a verified respondent result onto the
+// finite control channel. Cryptographic UID binding remains the HTTP
+// boundary's responsibility; this constructor validates the complete shape.
+func NewVoiceRespondentCheckpoint(
+	result VoiceTurnResult,
+) (VoiceRespondentCheckpoint, error) {
+	checkpoint := VoiceRespondentCheckpoint{
+		SessionState:     result.StateToken,
+		Route:            result.Route,
+		AssistanceTarget: result.AssistanceTarget,
+		RespondentStage:  result.RespondentStage,
+		CoachPhase:       result.CoachPhase,
+		CoachAction:      result.CoachAction,
+	}
+	if !validVoiceRespondentCheckpoint(checkpoint) {
+		return VoiceRespondentCheckpoint{}, errors.New(
+			"voice respondent checkpoint is invalid",
+		)
+	}
+	return checkpoint, nil
+}
+
+// MatchesResult prevents the final frame from changing any state transition
+// metadata after the checkpoint has been accepted.
+func (checkpoint VoiceRespondentCheckpoint) MatchesResult(
+	result VoiceTurnResult,
+) bool {
+	return checkpoint.SessionState == result.StateToken &&
+		checkpoint.Route == result.Route &&
+		checkpoint.AssistanceTarget == result.AssistanceTarget &&
+		checkpoint.RespondentStage == result.RespondentStage &&
+		checkpoint.CoachPhase == result.CoachPhase &&
+		checkpoint.CoachAction == result.CoachAction
+}
+
+func validVoiceRespondentCheckpoint(
+	checkpoint VoiceRespondentCheckpoint,
+) bool {
+	return checkpoint.SessionState != "" &&
+		len(checkpoint.SessionState) <= maxStateBytes &&
+		utf8.ValidString(checkpoint.SessionState) &&
+		strings.TrimSpace(checkpoint.SessionState) == checkpoint.SessionState &&
+		checkpoint.Route == VoiceNativeRespondentCoachRoute &&
+		checkpoint.AssistanceTarget == "respondent" &&
+		(checkpoint.RespondentStage == "awaiting_answer" ||
+			checkpoint.RespondentStage == "restructure") &&
+		validCoachMetadata(
+			checkpoint.AssistanceTarget,
+			checkpoint.CoachPhase,
+			checkpoint.CoachAction,
+		)
+}
+
 type VoiceLiveTimings struct {
 	STTFirstInterimMS   int64
 	STTFinalMS          int64
@@ -126,6 +208,11 @@ type VoiceLiveTimings struct {
 	TTSPrestarted       int64
 	TTSBufferedBytes    int64
 	TTSReleaseMS        int64
+	// NativeCaptionHandoff is one only when a finalized Native Audio caption
+	// was consumed directly by the audited staged agent. This route bit means
+	// this response did not invoke the staged recognizer a second time; tests
+	// with recognizer spies enforce that boundary.
+	NativeCaptionHandoff int64
 }
 
 type ResearchRecord struct {
@@ -179,8 +266,9 @@ type VoiceTurnLiveEndpointService interface {
 // accepted the control frame. Implementations must invoke onCoachActive at
 // most once per turn, only after deterministic explicit opt-in is accepted,
 // and only after the corresponding signed coach state has been issued. The
-// callback receives that opaque state token so the transport can checkpoint it
-// before any binary response audio is released.
+// callback receives a finite respondent envelope so the transport can bind the
+// UID-scoped token and every final transition field before binary response
+// audio is released.
 type VoiceTurnLiveControlService interface {
 	ProcessLiveWithControl(
 		ctx context.Context,
@@ -189,15 +277,51 @@ type VoiceTurnLiveControlService interface {
 		audio <-chan []byte,
 		onAudio func([]byte) error,
 		onEndpoint func(),
-		onCoachActive func(sessionState string) error,
+		onCoachActive func(VoiceRespondentCheckpointTransition) error,
 	) (VoiceTurnResult, error)
 }
 
-// VoiceStateTokenValidator authenticates an opaque conversation state without
-// advancing it. The HTTP boundary uses a separately supplied validator instead
-// of trusting a live-service callback to vouch for its own checkpoint.
-type VoiceStateTokenValidator interface {
-	ValidateStateToken(uid string, token string) error
+// VoiceCaptionHandoff owns a process-local, one-turn bridge from Native Audio
+// transcription to the audited staged agent. Observe may start speculative
+// agent/TTS work, but that audio remains private until Commit verifies the
+// candidate against the exact finalized caption. No caption is serialized,
+// logged, persisted, or placed in a result object.
+type VoiceCaptionHandoff interface {
+	Observe(captionUTF8 []byte, final bool, observedAt time.Time) error
+	Commit() (VoiceTurnResult, error)
+	Cancel()
+}
+
+// VoiceCaptionHandoffService is implemented by a staged live voice pipeline
+// that can consume a Native Audio caption without transcribing the same user
+// audio again. The Native service opens it only for a state that already
+// requires staged handling or after deterministic explicit coach opt-in.
+type VoiceCaptionHandoffService interface {
+	OpenCaptionHandoff(
+		ctx context.Context,
+		uid string,
+		input VoiceTurnInput,
+		onAudio func([]byte) error,
+		onCoachActive func(VoiceRespondentCheckpoint) error,
+	) (VoiceCaptionHandoff, error)
+}
+
+// VoiceRespondentCheckpointValidator authenticates the complete transition
+// from the request's input state to a request- and scope-bound output state.
+// The HTTP boundary uses a separately supplied validator instead of trusting a
+// live-service callback to vouch for its own checkpoint.
+type VoiceRespondentCheckpointValidator interface {
+	ValidateRespondentCheckpointTransition(
+		uid string,
+		requestToken string,
+		preparedToken string,
+		nextToken string,
+		requestID string,
+		assistanceTarget string,
+		respondentStage string,
+		coachPhase string,
+		coachAction string,
+	) error
 }
 
 type VoiceOptions struct {
@@ -207,7 +331,7 @@ type VoiceOptions struct {
 	AppRateLimiter       guard.Limiter
 	LiveLeaseManager     guard.VoiceLiveLeaseManager
 	LiveHandshakeGate    *VoiceLiveHandshakeGate
-	CoachStateValidator  VoiceStateTokenValidator
+	CoachStateValidator  VoiceRespondentCheckpointValidator
 	RequestTimeout       time.Duration
 	MaxRequestBytes      int64
 	RequireRecentPasskey bool
@@ -528,13 +652,22 @@ func (s *Server) consumeVoiceQuota(
 }
 
 func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
+	// Runtime documents are deliberately outside the public product boundary.
+	// Reject the field before decoding audio or handing the state token to any
+	// downstream component. Drop the only request-owned references immediately;
+	// in particular, never base64-decode the PDF payload into a byte slice.
+	if request.Document != nil {
+		request.Document.Base64 = ""
+		request.Document.MIMEType = ""
+		request.Document.Name = ""
+		return VoiceTurnInput{}, errors.New("runtime documents are unsupported")
+	}
 	mimeType := normalizedAudioMIME(request.MIMEType)
 	if mimeType == "" || len(request.SessionState) > maxStateBytes {
 		return VoiceTurnInput{}, errors.New("invalid voice metadata")
 	}
-	if request.StrictCloudMinimization &&
-		(request.SessionState != "" || request.Document != nil) {
-		return VoiceTurnInput{}, errors.New("strict voice metadata retained state or document")
+	if request.StrictCloudMinimization && request.SessionState != "" {
+		return VoiceTurnInput{}, errors.New("strict voice metadata retained state")
 	}
 	ambient := false
 	foreground := false
@@ -564,26 +697,6 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		STTLocale:               "ja-JP",
 		SchemaVersion:           1,
 		StrictCloudMinimization: request.StrictCloudMinimization,
-	}
-	if request.Document == nil {
-		return input, nil
-	}
-	if request.Document.MIMEType != "application/pdf" ||
-		len([]rune(request.Document.Name)) > 180 {
-		clearVoiceInput(&input)
-		return VoiceTurnInput{}, errors.New("invalid document metadata")
-	}
-	document, err := decodeBoundedBase64(request.Document.Base64, maxDocumentBytes)
-	if err != nil ||
-		len(document) == 0 ||
-		!bytes.HasPrefix(document, []byte("%PDF-")) {
-		clear(document)
-		clearVoiceInput(&input)
-		return VoiceTurnInput{}, errors.New("invalid document")
-	}
-	input.Document = &VoiceDocument{
-		MIMEType: "application/pdf",
-		Data:     document,
 	}
 	return input, nil
 }

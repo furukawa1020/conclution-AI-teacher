@@ -641,32 +641,25 @@ test("bridge requires a fresh passkey and never creates anonymous or popup ident
   assert.match(bridge, /state: "passkey-required"/u);
 });
 
-test("ordinary one-turn PDF remains available and bounded", async () => {
+test("runtime PDF is rejected before browser file access", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
+	const ui = await readFile(
+		new URL("../src/main.rs", import.meta.url),
+		"utf8",
+	);
   const attachStart = bridge.indexOf("async function attachDocument(");
   const attachEnd = bridge.indexOf("\n}\n\nfunction stopSession", attachStart);
   assert.notEqual(attachStart, -1);
   assert.notEqual(attachEnd, -1);
   const attach = bridge.slice(attachStart, attachEnd);
 
-  assert.match(attach, /input\.files\?\.length !== 1/u);
-  assert.match(attach, /file\.size === 0 \|\| file\.size > DOCUMENT_MAX_BYTES/u);
-  assert.match(attach, /arrayBufferToBase64\(await file\.arrayBuffer\(\)\)/u);
-  assert.match(attach, /pendingDocument = Object\.freeze/u);
-  assert.match(attach, /armPendingDocumentExpiry/u);
-
-  const finishStart = bridge.indexOf("async function finishTurn(");
-  const finishEnd = bridge.indexOf(
-    "\n}\n\nfunction safeDocumentName",
-    finishStart,
-  );
-  const finish = bridge.slice(finishStart, finishEnd);
-  assert.match(finish, /documentForTurn = pendingDocument/u);
-  assert.match(finish, /payload\.document = \{/u);
-  assert.match(finish, /mimeType: documentForTurn\.mimeType/u);
+  assert.match(attach, /fail\("document_unavailable"\)/u);
+  assert.doesNotMatch(attach, /getElementById|\.files|arrayBuffer|pendingDocument/u);
+	assert.doesNotMatch(ui, /id: "paper-input"|r#type: "file"/u);
+	assert.match(ui, /PDF入力[\s\S]*公開版では未提供/u);
 });
 
 test("explicit voice start warms only the fixed transport without private data", async () => {
@@ -703,7 +696,7 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.ok(microphoneAt > warmAt);
 });
 
-test("unfinished respondent coaching selects the staged lane at each session boundary", async () => {
+test("unfinished respondent coaching keeps Native input when privacy permits", async () => {
   const [bridge, client] = await Promise.all([
     readFile(
       new URL("../web/firebase-bridge.js", import.meta.url),
@@ -727,9 +720,12 @@ test("unfinished respondent coaching selects the staged lane at each session bou
   assert.match(begin, /typeof coachActive !== "boolean"/u);
   assert.match(
     begin,
-    /const nativeAudio =\s*!strictCloudMinimization && !pendingDocument && !coachActive;/u,
+    /const nativeAudio =\s*!strictCloudMinimization && !pendingDocument;/u,
   );
-  assert.match(begin, /nativeAudio,\s*sessionState: serializedSessionState/u);
+  assert.match(
+    begin,
+    /coachActive,\s*expectedEpoch,[\s\S]*nativeAudio,\s*sessionState: serializedSessionState/u,
+  );
   assert.match(
     bridge,
     /nativeAudio \? \{ nativeCoachControl: true \} : \{\}/u,
@@ -3233,7 +3229,7 @@ test("live commit preserves exact frames and fails on backpressure", () => {
 test("live server protocol gates binary on ready and commit", () => {
   const protocol = createVoiceLiveServerProtocol(
     (result) => Object.freeze({ ...result }),
-    { nativeAudio: true },
+    { coachActive: false, nativeAudio: true },
   );
   assert.throws(
     () => protocol.acceptBinary(new ArrayBuffer(4)),
@@ -3316,7 +3312,7 @@ test("a committed native turn replays only on reviewed zero-audio failures", () 
   );
 });
 
-test("a first-turn Native coach preserves signed state without replaying the utterance", async () => {
+test("a first-turn Native coach preserves authenticated state without replaying the utterance", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -3328,7 +3324,7 @@ test("a first-turn Native coach preserves signed state without replaying the utt
   const live = bridge.slice(liveStart, liveEnd);
   assert.match(
     live,
-    /createVoiceLiveServerProtocol\([\s\S]*safeVoiceResponse\(result, strictCloudMinimization\)[\s\S]*\{ nativeAudio \},\s*\);/u,
+    /createVoiceLiveServerProtocol\([\s\S]*safeVoiceResponse\(result, strictCloudMinimization\)[\s\S]*\{ coachActive, nativeAudio \},\s*\);/u,
   );
 
   assert.match(
@@ -3342,7 +3338,7 @@ test("a first-turn Native coach preserves signed state without replaying the utt
   const coachBranch = live.slice(coachStart, finalStart);
   assert.match(
     coachBranch,
-    /globalThis\.dispatchEvent\(\s*new CustomEvent\("kotae:coach-checkpoint", \{\s*detail: Object\.freeze\(\{\s*sessionState: message\.sessionState,\s*version: 1,\s*\}\),\s*\}\),\s*\);/u,
+    /detail: Object\.freeze\(\{[\s\S]*assistanceTarget: message\.assistanceTarget,[\s\S]*coachAction: message\.coachAction,[\s\S]*coachPhase: message\.coachPhase,[\s\S]*respondentStage: message\.respondentStage,[\s\S]*route: message\.route,[\s\S]*sessionState: message\.sessionState,[\s\S]*version: 1/u,
   );
   assert.ok(
     coachBranch.indexOf("session.playback.activateCoach();") <
@@ -3420,19 +3416,18 @@ test("Rust accepts only the exact coach checkpoint and preserves it across a rec
   assert.match(listener, /valid_coach_checkpoint_keys\(&key_names\)/u);
   assert.match(
     listener,
-    /valid_coach_checkpoint_metadata\(&checkpoint, version, keys\.length\(\)\)/u,
+    /valid_coach_checkpoint_metadata\([\s\S]*&checkpoint,[\s\S]*&checkpoint_route,[\s\S]*&assistance_target,[\s\S]*&respondent_stage,[\s\S]*coach_phase,[\s\S]*coach_action,[\s\S]*version,[\s\S]*keys\.length\(\)/u,
   );
   const sessionAt = listener.indexOf("session_state.set(checkpoint);");
-  const routeAt = listener.indexOf(
-    "route.set(NATIVE_RESPONDENT_COACH_ROUTE.to_string());",
-  );
+  const routeAt = listener.indexOf("route.set(checkpoint_route);");
   const coachAt = listener.indexOf("coach_state.set(CoachState::from_result(");
   assert.ok(sessionAt >= 0);
   assert.ok(routeAt > sessionAt);
   assert.ok(coachAt > routeAt);
-  assert.match(
+  assert.match(listener.slice(coachAt), /coach_phase, coach_action/u);
+  assert.doesNotMatch(
     listener.slice(coachAt),
-    /CoachPhase::AwaitingAnswer,\s*CoachAction::Elicit/u,
+    /CoachPhase::AwaitingAnswer|CoachAction::Elicit/u,
   );
   assert.match(
     listener,
@@ -3468,10 +3463,15 @@ test("Rust accepts only the exact coach checkpoint and preserves it across a rec
 });
 
 test("a Native coach control is exact, one-shot, and precedes response audio", () => {
-  const checkpoint = "signed-coach-checkpoint";
+  const checkpoint = "authenticated-coach-checkpoint";
   const coachControl = Object.freeze({
     type: "coach",
     active: true,
+    assistanceTarget: "respondent",
+    coachAction: "elicit",
+    coachPhase: "awaiting_answer",
+    respondentStage: "awaiting_answer",
+    route: "native-respondent-coach",
     sessionState: checkpoint,
     version: 1,
   });
@@ -3485,10 +3485,13 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     sessionState: checkpoint,
     ...overrides,
   });
-  const createCommitted = (nativeAudio = true) => {
+  const createCommitted = (
+    nativeAudio = true,
+    coachActive = false,
+  ) => {
     const protocol = createVoiceLiveServerProtocol(
       (result) => result,
-      { nativeAudio },
+      { coachActive, nativeAudio },
     );
     protocol.acceptText(JSON.stringify({ type: "ready", version: 1 }));
     protocol.markCommitted();
@@ -3499,8 +3502,10 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     undefined,
     null,
     {},
-    { nativeAudio: 1 },
-    { nativeAudio: true, extra: true },
+    { coachActive: false, nativeAudio: 1 },
+    { coachActive: 1, nativeAudio: true },
+    { coachActive: true, nativeAudio: false },
+    { coachActive: false, nativeAudio: true, extra: true },
   ]) {
     assert.throws(
       () => createVoiceLiveServerProtocol((result) => result, expectations),
@@ -3523,6 +3528,10 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     { ...coachControl, active: false },
     { ...coachControl, version: 2 },
     { ...coachControl, phase: "elicit" },
+    { ...coachControl, assistanceTarget: "assistant" },
+    { ...coachControl, respondentStage: "none" },
+    { ...coachControl, route: "native-audio" },
+    { ...coachControl, coachPhase: "awaiting_answer", coachAction: "retry" },
     { ...coachControl, sessionState: "" },
     { ...coachControl, sessionState: ` ${checkpoint}` },
     { ...coachControl, sessionState: `${checkpoint}\n` },
@@ -3544,7 +3553,7 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
 
   const beforeCommit = createVoiceLiveServerProtocol(
     (result) => result,
-    { nativeAudio: true },
+    { coachActive: false, nativeAudio: true },
   );
   beforeCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   assert.throws(
@@ -3559,7 +3568,7 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     /voice_response_invalid/u,
   );
 
-  const staged = createCommitted(false);
+  const staged = createCommitted(false, false);
   assert.throws(
     () => staged.acceptText(JSON.stringify(coachControl)),
     /voice_response_invalid/u,
@@ -3617,7 +3626,7 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
     /voice_response_invalid/u,
   );
 
-  const stagedRespondent = createCommitted(false);
+  const stagedRespondent = createCommitted(false, false);
   stagedRespondent.acceptBinary(new ArrayBuffer(4));
   assert.equal(
     stagedRespondent.acceptText(
@@ -3625,6 +3634,48 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
         type: "final",
         version: 1,
         result: coachFinal(),
+      }),
+    ).type,
+    "final",
+  );
+
+  const knownActiveCoach = createCommitted(true, true);
+  assert.throws(
+    () => knownActiveCoach.acceptBinary(new ArrayBuffer(4)),
+    /voice_response_invalid/u,
+    "known Coach response PCM must not precede its exact checkpoint",
+  );
+  assert.deepEqual(
+    knownActiveCoach.acceptText(JSON.stringify(coachControl)),
+    coachControl,
+  );
+  assert.equal(
+    knownActiveCoach.acceptBinary(new ArrayBuffer(4)).sequence,
+    0,
+  );
+
+  const expandingControl = Object.freeze({
+    ...coachControl,
+    coachAction: "expand",
+    coachPhase: "expanding",
+    respondentStage: "restructure",
+  });
+  const expanding = createCommitted(true, true);
+  assert.deepEqual(
+    expanding.acceptText(JSON.stringify(expandingControl)),
+    expandingControl,
+  );
+  expanding.acceptBinary(new ArrayBuffer(4));
+  assert.equal(
+    expanding.acceptText(
+      JSON.stringify({
+        type: "final",
+        version: 1,
+        result: coachFinal({
+          coachAction: "expand",
+          coachPhase: "expanding",
+          respondentStage: "restructure",
+        }),
       }),
     ).type,
     "final",
@@ -3884,7 +3935,7 @@ test("bridge applies the bounded coach override to local endpointing", async () 
 test("live endpoint is rejected before ready and ignored after commit", () => {
   const beforeReady = createVoiceLiveServerProtocol(
     (result) => result,
-    { nativeAudio: true },
+    { coachActive: false, nativeAudio: true },
   );
   assert.throws(
     () =>
@@ -3896,7 +3947,7 @@ test("live endpoint is rejected before ready and ignored after commit", () => {
 
   const afterCommit = createVoiceLiveServerProtocol(
     (result) => result,
-    { nativeAudio: true },
+    { coachActive: false, nativeAudio: true },
   );
   afterCommit.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   afterCommit.markCommitted();
@@ -3917,7 +3968,7 @@ test("live endpoint is rejected before ready and ignored after commit", () => {
 
   const afterAudio = createVoiceLiveServerProtocol(
     (result) => result,
-    { nativeAudio: true },
+    { coachActive: false, nativeAudio: true },
   );
   afterAudio.acceptText(JSON.stringify({ type: "ready", version: 1 }));
   afterAudio.markCommitted();
@@ -4148,7 +4199,8 @@ test("interrupt capture starts inside the guard and retains its first frame", ()
 });
 
 test("interrupt VAD confirms foreground speech after sustained proof", () => {
-  assert.equal(INTERRUPT_VAD_LIMITS.confirmationMs, 1_200);
+  assert.equal(INTERRUPT_VAD_LIMITS.confirmationMs, 720);
+  assert.equal(INTERRUPT_VAD_LIMITS.quietConfirmationMs, 1_200);
   assert.equal(INTERRUPT_VAD_LIMITS.trailingSilenceMs, 1_200);
   assert.equal(INTERRUPT_VAD_LIMITS.reflectiveSilenceMs, 2_200);
   const startedAt = 20_000;
@@ -4167,7 +4219,7 @@ test("interrupt VAD confirms foreground speech after sustained proof", () => {
     INTERRUPT_VAD_LIMITS.provisionalMs /
     INTERRUPT_VAD_LIMITS.intervalMs;
   assert.equal(provisionalFrames, 4);
-  assert.equal(confirmationFrames, 30);
+  assert.equal(confirmationFrames, 18);
 
   for (let frame = 0; frame < confirmationFrames; frame += 1) {
     state = advanceInterruptVad(state, {
@@ -4395,8 +4447,8 @@ test("a 600 ms quiet mutter cannot interrupt the current reply", () => {
   assert.equal(state.firstVoiceAt, null);
 });
 
-test("600 to 1000 ms clear mutters stay below the deliberate gate", () => {
-  for (const durationMs of [600, 800, 1_000]) {
+test("a sub-720 ms clear mutter stays below the deliberate gate", () => {
+  for (const durationMs of [600]) {
     const startedAt = 60_000 + durationMs * 10;
     let state = advancePastInterruptGuard(
       createInterruptVadState(startedAt),

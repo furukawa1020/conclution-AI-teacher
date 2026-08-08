@@ -2,7 +2,6 @@ package conversation
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -79,6 +78,16 @@ type VoiceTurn struct {
 	// its final boundary. Model text, provisional recognition, tests, and future
 	// non-voice callers must leave it unset or use a different fixed value.
 	InputOrigin InputOrigin `json:"-"`
+	// OutputCancelable is server-authored proof that any output produced for this
+	// turn can be stopped before it reaches the user. Callers must fail closed
+	// when the output path cannot provide that guarantee.
+	OutputCancelable bool `json:"-"`
+	// FloorEvidence records the finite transport proof available at this
+	// decision boundary. A committed transcript alone is insufficient: QARC
+	// may speak only after both the client commit and provider speech-end are
+	// observed, or compute speculatively while every byte remains behind the
+	// exact-final commit gate.
+	FloorEvidence FloorEvidence `json:"-"`
 	// ResearchDisabled is a server-authored capability restriction. It is not
 	// model-visible input and must be checked before any outbound verifier call.
 	ResearchDisabled bool       `json:"-"`
@@ -93,6 +102,14 @@ const (
 	InputOriginUnknown          InputOrigin = ""
 	InputOriginProvisionalVoice InputOrigin = "provisional_voice"
 	InputOriginCommittedVoice   InputOrigin = "committed_voice"
+)
+
+type FloorEvidence uint8
+
+const (
+	FloorEvidenceUnknown FloorEvidence = iota
+	FloorEvidenceProvisionalCommitGate
+	FloorEvidenceHybridCommitted
 )
 
 type InlinePDF struct {
@@ -215,6 +232,10 @@ type PendingAnswerFrame struct {
 	QuestionContinuityTag string                        `json:"question_continuity_tag,omitempty"`
 	ContinuityTag         string                        `json:"continuity_tag,omitempty"`
 	NativeCoachScopeTag   string                        `json:"native_coach_scope_tag,omitempty"`
+	// VerifierProgress is a fixed-size posterior over current-question verifier
+	// progress. It carries no prose, answer, transcript, diagnosis, or retrieval
+	// claim and is never exposed to a model prompt.
+	VerifierProgress *respondent.StoredVerifierProgress `json:"verifier_progress,omitempty"`
 }
 
 func (turn VoiceTurn) Validate() error {
@@ -233,7 +254,19 @@ func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 	default:
 		return VoiceTurn{}, ErrInvalidTurn
 	}
+	switch turn.FloorEvidence {
+	case FloorEvidenceUnknown,
+		FloorEvidenceProvisionalCommitGate,
+		FloorEvidenceHybridCommitted:
+	default:
+		return VoiceTurn{}, ErrInvalidTurn
+	}
 	if turn.Speculative && turn.InputOrigin == InputOriginCommittedVoice {
+		return VoiceTurn{}, ErrInvalidTurn
+	}
+	if (turn.Speculative && turn.FloorEvidence == FloorEvidenceHybridCommitted) ||
+		(!turn.Speculative &&
+			turn.FloorEvidence == FloorEvidenceProvisionalCommitGate) {
 		return VoiceTurn{}, ErrInvalidTurn
 	}
 	if turn.Foreground && !turn.Ambient {
@@ -343,6 +376,9 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		frame.QuestionContinuityTag != "" ||
 		frame.ContinuityTag != ""
 	nativeCoachScope := frame.NativeCoachScopeTag != ""
+	if frame.VerifierProgress != nil && !frame.VerifierProgress.Valid() {
+		return PendingAnswerFrame{}, ErrInvalidStateToken
+	}
 	if continuityProtected {
 		// Once continuity proofs exist, cross-turn identity is carried only by
 		// those non-reversible values. Never renew model-written subject prose.
@@ -402,12 +438,7 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		if encodedTag == "" {
 			continue
 		}
-		rawTag, decodeErr := base64.RawURLEncoding.DecodeString(encodedTag)
-		validTag := decodeErr == nil &&
-			len(rawTag) == coachContinuityTagBytes &&
-			base64.RawURLEncoding.EncodeToString(rawTag) == encodedTag
-		wipe(rawTag)
-		if !validTag {
+		if !validCoachControlTag(encodedTag) {
 			return PendingAnswerFrame{}, ErrInvalidStateToken
 		}
 	}

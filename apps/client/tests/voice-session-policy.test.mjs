@@ -3666,6 +3666,50 @@ test("live commit preserves exact frames and fails on backpressure", () => {
   );
 });
 
+test("live latency proof is negotiated, ordered, content-free, and one-shot", () => {
+  const socket = new MockWebSocket();
+  const transport = createVoiceLiveClientTransport(socket, {
+    ...liveStartFrame(),
+    latencyProofVersion: 1,
+  });
+  transport.open();
+  transport.markReady();
+  transport.pushFrame(new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes));
+  transport.commit();
+  transport.acknowledgeCommitted();
+  transport.publishLatencyProof({
+    speechEndToCommitSendMs: 120,
+    speechEndToCommitAckMs: 180,
+    speechEndToEstimatedAudibleMs: 760,
+  });
+  assert.deepEqual(JSON.parse(socket.sent.at(-1)), {
+    type: "latency",
+    version: 1,
+    speechEndToCommitSendMs: 120,
+    speechEndToCommitAckMs: 180,
+    speechEndToEstimatedAudibleMs: 760,
+  });
+  assert.equal(transport.snapshot().latencyProofSent, true);
+  assert.throws(() => transport.publishLatencyProof({
+    speechEndToCommitSendMs: 120,
+    speechEndToCommitAckMs: 180,
+    speechEndToEstimatedAudibleMs: 761,
+  }), /voice_response_invalid/u);
+
+  const protocol = createVoiceLiveServerProtocol(
+    (result) => result,
+    { coachActive: false, nativeAudio: false },
+  );
+  protocol.acceptText(JSON.stringify({ type: "ready", version: 1 }));
+  protocol.markCommitted();
+  assert.deepEqual(protocol.acceptText(JSON.stringify({
+    type: "committed", version: 1,
+  })), { type: "committed", version: 1 });
+  assert.throws(() => protocol.acceptText(JSON.stringify({
+    type: "committed", version: 1,
+  })), /voice_response_invalid/u);
+});
+
 test("live server protocol gates binary on ready and commit", () => {
   const protocol = createVoiceLiveServerProtocol(
     (result) => Object.freeze({ ...result }),

@@ -28,6 +28,9 @@ const (
 	voiceLiveReaderJoinTimeout    = 500 * time.Millisecond
 	voiceLiveTerminalWriteTimeout = 500 * time.Millisecond
 	voiceLivePipelineJoinTimeout  = 5 * time.Second
+	voiceLiveLatencyProofVersion  = 1
+	voiceLiveLatencyProofMaxMS    = 10_000
+	voiceLiveLatencyProofGrace    = 100 * time.Millisecond
 	// The client stops normal capture at 3m30s. The extra 30 seconds absorb
 	// lead-in and scheduling jitter while keeping the provider stream a full
 	// minute below Cloud Speech-to-Text's five-minute hard limit.
@@ -109,11 +112,27 @@ type voiceLiveStartFrame struct {
 	SampleRateHz            int           `json:"sampleRateHz"`
 	StrictCloudMinimization bool          `json:"strictCloudMinimization"`
 	NativeAudio             bool          `json:"nativeAudio"`
+	LatencyProofVersion     *int          `json:"latencyProofVersion,omitempty"`
 }
 
 type voiceLiveCommitFrame struct {
 	Type    string `json:"type"`
 	Version int    `json:"version"`
+}
+
+type voiceLiveLatencyFrame struct {
+	Type                          string `json:"type"`
+	Version                       int    `json:"version"`
+	SpeechEndToCommitSendMS       int64  `json:"speechEndToCommitSendMs"`
+	SpeechEndToCommitAckMS        int64  `json:"speechEndToCommitAckMs"`
+	SpeechEndToEstimatedAudibleMS int64  `json:"speechEndToEstimatedAudibleMs"`
+}
+
+type voiceLiveLatencyProof struct {
+	valid                         bool
+	speechEndToCommitSendMS       int64
+	speechEndToCommitAckMS        int64
+	speechEndToEstimatedAudibleMS int64
 }
 
 type voiceLiveOutboundFrame struct {
@@ -173,6 +192,33 @@ type voiceLiveOutputMetrics struct {
 	nativeRiskGateAt     time.Time
 	nativeOutputCommitAt time.Time
 	nativeFirstAudioAt   time.Time
+	latencyProof         voiceLiveLatencyProof
+}
+
+func validVoiceLiveLatencyFrame(frame voiceLiveLatencyFrame) bool {
+	return frame.Type == "latency" &&
+		frame.Version == voiceLiveLatencyProofVersion &&
+		frame.SpeechEndToCommitSendMS >= 0 &&
+		frame.SpeechEndToCommitSendMS <= frame.SpeechEndToCommitAckMS &&
+		frame.SpeechEndToCommitAckMS <= frame.SpeechEndToEstimatedAudibleMS &&
+		frame.SpeechEndToEstimatedAudibleMS <= voiceLiveLatencyProofMaxMS
+}
+
+func (metrics *voiceLiveOutputMetrics) markLatencyProof(frame voiceLiveLatencyFrame) {
+	if !validVoiceLiveLatencyFrame(frame) {
+		return
+	}
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if metrics.latencyProof.valid {
+		return
+	}
+	metrics.latencyProof = voiceLiveLatencyProof{
+		valid:                         true,
+		speechEndToCommitSendMS:       frame.SpeechEndToCommitSendMS,
+		speechEndToCommitAckMS:        frame.SpeechEndToCommitAckMS,
+		speechEndToEstimatedAudibleMS: frame.SpeechEndToEstimatedAudibleMS,
+	}
 }
 
 type voiceLiveNativeWaterfallSnapshot struct {
@@ -280,6 +326,12 @@ func (metrics *voiceLiveOutputMetrics) snapshot() (time.Time, int, int) {
 	metrics.mu.Lock()
 	defer metrics.mu.Unlock()
 	return metrics.firstOutputAt, metrics.frames, metrics.bytes
+}
+
+func (metrics *voiceLiveOutputMetrics) latencyProofSnapshot() voiceLiveLatencyProof {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	return metrics.latencyProof
 }
 
 func (metrics *voiceLiveOutputMetrics) snapshotForLog() (
@@ -1128,6 +1180,14 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				}
 				outputMetrics.markCommitted()
 				strictOutput.markCommitted()
+				if start.LatencyProofVersion != nil {
+					if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
+						Type: "committed", Version: voiceLiveLatencyProofVersion,
+					}); err != nil {
+						cancelLive()
+						return
+					}
+				}
 				if !acknowledgeRead(false) {
 					cancelLive()
 					return
@@ -1161,40 +1221,95 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		cancelLive,
 	)
 	defer processingTimer.Stop()
-	disconnectCtx := conn.CloseRead(liveCtx)
+	proofChannel := make(chan voiceLiveLatencyFrame, 1)
+	disconnectChannel := make(chan struct{}, 1)
+	if start.LatencyProofVersion != nil {
+		go func() {
+			for attempts := 0; attempts < 4; attempts++ {
+				messageType, payload, readErr := conn.Read(liveCtx)
+				if readErr != nil {
+					disconnectChannel <- struct{}{}
+					return
+				}
+				if messageType != websocket.MessageText {
+					clear(payload)
+					continue
+				}
+				var frame voiceLiveLatencyFrame
+				if decodeStrictVoiceLiveJSON(payload, &frame) != nil ||
+					!validVoiceLiveLatencyFrame(frame) {
+					clear(payload)
+					continue
+				}
+				clear(payload)
+				proofChannel <- frame
+				disconnectCtx := conn.CloseRead(liveCtx)
+				<-disconnectCtx.Done()
+				disconnectChannel <- struct{}{}
+				return
+			}
+			disconnectCtx := conn.CloseRead(liveCtx)
+			<-disconnectCtx.Done()
+			disconnectChannel <- struct{}{}
+		}()
+	} else {
+		disconnectCtx := conn.CloseRead(liveCtx)
+		go func() {
+			<-disconnectCtx.Done()
+			disconnectChannel <- struct{}{}
+		}()
+	}
 
 	var outcome voiceLiveOutcome
-	select {
-	case outcome = <-outcomeChannel:
-	case <-disconnectCtx.Done():
-		cancelLive()
-		s.logVoiceLiveSession(
-			liveCtx,
-			started,
-			authReadyMS,
-			firstInputAt,
-			commitAt,
-			inputFrames,
-			inputBytes,
-			outputMetrics,
-			emptyVoiceLiveTimings(),
-			true,
-		)
-		return
-	case <-liveCtx.Done():
-		s.logVoiceLiveSession(
-			liveCtx,
-			started,
-			authReadyMS,
-			firstInputAt,
-			commitAt,
-			inputFrames,
-			inputBytes,
-			outputMetrics,
-			emptyVoiceLiveTimings(),
-			true,
-		)
-		return
+	for {
+		select {
+		case outcome = <-outcomeChannel:
+			goto outcomeReady
+		case proof := <-proofChannel:
+			outputMetrics.markLatencyProof(proof)
+		case <-disconnectChannel:
+			cancelLive()
+			s.logVoiceLiveSession(
+				liveCtx,
+				started,
+				authReadyMS,
+				firstInputAt,
+				commitAt,
+				inputFrames,
+				inputBytes,
+				outputMetrics,
+				emptyVoiceLiveTimings(),
+				true,
+			)
+			return
+		case <-liveCtx.Done():
+			s.logVoiceLiveSession(
+				liveCtx,
+				started,
+				authReadyMS,
+				firstInputAt,
+				commitAt,
+				inputFrames,
+				inputBytes,
+				outputMetrics,
+				emptyVoiceLiveTimings(),
+				true,
+			)
+			return
+		}
+	}
+
+outcomeReady:
+	if start.LatencyProofVersion != nil &&
+		!outputMetrics.latencyProofSnapshot().valid {
+		grace := time.NewTimer(voiceLiveLatencyProofGrace)
+		select {
+		case proof := <-proofChannel:
+			outputMetrics.markLatencyProof(proof)
+		case <-grace.C:
+		case <-liveCtx.Done():
+		}
+		grace.Stop()
 	}
 	if outcome.err != nil {
 		code := voiceLiveCodeAPIUnavailable
@@ -1305,7 +1420,9 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		strings.TrimSpace(start.SessionState) != start.SessionState ||
 		(start.StrictCloudMinimization && start.SessionState != "") ||
 		(start.StrictCloudMinimization && start.NativeAudio) ||
-		(start.NativeCoachControl && !start.NativeAudio) {
+		(start.NativeCoachControl && !start.NativeAudio) ||
+		(start.LatencyProofVersion != nil &&
+			*start.LatencyProofVersion != voiceLiveLatencyProofVersion) {
 		return false
 	}
 	switch start.TurnMode {
@@ -1550,6 +1667,29 @@ func (s *Server) logVoiceLiveSession(
 	}
 	firstOutputAt, outputFrames, outputBytes, nativeSnapshot :=
 		outputMetrics.snapshotForLog()
+	latencyProof := outputMetrics.latencyProofSnapshot()
+	speechEndToServerCommitLowerMS := int64(-1)
+	speechEndToServerCommitUpperMS := int64(-1)
+	serverCommitToEstimatedAudibleLowerMS := int64(-1)
+	serverCommitToEstimatedAudibleUpperMS := int64(-1)
+	latencyProofUncertaintyMS := int64(-1)
+	speechEndToEstimatedAudibleMS := int64(-1)
+	latencySLO := "missing"
+	if latencyProof.valid && outputFrames > 0 {
+		speechEndToServerCommitLowerMS = latencyProof.speechEndToCommitSendMS
+		speechEndToServerCommitUpperMS = latencyProof.speechEndToCommitAckMS
+		serverCommitToEstimatedAudibleLowerMS =
+			latencyProof.speechEndToEstimatedAudibleMS - latencyProof.speechEndToCommitAckMS
+		serverCommitToEstimatedAudibleUpperMS =
+			latencyProof.speechEndToEstimatedAudibleMS - latencyProof.speechEndToCommitSendMS
+		latencyProofUncertaintyMS =
+			latencyProof.speechEndToCommitAckMS - latencyProof.speechEndToCommitSendMS
+		speechEndToEstimatedAudibleMS = latencyProof.speechEndToEstimatedAudibleMS
+		latencySLO = "missed"
+		if speechEndToEstimatedAudibleMS <= 1_000 {
+			latencySLO = "on_target"
+		}
+	}
 	nativeTimings := nativeWaterfallTimings(nativeSnapshot)
 	timings.CommitToServerDrainMS = nativeTimings.CommitToServerDrainMS
 	timings.ServerDrainToActivityEndMS =
@@ -1599,6 +1739,13 @@ func (s *Server) logVoiceLiveSession(
 		"tts_release_ms", finiteLatency(timings.TTSReleaseMS),
 		"native_caption_handoff", timings.NativeCaptionHandoff,
 		"commit_to_first_audio_ms", commitToFirstAudioMS,
+		"speech_end_to_server_commit_lower_ms", speechEndToServerCommitLowerMS,
+		"speech_end_to_server_commit_upper_ms", speechEndToServerCommitUpperMS,
+		"server_commit_to_estimated_audible_lower_ms", serverCommitToEstimatedAudibleLowerMS,
+		"server_commit_to_estimated_audible_upper_ms", serverCommitToEstimatedAudibleUpperMS,
+		"latency_proof_uncertainty_ms", latencyProofUncertaintyMS,
+		"speech_end_to_estimated_audible_ms", speechEndToEstimatedAudibleMS,
+		"speech_end_to_estimated_audible_slo", latencySLO,
 		"total_ms", finiteLatency(time.Since(started).Milliseconds()),
 		"input_frames", inputFrames,
 		"input_bytes", inputBytes,

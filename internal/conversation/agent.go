@@ -36,6 +36,7 @@ const (
 
 	phaticLocalSpokenReply                 = "こんにちは。朝と夜で同じ音楽も少し違って聞こえますが、浮かべば一言、聞くだけでも大丈夫です。"
 	listenOnlyLocalSpokenReply             = "わかりました、今日は聞くだけで大丈夫です。私から一つ、同じ音楽も朝と夜で少し違って聞こえます。"
+	proxyAnswerOptOutLocalSpokenReply      = "わかりました。あなたの代わりには答えません。"
 	interpretationClarificationSpokenReply = "短い言葉のままで大丈夫です。今の続きを話すのと、こちらから軽い話を出すのなら、どちらが楽ですか？"
 	interpretationListenSpokenReply        = "短い言葉のままで大丈夫です。朝と夜で同じ音楽も少し違って聞こえます。"
 	plannerUnavailableSpokenReply          = "今の声は届いています。返事の準備だけ止まったので、言い直さず続けてください。"
@@ -756,6 +757,9 @@ func (agent *vertexAgent) Process(
 		turnExpectsResponse(normalized) &&
 		(!normalized.Ambient || normalized.Foreground) &&
 		!requiresFailClosedPrecision(normalized, modelPlan{ResearchAction: "none"}) {
+		if explicitProxyAnswerOptOut(normalized.Utterance) {
+			return agent.completeProxyAnswerOptOutLocal(uid, state)
+		}
 		if reply, companionOnly, ok := coachOptOutControl(normalized.Utterance); ok &&
 			(companionOnly || state.PendingAnswer.Active) {
 			return agent.completeCoachOptOutLocal(
@@ -2275,6 +2279,63 @@ func (agent *vertexAgent) completeCoachOptOutLocal(
 		"coach-opt-out-local",
 		profile,
 	)
+}
+
+func (agent *vertexAgent) completeProxyAnswerOptOutLocal(
+	uid string,
+	state conversationState,
+) (VoiceTurnResult, error) {
+	decision := ArbiterDecision{
+		Benefit:          1,
+		InterruptionCost: 0,
+		Urgency:          0,
+		Confidence:       1,
+		Score:            1,
+		Act:              "reflect",
+	}
+	nextState := conversationState{
+		SessionID:           state.SessionID,
+		Turn:                state.Turn + 1,
+		Graph:               state.Graph,
+		ConversationSummary: "",
+		DocumentSummary:     "",
+		// Refusing proxy speech does not revoke an existing answer-practice
+		// scope. Preserve its authenticated tags and phase byte-for-byte; this
+		// local acknowledgement neither opens nor advances a respondent slot.
+		PendingAnswer:       state.PendingAnswer,
+		Support:             state.Support,
+		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		LastIntervention:    decision,
+	}
+	stateToken, err := agent.sealState(uid, nextState)
+	if err != nil {
+		return VoiceTurnResult{}, err
+	}
+	return VoiceTurnResult{
+		SchemaVersion:        SchemaVersion,
+		Domain:               "daily",
+		Intent:               "other",
+		AssistanceTarget:     "assistant",
+		RespondentStage:      "none",
+		CoachPhase:           string(respondent.CoachPhaseNone),
+		CoachAction:          string(respondent.CoachActionNone),
+		AnswerProof:          AnswerProofNone,
+		AnswerProofCandidate: AnswerProofNone,
+		ResearchStatus:       "none",
+		ResearchRecords:      []ResearchRecord{},
+		ArgumentStructure:    "direct_answer",
+		InterventionPolicy:   "wait",
+		SpokenReply:          proxyAnswerOptOutLocalSpokenReply,
+		Confidence:           1,
+		Intervention:         decision,
+		SelfCorrectionGrace:  state.SelfCorrectionGrace,
+		AnswerContract: answercontract.Metrics{
+			CommitmentFrontPosition: answercontract.PositionAbsent,
+		},
+		Route:              "proxy-answer-opt-out-local",
+		NeedsClarification: false,
+		StateToken:         stateToken,
+	}, nil
 }
 
 func (agent *vertexAgent) completeCoachOptInLocal(
@@ -5238,6 +5299,7 @@ func explicitCoachOptIn(utterance string) bool {
 	if !quotesValid {
 		return false
 	}
+	phrase = markProxyAnswerIntentBoundaries(phrase)
 	reportedThirdPartyContext := false
 	consented := false
 	for _, clause := range strings.FieldsFunc(phrase, coachClauseSeparator) {
@@ -5253,7 +5315,7 @@ func explicitCoachOptIn(utterance string) bool {
 			reportedThirdPartyContext = true
 		}
 	}
-	return consented
+	return consented || explicitProxyAnswerOptIn(utterance)
 }
 
 func coachPhraseWithoutQuotedSpeech(value string) (string, bool) {
@@ -5309,6 +5371,14 @@ func coachQuoteCloser(r rune) (rune, bool) {
 // a second, weaker grammar for quotation, ownership, and negation.
 func ExplicitCoachOptIn(utterance string) bool {
 	return explicitCoachOptIn(utterance)
+}
+
+// ExplicitProxyAnswerOptOut exposes the same finite ownership grammar used by
+// proxy-answer consent, but only for the current speaker's final refusal to let
+// the assistant occupy their A slot. Transports use this before publishing
+// provider audio; quoted, reported, and third-party-owned wording fails closed.
+func ExplicitProxyAnswerOptOut(utterance string) bool {
+	return explicitProxyAnswerOptOut(utterance)
 }
 
 func explicitCurrentSpeakerCoachRequest(clause string) bool {
@@ -5566,6 +5636,7 @@ func explicitProxyAnswerRequest(clause string) bool {
 	if !quotesValid {
 		return false
 	}
+	clause = normalizeProxyAnswerKana(clause)
 	clause = normalizeProxyAnswerSeparators(clause)
 	if clause == "" || startsQuotedCoachClause(clause) || coachOptInNegated(clause) {
 		return false
@@ -5659,6 +5730,16 @@ func proxyAnswerThirdPartyOwnsRequest(clause string, requestAt int) bool {
 	if prefix == "" {
 		return false
 	}
+	for _, reportedLead := range []string{
+		"曰く", "によると", "によれば", "の話では", "の話だと", "の発言では",
+		"たとえば", "例えば", "例として", "引用すると", "引用では",
+		"例：", "例:", "ルール：", "ルール:", "規則：", "規則:",
+		"引用：", "引用:",
+	} {
+		if strings.Contains(prefix, reportedLead) {
+			return true
+		}
+	}
 
 	// A reason/contrast before the finite command is context, not its actor.
 	// Commas may be absent in ASR, so use the connector itself as the boundary.
@@ -5708,7 +5789,10 @@ func proxyAnswerThirdPartyOwnsRequest(clause string, requestAt int) bool {
 			)
 		}
 	}
-	for _, assistant := range []string{"aiが", "kotaeが", "あなたが"} {
+	for _, assistant := range []string{
+		"aiが", "kotaeが", "あなたが",
+		"aiは", "kotaeは", "あなたは",
+	} {
 		if strings.HasPrefix(prefix, assistant) {
 			remainder := strings.TrimSpace(strings.TrimPrefix(prefix, assistant))
 			for _, self := range []string{
@@ -5751,7 +5835,10 @@ func proxyAnswerPrefixHasExplicitThirdParty(prefix string) bool {
 // a preceding owner ("母はAIが…") cannot be erased by the assistant noun.
 func directAssistantProxySubject(prefix string) bool {
 	prefix = strings.TrimSpace(prefix)
-	for _, subject := range []string{"aiが", "kotaeが", "あなたが"} {
+	for _, subject := range []string{
+		"aiが", "kotaeが", "あなたが",
+		"aiは", "kotaeは", "あなたは",
+	} {
 		if prefix == subject {
 			return true
 		}
@@ -5766,22 +5853,312 @@ func explicitProxyAnswerOptIn(utterance string) bool {
 	if !quotesValid {
 		return false
 	}
+	phrase = markProxyAnswerIntentBoundaries(phrase)
 	reportedThirdPartyContext := false
+	proxyIntentObserved := false
 	consented := false
 	for _, clause := range strings.FieldsFunc(phrase, coachClauseSeparator) {
 		clause = strings.TrimSpace(clause)
-		if explicitProxyAnswerRequest(clause) &&
-			(!reportedThirdPartyContext || explicitCurrentSpeakerCoachRequest(clause)) {
+		directOptIn := explicitProxyAnswerRequest(clause) &&
+			(!reportedThirdPartyContext || explicitCurrentSpeakerCoachRequest(clause))
+		directOptOut := explicitProxyAnswerOptOutClause(clause) &&
+			(!reportedThirdPartyContext ||
+				explicitJapaneseFirstPersonPrefix(clause) ||
+				directAssistantProxyOptOutClause(clause))
+		switch {
+		case directOptIn:
+			proxyIntentObserved = true
 			consented = true
-		}
-		if coachRequestWithdrawalClause(clause) {
+		case directOptOut:
+			proxyIntentObserved = true
+			consented = false
+		case proxyIntentObserved && proxyAnswerEllipticalOptInClause(clause):
+			consented = true
+		case proxyIntentObserved && proxyAnswerEllipticalOptOutClause(clause):
 			consented = false
 		}
 		if thirdPartyReportContext(clause) {
 			reportedThirdPartyContext = true
 		}
 	}
-	return consented
+	return proxyIntentObserved && consented
+}
+
+func explicitProxyAnswerOptOut(utterance string) bool {
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	var quotesValid bool
+	phrase, quotesValid = coachPhraseWithoutQuotedSpeech(phrase)
+	if !quotesValid {
+		return false
+	}
+	phrase = markProxyAnswerIntentBoundaries(phrase)
+
+	reportedThirdPartyContext := false
+	proxyIntentObserved := false
+	refused := false
+	for _, clause := range strings.FieldsFunc(phrase, coachClauseSeparator) {
+		clause = strings.TrimSpace(clause)
+		if clause == "" {
+			continue
+		}
+
+		directOptIn := explicitProxyAnswerRequest(clause) &&
+			(!reportedThirdPartyContext || explicitCurrentSpeakerCoachRequest(clause))
+		directOptOut := explicitProxyAnswerOptOutClause(clause) &&
+			(!reportedThirdPartyContext ||
+				explicitJapaneseFirstPersonPrefix(clause) ||
+				directAssistantProxyOptOutClause(clause))
+
+		// Relevant intent is evaluated in speech order. A later renewed request
+		// cancels an earlier refusal, while an elliptical withdrawal is meaningful
+		// only after this same utterance established the proxy-answer topic.
+		switch {
+		case directOptIn:
+			proxyIntentObserved = true
+			refused = false
+		case directOptOut:
+			proxyIntentObserved = true
+			refused = true
+		case proxyIntentObserved && proxyAnswerEllipticalOptInClause(clause):
+			refused = false
+		case proxyIntentObserved && proxyAnswerEllipticalOptOutClause(clause):
+			refused = true
+		}
+
+		if thirdPartyReportContext(clause) {
+			reportedThirdPartyContext = true
+		}
+	}
+	return proxyIntentObserved && refused
+}
+
+func explicitProxyAnswerOptOutClause(clause string) bool {
+	clause = normalizeExplicitCoachPhrase(clause)
+	var quotesValid bool
+	clause, quotesValid = coachPhraseWithoutQuotedSpeech(clause)
+	if !quotesValid {
+		return false
+	}
+	clause = normalizeProxyAnswerKana(clause)
+	if directEnglishProxyAnswerOptOut(clause) {
+		return true
+	}
+	clause = normalizeProxyAnswerSeparators(clause)
+	if clause == "" || startsQuotedCoachClause(clause) {
+		return false
+	}
+
+	for _, tail := range []string{"", "ね", "よ"} {
+		for _, suffix := range []string{
+			"代わりに答えないで", "代わりに答えないでください",
+			"代わりに答えないでほしい", "代わりに答えないでほしいです",
+			"代わりには答えないで", "代わりには答えないでください",
+			"代わりには答えないでほしい", "代わりには答えないでほしいです",
+			"代わりに答えなくていい", "代わりには答えなくていい",
+			"代わりに答えてほしくない", "代わりには答えてほしくない",
+			"代わりに回答しないで", "代わりに回答しないでください",
+			"代わりに回答しないでほしい", "代わりに回答しないでほしいです",
+			"代わりに回答しなくていい", "代わりに回答してほしくない",
+			"代わりに返事しないで", "代わりに返事しないでください",
+			"代わりに返事しないでほしい", "代わりに返事しないでほしいです",
+			"代わりに返事しなくていい", "代わりに返事してほしくない",
+			"代わりにと答えないで", "代わりにと答えないでください",
+			"代わりにと回答しないで", "代わりにと回答しないでください",
+		} {
+			if proxyAnswerSuffixOwnedByCurrentSpeaker(clause, suffix+tail) {
+				return true
+			}
+		}
+	}
+	for _, noun := range []string{"答え", "回答", "返事"} {
+		for _, particle := range []string{"を", "は", ""} {
+			for _, action := range []string{
+				"作らないで", "作らないでください", "作らないでほしい", "作らないでほしいです", "作らなくていい", "作ってほしくない",
+				"読まないで", "読まないでください", "読まないでほしい", "読まないでほしいです", "読まなくていい", "読んでほしくない",
+				"そのまま読まないで", "そのまま読まないでください", "そのまま読まなくていい",
+				"読み上げないで", "読み上げないでください", "読み上げないでほしい", "読み上げないでほしいです", "読み上げなくていい", "読み上げてほしくない",
+				"そのまま読み上げないで", "そのまま読み上げないでください", "そのまま読み上げなくていい",
+			} {
+				for _, tail := range []string{"", "ね", "よ"} {
+					if proxyAnswerSuffixOwnedByCurrentSpeaker(
+						clause,
+						noun+particle+action+tail,
+					) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func directEnglishProxyAnswerOptOut(clause string) bool {
+	clause = strings.TrimSpace(strings.ToLower(clause))
+	for _, exact := range []string{
+		"don't answer for me", "do not answer for me",
+		"don't write my answer", "do not write my answer",
+		"don't create my answer", "do not create my answer",
+		"don't read my answer aloud", "do not read my answer aloud",
+	} {
+		if clause == exact || clause == "please "+exact {
+			return true
+		}
+	}
+	return false
+}
+
+func directAssistantProxyOptOutClause(clause string) bool {
+	clause = normalizeProxyAnswerSeparators(
+		normalizeProxyAnswerKana(normalizeExplicitCoachPhrase(clause)),
+	)
+	for _, subject := range []string{
+		"aiが", "kotaeが", "あなたが",
+		"aiは", "kotaeは", "あなたは",
+	} {
+		if strings.HasPrefix(clause, subject) {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyAnswerEllipticalOptInClause(clause string) bool {
+	clause = normalizeProxyAnswerIntentClause(clause)
+	for _, tail := range []string{"", "ね", "よ"} {
+		for _, exact := range []string{
+			"答えて", "答えてください", "回答して", "回答してください",
+			"返事して", "返事してください", "作って", "作ってください",
+			"読んで", "読んでください", "そのまま読んで", "そのまま読んでください",
+			"読み上げて", "読み上げてください",
+			"そのまま読み上げて", "そのまま読み上げてください",
+		} {
+			if clause == exact+tail {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func proxyAnswerEllipticalOptOutClause(clause string) bool {
+	clause = normalizeProxyAnswerIntentClause(clause)
+	for _, tail := range []string{"", "ね", "よ"} {
+		for _, exact := range []string{
+			"やめて", "やめてください",
+			"答えないで", "答えないでください", "答えなくていい", "答えてほしくない",
+			"回答しないで", "回答しないでください", "回答しなくていい", "回答してほしくない",
+			"返事しないで", "返事しないでください", "返事しなくていい", "返事してほしくない",
+			"作らないで", "作らないでください", "作らなくていい", "作ってほしくない",
+			"読まないで", "読まないでください", "読まなくていい", "読んでほしくない",
+			"読み上げないで", "読み上げないでください", "読み上げなくていい", "読み上げてほしくない",
+		} {
+			if clause == exact+tail {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeProxyAnswerIntentClause(clause string) string {
+	clause = normalizeProxyAnswerKana(normalizeExplicitCoachPhrase(clause))
+	clause = normalizeProxyAnswerSeparators(clause)
+	for {
+		before := clause
+		for _, prefix := range []string{
+			"いや", "でも", "それでも", "ただ", "じゃあ", "では",
+			"やっぱり", "やはり", "やっぱ", "今は", "もう",
+		} {
+			if strings.HasPrefix(clause, prefix) {
+				clause = strings.TrimPrefix(clause, prefix)
+				break
+			}
+		}
+		if clause == before {
+			return clause
+		}
+	}
+}
+
+func normalizeProxyAnswerKana(clause string) string {
+	return strings.NewReplacer(
+		"下さい", "ください",
+		"欲しくない", "ほしくない",
+		"欲しい", "ほしい",
+		"良い", "いい",
+		"かわり", "代わり",
+		"こたえ", "答え",
+		"かいとう", "回答",
+		"へんじ", "返事",
+		"つくら", "作ら",
+		"つくって", "作って",
+		"読みあげ", "読み上げ",
+		"よみあげ", "読み上げ",
+	).Replace(clause)
+}
+
+func markProxyAnswerIntentBoundaries(phrase string) string {
+	phrase = normalizeProxyAnswerKana(phrase)
+	markers := []string{
+		"やっぱり", "やはり", "いや", "でも", "今は", "もう",
+		"やめて", "やめてください",
+	}
+	// ASR may retain, normalize, or remove a pause. Restore a boundary only when
+	// both sides are finite audited proxy intents. Conjunctive phrases such as
+	// "回答を作って、でも提出したい" must remain ordinary speech.
+	bridges := []string{"", "、", ",", "、 ", ", ", " "}
+	priorEndings := []string{
+		"やめて", "やめてください",
+		"答えて", "答えてください", "回答して", "回答してください",
+		"返事して", "返事してください", "作って", "作ってください",
+		"読んで", "読んでください", "読み上げて", "読み上げてください",
+		"答えないで", "答えないでください", "答えなくていい", "答えてほしくない",
+		"回答しないで", "回答しないでください", "回答しなくていい", "回答してほしくない",
+		"返事しないで", "返事しないでください", "返事しなくていい", "返事してほしくない",
+		"作らないで", "作らないでください", "作らなくていい", "作ってほしくない",
+		"読まないで", "読まないでください", "読まなくていい", "読んでほしくない",
+		"読み上げないで", "読み上げないでください", "読み上げなくていい", "読み上げてほしくない",
+	}
+	for {
+		changed := false
+	findBoundary:
+		for _, priorEnding := range priorEndings {
+			for _, marker := range markers {
+				for _, bridge := range bridges {
+					needle := priorEnding + bridge + marker
+					for searchAt := 0; searchAt < len(phrase); {
+						relativeAt := strings.Index(phrase[searchAt:], needle)
+						if relativeAt < 0 {
+							break
+						}
+						boundaryAt := searchAt + relativeAt + len(priorEnding)
+						intentAt := boundaryAt + len(bridge)
+						tail := phrase[intentAt:]
+						if separatorAt := strings.IndexFunc(tail, coachClauseSeparator); separatorAt >= 0 {
+							tail = tail[:separatorAt]
+						}
+						if auditedProxyAnswerIntentClause(tail) {
+							phrase = phrase[:boundaryAt] + "。" + phrase[intentAt:]
+							changed = true
+							break findBoundary
+						}
+						searchAt = searchAt + relativeAt + len(needle)
+					}
+				}
+			}
+		}
+		if !changed {
+			return phrase
+		}
+	}
+}
+
+func auditedProxyAnswerIntentClause(clause string) bool {
+	return explicitProxyAnswerRequest(clause) ||
+		explicitProxyAnswerOptOutClause(clause) ||
+		proxyAnswerEllipticalOptInClause(clause) ||
+		proxyAnswerEllipticalOptOutClause(clause)
 }
 
 func coachClauseSeparator(r rune) bool {

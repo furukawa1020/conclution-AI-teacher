@@ -2,7 +2,6 @@ package nativeflow
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
@@ -17,9 +16,13 @@ func TestNativeProxyAnswerRequestsDiscardProviderAndDonateFinalCaptionOnce(
 		"面接の回答を作って",
 		"私の代わりに「評価基準をそろえるためです」と答えて",
 		"この答えをそのまま読み上げて",
+		"回答を作らないで、でも代わりに答えて",
+		"回答を作らないででも代わりに答えて",
 	} {
 		t.Run(caption, func(t *testing.T) {
-			if !requiresRespondentCoach(caption) || !nativeAudioEligible(caption) {
+			if !requiresRespondentCoach(caption) ||
+				explicitProxyAnswerOptOut(caption) ||
+				!nativeAudioEligible(caption) {
 				t.Fatal("proxy request must enter the owned staged handoff")
 			}
 			session := newScriptedSession(
@@ -130,8 +133,7 @@ func TestNativeProxyAnswerNonConsentKeepsOrdinaryProviderRoute(t *testing.T) {
 		"母の回答を作って",
 		"母の質問への回答を作って",
 		"友達が「代わりに答えて」と言っていた",
-		"代わりに答えないで",
-		"代わりに答えてください。でも今はやめて",
+		"友達が「代わりに答えないで」と言っていた",
 	} {
 		t.Run(caption, func(t *testing.T) {
 			if requiresRespondentCoach(caption) {
@@ -203,13 +205,14 @@ func TestNativeProxyAnswerNonConsentKeepsOrdinaryProviderRoute(t *testing.T) {
 	}
 }
 
-func TestNativeRetractedIncrementalProxyCaptionNeverReleasesHeldProviderAnswer(
+func TestNativeRetractedIncrementalProxyCaptionDonatesFinalOptOut(
 	t *testing.T,
 ) {
 	const partialCaption = "代わりに答えて"
 	const finalCaption = "代わりに答えて。でも今はやめて"
 	if !requiresRespondentCoach(partialCaption) ||
-		requiresRespondentCoach(finalCaption) {
+		requiresRespondentCoach(finalCaption) ||
+		!explicitProxyAnswerOptOut(finalCaption) {
 		t.Fatal("test captions must cross then retract the proxy boundary")
 	}
 	session := newScriptedSession(
@@ -234,11 +237,14 @@ func TestNativeRetractedIncrementalProxyCaptionNeverReleasesHeldProviderAnswer(
 	opener := &fakeOpener{session: session}
 	handoffService := &recordingCaptionHandoffService{
 		result: httpapi.VoiceTurnResult{
-			StateToken:       "must-not-be-committed",
-			AssistanceTarget: "respondent",
-			Route:            httpapi.VoiceNativeRespondentCoachRoute,
+			StateToken:       "withdrawn-assistant-state",
+			AssistanceTarget: "assistant",
+			RespondentStage:  "none",
+			CoachPhase:       "none",
+			CoachAction:      "none",
+			Route:            "fast",
+			Caption:          "わかりました。代わりには答えません。",
 		},
-		audio: []byte{9, 0},
 	}
 	service, err := NewWithCaptionHandoff(
 		opener,
@@ -267,8 +273,9 @@ func TestNativeRetractedIncrementalProxyCaptionNeverReleasesHeldProviderAnswer(
 			return nil
 		},
 	)
-	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) ||
-		result.Route != "" || result.StateToken != "" || result.Caption != "" ||
+	if err != nil || result.Route != "fast" ||
+		result.StateToken != "withdrawn-assistant-state" ||
+		result.Caption != "わかりました。代わりには答えません。" ||
 		audioCalls != 0 ||
 		checkpointCalls != 0 {
 		t.Fatalf(
@@ -287,7 +294,7 @@ func TestNativeRetractedIncrementalProxyCaptionNeverReleasesHeldProviderAnswer(
 	if len(observations) != 2 ||
 		observations[0].caption != partialCaption || observations[0].final ||
 		observations[1].caption != finalCaption || !observations[1].final ||
-		handoffCommits != 0 || handoffCancels != 1 {
+		handoffCommits != 1 || handoffCancels != 1 {
 		t.Fatalf(
 			"observations=%+v commits=%d cancels=%d",
 			observations,

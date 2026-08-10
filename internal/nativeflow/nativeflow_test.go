@@ -802,6 +802,13 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestThroughBoundStagedFlow(t 
 		"上司に「この企画の目的は？」と聞かれました。どう答えればいいですか",
 		"面接で強みを質問されました。何て答えたらいいですか",
 		"My manager asked me why the change was needed. How should I answer?",
+		"代わりに答えて",
+		"回答を作って",
+		"この答えをそのまま読んで",
+		"私の代わりに「評価基準をそろえます」と答えて",
+		"代わりに、答えて",
+		"回答を 作って",
+		"この答えを、そのまま読み上げて",
 	} {
 		t.Run(value, func(t *testing.T) {
 			session := newScriptedSession(
@@ -860,6 +867,74 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestThroughBoundStagedFlow(t 
 					err,
 					audioDelivered,
 					controlPublished,
+					session.commits,
+					session.discards,
+				)
+			}
+		})
+	}
+}
+
+func TestNativeFinalCaptionKeepsOrdinaryAndRetractedProxyRequestsOnNativeAudio(t *testing.T) {
+	for index, value := range []string{
+		"問題の答えを教えて",
+		"代わりに答えて。でも今はやめて",
+		"回答を作って。いや、作らないで",
+		"この回答を読み上げて。やっぱりやめて",
+	} {
+		t.Run(value, func(t *testing.T) {
+			if requiresRespondentCoach(value) {
+				t.Fatalf("ordinary or retracted final intent entered respondent coach: %q", value)
+			}
+			const providerReply = "わかりました。今の依頼に沿って続けます。"
+			session := newScriptedSession(
+				nativevoice.Event{
+					Kind:         nativevoice.EventInputCaption,
+					CaptionUTF8:  []byte(value),
+					CaptionFinal: true,
+				},
+				nativevoice.Event{
+					Kind:            nativevoice.EventAudioPCM,
+					PCM:             []byte{1, 2, 3, 4},
+					SampleRateHertz: nativevoice.OutputSampleRateHertz,
+				},
+				nativevoice.Event{
+					Kind:         nativevoice.EventOutputCaption,
+					CaptionUTF8:  []byte(providerReply),
+					CaptionFinal: true,
+				},
+				nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+			)
+			service, err := New(
+				&fakeOpener{session: session},
+				fakePreparer{token: "ordinary-native-state"},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+
+			var delivered []byte
+			result, err := service.ProcessLive(
+				context.Background(),
+				"uid-native-proxy-control-"+string(rune('a'+index)),
+				nativeInput(),
+				oneFrame(),
+				func(chunk []byte) error {
+					delivered = append(delivered, chunk...)
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Route != nativevoice.RouteNativeAudio ||
+				string(result.Caption) != providerReply ||
+				len(delivered) != 4 || session.commits != 1 {
+				t.Fatalf(
+					"result=%+v delivered=%v commits=%d discards=%d",
+					result,
+					delivered,
 					session.commits,
 					session.discards,
 				)
@@ -1099,6 +1174,13 @@ func TestNativeRespondentCoachUsesAuditedDirectConsentBoundary(t *testing.T) {
 		"My boss asked me what the purpose was. Please help me answer.",
 		"答え方を一問だけ手伝って",
 		"どう答えればいいですか",
+		"代わりに答えて",
+		"回答を作って",
+		"この答えをそのまま読んで",
+		"私の代わりに「評価基準をそろえます」と答えて",
+		"面接の回答を作って",
+		"母はこう言いました。代わりに答えて",
+		"回答を作らないで。でも、代わりに答えて",
 	} {
 		if !requiresRespondentCoach(value) {
 			t.Errorf("explicit respondent request did not fall back: %q", value)
@@ -1117,6 +1199,18 @@ func TestNativeRespondentCoachUsesAuditedDirectConsentBoundary(t *testing.T) {
 		"友達が上司に目的を聞かれた。友達の答え方を手伝って",
 		"「上司に目的を聞かれた。どう答えればいい？」と友達が言っていた",
 		"上司に「目的を聞かれた。どう答えればいいですか",
+		"問題の答えを教えて",
+		"母の代わりに答えて",
+		"母が代わりに答えて",
+		"母の回答を作って",
+		"母の質問への回答を作って",
+		"友達が聞かれた質問への回答を作って",
+		"友達が「代わりに答えて」と言っていた",
+		"代わりに答えないで",
+		"この答えを読んで",
+		"代わりに答えて。でも今はやめて",
+		"回答を作って。いや、作らないで",
+		"この回答を読み上げて。やっぱりやめて",
 	} {
 		if requiresRespondentCoach(value) {
 			t.Errorf("ambiguous or unowned request entered respondent coach: %q", value)

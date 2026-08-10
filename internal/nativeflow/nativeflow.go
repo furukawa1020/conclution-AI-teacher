@@ -373,6 +373,21 @@ func (s *Service) processLive(
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 				}
+				if stagedHandoff != nil && !requiresStaged && !coachObserved {
+					// A non-final caption may have already asked the provider to
+					// answer for the person. If the cumulative final caption retracts
+					// that request, the held provider output is still tainted by the
+					// earlier instruction. Never commit it as ordinary Native audio;
+					// cancel respondent authority and replay the final turn through
+					// the audited staged fallback instead.
+					pooled.session.DiscardOutput()
+					stagedHandoff.Cancel()
+					stagedHandoff = nil
+					event.Clear()
+					clear(inputCaption)
+					clear(caption)
+					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+				}
 				if requiresStaged || coachObserved {
 					// A Native checkpoint can retain only a generic operator and
 					// cannot prove which external question the next utterance

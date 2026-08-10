@@ -60,42 +60,6 @@ func TestExplicitAnswerHelpCannotBeActuatedAsAssistantGhostwriting(t *testing.T)
 	}
 }
 
-func TestProxyAnswerRequestsUseOwnedRespondentConsentBoundary(t *testing.T) {
-	for _, utterance := range []string{
-		"代わりに答えて",
-		"私の代わりに答えてください",
-		"回答を作って",
-		"この答えをそのまま読んで",
-		"その回答を読み上げてください",
-		"AIが代わりに答えて",
-		"あなたが代わりに答えてください",
-		"KOTAEが回答を作って",
-		"母はこう言いました。代わりに答えて",
-	} {
-		if !explicitCoachOptIn(utterance) || !ExplicitCoachOptIn(utterance) {
-			t.Errorf("current-speaker proxy request was not intercepted: %q", utterance)
-		}
-	}
-
-	for _, utterance := range []string{
-		"問題の答えを教えて",
-		"母の代わりに答えて",
-		"母が代わりに答えて",
-		"彼が代わりに答えて",
-		"母はAIが代わりに答えて",
-		"友達が「代わりに答えて」と言っていた",
-		"「回答を作って」",
-		"代わりに答えないで",
-		"回答を作らないで",
-		"この答えをそのまま読まないで",
-		"母はこう言いました。答え方を手伝ってほしい",
-	} {
-		if explicitCoachOptIn(utterance) || ExplicitCoachOptIn(utterance) {
-			t.Errorf("unowned, quoted, negated, or informational request gained respondent authority: %q", utterance)
-		}
-	}
-}
-
 func TestHostilePlannerCannotFulfillProxyAnswerRequest(t *testing.T) {
 	for _, utterance := range []string{
 		"代わりに答えて",
@@ -126,8 +90,8 @@ func TestHostilePlannerCannotFulfillProxyAnswerRequest(t *testing.T) {
 			}
 			if result.Route != "planner-unavailable" || len(fake.calls) != 1 ||
 				strings.Contains(result.SpokenReply, ghostAnswer) ||
-				result.AnswerProof != AnswerProofNone ||
-				result.AnswerProofCandidate != AnswerProofNone {
+				(result.AnswerProof != "" && result.AnswerProof != AnswerProofNone) ||
+				(result.AnswerProofCandidate != "" && result.AnswerProofCandidate != AnswerProofNone) {
 				t.Fatalf("proxy request reached hostile assistant output: result=%#v calls=%#v", result, fake.calls)
 			}
 			state, openErr := agent.codec.open("uid-proxy-hostile-"+utterance, result.StateToken)
@@ -251,6 +215,24 @@ func TestAnswerWordsCannotBeMisreadAsCoachScopeExit(t *testing.T) {
 			opening: "上司に、AIへ任せる範囲を聞かれました。" +
 				"答え方を手伝ってください。",
 			ownAnswer: "AIに何を任せますか？",
+		},
+		{
+			name: "AI topic explanation answer",
+			opening: "上司に、AIをどう説明するか聞かれました。" +
+				"答え方を手伝ってください。",
+			ownAnswer: "AIについて説明して理解をそろえます",
+		},
+		{
+			name: "KOTAE relation explanation answer",
+			opening: "上司に、KOTAEに関する方針を聞かれました。" +
+				"答え方を手伝ってください。",
+			ownAnswer: "KOTAEに関する考えを説明して合意します",
+		},
+		{
+			name: "person expectation explanation answer",
+			opening: "上司に、相手への期待を聞かれました。" +
+				"答え方を手伝ってください。",
+			ownAnswer: "あなたへの期待を説明してください",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

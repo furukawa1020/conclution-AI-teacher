@@ -1779,8 +1779,10 @@ func (agent *vertexAgent) Process(
 	// summaries. Even an abstract-looking summary can preserve a partial quote,
 	// identifier, or document secret. Keep only independently filtered graph
 	// nodes and fixed-size control metadata.
+	proxySafetyTurn := urgentSafety && explicitProxyAnswerOptIn(normalized.Utterance)
 	isolateSemanticState := verificationUnavailable ||
 		finalPlan.AssistanceTarget == "respondent" ||
+		proxySafetyTurn ||
 		passiveAmbientTurn(normalized) ||
 		normalized.PDF != nil
 	semanticBaseState := state
@@ -3805,6 +3807,13 @@ func (agent *vertexAgent) infer(
 		// Keep the genuine urgent path available with audited fixed copy; a
 		// colluding planner/critic draft is never the actuator payload.
 		plan.SpokenReply = urgentSafetyFallbackSpokenReply
+		plan.AnswerAttempt = ""
+		plan.RespondentEvidence = []modelSlotEvidence{}
+		plan.RespondentProtected = []string{}
+		plan.LatentQuestion = ""
+		plan.ConversationSummary = ""
+		plan.DocumentSummary = ""
+		plan.ThoughtStateDelta = ThoughtStateDelta{}
 	}
 	if respondentRequired &&
 		plan.AssistanceTarget != "respondent" &&
@@ -5128,7 +5137,11 @@ func explicitAssistantDativeAddress(phrase string) bool {
 			remainder := strings.TrimSpace(strings.TrimPrefix(phrase, prefix))
 			blocked := []string{"は", "も"}
 			if particle == "に" {
-				blocked = append(blocked, "ついて", "関して", "関する", "おいて", "おける")
+				blocked = append(
+					blocked,
+					"ついて", "関して", "関する", "おいて", "おける",
+					"対して", "対する", "よって", "よる",
+				)
 			} else {
 				blocked = append(blocked, "の")
 			}
@@ -5226,46 +5239,21 @@ func explicitCoachOptIn(utterance string) bool {
 		return false
 	}
 	reportedThirdPartyContext := false
-	for _, clause := range strings.FieldsFunc(phrase, func(r rune) bool {
-		switch r {
-		case '。', '！', '？', '!', '?', '.', '\n', '\r', ';', '；':
-			return true
-		default:
-			return false
-		}
-	}) {
+	consented := false
+	for _, clause := range strings.FieldsFunc(phrase, coachClauseSeparator) {
 		clause = strings.TrimSpace(clause)
 		if explicitCoachOptInClause(clause) &&
 			(!reportedThirdPartyContext || explicitCurrentSpeakerCoachRequest(clause)) {
-			return true
+			consented = true
+		}
+		if coachRequestWithdrawalClause(clause) {
+			consented = false
 		}
 		if thirdPartyReportContext(clause) {
 			reportedThirdPartyContext = true
 		}
 	}
-	return false
-}
-
-func explicitProxyAnswerOptIn(utterance string) bool {
-	phrase := normalizeExplicitCoachPhrase(utterance)
-	var quotesValid bool
-	phrase, quotesValid = coachPhraseWithoutQuotedSpeech(phrase)
-	if !quotesValid {
-		return false
-	}
-	for _, clause := range strings.FieldsFunc(phrase, func(r rune) bool {
-		switch r {
-		case '。', '！', '？', '!', '?', '.', '\n', '\r', ';', '；':
-			return true
-		default:
-			return false
-		}
-	}) {
-		if explicitProxyAnswerRequest(strings.TrimSpace(clause)) {
-			return true
-		}
-	}
-	return false
+	return consented
 }
 
 func coachPhraseWithoutQuotedSpeech(value string) (string, bool) {
@@ -5572,7 +5560,13 @@ func explicitCoachOptInClause(clause string) bool {
 // at the matched suffix so a quoted or third-party request cannot grant coach
 // authority to the current speaker.
 func explicitProxyAnswerRequest(clause string) bool {
-	clause = strings.TrimSpace(clause)
+	clause = normalizeExplicitCoachPhrase(clause)
+	var quotesValid bool
+	clause, quotesValid = coachPhraseWithoutQuotedSpeech(clause)
+	if !quotesValid {
+		return false
+	}
+	clause = normalizeProxyAnswerSeparators(clause)
 	if clause == "" || startsQuotedCoachClause(clause) || coachOptInNegated(clause) {
 		return false
 	}
@@ -5580,25 +5574,11 @@ func explicitProxyAnswerRequest(clause string) bool {
 		"代わりに答えて", "代わりに答えてください",
 		"代わりに回答して", "代わりに回答してください",
 		"代わりに返事して", "代わりに返事してください",
+		"代わりにと答えて", "代わりにと答えてください",
+		"代わりにと回答して", "代わりにと回答してください",
 	} {
 		if proxyAnswerSuffixOwnedByCurrentSpeaker(clause, suffix) {
 			return true
-		}
-	}
-	for _, demonstrative := range []string{"この", "その", "上の", "次の"} {
-		for _, noun := range []string{"答え", "回答", "返事"} {
-			for _, modifier := range []string{"", "そのまま"} {
-				for _, action := range []string{
-					"読んで", "読んでください", "読み上げて", "読み上げてください",
-				} {
-					if proxyAnswerSuffixOwnedByCurrentSpeaker(
-						clause,
-						demonstrative+noun+"を"+modifier+action,
-					) {
-						return true
-					}
-				}
-			}
 		}
 	}
 	for _, noun := range []string{"答え", "回答", "返事"} {
@@ -5612,20 +5592,25 @@ func explicitProxyAnswerRequest(clause string) bool {
 				return true
 			}
 		}
-		for _, modifier := range []string{"", "そのまま"} {
-			for _, action := range []string{
-				"読んで", "読んでください", "読み上げて", "読み上げてください",
-			} {
-				if proxyAnswerSuffixOwnedByCurrentSpeaker(
-					clause,
-					noun+"を"+modifier+action,
-				) {
-					return true
-				}
+		for _, suffix := range []string{
+			noun + "をそのまま読んで",
+			noun + "をそのまま読んでください",
+			noun + "を読み上げて",
+			noun + "を読み上げてください",
+			noun + "をそのまま読み上げて",
+			noun + "をそのまま読み上げてください",
+		} {
+			if proxyAnswerSuffixOwnedByCurrentSpeaker(clause, suffix) {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+func normalizeProxyAnswerSeparators(clause string) string {
+	replacer := strings.NewReplacer(" ", "", "\t", "", "　", "", "、", "", ",", "")
+	return replacer.Replace(strings.TrimSpace(clause))
 }
 
 func proxyAnswerSuffixOwnedByCurrentSpeaker(clause string, suffix string) bool {
@@ -5633,10 +5618,131 @@ func proxyAnswerSuffixOwnedByCurrentSpeaker(clause string, suffix string) bool {
 		return false
 	}
 	requestAt := strings.LastIndex(clause, suffix)
-	if requestAt >= 0 && directAssistantProxySubject(clause[:requestAt]) {
+	requestAt = proxyAnswerRequestAnchor(clause, requestAt)
+	return requestAt >= 0 && !proxyAnswerThirdPartyOwnsRequest(clause, requestAt)
+}
+
+func proxyAnswerRequestAnchor(clause string, requestAt int) int {
+	if requestAt < 0 || requestAt > len(clause) {
+		return requestAt
+	}
+	for {
+		prefix := clause[:requestAt]
+		moved := false
+		for _, topic := range []string{
+			"がんばって考えた", "はっきりした", "もう少し短い",
+			"もっと自然な", "もっと丁寧な", "とても自然な", "長さは短く",
+			"丁寧な", "短い", "自然な",
+			"聞かれたことへの", "尋ねられたことへの",
+			"質問への", "問いへの",
+			"のための", "向けの", "用の", "への", "宛ての",
+			"面接の", "面談の", "質問の", "問題の", "問いの",
+			"さっきの", "先ほどの", "上の", "次の", "この", "その",
+		} {
+			if strings.HasSuffix(prefix, topic) {
+				requestAt -= len(topic)
+				moved = true
+				break
+			}
+		}
+		if !moved {
+			return requestAt
+		}
+	}
+}
+
+func proxyAnswerThirdPartyOwnsRequest(clause string, requestAt int) bool {
+	if requestAt <= 0 || requestAt > len(clause) {
+		return false
+	}
+	prefix := strings.TrimSpace(clause[:requestAt])
+	if prefix == "" {
+		return false
+	}
+
+	// A reason/contrast before the finite command is context, not its actor.
+	// Commas may be absent in ASR, so use the connector itself as the boundary.
+	lastContextEnd := -1
+	for _, connector := range []string{
+		"だから", "なので", "だけど", "ですが", "ものの", "とはいえ",
+		"から", "ので", "けど",
+	} {
+		if at := strings.LastIndex(prefix, connector); at >= 0 && at+len(connector) > lastContextEnd {
+			lastContextEnd = at + len(connector)
+		}
+	}
+	if lastContextEnd >= 0 {
+		prefix = strings.TrimSpace(prefix[lastContextEnd:])
+		if prefix == "" {
+			return false
+		}
+	}
+
+	// These exact turn-setting prefixes describe time, contrast, or requested
+	// style. They are not people who own the following answer slot.
+	for _, contextPrefix := range []string{
+		"今日は", "今は", "今回は", "次は", "今度は", "さっきは", "先ほどは",
+		"でも", "それでも", "ただ", "じゃあ", "では", "いや",
+		"はっきりした", "がんばって考えた", "もう少し", "もうちょっと",
+		"もっと", "とても",
+		"長さは",
+	} {
+		if strings.HasPrefix(prefix, contextPrefix) {
+			prefix = strings.TrimSpace(strings.TrimPrefix(prefix, contextPrefix))
+			break
+		}
+	}
+	if prefix == "" || directAssistantProxySubject(prefix) {
+		return false
+	}
+
+	if remainder, currentSpeaker := stripJapaneseFirstPersonSubjectPrefix(prefix); currentSpeaker {
+		return proxyAnswerPrefixHasExplicitThirdParty(remainder)
+	}
+	for _, self := range []string{
+		"私の", "わたしの", "僕の", "ぼくの", "俺の", "自分の",
+	} {
+		if strings.HasPrefix(prefix, self) {
+			return proxyAnswerPrefixHasExplicitThirdParty(
+				strings.TrimSpace(strings.TrimPrefix(prefix, self)),
+			)
+		}
+	}
+	for _, assistant := range []string{"aiが", "kotaeが", "あなたが"} {
+		if strings.HasPrefix(prefix, assistant) {
+			remainder := strings.TrimSpace(strings.TrimPrefix(prefix, assistant))
+			for _, self := range []string{
+				"私の", "わたしの", "僕の", "ぼくの", "俺の", "自分の",
+			} {
+				if strings.HasPrefix(remainder, self) {
+					return proxyAnswerPrefixHasExplicitThirdParty(
+						strings.TrimSpace(strings.TrimPrefix(remainder, self)),
+					)
+				}
+			}
+			return proxyAnswerPrefixHasExplicitThirdParty(remainder)
+		}
+	}
+	return proxyAnswerPrefixHasExplicitThirdParty(prefix)
+}
+
+func proxyAnswerPrefixHasExplicitThirdParty(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return false
+	}
+	if containsThirdPartyRequestPossession(prefix) || strings.HasSuffix(prefix, "の") {
 		return true
 	}
-	return requestAt >= 0 && !thirdPartyOwnsCoachRequest(clause, requestAt)
+	// Audited temporal/style prefixes have already been stripped above. Any
+	// remaining subject/topic marker is therefore ambiguous third-party
+	// ownership and fails closed, including names and roles outside a lexicon.
+	// Audited degree modifiers such as "もっと" and "とても" were stripped
+	// above, so a remaining も is an ambiguous third-party topic and fails closed.
+	return strings.Contains(prefix, "が") ||
+		strings.Contains(prefix, "は") ||
+		strings.Contains(prefix, "なら") ||
+		strings.Contains(prefix, "も")
 }
 
 // A direct command may spell out the assistant as the grammatical actor
@@ -5647,6 +5753,57 @@ func directAssistantProxySubject(prefix string) bool {
 	prefix = strings.TrimSpace(prefix)
 	for _, subject := range []string{"aiが", "kotaeが", "あなたが"} {
 		if prefix == subject {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitProxyAnswerOptIn(utterance string) bool {
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	var quotesValid bool
+	phrase, quotesValid = coachPhraseWithoutQuotedSpeech(phrase)
+	if !quotesValid {
+		return false
+	}
+	reportedThirdPartyContext := false
+	consented := false
+	for _, clause := range strings.FieldsFunc(phrase, coachClauseSeparator) {
+		clause = strings.TrimSpace(clause)
+		if explicitProxyAnswerRequest(clause) &&
+			(!reportedThirdPartyContext || explicitCurrentSpeakerCoachRequest(clause)) {
+			consented = true
+		}
+		if coachRequestWithdrawalClause(clause) {
+			consented = false
+		}
+		if thirdPartyReportContext(clause) {
+			reportedThirdPartyContext = true
+		}
+	}
+	return consented
+}
+
+func coachClauseSeparator(r rune) bool {
+	switch r {
+	case '。', '！', '？', '!', '?', '.', '\n', '\r', ';', '；':
+		return true
+	default:
+		return false
+	}
+}
+
+func coachRequestWithdrawalClause(clause string) bool {
+	phrase := normalizeExplicitCoachPhrase(clause)
+	if coachOptInNegated(phrase) {
+		return true
+	}
+	for _, ending := range []string{
+		"やめて", "今はやめて", "もうやめて", "やっぱりやめて", "やはりやめて",
+		"答えないで", "回答しないで", "返事しないで",
+		"作らないで", "読まないで", "読み上げないで",
+	} {
+		if strings.HasSuffix(phrase, ending) {
 			return true
 		}
 	}

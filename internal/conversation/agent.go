@@ -40,6 +40,7 @@ const (
 	interpretationListenSpokenReply        = "短い言葉のままで大丈夫です。朝と夜で同じ音楽も少し違って聞こえます。"
 	plannerUnavailableSpokenReply          = "今の声は届いています。返事の準備だけ止まったので、言い直さず続けてください。"
 	verificationUnavailableSpokenReply     = "今の声は届いています。確認だけ間に合わなかったので、言い直さず続けてください。"
+	urgentSafetyFallbackSpokenReply        = "緊急性があるため、安全を優先してください。今すぐ地域の緊急窓口へ連絡できますか？"
 
 	PrecisionConfidenceThreshold         = 0.78
 	AmbientEVIThreshold                  = 0.35
@@ -1727,7 +1728,7 @@ func (agent *vertexAgent) Process(
 	if urgentSafety {
 		if verificationUnavailable || lacBlocksAnswer {
 			decision.Act = "reflect"
-			spokenReply = "緊急性があるため、安全を優先してください。今すぐ地域の緊急窓口へ連絡できますか？"
+			spokenReply = urgentSafetyFallbackSpokenReply
 			interventionPolicy = "safety"
 		}
 	} else if passiveRespondentObservation {
@@ -2211,22 +2212,24 @@ func (agent *vertexAgent) completeProactiveLocal(
 		return VoiceTurnResult{}, err
 	}
 	return VoiceTurnResult{
-		SchemaVersion:       SchemaVersion,
-		Domain:              "daily",
-		Intent:              "other",
-		AssistanceTarget:    "assistant",
-		RespondentStage:     "none",
-		CoachPhase:          string(respondent.CoachPhaseNone),
-		CoachAction:         string(respondent.CoachActionNone),
-		ResearchStatus:      "none",
-		ResearchRecords:     []ResearchRecord{},
-		LatentQuestion:      "",
-		ArgumentStructure:   "direct_answer",
-		InterventionPolicy:  "answer",
-		SpokenReply:         spokenReply,
-		Confidence:          1,
-		Intervention:        decision,
-		SelfCorrectionGrace: state.SelfCorrectionGrace,
+		SchemaVersion:        SchemaVersion,
+		Domain:               "daily",
+		Intent:               "other",
+		AssistanceTarget:     "assistant",
+		RespondentStage:      "none",
+		CoachPhase:           string(respondent.CoachPhaseNone),
+		CoachAction:          string(respondent.CoachActionNone),
+		AnswerProof:          AnswerProofNone,
+		AnswerProofCandidate: AnswerProofNone,
+		ResearchStatus:       "none",
+		ResearchRecords:      []ResearchRecord{},
+		LatentQuestion:       "",
+		ArgumentStructure:    "direct_answer",
+		InterventionPolicy:   "answer",
+		SpokenReply:          spokenReply,
+		Confidence:           1,
+		Intervention:         decision,
+		SelfCorrectionGrace:  state.SelfCorrectionGrace,
 		AnswerContract: answercontract.Metrics{
 			CommitmentFrontPosition: answercontract.PositionAbsent,
 		},
@@ -2384,24 +2387,26 @@ func (agent *vertexAgent) completePlannerUnavailable(
 		return VoiceTurnResult{}, err
 	}
 	return VoiceTurnResult{
-		SchemaVersion:       SchemaVersion,
-		Domain:              "other",
-		Intent:              "other",
-		AssistanceTarget:    "assistant",
-		RespondentStage:     "none",
-		CoachPhase:          string(respondent.CoachPhaseNone),
-		CoachAction:         string(respondent.CoachActionNone),
-		ResearchStatus:      "none",
-		ResearchRecords:     []ResearchRecord{},
-		ArgumentStructure:   "direct_answer",
-		InterventionPolicy:  "wait",
-		SpokenReply:         plannerUnavailableSpokenReply,
-		Confidence:          0,
-		Intervention:        decision,
-		SelfCorrectionGrace: state.SelfCorrectionGrace,
-		Route:               "planner-unavailable",
-		NeedsClarification:  false,
-		StateToken:          stateToken,
+		SchemaVersion:        SchemaVersion,
+		Domain:               "other",
+		Intent:               "other",
+		AssistanceTarget:     "assistant",
+		RespondentStage:      "none",
+		CoachPhase:           string(respondent.CoachPhaseNone),
+		CoachAction:          string(respondent.CoachActionNone),
+		AnswerProof:          AnswerProofNone,
+		AnswerProofCandidate: AnswerProofNone,
+		ResearchStatus:       "none",
+		ResearchRecords:      []ResearchRecord{},
+		ArgumentStructure:    "direct_answer",
+		InterventionPolicy:   "wait",
+		SpokenReply:          plannerUnavailableSpokenReply,
+		Confidence:           0,
+		Intervention:         decision,
+		SelfCorrectionGrace:  state.SelfCorrectionGrace,
+		Route:                "planner-unavailable",
+		NeedsClarification:   false,
+		StateToken:           stateToken,
 	}, nil
 }
 
@@ -3793,6 +3798,15 @@ func (agent *vertexAgent) infer(
 		return modelPlan{}, err
 	}
 	if respondentRequired &&
+		plan.InterventionPolicy == "safety" &&
+		explicitProxyAnswerOptIn(turn.Utterance) {
+		// Safety may interrupt an answer slot, but a model cannot turn that
+		// exception into authority to speak a supplied or fabricated proxy A.
+		// Keep the genuine urgent path available with audited fixed copy; a
+		// colluding planner/critic draft is never the actuator payload.
+		plan.SpokenReply = urgentSafetyFallbackSpokenReply
+	}
+	if respondentRequired &&
 		plan.AssistanceTarget != "respondent" &&
 		plan.InterventionPolicy != "safety" {
 		// A current-speaker request for answer help is authority to open a
@@ -5033,6 +5047,11 @@ func shouldRecoverOutsideCoach(utterance string) bool {
 // would let an assistant classification steal the person's still-open A slot.
 func explicitDirectQuestionOutsideCoach(utterance string) bool {
 	phrase := normalizeExplicitCoachPhrase(utterance)
+	var quotesValid bool
+	phrase, quotesValid = coachPhraseWithoutQuotedSpeech(phrase)
+	if !quotesValid {
+		return false
+	}
 	for _, exact := range []string{
 		"kotaeに質問です", "kotaeに質問があります",
 		"あなたに質問です", "あなたに質問があります", "aiに質問です", "aiに質問があります",
@@ -5042,22 +5061,23 @@ func explicitDirectQuestionOutsideCoach(utterance string) bool {
 		}
 	}
 
-	directAddress := false
+	vocativeAddress := false
 	for _, prefix := range []string{
-		"kotae、", "kotae,", "kotaeに", "kotaeへ",
-		"あなたに", "あなたへ", "aiに", "aiへ",
+		"kotae、", "kotae,", "ai、", "ai,", "あなた、", "あなた,",
 	} {
 		if strings.HasPrefix(phrase, prefix) {
-			directAddress = true
+			vocativeAddress = true
 			break
 		}
 	}
-	if !directAddress {
+	dativeAddress := explicitAssistantDativeAddress(phrase)
+	if !vocativeAddress && !dativeAddress {
 		return false
 	}
-	// A question-shaped A is still the person's answer (for example, what
-	// they would ask a customer first). A terminal question mark can exit the
-	// slot only after an explicit KOTAE/AI address established above.
+	// A dative phrase such as "AIに何を任せますか？" can itself be the
+	// person's answer about AI. Only an explicit vocative may use a terminal
+	// question mark to hand the floor back to KOTAE. Dative address remains
+	// narrower: it must carry a direct teach/explain instruction below.
 	raw := strings.ToLower(collapseSpace(utterance))
 	raw = strings.TrimRight(raw, " \t\r\n。.!！")
 	questionAt := -1
@@ -5070,19 +5090,53 @@ func explicitDirectQuestionOutsideCoach(utterance string) bool {
 		questionAt = len(raw) - len("？")
 		questionWidth = len("？")
 	}
-	if questionAt >= 0 &&
+	if vocativeAddress && questionAt >= 0 &&
 		!coachTextPositionInsideQuote(raw, questionAt) &&
 		!coachQuestionMarkLocallyReported(raw, questionAt+questionWidth) {
 		return true
 	}
 	for _, ending := range []string{
 		"教えて", "教えてください", "説明して", "説明してください",
+	} {
+		if strings.HasSuffix(phrase, ending) {
+			return true
+		}
+	}
+	if !vocativeAddress {
+		return false
+	}
+	for _, ending := range []string{
 		"どう思う", "どう思いますか", "どうですか", "何ですか",
 		"なぜですか", "どこですか", "いつですか", "誰ですか",
 		"どっちですか", "どちらですか", "できますか",
 		"tell me", "what do you think", "can you explain",
 	} {
 		if strings.HasSuffix(phrase, ending) {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitAssistantDativeAddress(phrase string) bool {
+	for _, assistant := range []string{"kotae", "あなた", "ai"} {
+		for _, particle := range []string{"に", "へ"} {
+			prefix := assistant + particle
+			if !strings.HasPrefix(phrase, prefix) {
+				continue
+			}
+			remainder := strings.TrimSpace(strings.TrimPrefix(phrase, prefix))
+			blocked := []string{"は", "も"}
+			if particle == "に" {
+				blocked = append(blocked, "ついて", "関して", "関する", "おいて", "おける")
+			} else {
+				blocked = append(blocked, "の")
+			}
+			for _, nonAddress := range blocked {
+				if strings.HasPrefix(remainder, nonAddress) {
+					return false
+				}
+			}
 			return true
 		}
 	}
@@ -5192,6 +5246,28 @@ func explicitCoachOptIn(utterance string) bool {
 	return false
 }
 
+func explicitProxyAnswerOptIn(utterance string) bool {
+	phrase := normalizeExplicitCoachPhrase(utterance)
+	var quotesValid bool
+	phrase, quotesValid = coachPhraseWithoutQuotedSpeech(phrase)
+	if !quotesValid {
+		return false
+	}
+	for _, clause := range strings.FieldsFunc(phrase, func(r rune) bool {
+		switch r {
+		case '。', '！', '？', '!', '?', '.', '\n', '\r', ';', '；':
+			return true
+		default:
+			return false
+		}
+	}) {
+		if explicitProxyAnswerRequest(strings.TrimSpace(clause)) {
+			return true
+		}
+	}
+	return false
+}
+
 func coachPhraseWithoutQuotedSpeech(value string) (string, bool) {
 	var result strings.Builder
 	closers := make([]rune, 0, 2)
@@ -5249,7 +5325,8 @@ func ExplicitCoachOptIn(utterance string) bool {
 
 func explicitCurrentSpeakerCoachRequest(clause string) bool {
 	if explicitJapaneseFirstPersonPrefix(clause) ||
-		directEnglishCoachRequest(clause) {
+		directEnglishCoachRequest(clause) ||
+		explicitProxyAnswerRequest(clause) {
 		return true
 	}
 	answerSubject := false
@@ -5424,6 +5501,9 @@ func explicitCoachOptInClause(clause string) bool {
 			return false
 		}
 	}
+	if explicitProxyAnswerRequest(clause) {
+		return true
+	}
 
 	for _, ending := range []string{
 		"どう答えればいい", "どう答えればいいですか", "どう答えたらいい", "どう答えたらいいですか",
@@ -5483,6 +5563,94 @@ func explicitCoachOptInClause(clause string) bool {
 	}
 
 	return directEnglishCoachRequest(clause)
+}
+
+// explicitProxyAnswerRequest intercepts only three finite requests that would
+// otherwise ask the assistant to occupy the person's A slot: delegation,
+// answer fabrication, and verbatim recitation. It deliberately does not match
+// informational questions such as "問題の答えを教えて". Ownership is checked
+// at the matched suffix so a quoted or third-party request cannot grant coach
+// authority to the current speaker.
+func explicitProxyAnswerRequest(clause string) bool {
+	clause = strings.TrimSpace(clause)
+	if clause == "" || startsQuotedCoachClause(clause) || coachOptInNegated(clause) {
+		return false
+	}
+	for _, suffix := range []string{
+		"代わりに答えて", "代わりに答えてください",
+		"代わりに回答して", "代わりに回答してください",
+		"代わりに返事して", "代わりに返事してください",
+	} {
+		if proxyAnswerSuffixOwnedByCurrentSpeaker(clause, suffix) {
+			return true
+		}
+	}
+	for _, demonstrative := range []string{"この", "その", "上の", "次の"} {
+		for _, noun := range []string{"答え", "回答", "返事"} {
+			for _, modifier := range []string{"", "そのまま"} {
+				for _, action := range []string{
+					"読んで", "読んでください", "読み上げて", "読み上げてください",
+				} {
+					if proxyAnswerSuffixOwnedByCurrentSpeaker(
+						clause,
+						demonstrative+noun+"を"+modifier+action,
+					) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	for _, noun := range []string{"答え", "回答", "返事"} {
+		for _, action := range []string{
+			"作って", "作ってください",
+		} {
+			if proxyAnswerSuffixOwnedByCurrentSpeaker(
+				clause,
+				noun+"を"+action,
+			) {
+				return true
+			}
+		}
+		for _, modifier := range []string{"", "そのまま"} {
+			for _, action := range []string{
+				"読んで", "読んでください", "読み上げて", "読み上げてください",
+			} {
+				if proxyAnswerSuffixOwnedByCurrentSpeaker(
+					clause,
+					noun+"を"+modifier+action,
+				) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func proxyAnswerSuffixOwnedByCurrentSpeaker(clause string, suffix string) bool {
+	if !strings.HasSuffix(clause, suffix) {
+		return false
+	}
+	requestAt := strings.LastIndex(clause, suffix)
+	if requestAt >= 0 && directAssistantProxySubject(clause[:requestAt]) {
+		return true
+	}
+	return requestAt >= 0 && !thirdPartyOwnsCoachRequest(clause, requestAt)
+}
+
+// A direct command may spell out the assistant as the grammatical actor
+// ("AIが代わりに答えて"). That is still the current speaker asking the
+// assistant to occupy their A slot, not third-party consent. Keep this exact so
+// a preceding owner ("母はAIが…") cannot be erased by the assistant noun.
+func directAssistantProxySubject(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	for _, subject := range []string{"aiが", "kotaeが", "あなたが"} {
+		if prefix == subject {
+			return true
+		}
+	}
+	return false
 }
 
 func startsQuotedCoachClause(clause string) bool {
@@ -5671,6 +5839,12 @@ func coachOptInNegated(phrase string) bool {
 		"受け答えの練習はしない", "受け答えの練習をしない", "受け答えの練習はしたくない",
 		"答えを整えないで", "回答を整えないで", "返事を整えないで",
 		"答えを直さないで", "回答を直さないで", "答え方を教えないで",
+		"代わりに答えないで", "代わりに回答しないで", "代わりに返事しないで",
+		"答えを作らないで", "回答を作らないで", "返事を作らないで",
+		"答えを読まないで", "回答を読まないで", "返事を読まないで",
+		"答えをそのまま読まないで", "回答をそのまま読まないで", "返事をそのまま読まないで",
+		"答えを読み上げないで", "回答を読み上げないで", "返事を読み上げないで",
+		"答えをそのまま読み上げないで", "回答をそのまま読み上げないで", "返事をそのまま読み上げないで",
 		"don't help me answer", "do not help me answer", "don't resume coaching", "do not resume coaching",
 	} {
 		if strings.Contains(phrase, signal) {

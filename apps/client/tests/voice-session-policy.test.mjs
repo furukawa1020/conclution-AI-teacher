@@ -830,7 +830,7 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
 
   assert.match(
     client,
-    /const ANSWER_SUPPORT_COPY: &str =\s*"「一問だけ手伝って」で、本人のAを確認できたらAIが黙って発話権を返す";/u,
+    /const ANSWER_SUPPORT_COPY: &str =\s*"「代わりに答えて」でも代理回答せず、本人のAを一言から守る";/u,
   );
   assert.match(
     client,

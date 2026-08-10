@@ -31,21 +31,16 @@ const POLICY_VERSION: &str = "within-person-v1";
 const SCORER_VERSION: &str = "self-report-v1";
 const MODEL_VERSION: &str = "no-model-v1";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum EvaluationState {
     /// The privacy-preserving initial state. Constructing it does not access browser storage.
+    #[default]
     Dormant,
     Active(EvaluationLedgerV1),
     Withdrawn,
     Deleted,
     Invalid,
     StorageUnavailable,
-}
-
-impl Default for EvaluationState {
-    fn default() -> Self {
-        Self::Dormant
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1051,6 +1046,7 @@ fn force_tombstone<S: EvaluationStorage>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_due_with_store<S: EvaluationStorage>(
     store: &S,
     expected: &EvaluationLedgerV1,

@@ -43,8 +43,12 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // The native-audio lane consumes PCM while the person is speaking. Clear
   // speech uses the fast endpoint regardless of ordinary answer length;
   // confirmed quiet speech and monologues retain their wider windows.
-  nativeAudioEndOfTurnSilenceMs: 520,
-  nativeAudioHybridEndpointSilenceMs: 400,
+  // Clear Native turns are already streaming to the provider while the user
+  // speaks. A 400 ms local fallback, or a 280 ms two-detector agreement when
+  // the provider independently reports endpoint, keeps the first reply near
+  // the one-second target without shortening quiet-speech or monologue pauses.
+  nativeAudioEndOfTurnSilenceMs: 400,
+  nativeAudioHybridEndpointSilenceMs: 280,
   // A voice candidate must either reach the 120 ms confirmation threshold
   // promptly or be discarded. This also bounds unconfirmed room audio before
   // a fresh candidate and its isolated recorder are created.
@@ -827,7 +831,7 @@ export function shouldCommitHybridEndpoint({
     speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
   // Native can be promoted to Coach after commit. In that legal dynamic
   // state, retain Coach's slightly wider floor instead of regressing to the
-  // 400 ms Native endpoint.
+  // fast Native endpoint.
   const shortRequiredSilence = coachActive
     ? VOICE_SESSION_LIMITS.coachHybridEndpointSilenceMs
     : nativeAudio

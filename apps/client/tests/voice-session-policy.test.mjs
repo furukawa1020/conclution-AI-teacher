@@ -1892,14 +1892,33 @@ test("an authenticated silent foreground miss rearms without ending the session"
   assert.notEqual(submitStart, -1);
   assert.notEqual(submitEnd, -1);
   const submit = client.slice(submitStart, submitEnd);
+  const clearAt = submit.indexOf("turn_notice.set(TurnNotice::Clear);");
+  const finishAt = submit.indexOf("cloud::finish_turn(");
+  assert.ok(
+    clearAt >= 0 && finishAt > clearAt,
+    "the next confirmed turn must clear an old recognition notice before finishing",
+  );
   const missAt = submit.indexOf("silent_recognition_miss(&result.route)");
   const interruptedAt = submit.indexOf("if result.interrupted", missAt);
   assert.ok(missAt >= 0);
   assert.ok(interruptedAt > missAt);
   const miss = submit.slice(missAt, interruptedAt);
   assert.match(
+    submit,
+    /if turn_mode == VoiceTurnMode::Foreground && silent_recognition_miss\(&result\.route\)/u,
+  );
+  assert.match(
     miss,
-    /arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,[\s\S]*return;/u,
+    /turn_notice\.set\(TurnNotice::RecognitionMiss\);[\s\S]*arm_listening\(\s*operation,\s*false,\s*VoiceTurnMode::Foreground,[\s\S]*return;/u,
+  );
+  const noticeAt = miss.indexOf(
+    "turn_notice.set(TurnNotice::RecognitionMiss);",
+  );
+  const rearmAt = miss.indexOf("arm_listening(", noticeAt);
+  assert.ok(noticeAt >= 0 && rearmAt > noticeAt);
+  assert.doesNotMatch(
+    miss.slice(noticeAt, rearmAt),
+    /TurnNotice::Clear|cloud::stop_session\(\)|VoiceState::Ready/u,
   );
   assert.doesNotMatch(
     miss,
@@ -3836,7 +3855,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
       ...reflective,
       nativeAudio: true,
       providerEndpointAt: 2_700,
-      now: 2_779,
+      now: 4_699,
     }),
     false,
   );
@@ -3845,10 +3864,51 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
       ...reflective,
       nativeAudio: true,
       providerEndpointAt: 2_700,
-      now: 2_780,
+      now: 4_700,
     }),
     true,
-    "clear Native speech keeps the 280 ms agreement at reflective length",
+    "reflective Native speech keeps the 2.2 second continuation window",
+  );
+
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      continuationEvidence: true,
+      nativeAudio: true,
+      now: 3_199,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      continuationEvidence: true,
+      nativeAudio: true,
+      now: 3_200,
+    }),
+    true,
+    "verified Native continuation evidence keeps the reflective window",
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      coachActive: true,
+      continuationEvidence: true,
+      nativeAudio: true,
+      now: 1_439,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({
+      ...short,
+      coachActive: true,
+      continuationEvidence: true,
+      nativeAudio: true,
+      now: 1_440,
+    }),
+    true,
+    "Native continuation evidence must not widen an active Coach answer",
   );
 
   const softVoice = {
@@ -3974,7 +4034,16 @@ test("bridge applies the bounded coach override to local endpointing", async () 
   );
   assert.match(
     source,
+    /continuationEvidence: recording\.continuationEvidence/u,
+  );
+  assert.match(source, /nativeAudio: recording\.nativeAudio/u);
+  assert.match(
+    source,
     /recording\.softVoiceConfirmed = vadState\.softVoiceConfirmed/u,
+  );
+  assert.match(
+    source,
+    /recording\.continuationEvidence = vadState\.continuationEvidence/u,
   );
   const armVadStart = source.indexOf("function armVad(recording)");
   const armVadEnd = source.indexOf(
@@ -3987,10 +4056,16 @@ test("bridge applies the bounded coach override to local endpointing", async () 
     /coachActive: recording\.coachActive[\s\S]*VOICE_SESSION_LIMITS\.coachEndOfTurnSilenceMs/u,
     "active coach continuation must receive the bounded short override",
   );
+  const armVad = source.slice(armVadStart, armVadEnd);
   assert.match(
-    source.slice(armVadStart, armVadEnd),
-    /endOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs,[\s\S]*reflectiveEndOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs/u,
-    "clear Native speech must use 400 ms locally at ordinary and reflective lengths",
+    armVad,
+    /endOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs/u,
+    "a short clear Native answer must use 400 ms locally",
+  );
+  assert.doesNotMatch(
+    armVad,
+    /reflectiveEndOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs/u,
+    "Native must not shorten a reflective pause to 400 ms",
   );
 });
 
@@ -5839,12 +5914,11 @@ test("active coach local VAD accelerates only a short clear answer", () => {
   assert.equal(monologue.action, "end-of-turn");
 });
 
-test("clear Native speech ends at 400 ms while protected speech keeps wider pauses", () => {
+test("only short clear Native speech ends at 400 ms while protected speech keeps wider pauses", () => {
   assert.equal(VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs, 400);
   const nativeVadOptions = {
+    nativeAudio: true,
     endOfTurnSilenceMs:
-      VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-    reflectiveEndOfTurnSilenceMs:
       VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
   };
   const speakClearly = (startedAt, durationMs) => {
@@ -5885,8 +5959,8 @@ test("clear Native speech ends at 400 ms while protected speech keeps wider paus
   );
   expectEndpointAt(
     speakClearly(5_000, VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs),
-    VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-    "clear Native speech keeps 400 ms at reflective length",
+    VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+    "reflective Native speech must keep the full thinking pause",
   );
 
   let now = 10_000;
@@ -6105,7 +6179,7 @@ test("a clear utterance can fade into verified quiet speech without a 1.2 second
   assert.equal(state.lastVoiceAt, now);
 });
 
-test("a brief dynamic quiet word refreshes a clear turn without forcing long-pause mode", () => {
+test("a brief dynamic quiet word records continuation without slowing a non-Native turn", () => {
   let now = 0;
   let state = createVadState(now);
   for (let frame = 0; frame < 15; frame += 1) {
@@ -6126,6 +6200,7 @@ test("a brief dynamic quiet word refreshes a clear turn without forcing long-pau
   assert.ok(state.lastVoiceAt > clearLastVoiceAt);
   assert.equal(state.lastVoiceAt, now);
   assert.equal(state.softVoiceConfirmed, false);
+  assert.equal(state.continuationEvidence, true);
 
   state = advanceVad(state, {
     now: now + VOICE_SESSION_LIMITS.endOfTurnSilenceMs - 1,
@@ -6138,6 +6213,69 @@ test("a brief dynamic quiet word refreshes a clear turn without forcing long-pau
     peak: 0.004,
     rms: 0.003,
   });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("verified continuation evidence protects a short Native turn for 2.2 seconds", () => {
+  let now = 0;
+  let state = createVadState(now);
+  const nativeOptions = {
+    nativeAudio: true,
+    endOfTurnSilenceMs:
+      VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+  };
+  for (let frame = 0; frame < 15; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(
+      state,
+      { now, peak: 0.004, rms: 0.003 },
+      nativeOptions,
+    );
+  }
+  for (let frame = 0; frame < 3; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    state = advanceVad(
+      state,
+      { now, peak: 0.08, rms: 0.03 },
+      nativeOptions,
+    );
+  }
+  for (let frame = 0; frame < 5; frame += 1) {
+    now += VOICE_SESSION_LIMITS.vadIntervalMs;
+    const rms = frame % 2 === 0 ? 0.0065 : 0.0085;
+    state = advanceVad(
+      state,
+      { now, peak: rms * 2, rms },
+      nativeOptions,
+    );
+  }
+  assert.equal(state.continuationEvidence, true);
+  const lastVoiceAt = state.lastVoiceAt;
+
+  state = advanceVad(
+    state,
+    {
+      now:
+        lastVoiceAt +
+        VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs -
+        1,
+      peak: 0.004,
+      rms: 0.003,
+    },
+    nativeOptions,
+  );
+  assert.equal(state.action, null);
+  state = advanceVad(
+    state,
+    {
+      now:
+        lastVoiceAt +
+        VOICE_SESSION_LIMITS.reflectiveEndOfTurnSilenceMs,
+      peak: 0.004,
+      rms: 0.003,
+    },
+    nativeOptions,
+  );
   assert.equal(state.action, "end-of-turn");
 });
 
@@ -6160,6 +6298,7 @@ test("stationary soft tail and a short echo burst cannot extend a clear utteranc
     state = advanceVad(state, { now, peak: rms * 2, rms });
   }
   assert.equal(state.softVoiceConfirmed, false);
+  assert.equal(state.continuationEvidence, false);
   assert.equal(state.lastVoiceAt, clearLastVoiceAt);
 
   while (
@@ -6169,6 +6308,7 @@ test("stationary soft tail and a short echo burst cannot extend a clear utteranc
     state = advanceVad(state, { now, peak: 0.017, rms: 0.0085 });
   }
   assert.equal(state.softVoiceConfirmed, false);
+  assert.equal(state.continuationEvidence, false);
   assert.equal(state.lastVoiceAt, clearLastVoiceAt);
   assert.equal(state.action, "end-of-turn");
 });

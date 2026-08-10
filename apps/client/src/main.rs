@@ -65,6 +65,7 @@ enum VoiceReceipt {
 enum TurnNotice {
     Clear,
     CaptureSkipped,
+    RecognitionMiss,
     ReplyUnavailable,
     PrivacyBlocked,
 }
@@ -78,6 +79,7 @@ impl TurnNotice {
         match self {
             Self::Clear => "",
             Self::CaptureSkipped => "こちらで声を受け切れませんでした",
+            Self::RecognitionMiss => "声は届きました",
             Self::ReplyUnavailable => "こちらの返事だけ止まりました",
             Self::PrivacyBlocked => "この発話はAIへ進めませんでした",
         }
@@ -88,6 +90,9 @@ impl TurnNotice {
             Self::Clear => "",
             Self::CaptureSkipped => {
                 "会話は開いたままです。あなたの言い方の問題ではありません。別の一言から続けられます"
+            }
+            Self::RecognitionMiss => {
+                "こちらで内容を確かに聞き取れませんでした。言い直さなくて大丈夫です。そのまま次の一言から続けられます"
             }
             Self::ReplyUnavailable => {
                 "声は言い直さなくて大丈夫です。会話は開いたままなので、そのまま続けられます"
@@ -2048,6 +2053,7 @@ fn submit_turn(
             // to end the conversation. Continue in foreground mode without
             // granting intentional authority; the independent idle,
             // absolute-session, and rate limits keep retries bounded.
+            turn_notice.set(TurnNotice::RecognitionMiss);
             arm_listening(
                 operation,
                 false,
@@ -4429,6 +4435,7 @@ mod tests {
         assert!(silent_recognition_miss("stt-silent-no-speech"));
         assert!(silent_recognition_miss("stt-silent-low-confidence"));
         assert!(!silent_recognition_miss("stt-clarify-no-speech"));
+        assert!(!silent_recognition_miss("respondent-complete-fast"));
         assert!(!silent_recognition_miss("fast"));
     }
 
@@ -4521,6 +4528,7 @@ mod tests {
 
         for notice in [
             TurnNotice::CaptureSkipped,
+            TurnNotice::RecognitionMiss,
             TurnNotice::ReplyUnavailable,
             TurnNotice::PrivacyBlocked,
         ] {
@@ -4538,6 +4546,15 @@ mod tests {
                 .contains("言い方の問題ではありません")
         );
         assert!(TurnNotice::ReplyUnavailable.heading().contains("返事だけ"));
+        assert_eq!(TurnNotice::RecognitionMiss.heading(), "声は届きました");
+        assert_eq!(
+            TurnNotice::RecognitionMiss.hint(),
+            "こちらで内容を確かに聞き取れませんでした。言い直さなくて大丈夫です。そのまま次の一言から続けられます"
+        );
+        for forbidden in ["理解できた", "正解", "採点", "文字起こし"] {
+            assert!(!TurnNotice::RecognitionMiss.heading().contains(forbidden));
+            assert!(!TurnNotice::RecognitionMiss.hint().contains(forbidden));
+        }
         assert!(
             TurnNotice::ReplyUnavailable
                 .hint()

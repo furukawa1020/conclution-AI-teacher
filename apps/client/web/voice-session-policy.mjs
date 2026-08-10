@@ -40,13 +40,12 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // and monologue speech still select their wider windows below.
   coachEndOfTurnSilenceMs: 640,
   coachHybridEndpointSilenceMs: 440,
-  // The native-audio lane consumes PCM while the person is speaking. Clear
-  // speech uses the fast endpoint regardless of ordinary answer length;
-  // confirmed quiet speech and monologues retain their wider windows.
-  // Clear Native turns are already streaming to the provider while the user
-  // speaks. A 400 ms local fallback, or a 280 ms two-detector agreement when
-  // the provider independently reports endpoint, keeps the first reply near
-  // the one-second target without shortening quiet-speech or monologue pauses.
+  // The native-audio lane consumes PCM while the person is speaking. Only a
+  // short clear answer uses the fast endpoint. A 1.6-second utterance or a
+  // verified changing-envelope continuation keeps the 2.2-second reflective
+  // window; confirmed quiet speech and monologues keep their wider windows.
+  // A 400 ms local fallback, or a 280 ms two-detector agreement when the
+  // provider independently reports endpoint, keeps short replies responsive.
   nativeAudioEndOfTurnSilenceMs: 400,
   nativeAudioHybridEndpointSilenceMs: 280,
   // A voice candidate must either reach the 120 ms confirmation threshold
@@ -768,6 +767,7 @@ export function createVadState(startedAt) {
   return Object.freeze({
     action: null,
     clearVoiceRunMs: 0,
+    continuationEvidence: false,
     firstVoiceAt: null,
     hasSpeech: false,
     lastVoiceAt: null,
@@ -787,6 +787,7 @@ export function createVadState(startedAt) {
 
 export function shouldCommitHybridEndpoint({
   coachActive = false,
+  continuationEvidence = false,
   firstVoiceAt,
   hasSpeech,
   lastVoiceAt,
@@ -797,6 +798,7 @@ export function shouldCommitHybridEndpoint({
 }) {
   if (
     typeof coachActive !== "boolean" ||
+    typeof continuationEvidence !== "boolean" ||
     typeof hasSpeech !== "boolean" ||
     typeof nativeAudio !== "boolean" ||
     typeof softVoiceConfirmed !== "boolean" ||
@@ -829,6 +831,9 @@ export function shouldCommitHybridEndpoint({
     VOICE_SESSION_LIMITS.vadIntervalMs;
   const monologue =
     speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
+  const reflective =
+    speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs ||
+    (nativeAudio && !coachActive && continuationEvidence);
   // Native can be promoted to Coach after commit. In that legal dynamic
   // state, retain Coach's slightly wider floor instead of regressing to the
   // fast Native endpoint.
@@ -841,9 +846,7 @@ export function shouldCommitHybridEndpoint({
     ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
     : softVoiceConfirmed
       ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
-      : nativeAudio && !coachActive
-        ? VOICE_SESSION_LIMITS.nativeAudioHybridEndpointSilenceMs
-        : speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs
+      : reflective
         ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
         : shortRequiredSilence;
   const agreementWindow = monologue
@@ -877,6 +880,7 @@ export function advanceVad(
     softVoiceContinuationEvidenceSpanMs =
       VOICE_SESSION_LIMITS.softVoiceContinuationEvidenceSpanMs,
     coachActive = false,
+    nativeAudio = false,
     coachEndOfTurnSilenceMs =
       VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
     softCandidateCaptureLimitMs =
@@ -901,6 +905,7 @@ export function advanceVad(
     typeof previous !== "object" ||
     !Number.isFinite(previous.startedAt) ||
     typeof coachActive !== "boolean" ||
+    typeof nativeAudio !== "boolean" ||
     !Number.isFinite(coachEndOfTurnSilenceMs) ||
     coachEndOfTurnSilenceMs <= 0
   ) {
@@ -920,6 +925,7 @@ export function advanceVad(
 
   let {
     clearVoiceRunMs = previous.voiceRunMs,
+    continuationEvidence = false,
     firstVoiceAt,
     hasSpeech,
     lastVoiceAt,
@@ -1019,6 +1025,9 @@ export function advanceVad(
         (!softVoiceConfirmed && hasSoftContinuationEnvelope)
       ) {
         lastVoiceAt = timestamp;
+        if (!softVoiceConfirmed && hasSoftContinuationEnvelope) {
+          continuationEvidence = true;
+        }
       } else if (
         softVoiceRunMs >= softCandidateCaptureLimitMs &&
         !hasRecentSoftEnvelope
@@ -1152,7 +1161,8 @@ export function advanceVad(
       ? monologueEndOfTurnSilenceMs
       : softVoiceConfirmed
         ? softVoiceEndOfTurnSilenceMs
-        : speechSpanMs >= reflectiveSpeechSpanMs
+        : speechSpanMs >= reflectiveSpeechSpanMs ||
+            (nativeAudio && !coachActive && continuationEvidence)
           ? reflectiveEndOfTurnSilenceMs
           : shortEndOfTurnSilenceMs;
   // Keep direct questions fast, while giving a longer, think-aloud utterance
@@ -1174,6 +1184,7 @@ export function advanceVad(
   return Object.freeze({
     action,
     clearVoiceRunMs,
+    continuationEvidence,
     firstVoiceAt,
     hasSpeech,
     lastVoiceAt,

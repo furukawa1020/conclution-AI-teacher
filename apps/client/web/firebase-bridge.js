@@ -1604,6 +1604,7 @@ function maybeCommitHybridEndpoint(recording, now) {
   if (
     !shouldCommitHybridEndpoint({
       coachActive: recording.coachActive,
+      continuationEvidence: recording.continuationEvidence,
       firstVoiceAt: recording.firstVoiceAt,
       hasSpeech: recording.vadHasSpeech,
       lastVoiceAt: recording.lastVoiceAt,
@@ -1650,6 +1651,7 @@ function armVad(recording) {
       { now, peak, rms },
       {
         coachActive: recording.coachActive,
+        nativeAudio: recording.nativeAudio,
         ...(recording.coachActive
           ? {
               endOfTurnSilenceMs:
@@ -1659,13 +1661,12 @@ function armVad(recording) {
             ? {
               endOfTurnSilenceMs:
                 VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-              reflectiveEndOfTurnSilenceMs:
-                VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
             }
             : {}),
       },
     );
     recording.firstVoiceAt = vadState.firstVoiceAt;
+    recording.continuationEvidence = vadState.continuationEvidence;
     const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.hasSpeech;
     if (!hadConfirmedSpeech && recording.vadHasSpeech) {
@@ -1787,6 +1788,7 @@ function createRecordingState(
   void turnEndedPromise.catch(() => {});
   const recording = {
     candidate: undefined,
+    continuationEvidence: false,
     discard: false,
     endPromise,
     expectedEpoch: sessionEpoch,

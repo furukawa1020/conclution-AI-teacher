@@ -3040,6 +3040,30 @@ test("live capture accepts only exact 20 ms PCM frames and bounds startup", () =
   assert.equal(
     safeLiveCaptureSignal(
       {
+        code: "capture_invalid",
+        generation: 7,
+        type: "error",
+        version: 1,
+      },
+      { generation: 7, lastSequence: 0, sealing: false },
+    ),
+    "capture_invalid",
+  );
+  assert.equal(
+    safeLiveCaptureSignal(
+      {
+        code: "capture_overflow",
+        generation: 7,
+        type: "error",
+        version: 1,
+      },
+      { generation: 7, lastSequence: 0, sealing: false },
+    ),
+    "capture_overflow",
+  );
+  assert.equal(
+    safeLiveCaptureSignal(
+      {
         generation: 7,
         lastSequence: 0,
         type: "sealed",

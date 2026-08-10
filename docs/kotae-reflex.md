@@ -755,7 +755,7 @@ Full-duplexの比較には、割り込み、相槌、横の会話、環境音を
 - regional STT後の文字起こしとモデル応答を、Cloud Run内の決定論検査と東京リージョンDLPの両方へ通す。`clear`以外、timeout、権限エラー、応答不整合は後段へ進めない
 - 厳格streamingでは合成音声をrequest-bound bufferへ保持し、検査済みresultとmodeが一致した後だけ送信する。blocked/error時は送信せずbufferを消去する
 - 原音はregional STT、文字列はCloud Run・DLP・Vertex AI、応答はTTSが平文で扱う。このためE2EEでも完全PII除去でもなく、そのようには表示しない
-- Rust/WasmへVADと短いring bufferの責務をさらに移す作業、local transcript path、話者本人認証は未実装
+- 短いPCM ringの固定長所有権は専用Rust/Wasmへ移したが、通常・割込みVADの時系列FSMを単調なAudioContext sample clockへ束縛してRust/Wasmへ移す作業、local transcript path、話者本人認証は未実装
 - TEN VAD、VAP、Moonshine等はライセンス、配布量、日本語精度、Web性能を実測してから採用する
 
 ### D. Research Verifier — 一部実装

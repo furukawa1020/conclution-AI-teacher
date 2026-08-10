@@ -302,6 +302,69 @@ function Invoke-GcloudJson {
     return @($decoded)
 }
 
+function Assert-BrowserAudioGate {
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern("^[0-9a-f]{64}$")]
+        [string] $ExpectedManifestSha256
+    )
+
+    $browserGatePath = Join-Path $PSScriptRoot "test-browser-audio.mjs"
+    if (-not (Test-Path -LiteralPath $browserGatePath -PathType Leaf)) {
+        throw "The browser audio release gate is missing."
+    }
+    $node = Get-Command "node" -CommandType Application -ErrorAction Stop
+    $browserArguments = @(
+        $browserGatePath,
+        "--dist", $publicRoot,
+        "--expected-commit", $ExpectedGitCommit,
+        "--expected-manifest-sha256", $ExpectedManifestSha256
+    )
+
+    # Windows PowerShell can surface native stderr as terminating errors. The
+    # browser gate is authoritative through its native exit code and JSON.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $jsonLines = @()
+    $commandExitCode = -1
+    try {
+        $ErrorActionPreference = "Continue"
+        $jsonLines = @(& $node.Source @browserArguments 2>$null)
+        $commandExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($commandExitCode -ne 0) {
+        throw "The real-browser AudioWorklet release gate failed."
+    }
+    $jsonText = ($jsonLines -join [System.Environment]::NewLine).Trim()
+    if ([string]::IsNullOrWhiteSpace($jsonText)) {
+        throw "The real-browser AudioWorklet release gate returned no JSON."
+    }
+    try {
+        $result = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
+    } catch {
+        throw "The real-browser AudioWorklet release gate returned invalid JSON."
+    }
+    $resultProperties = @($result.PSObject.Properties.Name | Sort-Object)
+    if (
+        ($resultProperties -join ",") -cne
+            "freshGenerationFrames,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,wrappedFrames,zeroOutputCapture" -or
+        $result.status -cne "passed" -or
+        $result.provenance -cne "release" -or
+        $result.sourceCommit -cne $ExpectedGitCommit -or
+        $result.manifestSha256 -cne $ExpectedManifestSha256 -or
+        [int] $result.sampleRateHz -ne 48000 -or
+        [bool] $result.zeroOutputCapture -ne $true -or
+        [int] $result.wrappedFrames -ne 5 -or
+        [int] $result.freshGenerationFrames -ne 3 -or
+        [int] $result.sameContextReuseFrames -ne 2 -or
+        [bool] $result.sameContextReuseIsolated -ne $true -or
+        [bool] $result.senderDetachGuardPassed -ne $true
+    ) {
+        throw "The real-browser AudioWorklet release gate did not attest the reviewed release commit."
+    }
+}
+
 function Assert-PromotedBackendBoundary {
     $service = Invoke-GcloudJson `
         -Operation "checking the promoted Cloud Run service" `
@@ -564,14 +627,15 @@ function Assert-HostingArtifact {
     ) {
         throw "Hosting release manifest is outside the reviewed boundary."
     }
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
     try {
-        $manifest = [System.IO.File]::ReadAllText(
-            $manifestPath,
-            [System.Text.UTF8Encoding]::new($false, $true)
-        ) | ConvertFrom-Json -ErrorAction Stop
+        $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+        $manifest = $strictUtf8.GetString($manifestBytes) |
+            ConvertFrom-Json -ErrorAction Stop
     } catch {
         throw "Hosting release manifest is not valid UTF-8 JSON."
     }
+    $manifestSha256 = ConvertTo-Sha256Hex -Bytes $manifestBytes
     $manifestProperties = @($manifest.PSObject.Properties.Name | Sort-Object)
     if (
         ($manifestProperties -join ",") -cne "artifacts,schemaVersion,sourceCommit" -or
@@ -593,13 +657,20 @@ function Assert-HostingArtifact {
         "voice-stream-policy.mjs",
         "assets\main.css",
         "wasm\kotae_client.js",
-        "wasm\kotae_client_bg.wasm"
+        "wasm\kotae_client_bg.wasm",
+        "wasm\kotae_pcm_ring_bg.wasm"
     )
     foreach ($relativePath in $requiredFiles) {
         $requiredPath = Join-Path $Root $relativePath
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "Required Hosting artifact is missing: $relativePath"
         }
+    }
+    $pcmRingWasmArtifact = Get-Item -LiteralPath (
+        Join-Path $Root "wasm\kotae_pcm_ring_bg.wasm"
+    )
+    if ($pcmRingWasmArtifact.Length -le 0 -or $pcmRingWasmArtifact.Length -gt 256KB) {
+        throw "PCM ring Wasm artifact must stay inside its 256 KiB runtime boundary."
     }
 
     $manifestArtifacts = @($manifest.artifacts)
@@ -659,6 +730,7 @@ function Assert-HostingArtifact {
                 "assets/main.css",
                 "wasm/kotae_client.js",
                 "wasm/kotae_client_bg.wasm",
+                "wasm/kotae_pcm_ring_bg.wasm",
                 $releaseManifestName
             ) -or
             $relativePath -match '^wasm/snippets/[A-Za-z0-9._/-]+\.js$'
@@ -696,7 +768,6 @@ function Assert-HostingArtifact {
         throw "Hosting release manifest contains a missing or unexpected artifact."
     }
 
-    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
     try {
         $bridge = $strictUtf8.GetString([byte[]] $snapshot["firebase-bridge.js"])
     } catch {
@@ -761,11 +832,17 @@ function Assert-HostingArtifact {
     ) {
         throw "index.html must contain only the external bootstrap.js module script."
     }
-    return ,$snapshot
+    return [pscustomobject]@{
+        Snapshot       = $snapshot
+        ManifestSha256 = $manifestSha256
+    }
 }
 
 Assert-HostingReleaseSource
-$hostingSnapshot = Assert-HostingArtifact -Root $publicRoot
+$hostingRelease = Assert-HostingArtifact -Root $publicRoot
+$hostingSnapshot = $hostingRelease.Snapshot
+Assert-BrowserAudioGate `
+    -ExpectedManifestSha256 $hostingRelease.ManifestSha256
 Assert-PromotedBackendBoundary
 if ($PreflightOnly) {
     Write-Output "HOSTING_PREFLIGHT=PASS"

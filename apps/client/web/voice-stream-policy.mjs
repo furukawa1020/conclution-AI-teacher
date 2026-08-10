@@ -55,6 +55,16 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   trailingSilenceMs: 1_200,
 });
 
+export const INTERRUPT_ECHO_PROBE_LIMITS = Object.freeze({
+  // Browsers that cannot prove acoustic echo cancellation stay half-duplex:
+  // playback remains untouched through the normal 720 ms foreground gate,
+  // then a bounded local mute distinguishes a person from speaker echo.
+  muteRampMs: 20,
+  postMuteProofMs: 240,
+  probeTimeoutMs: 480,
+  speakerTailMs: 120,
+});
+
 export const VOICE_LIVE_LIMITS = Object.freeze({
   inputFrameBytes: 640,
   inputSampleRateHz: 16_000,
@@ -1241,6 +1251,10 @@ export function createInterruptVadState(startedAt) {
 export function advanceInterruptVad(
   state,
   { now, outputActive, peak, rms },
+  {
+    confirmationAllowed = true,
+    confirmationProofSatisfied = false,
+  } = {},
 ) {
   const finiteOrNull = (value) =>
     value === null || (Number.isFinite(value) && value >= state.startedAt);
@@ -1266,6 +1280,8 @@ export function advanceInterruptVad(
     !Number.isFinite(now) ||
     now < state.startedAt ||
     typeof outputActive !== "boolean" ||
+    typeof confirmationAllowed !== "boolean" ||
+    typeof confirmationProofSatisfied !== "boolean" ||
     !boundedLevel(peak) ||
     !boundedLevel(rms) ||
     ![
@@ -1450,8 +1466,14 @@ export function advanceInterruptVad(
         INTERRUPT_VAD_LIMITS.minimumForegroundDensity;
     const quietConfirmed =
       voiceRunMs >= INTERRUPT_VAD_LIMITS.quietConfirmationMs;
+    const externalProofConfirmed =
+      confirmationProofSatisfied &&
+      voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs;
     if (
-      (foregroundConfirmed || quietConfirmed) &&
+      confirmationAllowed &&
+      (foregroundConfirmed ||
+        quietConfirmed ||
+        externalProofConfirmed) &&
       voiceDensity >= INTERRUPT_VAD_LIMITS.minimumVoiceDensity
     ) {
       phase = "confirmed";

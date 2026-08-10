@@ -248,6 +248,101 @@ func TestNativeExplicitCoachDonatesFinalCaptionWithoutASecondRecognizerPass(
 	}
 }
 
+func TestNativeProxyFinalCaptionDiscardsProviderGhostBeforeStagedHandoff(t *testing.T) {
+	for index, caption := range []string{
+		"代わりに答えて",
+		"回答を作って",
+		"この答えをそのまま読んで",
+	} {
+		t.Run(caption, func(t *testing.T) {
+			const providerGhost = "AIが本人の代わりに完成させた回答です。"
+			session := newScriptedSession(
+				nativevoice.Event{
+					Kind:         nativevoice.EventInputCaption,
+					CaptionUTF8:  []byte(caption),
+					CaptionFinal: true,
+				},
+				nativevoice.Event{
+					Kind:            nativevoice.EventAudioPCM,
+					PCM:             []byte{9, 9, 9, 9},
+					SampleRateHertz: nativevoice.OutputSampleRateHertz,
+				},
+				nativevoice.Event{
+					Kind:         nativevoice.EventOutputCaption,
+					CaptionUTF8:  []byte(providerGhost),
+					CaptionFinal: true,
+				},
+				nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+			)
+			opener := &fakeOpener{session: session}
+			handoffService := &recordingCaptionHandoffService{
+				result: httpapi.VoiceTurnResult{
+					StateToken:       "proxy-owned-state",
+					AssistanceTarget: "respondent",
+					RespondentStage:  "awaiting_answer",
+					CoachPhase:       "awaiting_answer",
+					CoachAction:      "elicit",
+					Route:            httpapi.VoiceNativeRespondentCoachRoute,
+					Caption:          "今ある自分の答えを、一言だけそのままどうぞ。",
+				},
+				audio: []byte{3, 0, 4, 0},
+			}
+			service, err := NewWithCaptionHandoff(
+				opener,
+				fakePreparer{token: "prepared-proxy-state"},
+				handoffService,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+
+			checkpointAccepted := false
+			var delivered []byte
+			result, err := service.ProcessLiveWithControl(
+				context.Background(),
+				"uid-native-proxy-handoff-"+string(rune('a'+index)),
+				nativeInput(),
+				oneFrame(),
+				func(chunk []byte) error {
+					if !checkpointAccepted {
+						return errors.New("staged proxy audio crossed before checkpoint")
+					}
+					delivered = append(delivered, chunk...)
+					return nil
+				},
+				nil,
+				func(httpapi.VoiceRespondentCheckpointTransition) error {
+					checkpointAccepted = true
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Route != httpapi.VoiceNativeRespondentCoachRoute ||
+				result.Caption == providerGhost ||
+				string(delivered) != string([]byte{3, 0, 4, 0}) ||
+				session.commits != 0 || session.discards == 0 ||
+				handoffService.openCount() != 1 || handoffService.lastHandoff == nil {
+				t.Fatalf(
+					"result=%+v delivered=%v commits=%d discards=%d opens=%d",
+					result,
+					delivered,
+					session.commits,
+					session.discards,
+					handoffService.openCount(),
+				)
+			}
+			observations, commits, _ := handoffService.lastHandoff.snapshot()
+			if len(observations) != 1 || observations[0].caption != caption ||
+				!observations[0].final || commits != 1 {
+				t.Fatalf("observations=%+v commits=%d", observations, commits)
+			}
+		})
+	}
+}
+
 func TestNativeActiveStagedStateUsesFinalCaptionWithoutRecordingReplay(
 	t *testing.T,
 ) {

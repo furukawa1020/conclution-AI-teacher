@@ -17,11 +17,11 @@ QBA Proofは、KOTAEの明示回答支援にだけ使う、本文を含まない
 5. 決定論的Meaning Gateが全required slotのcoverage=1、target satisfied、A-firstと判定する
 6. 別model callのLAC criticもcoverage=1、target satisfied、A-firstと独立に判定する
 7. 新しい別質問、引用、代理回答、訂正・撤回、別人を主語にした答え、無関係な次turn、監査timeoutではない
+8. 厳格モードでもPDF turnでもない
 
 ## 代理回答要求の所有権変換
 
 本人が「代わりに答えて」「回答を作って」「この答えを読み上げて」と頼んでも、その依頼を回答本文の生成権限にはしない。引用、第三者の依頼、否定、一般的な知識質問を除外した有限句だけを、モデル呼び出し前に一回限りの本人回答スロットへ変換する。最初に返せるのは固定cueだけで、回答本文、候補回答、文字起こしはstateへ保存しない。「AIに何を任せますか？」のようにAIを目的語に含む本人のAはスロット離脱とみなさず、「AI、何を任せますか？」のような明示呼びかけだけを通常のAI質問へ戻す。
-8. 厳格モードでもPDF turnでもない
 
 質問インスタンス、質問主題、回答evidenceは、同じ鍵素材から用途分離したHMACへ変換します。raw tag自体もwireへ出しません。cross-turn stateにはoperator、required slot、有限の制御値、非可逆tagだけを入れ、UID-bound AES-256-GCMで暗号化し、15分で失効させます。
 

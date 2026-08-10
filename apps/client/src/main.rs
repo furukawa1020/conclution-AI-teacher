@@ -5,8 +5,7 @@ use serde::Deserialize;
 
 const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
-const ANSWER_SUPPORT_COPY: &str =
-    "「一問だけ手伝って」で、本人のAを確認できたらAIが黙って発話権を返す";
+const ANSWER_SUPPORT_COPY: &str = "「代わりに答えて」でも代理回答せず、本人のAを一言から守る";
 const TALK_ONLY_COPY: &str = "届いた瞬間だけ知らせて、点数にはしない";
 const STANDARD_MODE_ROUTE_LABEL: &str =
     "通常会話はNative Audio / 明示した回答支援はQ-ARC + QBA Proof";
@@ -3913,7 +3912,7 @@ mod tests {
         );
         assert_eq!(
             ANSWER_SUPPORT_COPY,
-            "「一問だけ手伝って」で、本人のAを確認できたらAIが黙って発話権を返す"
+            "「代わりに答えて」でも代理回答せず、本人のAを一言から守る"
         );
         assert_eq!(TALK_ONLY_COPY, "届いた瞬間だけ知らせて、点数にはしない");
 

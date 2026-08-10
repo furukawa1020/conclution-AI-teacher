@@ -121,6 +121,37 @@ impl VoiceReceipt {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VoiceStartLatency {
+    milliseconds: u32,
+}
+
+impl VoiceStartLatency {
+    const ONE_SECOND_GOAL_MS: u32 = 1_000;
+    const MAXIMUM_EVENT_MS: f64 = 120_000.0;
+
+    const fn is_on_target(self) -> bool {
+        self.milliseconds <= Self::ONE_SECOND_GOAL_MS
+    }
+
+    fn status(self) -> String {
+        let seconds = f64::from(self.milliseconds) / 1_000.0;
+        if self.is_on_target() {
+            format!("返答開始 約{seconds:.1}秒 / 1秒目標内")
+        } else {
+            format!("返答開始 約{seconds:.1}秒 / さらに短縮中")
+        }
+    }
+
+    const fn class_name(self) -> &'static str {
+        if self.is_on_target() {
+            "voice-status__latency is-on-target"
+        } else {
+            "voice-status__latency"
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationStep {
     Prompt,
@@ -564,6 +595,7 @@ mod cloud {
         coach_phase_from_checkpoint, confirmed_voice_input_state, recoverable_finish_turn_code,
         recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
         valid_coach_checkpoint_metadata, valid_voice_pause_metadata, valid_voice_receipt_metadata,
+        validated_voice_start_latency,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -632,6 +664,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct VoiceStartLatencyListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     impl Drop for FirstAudioListener {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
@@ -663,6 +700,15 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:voice-input-confirmed",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for VoiceStartLatencyListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-start-latency",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -993,6 +1039,61 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(VoiceInputConfirmedListener { window, callback }))
+    }
+
+    pub fn install_voice_start_latency_listener(
+        mut voice_start_latency: Signal<Option<super::VoiceStartLatency>>,
+    ) -> Option<Rc<VoiceStartLatencyListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Some(key_names) = keys
+                .iter()
+                .map(|key| key.as_string())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            let Ok(milliseconds) =
+                js_sys::Reflect::get(&detail, &JsValue::from_str("milliseconds"))
+            else {
+                return;
+            };
+            let milliseconds = if milliseconds.is_null() {
+                None
+            } else {
+                let Some(value) = milliseconds.as_f64() else {
+                    return;
+                };
+                Some(value)
+            };
+            let Some(next_latency) =
+                validated_voice_start_latency(milliseconds, version, &key_names)
+            else {
+                return;
+            };
+            voice_start_latency.set(next_latency);
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:voice-start-latency",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(VoiceStartLatencyListener { window, callback }))
     }
 
     pub fn install_first_audio_listener(
@@ -1346,8 +1447,8 @@ const fn cloud_state_for_display(
 mod cloud {
     use super::{
         CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeySetupFeedback,
-        ResearchRecord, ResearchStatus, VoiceReceipt, VoiceState, VoiceTurnMode, VoiceTurnResult,
-        WaitTurnError,
+        ResearchRecord, ResearchStatus, VoiceReceipt, VoiceStartLatency, VoiceState, VoiceTurnMode,
+        VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -1425,6 +1526,12 @@ mod cloud {
 
     pub fn install_voice_input_confirmed_listener(
         _coach_state: Signal<CoachState>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_voice_start_latency_listener(
+        _voice_start_latency: Signal<Option<VoiceStartLatency>>,
     ) -> Option<Listener> {
         None
     }
@@ -2056,6 +2163,27 @@ fn valid_voice_receipt_metadata(phase: &str, version: f64, field_count: u32) -> 
     field_count == 2 && version == 1.0 && matches!(phase, "received" | "clear")
 }
 
+fn validated_voice_start_latency(
+    milliseconds: Option<f64>,
+    version: f64,
+    keys: &[String],
+) -> Option<Option<VoiceStartLatency>> {
+    if version != 1.0 || keys != ["milliseconds", "version"] {
+        return None;
+    }
+    let Some(milliseconds) = milliseconds else {
+        return Some(None);
+    };
+    if !milliseconds.is_finite()
+        || !(0.0..=VoiceStartLatency::MAXIMUM_EVENT_MS).contains(&milliseconds)
+    {
+        return None;
+    }
+    Some(Some(VoiceStartLatency {
+        milliseconds: milliseconds.round() as u32,
+    }))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn confirmed_voice_input_state(
     state: CoachState,
@@ -2659,6 +2787,7 @@ fn LongitudinalPanel() -> Element {
 fn App() -> Element {
     let mut voice_state = use_signal(|| VoiceState::Ready);
     let voice_receipt = use_signal(|| VoiceReceipt::Clear);
+    let voice_start_latency = use_signal(|| None::<VoiceStartLatency>);
     let mut generation = use_signal(|| 0_u64);
     let mut session_state = use_signal(String::new);
     let mut detected_domain = use_signal(String::new);
@@ -2701,6 +2830,8 @@ fn App() -> Element {
     let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
     let _voice_input_confirmed_listener =
         use_hook(|| cloud::install_voice_input_confirmed_listener(coach_state));
+    let _voice_start_latency_listener =
+        use_hook(|| cloud::install_voice_start_latency_listener(voice_start_latency));
     let _first_audio_listener =
         use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
     let _coach_checkpoint_listener =
@@ -2731,6 +2862,7 @@ fn App() -> Element {
 
     let state_snapshot = *voice_state.read();
     let receipt_snapshot = *voice_receipt.read();
+    let voice_start_latency_snapshot = *voice_start_latency.read();
     let receipt_is_visible = receipt_snapshot.is_visible_for(state_snapshot);
     let coach_snapshot = *coach_state.read();
     let turn_notice_snapshot = *turn_notice.read();
@@ -2971,6 +3103,15 @@ fn App() -> Element {
                         ) {
                             p { class: "voice-status__transport", {state_snapshot.hint()} }
                             }
+                        if state_snapshot.session_active() {
+                            if let Some(latency) = voice_start_latency_snapshot {
+                                p {
+                                    class: latency.class_name(),
+                                    aria_label: "実質音声の返答開始時間",
+                                    {latency.status()}
+                                }
+                            }
+                        }
                     }
                     if turn_notice_snapshot.is_visible() {
                         section {
@@ -3501,13 +3642,13 @@ mod tests {
         PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
         STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceState, VoiceTurnMode,
+        TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceStartLatency, VoiceState, VoiceTurnMode,
         cloud_state_for_display, confirmed_voice_input_state, passkey_focus_target,
         recoverable_wait_turn_code, requires_passkey_choice,
         requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
         turn_mode_for_gesture_epoch, valid_answer_proof_metadata, valid_coach_checkpoint_keys,
         valid_coach_checkpoint_metadata, valid_streamed_audio_metadata, valid_voice_pause_metadata,
-        valid_voice_privacy_metadata, valid_voice_receipt_metadata,
+        valid_voice_privacy_metadata, valid_voice_receipt_metadata, validated_voice_start_latency,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -3974,6 +4115,51 @@ mod tests {
             assert!(!copy.contains("分かった"));
             assert!(!copy.contains("伝わった"));
             assert!(!copy.contains("採点"));
+        }
+    }
+
+    #[test]
+    fn voice_start_latency_is_exact_current_turn_metadata() {
+        let keys = ["milliseconds".to_string(), "version".to_string()];
+        let on_target = validated_voice_start_latency(Some(842.4), 1.0, &keys)
+            .expect("valid event")
+            .expect("measured event");
+        assert_eq!(on_target.milliseconds, 842);
+        assert!(on_target.is_on_target());
+        assert_eq!(on_target.status(), "返答開始 約0.8秒 / 1秒目標内");
+
+        let over_target = validated_voice_start_latency(Some(1_249.7), 1.0, &keys)
+            .expect("valid event")
+            .expect("measured event");
+        assert_eq!(over_target.milliseconds, 1_250);
+        assert!(!over_target.is_on_target());
+        assert_eq!(over_target.status(), "返答開始 約1.2秒 / さらに短縮中");
+
+        assert_eq!(
+            validated_voice_start_latency(None, 1.0, &keys),
+            Some(None),
+            "a new turn clears the prior measurement",
+        );
+        for invalid in [
+            validated_voice_start_latency(Some(-0.1), 1.0, &keys),
+            validated_voice_start_latency(Some(f64::NAN), 1.0, &keys),
+            validated_voice_start_latency(
+                Some(VoiceStartLatency::MAXIMUM_EVENT_MS + 0.1),
+                1.0,
+                &keys,
+            ),
+            validated_voice_start_latency(Some(500.0), 2.0, &keys),
+            validated_voice_start_latency(
+                Some(500.0),
+                1.0,
+                &[
+                    "milliseconds".to_string(),
+                    "transcript".to_string(),
+                    "version".to_string(),
+                ],
+            ),
+        ] {
+            assert_eq!(invalid, None);
         }
     }
 

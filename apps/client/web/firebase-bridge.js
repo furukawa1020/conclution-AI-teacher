@@ -237,6 +237,18 @@ function dispatchVoiceLatency({
   );
 }
 
+function dispatchVoiceStartLatency(estimatedAudibleMs) {
+  const milliseconds =
+    Number.isFinite(estimatedAudibleMs) && estimatedAudibleMs >= 0
+      ? boundedLatency(estimatedAudibleMs)
+      : null;
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-start-latency", {
+      detail: Object.freeze({ milliseconds, version: 1 }),
+    }),
+  );
+}
+
 function isPlainRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -1865,6 +1877,10 @@ async function beginTurn(
       fail("session_expired");
     }
     primeVoiceTransportConnection();
+    // A new intentional/foreground turn owns a new content-free measurement.
+    // Clear the previous value before any asynchronous permission or network
+    // work so a stale fast result can never be shown for the current turn.
+    dispatchVoiceStartLatency(null);
 
     const expectedEpoch = sessionEpoch;
     if (!sessionExpiryWatchdog.arm() || !ensureActiveSession(expectedEpoch)) {
@@ -2930,6 +2946,9 @@ async function startVoiceLiveSession({
         if (Number.isFinite(speechEndedAt)) {
           speechEndToEstimatedAudibleMs =
             audibleAt - speechEndedAt;
+          dispatchVoiceStartLatency(
+            speechEndToEstimatedAudibleMs,
+          );
         }
       }
     } catch (error) {

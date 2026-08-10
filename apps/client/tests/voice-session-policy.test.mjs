@@ -3701,7 +3701,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     shouldCommitHybridEndpoint({
       ...short,
       nativeAudio: true,
-      now: 1_399,
+      now: 1_299,
     }),
     false,
   );
@@ -3709,10 +3709,10 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
     shouldCommitHybridEndpoint({
       ...short,
       nativeAudio: true,
-      now: 1_400,
+      now: 1_300,
     }),
     true,
-    "native input is already streaming and can use a 400 ms agreement",
+    "native input is already streaming and can use a 280 ms agreement",
   );
   assert.equal(
     shouldCommitHybridEndpoint({
@@ -3774,7 +3774,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
       ...reflective,
       nativeAudio: true,
       providerEndpointAt: 2_700,
-      now: 2_899,
+      now: 2_779,
     }),
     false,
   );
@@ -3783,10 +3783,10 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
       ...reflective,
       nativeAudio: true,
       providerEndpointAt: 2_700,
-      now: 2_900,
+      now: 2_780,
     }),
     true,
-    "clear Native speech keeps the 400 ms agreement at reflective length",
+    "clear Native speech keeps the 280 ms agreement at reflective length",
   );
 
   const softVoice = {
@@ -3884,7 +3884,7 @@ test("hybrid endpoint requires provider and local silence agreement", () => {
       now: 1_439,
     }),
     false,
-    "dynamic Native-to-Coach promotion must not regress to 400 ms",
+    "dynamic Native-to-Coach promotion must not regress to 280 ms",
   );
   assert.equal(
     shouldCommitHybridEndpoint({
@@ -3928,7 +3928,7 @@ test("bridge applies the bounded coach override to local endpointing", async () 
   assert.match(
     source.slice(armVadStart, armVadEnd),
     /endOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs,[\s\S]*reflectiveEndOfTurnSilenceMs:\s*VOICE_SESSION_LIMITS\.nativeAudioEndOfTurnSilenceMs/u,
-    "clear Native speech must use 520 ms locally at ordinary and reflective lengths",
+    "clear Native speech must use 400 ms locally at ordinary and reflective lengths",
   );
 });
 
@@ -5777,8 +5777,8 @@ test("active coach local VAD accelerates only a short clear answer", () => {
   assert.equal(monologue.action, "end-of-turn");
 });
 
-test("clear Native speech ends at 520 ms while protected speech keeps wider pauses", () => {
-  assert.equal(VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs, 520);
+test("clear Native speech ends at 400 ms while protected speech keeps wider pauses", () => {
+  assert.equal(VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs, 400);
   const nativeVadOptions = {
     endOfTurnSilenceMs:
       VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
@@ -5819,12 +5819,12 @@ test("clear Native speech ends at 520 ms while protected speech keeps wider paus
   expectEndpointAt(
     speakClearly(2_000, VOICE_SESSION_LIMITS.minimumVoiceMs),
     VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-    "a short clear Native answer must not commit before 520 ms",
+    "a short clear Native answer must not commit before 400 ms",
   );
   expectEndpointAt(
     speakClearly(5_000, VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs),
     VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-    "clear Native speech keeps 520 ms at reflective length",
+    "clear Native speech keeps 400 ms at reflective length",
   );
 
   let now = 10_000;
@@ -7124,6 +7124,73 @@ return dispatchVoiceLatency;`,
   assert.equal(silentTransport.first_binary_ms, 16);
   assert.equal(silentTransport.commit_to_estimated_audible_ms, null);
   assert.equal(silentTransport.speech_end_to_estimated_audible_ms, null);
+});
+
+test("voice start proof is current-turn, bounded, and content-free", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("function boundedLatency(");
+  const end = bridge.indexOf("\n\nfunction isPlainRecord(", start);
+  assert.ok(start >= 0 && end > start);
+  const events = [];
+  const dispatch = new Function(
+    "eventTarget",
+    "CustomEvent",
+    `"use strict";
+const globalThis = eventTarget;
+${bridge.slice(start, end)}
+return dispatchVoiceStartLatency;`,
+  )(
+    { dispatchEvent: (event) => events.push(event) },
+    class {
+      constructor(type, options) {
+        this.type = type;
+        this.detail = options.detail;
+      }
+    },
+  );
+
+  dispatch(null);
+  assert.equal(events.at(-1).type, "kotae:voice-start-latency");
+  assert.deepEqual(events.at(-1).detail, {
+    milliseconds: null,
+    version: 1,
+  });
+  dispatch(842.36);
+  assert.deepEqual(events.at(-1).detail, {
+    milliseconds: 842.4,
+    version: 1,
+  });
+  dispatch(200_000);
+  assert.equal(events.at(-1).detail.milliseconds, 120_000);
+
+  const beginAt = bridge.indexOf("async function beginTurn(");
+  const begin = bridge.slice(beginAt, beginAt + 4_000);
+  assert.match(
+    begin,
+    /dispatchVoiceStartLatency\(null\)[\s\S]*secureCredentials\(true\)/u,
+    "a new turn must clear stale latency before asynchronous initialization",
+  );
+  const scheduleAt = bridge.indexOf(
+    "const audibleAt = session.playback.schedulePcm(audioEvent);",
+  );
+  const schedule = bridge.slice(scheduleAt, scheduleAt + 1_500);
+  assert.ok(scheduleAt >= 0);
+  assert.match(
+    schedule,
+    /Number\.isFinite\(speechEndedAt\)[\s\S]*speechEndToEstimatedAudibleMs[\s\S]*dispatchVoiceStartLatency/u,
+    "only a meaningful scheduled PCM frame may publish the start estimate",
+  );
+  const dispatcher = bridge.slice(
+    bridge.indexOf("function dispatchVoiceStartLatency("),
+    bridge.indexOf("\n\nfunction isPlainRecord("),
+  );
+  assert.doesNotMatch(
+    dispatcher,
+    /caption|transcript|sessionState|idToken|appCheckToken/u,
+  );
 });
 
 test("an 80 ms noise candidate is discarded before a fresh capture starts", () => {

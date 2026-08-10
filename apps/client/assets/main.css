@@ -572,6 +572,23 @@
     letter-spacing: 0.07em;
   }
 
+  .voice-status__latency {
+    margin-top: 9px;
+    padding: 6px 10px;
+    border: 1px solid oklch(80% 0.08 240 / 32%);
+    border-radius: 999px;
+    background: oklch(20% 0.04 255 / 46%);
+    color: var(--white-soft);
+    font: 650 0.68rem/1.4 var(--mono);
+    letter-spacing: 0.04em;
+  }
+
+  .voice-status__latency.is-on-target {
+    border-color: oklch(84% 0.14 170 / 46%);
+    background: oklch(24% 0.06 170 / 38%);
+    color: oklch(92% 0.08 170);
+  }
+
   .turn-notice {
     display: grid;
     justify-self: center;

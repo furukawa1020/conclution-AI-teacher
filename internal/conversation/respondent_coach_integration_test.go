@@ -292,7 +292,6 @@ func TestAgentExplicitFirstAnswerUpdatesBoundedFadingMetadata(t *testing.T) {
 		questionText = "上司に、導入目的は何かと聞かれました"
 		coreAnswer   = "目的は評価基準をそろえることです。判断のばらつきを減らします"
 		proxyDraft   = "AIが本人の代わりに作った回答です。"
-		fixedReply   = "なるほど、そう考えているんですね。"
 	)
 	core := coachAttemptPlan(
 		answercontract.OperatorPurpose,
@@ -343,11 +342,11 @@ func TestAgentExplicitFirstAnswerUpdatesBoundedFadingMetadata(t *testing.T) {
 	if result.AnswerProof != AnswerProofQuestionBoundInputAnswerFirst {
 		t.Fatalf("verified answer proof = %q", result.AnswerProof)
 	}
-	if result.SpokenReply != fixedReply ||
+	if result.SpokenReply != "" ||
 		strings.Contains(result.SpokenReply, proxyDraft) ||
 		strings.Contains(result.SpokenReply, coreAnswer) ||
 		strings.HasSuffix(result.SpokenReply, "？") {
-		t.Fatalf("core completion opened another test: %#v", result)
+		t.Fatalf("owned answer did not yield the floor: %#v", result)
 	}
 	following := openCoachState(t, agent, uid, result.StateToken)
 	if following.PendingAnswer.Active {

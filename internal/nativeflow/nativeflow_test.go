@@ -875,16 +875,16 @@ func TestNativeFlowRoutesExplicitRespondentCoachRequestThroughBoundStagedFlow(t 
 	}
 }
 
-func TestNativeFinalCaptionKeepsOrdinaryAndRetractedProxyRequestsOnNativeAudio(t *testing.T) {
+func TestNativeFinalCaptionKeepsOrdinaryAndReportedRequestsOnNativeAudio(t *testing.T) {
 	for index, value := range []string{
 		"問題の答えを教えて",
-		"代わりに答えて。でも今はやめて",
-		"回答を作って。いや、作らないで",
-		"この回答を読み上げて。やっぱりやめて",
+		"友達が「代わりに答えないで」と言っていた",
+		"母は回答を作らないでと言いました",
+		"『この回答を読み上げないで』は引用です",
 	} {
 		t.Run(value, func(t *testing.T) {
-			if requiresRespondentCoach(value) {
-				t.Fatalf("ordinary or retracted final intent entered respondent coach: %q", value)
+			if requiresRespondentCoach(value) || explicitProxyAnswerOptOut(value) {
+				t.Fatalf("ordinary or reported final intent entered a proxy control: %q", value)
 			}
 			const providerReply = "わかりました。今の依頼に沿って続けます。"
 			session := newScriptedSession(

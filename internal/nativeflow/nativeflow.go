@@ -10,6 +10,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -236,6 +237,7 @@ func (s *Service) processLive(
 	sendResultRead := false
 	spoke := false
 	turnComplete := false
+	providerAnswerTainted := false
 	deliverAudio := func(pcm []byte) error {
 		meaningful := speechio.PCM16HasMeaningfulSample(pcm)
 		if err := onAudio(pcm); err != nil {
@@ -248,6 +250,7 @@ func (s *Service) processLive(
 		return nil
 	}
 	var stagedHandoff httpapi.VoiceCaptionHandoff
+	var respondentCheckpointAuthorized atomic.Bool
 	defer func() {
 		if stagedHandoff != nil {
 			stagedHandoff.Cancel()
@@ -263,6 +266,9 @@ func (s *Service) processLive(
 		var publishCheckpoint func(httpapi.VoiceRespondentCheckpoint) error
 		if onCoachActive != nil {
 			publishCheckpoint = func(checkpoint httpapi.VoiceRespondentCheckpoint) error {
+				if !respondentCheckpointAuthorized.Load() {
+					return errNativeFlowUnavailable
+				}
 				return onCoachActive(httpapi.VoiceRespondentCheckpointTransition{
 					PreviousSessionState: preparedStateToken,
 					Checkpoint:           checkpoint,
@@ -308,9 +314,22 @@ func (s *Service) processLive(
 			}
 			inputCaptionText := string(inputCaption)
 			coachObserved := requiresRespondentCoach(inputCaptionText)
-			canDonateCaption := s.captionHandoff != nil && onCoachActive != nil
+			proxyAnswerOptOutObserved := explicitProxyAnswerOptOut(inputCaptionText)
+			if coachObserved || proxyAnswerOptOutObserved {
+				// Taint belongs to the provider session, not to the optional staged
+				// handoff. ProcessLive and ProcessLiveWithEndpoint have no respondent
+				// callback, so an interim proxy instruction may be observed even when
+				// no handoff can open. Never release that provider's later output.
+				providerAnswerTainted = true
+			}
+			// A direct proxy-answer refusal is an assistant-only control turn. It
+			// may use the audited caption handoff without respondent checkpoint
+			// authority, while coach opt-in still requires that authority.
+			canDonateCaption := s.captionHandoff != nil &&
+				(onCoachActive != nil || proxyAnswerOptOutObserved)
 			if canDonateCaption &&
-				(requiresStaged || coachObserved || stagedHandoff != nil) {
+				(requiresStaged || coachObserved || proxyAnswerOptOutObserved ||
+					stagedHandoff != nil) {
 				if err := openStagedHandoff(); err != nil {
 					pooled.session.DiscardOutput()
 					event.Clear()
@@ -373,22 +392,24 @@ func (s *Service) processLive(
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 				}
-				if stagedHandoff != nil && !requiresStaged && !coachObserved {
-					// A non-final caption may have already asked the provider to
-					// answer for the person. If the cumulative final caption retracts
-					// that request, the held provider output is still tainted by the
-					// earlier instruction. Never commit it as ordinary Native audio;
-					// cancel respondent authority and replay the final turn through
-					// the audited staged fallback instead.
+				if providerAnswerTainted && !requiresStaged && !coachObserved &&
+					!proxyAnswerOptOutObserved {
+					// A non-final caption already asked the provider to answer for the
+					// person, or explicitly refused such an answer. If the cumulative
+					// final caption is ordinary, the held provider output is still
+					// tainted by that earlier instruction. Never commit it as ordinary
+					// Native audio; replay the final turn through the staged fallback.
 					pooled.session.DiscardOutput()
-					stagedHandoff.Cancel()
-					stagedHandoff = nil
+					if stagedHandoff != nil {
+						stagedHandoff.Cancel()
+						stagedHandoff = nil
+					}
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
 					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
 				}
-				if requiresStaged || coachObserved {
+				if requiresStaged || coachObserved || proxyAnswerOptOutObserved {
 					// A Native checkpoint can retain only a generic operator and
 					// cannot prove which external question the next utterance
 					// answers. Release no provider output. Donate the provider's
@@ -421,6 +442,10 @@ func (s *Service) processLive(
 						endpointPublished = true
 						onEndpoint()
 					}
+					respondentCheckpointAuthorized.Store(
+						!proxyAnswerOptOutObserved &&
+							(requiresStaged || coachObserved),
+					)
 					result, handoffErr := stagedHandoff.Commit()
 					result.LiveTimings.STTFinalMS = millisecondsSince(
 						started,
@@ -611,6 +636,14 @@ func mergeCaption(current []byte, next []byte) []byte {
 // broader respondent authority.
 func requiresRespondentCoach(value string) bool {
 	return conversation.ExplicitCoachOptIn(value)
+}
+
+// explicitProxyAnswerOptOut delegates the refusal boundary to the same
+// deterministic parser used by the staged agent. A refusal is not coach
+// consent, but its provider output is still unsafe to publish: the provider
+// may have prepared the very answer the person explicitly rejected.
+func explicitProxyAnswerOptOut(value string) bool {
+	return conversation.ExplicitProxyAnswerOptOut(value)
 }
 
 func nativeAudioEligible(value string) bool {

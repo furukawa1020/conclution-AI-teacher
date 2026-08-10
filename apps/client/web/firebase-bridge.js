@@ -2473,6 +2473,55 @@ function hasValidAnswerProofMetadata(
   );
 }
 
+function hasValidAnswerTransitionProofMetadata(
+  proof,
+  answerProof,
+  assistanceTarget,
+  respondentStage,
+  coachPhase,
+  coachAction,
+) {
+  if (proof === "none") return true;
+  return (
+    proof === "question_bound_input_clause_later_to_first" &&
+    answerProof === "question_bound_input_answer_first" &&
+    assistanceTarget === "respondent" &&
+    respondentStage === "restructure" &&
+    coachPhase === "complete" &&
+    coachAction === "complete"
+  );
+}
+
+const VOICE_RESPONSE_REQUIRED_KEYS = Object.freeze([
+  "answerProof",
+  "assistanceTarget",
+  "audioBase64",
+  "audioMimeType",
+  "caption",
+  "coachAction",
+  "coachPhase",
+  "detectedDomain",
+  "needsPaper",
+  "privacyStatus",
+  "researchRecords",
+  "researchStatus",
+  "respondentStage",
+  "route",
+  "sessionState",
+]);
+
+function hasExactVoiceResponseKeys(payload) {
+  const keys = Object.keys(payload).sort();
+  const withTransition = keys.includes("answerTransitionProof");
+  const expected = withTransition
+    ? [...VOICE_RESPONSE_REQUIRED_KEYS, "answerTransitionProof"].sort()
+    : VOICE_RESPONSE_REQUIRED_KEYS;
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
+  );
+}
+
 function clearPendingDocument(reason = "cleared") {
   const hadPendingDocument = pendingDocument !== undefined;
   pendingDocument = undefined;
@@ -2511,6 +2560,7 @@ function armPendingDocumentExpiry(documentForExpiry, attachedAt) {
 function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
   if (
     !isPlainRecord(payload) ||
+    !hasExactVoiceResponseKeys(payload) ||
     typeof expectedStrictCloudMinimization !== "boolean"
   ) {
     fail("voice_response_invalid");
@@ -2518,6 +2568,10 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
   const hasAudio = payload.audioBase64 !== "";
   const answerProof =
     payload.answerProof === undefined ? "none" : payload.answerProof;
+  const answerTransitionProof =
+    payload.answerTransitionProof === undefined
+      ? "none"
+      : payload.answerTransitionProof;
   if (
     !isBase64(payload.audioBase64) ||
     payload.audioBase64.length > RESPONSE_AUDIO_MAX_BASE64_CHARS ||
@@ -2548,7 +2602,20 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
       payload.coachPhase,
       payload.coachAction,
     ) ||
+    !hasValidAnswerTransitionProofMetadata(
+      answerTransitionProof,
+      answerProof,
+      payload.assistanceTarget,
+      payload.respondentStage,
+      payload.coachPhase,
+      payload.coachAction,
+    ) ||
     (expectedStrictCloudMinimization && answerProof !== "none") ||
+    (expectedStrictCloudMinimization && answerTransitionProof !== "none") ||
+    (answerTransitionProof !== "none" &&
+      (hasAudio ||
+        payload.caption !== null ||
+        (payload.audioMimeType !== "" && payload.audioMimeType !== undefined))) ||
     !boundedString(payload.route, 100) ||
     typeof payload.needsPaper !== "boolean" ||
     !["", "blocked", "clear"].includes(payload.privacyStatus) ||
@@ -2584,6 +2651,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
         payload.coachPhase !== "none" ||
         payload.coachAction !== "none" ||
         answerProof !== "none" ||
+        answerTransitionProof !== "none" ||
         research.status !== "none" ||
         research.records.length !== 0 ||
         payload.route !== "strict-privacy-blocked" ||
@@ -2606,6 +2674,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     coachPhase: payload.coachPhase,
     coachAction: payload.coachAction,
     answerProof,
+    answerTransitionProof,
     needsPaper: payload.needsPaper,
     privacyStatus: payload.privacyStatus,
     researchStatus: research.status,

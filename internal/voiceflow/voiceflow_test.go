@@ -918,6 +918,37 @@ func TestSpeculativeAnswerProofCommitsOnlyAtEligibleFinalBoundary(t *testing.T) 
 	}
 }
 
+func TestSpeculativeAnswerTransitionProofCommitsOnlyWithExactFinalQBA(t *testing.T) {
+	decision := conversation.VoiceTurnResult{
+		AnswerProof:                    conversation.AnswerProofNone,
+		AnswerProofCandidate:           conversation.AnswerProofQuestionBoundInputAnswerFirst,
+		AnswerTransitionProof:          conversation.AnswerTransitionProofNone,
+		AnswerTransitionProofCandidate: conversation.AnswerTransitionProofQuestionBoundInputClauseLaterToFirst,
+	}
+	if got := committedSpeculativeAnswerTransitionProof(
+		httpapi.VoiceTurnInput{}, decision,
+	); got != conversation.AnswerTransitionProofQuestionBoundInputClauseLaterToFirst {
+		t.Fatalf("committed transition proof = %q", got)
+	}
+
+	for _, input := range []httpapi.VoiceTurnInput{
+		{StrictCloudMinimization: true},
+		{Document: &httpapi.VoiceDocument{}},
+	} {
+		if got := committedSpeculativeAnswerTransitionProof(input, decision); got !=
+			conversation.AnswerTransitionProofNone {
+			t.Fatalf("ineligible transition committed: %+v = %q", input, got)
+		}
+	}
+	withoutQBA := decision
+	withoutQBA.AnswerProofCandidate = conversation.AnswerProofNone
+	if got := committedSpeculativeAnswerTransitionProof(
+		httpapi.VoiceTurnInput{}, withoutQBA,
+	); got != conversation.AnswerTransitionProofNone {
+		t.Fatalf("transition committed without QBA: %q", got)
+	}
+}
+
 func TestPipelineMapsResearchRecords(t *testing.T) {
 	t.Parallel()
 

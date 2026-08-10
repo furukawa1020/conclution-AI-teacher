@@ -294,6 +294,52 @@ func TestLoadParsesVerifierProgressWritesStrictly(t *testing.T) {
 	}
 }
 
+func TestLoadStagesAnswerTransitionWriterBeforeBehavior(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_STATE_V2_WRITES", "true")
+	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "true")
+	t.Setenv("KOTAE_COACH_RESTATEMENT_BINDING", "true")
+	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "true")
+	t.Setenv("KOTAE_ANSWER_TRANSITION_WRITES", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AnswerTransitionWrites || cfg.AnswerTransitionEnabled {
+		t.Fatalf("unexpected transition rollout: %+v", cfg)
+	}
+
+	t.Setenv("KOTAE_ANSWER_TRANSITION_ENABLED", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AnswerTransitionEnabled {
+		t.Fatal("transition behavior was not enabled")
+	}
+
+	t.Setenv("KOTAE_ANSWER_TRANSITION_WRITES", "false")
+	if _, err := Load(); err == nil ||
+		!strings.Contains(err.Error(), "requires KOTAE_ANSWER_TRANSITION_WRITES") {
+		t.Fatalf("behavior without writer error = %v", err)
+	}
+}
+
+func TestLoadParsesAnswerTransitionFlagsStrictly(t *testing.T) {
+	setTestEnvironment(t)
+	for _, name := range []string{
+		"KOTAE_ANSWER_TRANSITION_WRITES",
+		"KOTAE_ANSWER_TRANSITION_ENABLED",
+	} {
+		t.Setenv(name, "eventually")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
+			t.Fatalf("malformed %s error = %v", name, err)
+		}
+		t.Setenv(name, "false")
+	}
+}
+
 func TestLoadRejectsVerifierProgressWritesWithoutStateV2(t *testing.T) {
 	setTestEnvironment(t)
 	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "true")

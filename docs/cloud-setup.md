@@ -165,6 +165,8 @@ KOTAE_COACH_RESTATEMENT_BINDING=true
 KOTAE_ANSWER_PROOF_WRITES=true
 KOTAE_VERIFIER_PROGRESS_WRITES=true
 KOTAE_RETRIEVAL_POLICY_ENABLED=true
+KOTAE_ANSWER_TRANSITION_WRITES=true
+KOTAE_ANSWER_TRANSITION_ENABLED=true
 KOTAE_SPEECH_LOCATION=asia-northeast1
 KOTAE_SPEECH_MODEL=long
 KOTAE_SPEECH_VOICE=ja-JP-Chirp3-HD-Kore
@@ -272,6 +274,8 @@ Native Audioのlocationは`KOTAE_NATIVE_AUDIO_LOCATION=us-central1`へ固定し�
 本番では`KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true`を維持し、未指定でもsecure defaultとして`true`になります。まずcandidate backendを検証し、必須7 collectionのTTLをすべて`ACTIVE`にしてからservice rootへ昇格し、その後にPasskey UIを含むHostingを最終公開します。これにより、短命データを期限管理できないrevisionへ本番trafficを流さず、新しいUIが未対応の旧backendへ接続する時間も作りません。音声APIのbuffered、streaming、WebSocketすべてが、Passkey由来claimと5分以内の署名検証時刻`kotae_passkey_at`を要求します。Firebaseの`auth_time`はcustom token交換時に新しくなり得るため、freshness根拠には使いません。`false`は認証を迂回できるため、明示的なローカル開発以外では使いません。
 
 `KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行、`KOTAE_ANSWER_PROOF_WRITES`はQBA Proof用の質問インスタンスtag発行を制御します。`KOTAE_VERIFIER_PROGRESS_WRITES`は、現在の質問に対する検証の進行だけを表す5個の固定小数verifier-progress audit-posterior massをstateへ発行するwriter flagです。本人のretrieval状態を推定するflagではありません。`KOTAE_RETRIEVAL_POLICY_ENABLED`は、質問拘束済みQ-ARCと回答後の有限型controllerを使うbehavior flagであり、writer flagとは独立です。`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED`はNative final captionを監査済みplanner/controllerへ直接donateするbehavior flagです。policyを`true`にするには`KOTAE_STATE_V2_WRITES=true`、`KOTAE_ANSWER_PROOF_WRITES=true`、`KOTAE_COACH_RESTATEMENT_BINDING=true`が必要です。これによりA-laterは設定で即時completeへ迂回できず、質問boundな一度だけの再質問を必ず使います。caption handoffを`true`にするにはさらにverifier-progress writerとretrieval policyがともに`true`でなければなりません。長期運用ではこの6 flagをすべて`true`にします。progressには質問、回答、逐語録、診断、人物特性を入れません。本番Hostingのpreflightは、昇格済みCloud Run revisionで`KOTAE_VERIFIER_PROGRESS_WRITES=true`、`KOTAE_RETRIEVAL_POLICY_ENABLED=true`、`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED=true`を必須とし、一つでも欠ける、または`false`なら公開前に停止します。
+
+QBA-Δは`KOTAE_ANSWER_TRANSITION_WRITES`と`KOTAE_ANSWER_TRANSITION_ENABLED`を分離します。全trafficが新fieldを読めるreaderになった後にwriterだけを有効化し、安定確認後にbehaviorを有効化します。rollbackはbehavior、writerの逆順です。本文は保存せず、詳細は[QBA-Δ](answer-transition-proof.md)を参照してください。
 
 verifier progress、policy、Native caption handoffは次の4段階でreader-first移行します。tupleの順序は常に`(KOTAE_VERIFIER_PROGRESS_WRITES, KOTAE_RETRIEVAL_POLICY_ENABLED, KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED)`です。
 

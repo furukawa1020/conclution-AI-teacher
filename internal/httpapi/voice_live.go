@@ -150,21 +150,22 @@ type voiceLiveOutboundFrame struct {
 }
 
 type voiceLiveFinalResult struct {
-	AudioBase64      string           `json:"audioBase64"`
-	AudioMIMEType    string           `json:"audioMimeType"`
-	Caption          *string          `json:"caption"`
-	SessionState     string           `json:"sessionState"`
-	DetectedDomain   string           `json:"detectedDomain"`
-	AssistanceTarget string           `json:"assistanceTarget"`
-	RespondentStage  string           `json:"respondentStage"`
-	CoachPhase       string           `json:"coachPhase"`
-	CoachAction      string           `json:"coachAction"`
-	AnswerProof      string           `json:"answerProof"`
-	ResearchStatus   string           `json:"researchStatus"`
-	ResearchRecords  []ResearchRecord `json:"researchRecords"`
-	PrivacyStatus    string           `json:"privacyStatus"`
-	Route            string           `json:"route"`
-	NeedsPaper       bool             `json:"needsPaper"`
+	AudioBase64           string           `json:"audioBase64"`
+	AudioMIMEType         string           `json:"audioMimeType"`
+	Caption               *string          `json:"caption"`
+	SessionState          string           `json:"sessionState"`
+	DetectedDomain        string           `json:"detectedDomain"`
+	AssistanceTarget      string           `json:"assistanceTarget"`
+	RespondentStage       string           `json:"respondentStage"`
+	CoachPhase            string           `json:"coachPhase"`
+	CoachAction           string           `json:"coachAction"`
+	AnswerProof           string           `json:"answerProof"`
+	AnswerTransitionProof string           `json:"answerTransitionProof"`
+	ResearchStatus        string           `json:"researchStatus"`
+	ResearchRecords       []ResearchRecord `json:"researchRecords"`
+	PrivacyStatus         string           `json:"privacyStatus"`
+	Route                 string           `json:"route"`
+	NeedsPaper            bool             `json:"needsPaper"`
 }
 
 type voiceLiveOutcome struct {
@@ -1375,11 +1376,14 @@ outcomeReady:
 		CoachPhase:       outcome.result.CoachPhase,
 		CoachAction:      outcome.result.CoachAction,
 		AnswerProof:      normalizedAnswerProof(outcome.result.AnswerProof),
-		ResearchStatus:   outcome.result.ResearchStatus,
-		ResearchRecords:  outcome.result.ResearchRecords,
-		PrivacyStatus:    outcome.result.PrivacyStatus,
-		Route:            outcome.result.Route,
-		NeedsPaper:       outcome.result.NeedsPaper,
+		AnswerTransitionProof: normalizedAnswerTransitionProof(
+			outcome.result.AnswerTransitionProof,
+		),
+		ResearchStatus:  outcome.result.ResearchStatus,
+		ResearchRecords: outcome.result.ResearchRecords,
+		PrivacyStatus:   outcome.result.PrivacyStatus,
+		Route:           outcome.result.Route,
+		NeedsPaper:      outcome.result.NeedsPaper,
 	}
 	if spoke {
 		finalResult.AudioMIMEType = "audio/L16"

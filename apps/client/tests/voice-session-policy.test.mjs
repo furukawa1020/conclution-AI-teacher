@@ -6336,6 +6336,9 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
   const validateAnswerProof = Function(
     `"use strict"; ${validatorSource}; return hasValidAnswerProofMetadata;`,
   )();
+  const validateAnswerTransitionProof = Function(
+    `"use strict"; ${validatorSource}; return hasValidAnswerTransitionProofMetadata;`,
+  )();
 
   for (const [target, phase, action] of [
     ["assistant", "none", "none"],
@@ -6369,6 +6372,24 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
     ),
     true,
   );
+  assert.equal(
+    validateAnswerTransitionProof(
+      "question_bound_input_clause_later_to_first",
+      "question_bound_input_answer_first",
+      "respondent",
+      "restructure",
+      "complete",
+      "complete",
+    ),
+    true,
+  );
+  for (const candidate of [
+    ["future", "question_bound_input_answer_first", "respondent", "restructure", "complete", "complete"],
+    ["question_bound_input_clause_later_to_first", "none", "respondent", "restructure", "complete", "complete"],
+    ["question_bound_input_clause_later_to_first", "question_bound_input_answer_first", "respondent", "restructure", "expanding", "expand"],
+  ]) {
+    assert.equal(validateAnswerTransitionProof(...candidate), false);
+  }
   assert.equal(
     validateAnswerProof(
       "question_bound_input_answer_first",
@@ -6430,6 +6451,12 @@ test("coach metadata accepts only authoritative phase and action pairs", async (
     /expectedStrictCloudMinimization && answerProof !== "none"/u,
   );
   assert.match(response, /answerProof,/u);
+  assert.match(response, /answerTransitionProof,/u);
+  assert.match(response, /!hasExactVoiceResponseKeys\(payload\)/u);
+  assert.match(
+    response,
+    /expectedStrictCloudMinimization && answerTransitionProof !== "none"/u,
+  );
   assert.match(
     response,
     /expectedStrictCloudMinimization[\s\S]*payload\.privacyStatus !== "blocked"[\s\S]*payload\.privacyStatus !== "clear"/u,

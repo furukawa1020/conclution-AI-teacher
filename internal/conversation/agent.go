@@ -217,6 +217,8 @@ type vertexAgent struct {
 	continuityKey           []byte
 	stateV2Writes           bool
 	answerProofWrites       bool
+	answerTransitionWrites  bool
+	answerTransitionEnabled bool
 	verifierProgressWrites  bool
 	retrievalPolicyEnabled  bool
 	research                *securityflow.CrossrefExecutor
@@ -340,6 +342,8 @@ func NewVertexAgent(
 	answerProofWrites bool,
 	verifierProgressWrites bool,
 	retrievalPolicyEnabled bool,
+	answerTransitionWrites bool,
+	answerTransitionEnabled bool,
 ) (Agent, error) {
 	if ctx == nil || strings.TrimSpace(project) == "" {
 		return nil, errors.New("conversation: Vertex AI project is required")
@@ -382,6 +386,8 @@ func NewVertexAgent(
 		answerProofWrites,
 		verifierProgressWrites,
 		retrievalPolicyEnabled,
+		answerTransitionWrites,
+		answerTransitionEnabled,
 	)
 }
 
@@ -402,7 +408,7 @@ func NewAgent(
 	precisionModel string,
 	stateKey []byte,
 ) (Agent, error) {
-	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true, true, true, true, true)
+	return newAgent(generator, fastModel, precisionModel, stateKey, nil, true, true, true, true, true, true, true)
 }
 
 func newAgent(
@@ -416,6 +422,8 @@ func newAgent(
 	answerProofWrites bool,
 	verifierProgressWrites bool,
 	retrievalPolicyEnabled bool,
+	answerTransitionWrites bool,
+	answerTransitionEnabled bool,
 ) (Agent, error) {
 	if generator == nil {
 		return nil, errors.New("conversation: content generator is required")
@@ -459,6 +467,8 @@ func newAgent(
 		answerProofWrites:       answerProofWrites,
 		verifierProgressWrites:  verifierProgressWrites,
 		retrievalPolicyEnabled:  retrievalPolicyEnabled,
+		answerTransitionWrites:  answerTransitionWrites,
+		answerTransitionEnabled: answerTransitionEnabled,
 		security:                securityGuard,
 		now:                     time.Now,
 	}
@@ -506,6 +516,10 @@ func (agent *vertexAgent) sealState(
 		// writes only after all traffic is on a compatible reader.
 		state.PendingAnswer.QuestionInstanceTag = ""
 	}
+	if !agent.answerTransitionWrites {
+		state.PendingAnswer.AnswerTransitionEvidence =
+			AnswerTransitionEvidenceNone
+	}
 	if !agent.verifierProgressWrites || !agent.stateV2Writes {
 		// Reader-first rollout for the fixed-size, content-free posterior. Older
 		// revisions never see this additive JSON field until every live reader
@@ -527,6 +541,8 @@ func (agent *vertexAgent) sealState(
 			state.PendingAnswer.QuestionContinuityTag = ""
 			state.PendingAnswer.ContinuityTag = ""
 			state.PendingAnswer.ExpansionOptIn = false
+			state.PendingAnswer.AnswerTransitionEvidence =
+				AnswerTransitionEvidenceNone
 		}
 	}
 	return agent.codec.seal(uid, state)
@@ -1506,6 +1522,7 @@ func (agent *vertexAgent) Process(
 		}
 	}
 	coachContinuityVerified := false
+	coachTransitionEvidence := coachFrame.AnswerTransitionEvidence
 	coachVerificationPlan := finalPlan
 	if coachTurn && !verificationUnavailable {
 		operator := authoritativeCoachOperator(coachFrame)
@@ -1660,6 +1677,14 @@ func (agent *vertexAgent) Process(
 				)
 			}
 			coachContinuityVerified = continuityOK
+			if agent.answerTransitionWrites {
+				coachTransitionEvidence = answerTransitionEvidenceForLateTurn(
+					coachFrame,
+					coachDecision,
+					gate,
+					finalPlan.answerAssessment,
+				)
+			}
 		}
 		if coachFrame.Phase == respondent.CoachPhaseExpanding &&
 			substantiveCoachAttempt(normalized.Utterance) {
@@ -1836,6 +1861,7 @@ func (agent *vertexAgent) Process(
 				}
 			}
 			storedFrame := coachFrame
+			storedFrame.AnswerTransitionEvidence = coachTransitionEvidence
 			if storedPhase == respondent.CoachPhaseExpanding {
 				// The original A verifier cannot authorize the different follow-up
 				// slot. Expansion accepts only its fixed, explicit reference form.
@@ -2055,6 +2081,30 @@ func (agent *vertexAgent) Process(
 		responseAssistanceTarget,
 		responseRespondentStage,
 	)
+	answerTransitionProof := answerTransitionProofForTurn(
+		normalized,
+		preTurnState.PendingAnswer,
+		coachFrame,
+		coachDecision,
+		answerProof,
+		coachContinuityVerified,
+		proofSpanBound,
+		responseAssistanceTarget,
+		responseRespondentStage,
+		agent.answerTransitionEnabled,
+	)
+	answerTransitionProofCandidate := answerTransitionProofCandidateForTurn(
+		normalized,
+		preTurnState.PendingAnswer,
+		coachFrame,
+		coachDecision,
+		answerProofCandidate,
+		coachContinuityVerified,
+		proofSpanBound,
+		responseAssistanceTarget,
+		responseRespondentStage,
+		agent.answerTransitionEnabled,
+	)
 	if answerOwnershipYieldsFloor(
 		answerProof,
 		answerProofCandidate,
@@ -2068,28 +2118,30 @@ func (agent *vertexAgent) Process(
 	}
 
 	return VoiceTurnResult{
-		SchemaVersion:        SchemaVersion,
-		Domain:               finalPlan.Domain,
-		Intent:               finalPlan.Intent,
-		AssistanceTarget:     responseAssistanceTarget,
-		RespondentStage:      responseRespondentStage,
-		CoachPhase:           responseCoachPhase,
-		CoachAction:          responseCoachAction,
-		AnswerProof:          answerProof,
-		AnswerProofCandidate: answerProofCandidate,
-		ResearchStatus:       researchStatus,
-		ResearchRecords:      researchRecords,
-		LatentQuestion:       finalPlan.LatentQuestion,
-		ArgumentStructure:    finalPlan.ArgumentStructure,
-		InterventionPolicy:   interventionPolicy,
-		SpokenReply:          spokenReply,
-		Confidence:           finalPlan.Confidence,
-		Intervention:         decision,
-		SelfCorrectionGrace:  nextSelfCorrectionGrace,
-		AnswerContract:       finalPlan.answerAssessment.Metrics,
-		Route:                route,
-		NeedsClarification:   decision.Act == "clarify",
-		StateToken:           stateToken,
+		SchemaVersion:                  SchemaVersion,
+		Domain:                         finalPlan.Domain,
+		Intent:                         finalPlan.Intent,
+		AssistanceTarget:               responseAssistanceTarget,
+		RespondentStage:                responseRespondentStage,
+		CoachPhase:                     responseCoachPhase,
+		CoachAction:                    responseCoachAction,
+		AnswerProof:                    answerProof,
+		AnswerProofCandidate:           answerProofCandidate,
+		AnswerTransitionProof:          answerTransitionProof,
+		AnswerTransitionProofCandidate: answerTransitionProofCandidate,
+		ResearchStatus:                 researchStatus,
+		ResearchRecords:                researchRecords,
+		LatentQuestion:                 finalPlan.LatentQuestion,
+		ArgumentStructure:              finalPlan.ArgumentStructure,
+		InterventionPolicy:             interventionPolicy,
+		SpokenReply:                    spokenReply,
+		Confidence:                     finalPlan.Confidence,
+		Intervention:                   decision,
+		SelfCorrectionGrace:            nextSelfCorrectionGrace,
+		AnswerContract:                 finalPlan.answerAssessment.Metrics,
+		Route:                          route,
+		NeedsClarification:             decision.Act == "clarify",
+		StateToken:                     stateToken,
 	}, nil
 }
 

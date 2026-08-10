@@ -658,6 +658,71 @@ func TestAnswerProofMetadataFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAnswerTransitionProofRequiresOrdinaryQBAAndSilentTerminalTurn(t *testing.T) {
+	t.Parallel()
+	verified := VoiceTurnResult{
+		StateToken:            "opaque-state",
+		DetectedDomain:        "daily",
+		AssistanceTarget:      "respondent",
+		RespondentStage:       "restructure",
+		CoachPhase:            "complete",
+		CoachAction:           "complete",
+		AnswerProof:           "question_bound_input_answer_first",
+		AnswerTransitionProof: "question_bound_input_clause_later_to_first",
+		ResearchStatus:        "none",
+		ResearchRecords:       []ResearchRecord{},
+		Route:                 "respondent-complete-fast",
+	}
+	if err := validateVoiceResult(verified); err != nil {
+		t.Fatalf("transition proof rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*VoiceTurnResult){
+		"unknown enum": func(result *VoiceTurnResult) {
+			result.AnswerTransitionProof = "later_to_first"
+		},
+		"missing QBA": func(result *VoiceTurnResult) {
+			result.AnswerProof = "none"
+		},
+		"expansion": func(result *VoiceTurnResult) {
+			result.CoachPhase = "expanding"
+			result.CoachAction = "expand"
+		},
+		"audible acknowledgement": func(result *VoiceTurnResult) {
+			result.Audio = []byte{1, 2}
+			result.AudioMIMEType = "audio/mpeg"
+			result.Caption = "追加の返答"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := verified
+			mutate(&candidate)
+			if err := validateVoiceResult(candidate); err == nil {
+				t.Fatalf("invalid transition accepted: %+v", candidate)
+			}
+		})
+	}
+
+	if err := validateVoiceResultForInput(
+		VoiceTurnInput{StrictCloudMinimization: true},
+		func() VoiceTurnResult {
+			copy := verified
+			copy.PrivacyStatus = "clear"
+			return copy
+		}(),
+	); err == nil {
+		t.Fatal("strict mode accepted transition proof")
+	}
+	if err := validateVoiceResultForInput(
+		VoiceTurnInput{Document: &VoiceDocument{}}, verified,
+	); err == nil {
+		t.Fatal("PDF turn accepted transition proof")
+	}
+	if got := normalizedAnswerTransitionProof(""); got != "none" {
+		t.Fatalf("empty transition proof = %q", got)
+	}
+}
+
 func TestVoiceTurnFailureLogsOnlyFinitePipelineStage(t *testing.T) {
 	t.Parallel()
 

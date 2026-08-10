@@ -196,11 +196,14 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		"coachPhase":       result.CoachPhase,
 		"coachAction":      result.CoachAction,
 		"answerProof":      normalizedAnswerProof(result.AnswerProof),
-		"researchStatus":   result.ResearchStatus,
-		"researchRecords":  result.ResearchRecords,
-		"privacyStatus":    result.PrivacyStatus,
-		"route":            result.Route,
-		"needsPaper":       result.NeedsPaper,
+		"answerTransitionProof": normalizedAnswerTransitionProof(
+			result.AnswerTransitionProof,
+		),
+		"researchStatus":  result.ResearchStatus,
+		"researchRecords": result.ResearchRecords,
+		"privacyStatus":   result.PrivacyStatus,
+		"route":           result.Route,
+		"needsPaper":      result.NeedsPaper,
 	}
 	if err := encoder.Encode(voiceStreamFrame{
 		Type:    "final",

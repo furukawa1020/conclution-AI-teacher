@@ -25,6 +25,135 @@ const (
 	liveTestPCMFrameBytes = 640
 )
 
+func TestEmptyVoiceLiveTimingsMarksNativeWaterfallMissing(t *testing.T) {
+	timings := emptyVoiceLiveTimings()
+	if timings.CommitToServerDrainMS != -1 ||
+		timings.ServerDrainToActivityEndMS != -1 ||
+		timings.ActivityEndToFinalCaptionMS != -1 ||
+		timings.FinalToRiskRouteGateMS != -1 ||
+		timings.OutputCommitToFirstAudioMS != -1 {
+		t.Fatalf("empty native waterfall = %+v", timings)
+	}
+}
+
+func TestVoiceLiveLogIncludesContentFreeNativeWaterfall(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	base := time.Unix(1_700_000_000, 0)
+	metrics := &voiceLiveOutputMetrics{
+		committed:     true,
+		firstOutputAt: base.Add(40 * time.Millisecond),
+		frames:        1,
+		bytes:         2,
+	}
+	metrics.markNativeCommit(base)
+	for stage, at := range map[VoiceNativeWaterfallStage]time.Time{
+		VoiceNativeWaterfallServerDrain:        base.Add(7 * time.Millisecond),
+		VoiceNativeWaterfallActivityEnd:        base.Add(11 * time.Millisecond),
+		VoiceNativeWaterfallFinalCaption:       base.Add(20 * time.Millisecond),
+		VoiceNativeWaterfallRiskRouteGate:      base.Add(23 * time.Millisecond),
+		VoiceNativeWaterfallOutputCommit:       base.Add(25 * time.Millisecond),
+		VoiceNativeWaterfallFirstMeaningfulPCM: base.Add(31 * time.Millisecond),
+	} {
+		metrics.markNativeBoundary(stage, at)
+	}
+	server.logVoiceLiveSession(
+		context.Background(),
+		base,
+		-1,
+		time.Time{},
+		base,
+		1,
+		640,
+		metrics,
+		VoiceLiveTimings{
+			CommitToServerDrainMS:       999,
+			ServerDrainToActivityEndMS:  999,
+			ActivityEndToFinalCaptionMS: 999,
+			FinalToRiskRouteGateMS:      999,
+			OutputCommitToFirstAudioMS:  999,
+		},
+		false,
+	)
+	var logged map[string]any
+	if err := json.Unmarshal(output.Bytes(), &logged); err != nil {
+		t.Fatalf("decode voice live log: %v", err)
+	}
+	for key, want := range map[string]float64{
+		"commit_to_server_drain_ms":        7,
+		"server_drain_to_activity_end_ms":  4,
+		"activity_end_to_final_caption_ms": 9,
+		"final_to_risk_route_gate_ms":      3,
+		"output_commit_to_first_audio_ms":  6,
+	} {
+		if got := logged[key]; got != want {
+			t.Fatalf("%s = %#v, want %.0f; log=%s", key, got, want, output.String())
+		}
+	}
+}
+
+func TestNativeWaterfallSnapshotPreservesPartialAndIgnoresLateMarkers(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	metrics := &voiceLiveOutputMetrics{}
+	metrics.markNativeCommit(base)
+	metrics.markNativeBoundary(
+		VoiceNativeWaterfallServerDrain,
+		base.Add(7*time.Millisecond),
+	)
+	_, _, _, snapshot := metrics.snapshotForLog()
+	metrics.markNativeBoundary(
+		VoiceNativeWaterfallActivityEnd,
+		base.Add(11*time.Millisecond),
+	)
+	_, _, _, afterLateMarker := metrics.snapshotForLog()
+	timings := nativeWaterfallTimings(snapshot)
+	lateTimings := nativeWaterfallTimings(afterLateMarker)
+	if timings.CommitToServerDrainMS != 7 ||
+		timings.ServerDrainToActivityEndMS != -1 ||
+		lateTimings.ServerDrainToActivityEndMS != -1 {
+		t.Fatalf("snapshot=%+v after late marker=%+v", timings, lateTimings)
+	}
+}
+
+func TestVoiceLiveLogForcesUnobservedNativeWaterfallToMinusOne(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	base := time.Unix(1_700_000_000, 0)
+	server.logVoiceLiveSession(
+		context.Background(),
+		base,
+		-1,
+		time.Time{},
+		base,
+		0,
+		0,
+		&voiceLiveOutputMetrics{},
+		VoiceLiveTimings{
+			CommitToServerDrainMS:       999,
+			ServerDrainToActivityEndMS:  999,
+			ActivityEndToFinalCaptionMS: 999,
+			FinalToRiskRouteGateMS:      999,
+			OutputCommitToFirstAudioMS:  999,
+		},
+		true,
+	)
+	var logged map[string]any
+	if err := json.Unmarshal(output.Bytes(), &logged); err != nil {
+		t.Fatalf("decode voice live log: %v", err)
+	}
+	for _, key := range []string{
+		"commit_to_server_drain_ms",
+		"server_drain_to_activity_end_ms",
+		"activity_end_to_final_caption_ms",
+		"final_to_risk_route_gate_ms",
+		"output_commit_to_first_audio_ms",
+	} {
+		if got := logged[key]; got != float64(-1) {
+			t.Fatalf("%s = %#v, want -1; log=%s", key, got, output.String())
+		}
+	}
+}
+
 type voiceLiveOutputMetricObservation struct {
 	firstOutputAt time.Time
 	frames        int
@@ -2881,6 +3010,8 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 	publishedDeadline, hasDeadline :=
 		<-service.input.ProcessingDeadline
 	_, deadlineStillOpen := <-service.input.ProcessingDeadline
+	publishedCommitAt, hasCommitAt := <-service.input.ProcessingCommittedAt
+	_, commitAtStillOpen := <-service.input.ProcessingCommittedAt
 	commitPublished := false
 	select {
 	case <-service.input.ProcessingCommitted:
@@ -2894,6 +3025,10 @@ func TestVoiceLiveAuthenticatesThenStreamsPCMAndFinalInOrder(t *testing.T) {
 		!hasDeadline ||
 		publishedDeadline.IsZero() ||
 		deadlineStillOpen ||
+		!hasCommitAt ||
+		publishedCommitAt.IsZero() ||
+		commitAtStillOpen ||
+		publishedDeadline.Before(publishedCommitAt) ||
 		!commitPublished {
 		t.Fatalf("live service audio=%v input=%+v", service.audio, service.input)
 	}

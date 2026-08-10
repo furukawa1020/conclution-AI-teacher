@@ -235,6 +235,9 @@ func (s *liveSession) SendPCM20ms(ctx context.Context, pcm []byte) error {
 	return nil
 }
 
+// EndActivity is the synchronous provider-write boundary used by the Native
+// latency waterfall. A nil return means SendRealtimeInput(ActivityEnd) has
+// completed; provider transcription finalization remains a later event.
 func (s *liveSession) EndActivity(ctx context.Context) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()

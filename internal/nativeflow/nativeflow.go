@@ -52,6 +52,13 @@ type pooledSession struct {
 	session nativevoice.Session
 }
 
+type streamInputResult struct {
+	err           error
+	committedAt   time.Time
+	drainedAt     time.Time
+	activityEndAt time.Time
+}
+
 // Service implements only the live service contract. Buffered audio, PDF,
 // strict mode, tools, and research continue through the audited legacy flow.
 type Service struct {
@@ -201,6 +208,13 @@ func (s *Service) processLive(
 	// receive that exact prepared token instead of replaying stale caller input.
 	input.StateToken = preparedStateToken
 	if requiresStaged && (s.captionHandoff == nil || onCoachActive == nil) {
+		missingTimingResult := httpapi.VoiceTurnResult{
+			LiveTimings: newNativeLiveTimings(
+				time.Time{},
+				time.Time{},
+				time.Time{},
+			),
+		}
 		// The WebSocket handler recognizes native fallback only after its commit
 		// frame closes audio. Drain and wipe capture without opening a provider;
 		// returning before commit would be treated as an unexpected pipeline
@@ -209,13 +223,13 @@ func (s *Service) processLive(
 		// has completed, and publishing before the drain lets the transport begin
 		// capture without falsely claiming that a provider session was opened.
 		if ctx.Err() != nil || s.ctx.Err() != nil {
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return missingTimingResult, errNativeFlowUnavailable
 		}
 		publishNativeInputReady(&input)
 		if err := discardNativeInputUntilCommit(ctx, audio); err != nil {
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return missingTimingResult, errNativeFlowUnavailable
 		}
-		return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+		return missingTimingResult, httpapi.ErrVoiceNativeFallback
 	}
 
 	pooled, err := s.acquire(ctx, uid)
@@ -240,19 +254,63 @@ func (s *Service) processLive(
 	}
 	publishNativeInputReady(&input)
 
-	sendDone := make(chan error, 1)
-	go streamInput(ctx, pooled.session, audio, sendDone)
+	sendDone := make(chan streamInputResult, 1)
+	go streamInput(
+		ctx,
+		pooled.session,
+		audio,
+		input.ProcessingCommittedAt,
+		input.OnNativeWaterfall,
+		s.now,
+		sendDone,
+	)
 
 	var caption []byte
 	var inputCaption []byte
 	var firstAudioAt time.Time
 	var inputCaptionFinalAt time.Time
+	var riskRouteGateAt time.Time
+	var outputCommitAt time.Time
+	var inputSendResult streamInputResult
 	endpointPublished := false
 	inputGatePassed := false
 	sendResultRead := false
 	spoke := false
 	turnComplete := false
 	providerAnswerTainted := false
+	completeRiskRouteGate := func() {
+		if riskRouteGateAt.IsZero() {
+			riskRouteGateAt = s.now()
+			publishNativeWaterfall(
+				input.OnNativeWaterfall,
+				httpapi.VoiceNativeWaterfallRiskRouteGate,
+				riskRouteGateAt,
+			)
+		}
+	}
+	nativeFailureResult := func() httpapi.VoiceTurnResult {
+		tryReadStreamInputResult(
+			sendDone,
+			&sendResultRead,
+			&inputSendResult,
+		)
+		result := httpapi.VoiceTurnResult{
+			LiveTimings: newNativeLiveTimings(
+				started,
+				inputCaptionFinalAt,
+				firstAudioAt,
+			),
+		}
+		applyNativeWaterfallTimings(
+			&result.LiveTimings,
+			inputSendResult,
+			inputCaptionFinalAt,
+			riskRouteGateAt,
+			outputCommitAt,
+			firstAudioAt,
+		)
+		return result
+	}
 	deliverAudio := func(pcm []byte) error {
 		meaningful := speechio.PCM16HasMeaningfulSample(pcm)
 		if err := onAudio(pcm); err != nil {
@@ -260,6 +318,11 @@ func (s *Service) processLive(
 		}
 		if meaningful && firstAudioAt.IsZero() {
 			firstAudioAt = s.now()
+			publishNativeWaterfall(
+				input.OnNativeWaterfall,
+				httpapi.VoiceNativeWaterfallFirstMeaningfulPCM,
+				firstAudioAt,
+			)
 		}
 		spoke = true
 		return nil
@@ -311,7 +374,7 @@ func (s *Service) processLive(
 		if receiveErr != nil {
 			clear(inputCaption)
 			clear(caption)
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return nativeFailureResult(), errNativeFlowUnavailable
 		}
 		switch event.Kind {
 		case nativevoice.EventInputCaption:
@@ -321,11 +384,16 @@ func (s *Service) processLive(
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
-				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				return nativeFailureResult(), errNativeFlowUnavailable
 			}
 			observedAt := s.now()
 			if event.CaptionFinal && inputCaptionFinalAt.IsZero() {
 				inputCaptionFinalAt = observedAt
+				publishNativeWaterfall(
+					input.OnNativeWaterfall,
+					httpapi.VoiceNativeWaterfallFinalCaption,
+					inputCaptionFinalAt,
+				)
 			}
 			inputCaptionText := string(inputCaption)
 			coachObserved := requiresRespondentCoach(inputCaptionText)
@@ -351,9 +419,9 @@ func (s *Service) processLive(
 					clear(inputCaption)
 					clear(caption)
 					if errors.Is(err, httpapi.ErrVoiceNativeFallback) {
-						return httpapi.VoiceTurnResult{}, err
+						return nativeFailureResult(), err
 					}
-					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+					return nativeFailureResult(), errNativeFlowUnavailable
 				}
 				if err := stagedHandoff.Observe(
 					bytes.Clone(inputCaption),
@@ -364,28 +432,28 @@ func (s *Service) processLive(
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+					return nativeFailureResult(), errNativeFlowUnavailable
 				}
 			}
 			if event.CaptionFinal && !inputGatePassed {
-				var sendErr error
 				select {
-				case sendErr = <-sendDone:
+				case inputSendResult = <-sendDone:
 				case <-ctx.Done():
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+					return nativeFailureResult(), errNativeFlowUnavailable
 				}
 				sendResultRead = true
-				if sendErr != nil {
+				if inputSendResult.err != nil {
 					pooled.session.DiscardOutput()
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+					return nativeFailureResult(), errNativeFlowUnavailable
 				}
 				if !nativeAudioEligible(inputCaptionText) {
+					completeRiskRouteGate()
 					pooled.session.DiscardOutput()
 					if stagedHandoff != nil {
 						stagedHandoff.Cancel()
@@ -394,9 +462,10 @@ func (s *Service) processLive(
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+					return nativeFailureResult(), httpapi.ErrVoiceNativeFallback
 				}
 				if coachObserved && onCoachActive == nil {
+					completeRiskRouteGate()
 					pooled.session.DiscardOutput()
 					if stagedHandoff != nil {
 						stagedHandoff.Cancel()
@@ -405,10 +474,11 @@ func (s *Service) processLive(
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+					return nativeFailureResult(), httpapi.ErrVoiceNativeFallback
 				}
 				if providerAnswerTainted && !requiresStaged && !coachObserved &&
 					!proxyAnswerOptOutObserved {
+					completeRiskRouteGate()
 					// A non-final caption already asked the provider to answer for the
 					// person, or explicitly refused such an answer. If the cumulative
 					// final caption is ordinary, the held provider output is still
@@ -422,7 +492,7 @@ func (s *Service) processLive(
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceNativeFallback
+					return nativeFailureResult(), httpapi.ErrVoiceNativeFallback
 				}
 				if requiresStaged || coachObserved || proxyAnswerOptOutObserved {
 					// A Native checkpoint can retain only a generic operator and
@@ -438,9 +508,9 @@ func (s *Service) processLive(
 							clear(inputCaption)
 							clear(caption)
 							if errors.Is(err, httpapi.ErrVoiceNativeFallback) {
-								return httpapi.VoiceTurnResult{}, err
+								return nativeFailureResult(), err
 							}
-							return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+							return nativeFailureResult(), errNativeFlowUnavailable
 						}
 						if err := stagedHandoff.Observe(
 							bytes.Clone(inputCaption),
@@ -450,13 +520,14 @@ func (s *Service) processLive(
 							event.Clear()
 							clear(inputCaption)
 							clear(caption)
-							return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+							return nativeFailureResult(), errNativeFlowUnavailable
 						}
 					}
 					if !endpointPublished && onEndpoint != nil {
 						endpointPublished = true
 						onEndpoint()
 					}
+					completeRiskRouteGate()
 					respondentCheckpointAuthorized.Store(
 						!proxyAnswerOptOutObserved &&
 							(requiresStaged || coachObserved),
@@ -465,6 +536,14 @@ func (s *Service) processLive(
 					result.LiveTimings.STTFinalMS = millisecondsSince(
 						started,
 						inputCaptionFinalAt,
+					)
+					applyNativeWaterfallTimings(
+						&result.LiveTimings,
+						inputSendResult,
+						inputCaptionFinalAt,
+						riskRouteGateAt,
+						time.Time{},
+						firstAudioAt,
 					)
 					event.Clear()
 					clear(inputCaption)
@@ -478,12 +557,19 @@ func (s *Service) processLive(
 					stagedHandoff.Cancel()
 					stagedHandoff = nil
 				}
+				completeRiskRouteGate()
 				if err := pooled.session.CommitOutput(); err != nil {
 					event.Clear()
 					clear(inputCaption)
 					clear(caption)
-					return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+					return nativeFailureResult(), errNativeFlowUnavailable
 				}
+				outputCommitAt = s.now()
+				publishNativeWaterfall(
+					input.OnNativeWaterfall,
+					httpapi.VoiceNativeWaterfallOutputCommit,
+					outputCommitAt,
+				)
 				inputGatePassed = true
 				clear(inputCaption)
 				inputCaption = nil
@@ -497,14 +583,14 @@ func (s *Service) processLive(
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
-				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				return nativeFailureResult(), errNativeFlowUnavailable
 			}
 			caption = mergeCaption(caption, event.CaptionUTF8)
 			if !utf8.Valid(caption) || utf8.RuneCount(caption) > maxCaptionRunes {
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
-				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				return nativeFailureResult(), errNativeFlowUnavailable
 			}
 		case nativevoice.EventAudioPCM:
 			if !inputGatePassed ||
@@ -513,55 +599,55 @@ func (s *Service) processLive(
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
-				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				return nativeFailureResult(), errNativeFlowUnavailable
 			}
 			if err := deliverAudio(event.PCM); err != nil {
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
-				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				return nativeFailureResult(), errNativeFlowUnavailable
 			}
 		case nativevoice.EventTurnComplete:
 			if !inputGatePassed {
 				event.Clear()
 				clear(inputCaption)
 				clear(caption)
-				return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+				return nativeFailureResult(), errNativeFlowUnavailable
 			}
 			turnComplete = true
 		case nativevoice.EventInterrupted:
 			event.Clear()
 			clear(inputCaption)
 			clear(caption)
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return nativeFailureResult(), errNativeFlowUnavailable
 		default:
 			event.Clear()
 			clear(inputCaption)
 			clear(caption)
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return nativeFailureResult(), errNativeFlowUnavailable
 		}
 		event.Clear()
 	}
 
 	if !sendResultRead {
-		var sendErr error
 		select {
-		case sendErr = <-sendDone:
+		case inputSendResult = <-sendDone:
+			sendResultRead = true
 		case <-ctx.Done():
 			clear(inputCaption)
 			clear(caption)
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return nativeFailureResult(), errNativeFlowUnavailable
 		}
-		if sendErr != nil {
+		if inputSendResult.err != nil {
 			clear(inputCaption)
 			clear(caption)
-			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+			return nativeFailureResult(), errNativeFlowUnavailable
 		}
 	}
 	if !inputGatePassed || !spoke || len(caption) == 0 {
 		clear(inputCaption)
 		clear(caption)
-		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+		return nativeFailureResult(), errNativeFlowUnavailable
 	}
 	healthy = true
 	result := httpapi.VoiceTurnResult{
@@ -575,15 +661,20 @@ func (s *Service) processLive(
 		ResearchRecords:  []httpapi.ResearchRecord{},
 		Route:            nativevoice.RouteNativeAudio,
 		Caption:          string(caption),
-		LiveTimings: httpapi.VoiceLiveTimings{
-			STTFirstInterimMS:   -1,
-			STTFinalMS:          millisecondsSince(started, inputCaptionFinalAt),
-			ConversationMS:      -1,
-			TTSFirstChunkMS:     millisecondsSince(started, firstAudioAt),
-			FinalToFirstAudioMS: millisecondsBetween(inputCaptionFinalAt, firstAudioAt),
-			TTSReleaseMS:        -1,
-		},
+		LiveTimings: newNativeLiveTimings(
+			started,
+			inputCaptionFinalAt,
+			firstAudioAt,
+		),
 	}
+	applyNativeWaterfallTimings(
+		&result.LiveTimings,
+		inputSendResult,
+		inputCaptionFinalAt,
+		riskRouteGateAt,
+		outputCommitAt,
+		firstAudioAt,
+	)
 	clear(inputCaption)
 	clear(caption)
 	return result, nil
@@ -618,25 +709,137 @@ func streamInput(
 	ctx context.Context,
 	session nativevoice.Session,
 	audio <-chan []byte,
-	done chan<- error,
+	committedAt <-chan time.Time,
+	onNativeWaterfall func(httpapi.VoiceNativeWaterfallStage, time.Time),
+	now func() time.Time,
+	done chan<- streamInputResult,
 ) {
+	result := streamInputResult{}
 	for frame := range audio {
 		err := session.SendPCM20ms(ctx, frame)
 		clear(frame)
 		if err != nil {
 			session.DiscardOutput()
 			_ = session.Close()
-			done <- err
+			result.err = err
+			done <- result
 			return
+		}
+	}
+	result.drainedAt = now()
+	publishNativeWaterfall(
+		onNativeWaterfall,
+		httpapi.VoiceNativeWaterfallServerDrain,
+		result.drainedAt,
+	)
+	if committedAt != nil {
+		select {
+		case value, ok := <-committedAt:
+			if ok {
+				result.committedAt = value
+			}
+		default:
 		}
 	}
 	if err := session.EndActivity(ctx); err != nil {
 		session.DiscardOutput()
 		_ = session.Close()
-		done <- err
+		result.err = err
+		done <- result
 		return
 	}
-	done <- nil
+	result.activityEndAt = now()
+	publishNativeWaterfall(
+		onNativeWaterfall,
+		httpapi.VoiceNativeWaterfallActivityEnd,
+		result.activityEndAt,
+	)
+	done <- result
+}
+
+func tryReadStreamInputResult(
+	done <-chan streamInputResult,
+	read *bool,
+	result *streamInputResult,
+) {
+	if done == nil || read == nil || result == nil || *read {
+		return
+	}
+	select {
+	case *result = <-done:
+		*read = true
+	default:
+	}
+}
+
+func publishNativeWaterfall(
+	callback func(httpapi.VoiceNativeWaterfallStage, time.Time),
+	stage httpapi.VoiceNativeWaterfallStage,
+	at time.Time,
+) {
+	if callback != nil && !at.IsZero() {
+		callback(stage, at)
+	}
+}
+
+func applyNativeWaterfallTimings(
+	timings *httpapi.VoiceLiveTimings,
+	input streamInputResult,
+	finalCaptionAt time.Time,
+	riskRouteGateAt time.Time,
+	outputCommitAt time.Time,
+	firstAudioAt time.Time,
+) {
+	if timings == nil {
+		return
+	}
+	finalReadyAt := time.Time{}
+	if !input.activityEndAt.IsZero() && !finalCaptionAt.IsZero() {
+		finalReadyAt = finalCaptionAt
+		if finalReadyAt.Before(input.activityEndAt) {
+			finalReadyAt = input.activityEndAt
+		}
+	}
+	timings.CommitToServerDrainMS = millisecondsBetween(
+		input.committedAt,
+		input.drainedAt,
+	)
+	timings.ServerDrainToActivityEndMS = millisecondsBetween(
+		input.drainedAt,
+		input.activityEndAt,
+	)
+	timings.ActivityEndToFinalCaptionMS = millisecondsBetween(
+		input.activityEndAt,
+		finalReadyAt,
+	)
+	timings.FinalToRiskRouteGateMS = millisecondsBetween(
+		finalReadyAt,
+		riskRouteGateAt,
+	)
+	timings.OutputCommitToFirstAudioMS = millisecondsBetween(
+		outputCommitAt,
+		firstAudioAt,
+	)
+}
+
+func newNativeLiveTimings(
+	started time.Time,
+	finalCaptionAt time.Time,
+	firstAudioAt time.Time,
+) httpapi.VoiceLiveTimings {
+	return httpapi.VoiceLiveTimings{
+		STTFirstInterimMS:           -1,
+		STTFinalMS:                  millisecondsSince(started, finalCaptionAt),
+		ConversationMS:              -1,
+		TTSFirstChunkMS:             millisecondsSince(started, firstAudioAt),
+		FinalToFirstAudioMS:         millisecondsBetween(finalCaptionAt, firstAudioAt),
+		CommitToServerDrainMS:       -1,
+		ServerDrainToActivityEndMS:  -1,
+		ActivityEndToFinalCaptionMS: -1,
+		FinalToRiskRouteGateMS:      -1,
+		OutputCommitToFirstAudioMS:  -1,
+		TTSReleaseMS:                -1,
+	}
 }
 
 func mergeCaption(current []byte, next []byte) []byte {

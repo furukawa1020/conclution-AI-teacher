@@ -188,6 +188,46 @@ func TestManualActivitySendsExactTwentyMillisecondPCMFrames(t *testing.T) {
 	}
 }
 
+func TestEndActivityReturnsOnlyAfterProviderWriteCompletes(t *testing.T) {
+	provider := newBlockingActivityEndProvider()
+	provider.push(&genai.LiveServerMessage{
+		SetupComplete: &genai.LiveServerSetupComplete{},
+	}, nil)
+	service := newTestService(t, Config{}, &fakeDialer{session: provider})
+	session, err := service.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if err := session.StartActivity(context.Background()); err != nil {
+		t.Fatalf("StartActivity() error = %v", err)
+	}
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- session.EndActivity(context.Background())
+	}()
+	select {
+	case <-provider.activityEndObserved:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not observe ActivityEnd")
+	}
+	select {
+	case err := <-returned:
+		t.Fatalf("EndActivity returned before provider write completed: %v", err)
+	default:
+	}
+	close(provider.releaseActivityEnd)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatalf("EndActivity() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("EndActivity did not return after provider write completed")
+	}
+}
+
 func TestOutputIsBufferedUntilCommit(t *testing.T) {
 	provider, session := openTestSession(t, Config{})
 	if err := session.StartActivity(context.Background()); err != nil {
@@ -741,6 +781,35 @@ type fakeProviderSession struct {
 type blockingAudioSendProvider struct {
 	*fakeProviderSession
 	observed chan []byte
+}
+
+type blockingActivityEndProvider struct {
+	*fakeProviderSession
+	activityEndObserved chan struct{}
+	releaseActivityEnd  chan struct{}
+	observeOnce         sync.Once
+}
+
+func newBlockingActivityEndProvider() *blockingActivityEndProvider {
+	return &blockingActivityEndProvider{
+		fakeProviderSession: newFakeProviderSession(),
+		activityEndObserved: make(chan struct{}),
+		releaseActivityEnd:  make(chan struct{}),
+	}
+}
+
+func (s *blockingActivityEndProvider) SendRealtimeInput(
+	input genai.LiveRealtimeInput,
+) error {
+	if input.ActivityEnd != nil {
+		s.observeOnce.Do(func() { close(s.activityEndObserved) })
+		select {
+		case <-s.releaseActivityEnd:
+		case <-s.closed:
+			return errors.New("blocked ActivityEnd provider closed")
+		}
+	}
+	return s.fakeProviderSession.SendRealtimeInput(input)
 }
 
 func newBlockingAudioSendProvider() *blockingAudioSendProvider {

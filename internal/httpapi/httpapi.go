@@ -95,6 +95,16 @@ type VoiceTurnInput struct {
 	// ProcessingCommitted is a broadcast-only server signal. A closed channel
 	// means no new speculative model work may start.
 	ProcessingCommitted <-chan struct{}
+	// ProcessingCommittedAt carries the server-authored commit timestamp once.
+	// It is content-free and exists only so a live pipeline can partition the
+	// post-commit latency waterfall without deriving the timestamp from a
+	// possibly capped processing deadline.
+	ProcessingCommittedAt <-chan time.Time
+	// OnNativeWaterfall receives only a finite stage and a process-local
+	// timestamp. The live transport uses it to preserve already-observed timing
+	// boundaries when a request is cancelled before the pipeline can return.
+	// It must never carry audio, captions, state, identifiers, or free text.
+	OnNativeWaterfall func(VoiceNativeWaterfallStage, time.Time)
 	// OnInputReady is a content-free, server-authored live transport callback.
 	// A Native Audio service invokes it exactly once only after the current
 	// turn's provider session has completed setup and accepted StartActivity.
@@ -104,6 +114,17 @@ type VoiceTurnInput struct {
 	// the committed input turn.
 	OnInputReady func()
 }
+
+type VoiceNativeWaterfallStage uint8
+
+const (
+	VoiceNativeWaterfallServerDrain VoiceNativeWaterfallStage = iota + 1
+	VoiceNativeWaterfallActivityEnd
+	VoiceNativeWaterfallFinalCaption
+	VoiceNativeWaterfallRiskRouteGate
+	VoiceNativeWaterfallOutputCommit
+	VoiceNativeWaterfallFirstMeaningfulPCM
+)
 
 type VoiceTurnResult struct {
 	Audio            []byte
@@ -205,17 +226,22 @@ func validVoiceRespondentCheckpoint(
 }
 
 type VoiceLiveTimings struct {
-	STTFirstInterimMS   int64
-	STTFinalMS          int64
-	ConversationMS      int64
-	TTSFirstChunkMS     int64
-	FinalToFirstAudioMS int64
-	SpecHit             int64
-	SpecMiss            int64
-	SpecCancel          int64
-	TTSPrestarted       int64
-	TTSBufferedBytes    int64
-	TTSReleaseMS        int64
+	STTFirstInterimMS           int64
+	STTFinalMS                  int64
+	ConversationMS              int64
+	TTSFirstChunkMS             int64
+	FinalToFirstAudioMS         int64
+	CommitToServerDrainMS       int64
+	ServerDrainToActivityEndMS  int64
+	ActivityEndToFinalCaptionMS int64
+	FinalToRiskRouteGateMS      int64
+	OutputCommitToFirstAudioMS  int64
+	SpecHit                     int64
+	SpecMiss                    int64
+	SpecCancel                  int64
+	TTSPrestarted               int64
+	TTSBufferedBytes            int64
+	TTSReleaseMS                int64
 	// NativeCaptionHandoff is one only when a finalized Native Audio caption
 	// was consumed directly by the audited staged agent. This route bit means
 	// this response did not invoke the staged recognizer a second time; tests

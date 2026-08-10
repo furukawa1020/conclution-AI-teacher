@@ -160,16 +160,85 @@ type voiceLiveRead struct {
 }
 
 type voiceLiveOutputMetrics struct {
-	mu            sync.Mutex
-	committed     bool
-	firstOutputAt time.Time
-	frames        int
-	bytes         int
+	mu                   sync.Mutex
+	committed            bool
+	firstOutputAt        time.Time
+	frames               int
+	bytes                int
+	nativeClosed         bool
+	nativeCommitAt       time.Time
+	nativeServerDrainAt  time.Time
+	nativeActivityEndAt  time.Time
+	nativeFinalAt        time.Time
+	nativeRiskGateAt     time.Time
+	nativeOutputCommitAt time.Time
+	nativeFirstAudioAt   time.Time
+}
+
+type voiceLiveNativeWaterfallSnapshot struct {
+	commitAt       time.Time
+	serverDrainAt  time.Time
+	activityEndAt  time.Time
+	finalAt        time.Time
+	riskGateAt     time.Time
+	outputCommitAt time.Time
+	firstAudioAt   time.Time
 }
 
 func (metrics *voiceLiveOutputMetrics) markCommitted() {
 	metrics.mu.Lock()
 	metrics.committed = true
+	metrics.mu.Unlock()
+}
+
+func (metrics *voiceLiveOutputMetrics) markNativeCommit(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	metrics.mu.Lock()
+	if !metrics.nativeClosed && metrics.nativeCommitAt.IsZero() {
+		metrics.nativeCommitAt = at
+	}
+	metrics.mu.Unlock()
+}
+
+func (metrics *voiceLiveOutputMetrics) markNativeBoundary(
+	stage VoiceNativeWaterfallStage,
+	at time.Time,
+) {
+	if at.IsZero() {
+		return
+	}
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	if metrics.nativeClosed {
+		return
+	}
+	var target *time.Time
+	switch stage {
+	case VoiceNativeWaterfallServerDrain:
+		target = &metrics.nativeServerDrainAt
+	case VoiceNativeWaterfallActivityEnd:
+		target = &metrics.nativeActivityEndAt
+	case VoiceNativeWaterfallFinalCaption:
+		target = &metrics.nativeFinalAt
+	case VoiceNativeWaterfallRiskRouteGate:
+		target = &metrics.nativeRiskGateAt
+	case VoiceNativeWaterfallOutputCommit:
+		target = &metrics.nativeOutputCommitAt
+	case VoiceNativeWaterfallFirstMeaningfulPCM:
+		target = &metrics.nativeFirstAudioAt
+	default:
+		return
+	}
+	if target.IsZero() {
+		*target = at
+	}
+}
+
+func (metrics *voiceLiveOutputMetrics) closeNativeWaterfall() {
+	metrics.mu.Lock()
+	metrics.nativeClosed = true
 	metrics.mu.Unlock()
 }
 
@@ -196,7 +265,11 @@ func (metrics *voiceLiveOutputMetrics) deliver(
 		return err
 	}
 	if meaningful && metrics.firstOutputAt.IsZero() {
-		metrics.firstOutputAt = time.Now()
+		observedAt := time.Now()
+		metrics.firstOutputAt = observedAt
+		if !metrics.nativeClosed && metrics.nativeFirstAudioAt.IsZero() {
+			metrics.nativeFirstAudioAt = observedAt
+		}
 	}
 	metrics.frames++
 	metrics.bytes += len(audio)
@@ -207,6 +280,27 @@ func (metrics *voiceLiveOutputMetrics) snapshot() (time.Time, int, int) {
 	metrics.mu.Lock()
 	defer metrics.mu.Unlock()
 	return metrics.firstOutputAt, metrics.frames, metrics.bytes
+}
+
+func (metrics *voiceLiveOutputMetrics) snapshotForLog() (
+	time.Time,
+	int,
+	int,
+	voiceLiveNativeWaterfallSnapshot,
+) {
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	metrics.nativeClosed = true
+	return metrics.firstOutputAt, metrics.frames, metrics.bytes,
+		voiceLiveNativeWaterfallSnapshot{
+			commitAt:       metrics.nativeCommitAt,
+			serverDrainAt:  metrics.nativeServerDrainAt,
+			activityEndAt:  metrics.nativeActivityEndAt,
+			finalAt:        metrics.nativeFinalAt,
+			riskGateAt:     metrics.nativeRiskGateAt,
+			outputCommitAt: metrics.nativeOutputCommitAt,
+			firstAudioAt:   metrics.nativeFirstAudioAt,
+		}
 }
 
 func setVoiceLiveDeadlines(w http.ResponseWriter, deadline time.Time) error {
@@ -467,12 +561,19 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}
 	processingDeadlineSignal := make(chan time.Time, 1)
 	processingCommittedSignal := make(chan struct{})
+	processingCommittedAtSignal := make(chan time.Time, 1)
 	processingDeadlinePublished := false
+	processingCommittedAtPublished := false
 	defer func() {
 		if !processingDeadlinePublished {
 			close(processingDeadlineSignal)
 		}
+		if !processingCommittedAtPublished {
+			close(processingCommittedAtSignal)
+		}
 	}()
+	outputMetrics := &voiceLiveOutputMetrics{}
+	defer outputMetrics.closeNativeWaterfall()
 
 	input := VoiceTurnInput{
 		MIMEType:                "audio/L16",
@@ -483,15 +584,17 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		NativeAudio:             start.NativeAudio,
 		Ambient: start.TurnMode == VoiceTurnAmbient ||
 			start.TurnMode == VoiceTurnForeground,
-		Foreground:          start.TurnMode == VoiceTurnForeground,
-		STTLocale:           "ja-JP",
-		SchemaVersion:       voiceLiveVersion,
-		ProcessingTimeout:   s.voice.RequestTimeout,
-		ProcessingDeadline:  processingDeadlineSignal,
-		ProcessingCommitted: processingCommittedSignal,
+		Foreground:            start.TurnMode == VoiceTurnForeground,
+		STTLocale:             "ja-JP",
+		SchemaVersion:         voiceLiveVersion,
+		ProcessingTimeout:     s.voice.RequestTimeout,
+		ProcessingDeadline:    processingDeadlineSignal,
+		ProcessingCommitted:   processingCommittedSignal,
+		ProcessingCommittedAt: processingCommittedAtSignal,
 	}
 	var nativeInputReady <-chan struct{}
 	if input.NativeAudio {
+		input.OnNativeWaterfall = outputMetrics.markNativeBoundary
 		readySignal := make(chan struct{})
 		var readyOnce sync.Once
 		input.OnInputReady = func() {
@@ -511,7 +614,6 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	outputMetrics := &voiceLiveOutputMetrics{}
 	strictOutput := &strictAudioBuffer{}
 	defer strictOutput.clear()
 	outcomeChannel := make(chan voiceLiveOutcome, 1)
@@ -1010,6 +1112,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				// therefore created strictly before this timestamp.
 				close(processingCommittedSignal)
 				commitAt = time.Now()
+				processingCommittedAtSignal <- commitAt
+				close(processingCommittedAtSignal)
+				processingCommittedAtPublished = true
 				processingDeadline = commitAt.Add(s.voice.RequestTimeout)
 				if liveDeadline, ok := liveCtx.Deadline(); ok &&
 					liveDeadline.Before(processingDeadline) {
@@ -1018,6 +1123,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				processingDeadlineSignal <- processingDeadline
 				close(processingDeadlineSignal)
 				processingDeadlinePublished = true
+				if input.NativeAudio {
+					outputMetrics.markNativeCommit(commitAt)
+				}
 				outputMetrics.markCommitted()
 				strictOutput.markCommitted()
 				if !acknowledgeRead(false) {
@@ -1404,12 +1512,17 @@ func (s *Server) consumeVoiceLiveQuota(
 
 func emptyVoiceLiveTimings() VoiceLiveTimings {
 	return VoiceLiveTimings{
-		STTFirstInterimMS:   -1,
-		STTFinalMS:          -1,
-		ConversationMS:      -1,
-		TTSFirstChunkMS:     -1,
-		FinalToFirstAudioMS: -1,
-		TTSReleaseMS:        -1,
+		STTFirstInterimMS:           -1,
+		STTFinalMS:                  -1,
+		ConversationMS:              -1,
+		TTSFirstChunkMS:             -1,
+		FinalToFirstAudioMS:         -1,
+		CommitToServerDrainMS:       -1,
+		ServerDrainToActivityEndMS:  -1,
+		ActivityEndToFinalCaptionMS: -1,
+		FinalToRiskRouteGateMS:      -1,
+		OutputCommitToFirstAudioMS:  -1,
+		TTSReleaseMS:                -1,
 	}
 }
 
@@ -1435,7 +1548,17 @@ func (s *Server) logVoiceLiveSession(
 		}
 		coachActive = results[0].AssistanceTarget == "respondent"
 	}
-	firstOutputAt, outputFrames, outputBytes := outputMetrics.snapshot()
+	firstOutputAt, outputFrames, outputBytes, nativeSnapshot :=
+		outputMetrics.snapshotForLog()
+	nativeTimings := nativeWaterfallTimings(nativeSnapshot)
+	timings.CommitToServerDrainMS = nativeTimings.CommitToServerDrainMS
+	timings.ServerDrainToActivityEndMS =
+		nativeTimings.ServerDrainToActivityEndMS
+	timings.ActivityEndToFinalCaptionMS =
+		nativeTimings.ActivityEndToFinalCaptionMS
+	timings.FinalToRiskRouteGateMS = nativeTimings.FinalToRiskRouteGateMS
+	timings.OutputCommitToFirstAudioMS =
+		nativeTimings.OutputCommitToFirstAudioMS
 	firstInputMS := durationFrom(started, firstInputAt)
 	commitMS := durationFrom(started, commitAt)
 	commitToFirstAudioMS := int64(-1)
@@ -1458,6 +1581,16 @@ func (s *Server) logVoiceLiveSession(
 		"tts_first_chunk_ms", finiteLatency(timings.TTSFirstChunkMS),
 		"final_to_first_audio_ms",
 		finiteLatency(timings.FinalToFirstAudioMS),
+		"commit_to_server_drain_ms",
+		finiteLatency(timings.CommitToServerDrainMS),
+		"server_drain_to_activity_end_ms",
+		finiteLatency(timings.ServerDrainToActivityEndMS),
+		"activity_end_to_final_caption_ms",
+		finiteLatency(timings.ActivityEndToFinalCaptionMS),
+		"final_to_risk_route_gate_ms",
+		finiteLatency(timings.FinalToRiskRouteGateMS),
+		"output_commit_to_first_audio_ms",
+		finiteLatency(timings.OutputCommitToFirstAudioMS),
 		"spec_hit", timings.SpecHit,
 		"spec_miss", timings.SpecMiss,
 		"spec_cancel", timings.SpecCancel,
@@ -1473,6 +1606,53 @@ func (s *Server) logVoiceLiveSession(
 		"output_bytes", outputBytes,
 		"cancelled", cancelled,
 	)
+}
+
+func nativeWaterfallTimings(
+	snapshot voiceLiveNativeWaterfallSnapshot,
+) VoiceLiveTimings {
+	timings := VoiceLiveTimings{
+		CommitToServerDrainMS:       -1,
+		ServerDrainToActivityEndMS:  -1,
+		ActivityEndToFinalCaptionMS: -1,
+		FinalToRiskRouteGateMS:      -1,
+		OutputCommitToFirstAudioMS:  -1,
+	}
+	finalReadyAt := time.Time{}
+	if !snapshot.activityEndAt.IsZero() && !snapshot.finalAt.IsZero() {
+		finalReadyAt = snapshot.finalAt
+		if finalReadyAt.Before(snapshot.activityEndAt) {
+			finalReadyAt = snapshot.activityEndAt
+		}
+	}
+	timings.CommitToServerDrainMS = millisecondsBetweenVoiceLiveStages(
+		snapshot.commitAt,
+		snapshot.serverDrainAt,
+	)
+	timings.ServerDrainToActivityEndMS = millisecondsBetweenVoiceLiveStages(
+		snapshot.serverDrainAt,
+		snapshot.activityEndAt,
+	)
+	timings.ActivityEndToFinalCaptionMS = millisecondsBetweenVoiceLiveStages(
+		snapshot.activityEndAt,
+		finalReadyAt,
+	)
+	timings.FinalToRiskRouteGateMS = millisecondsBetweenVoiceLiveStages(
+		finalReadyAt,
+		snapshot.riskGateAt,
+	)
+	timings.OutputCommitToFirstAudioMS = millisecondsBetweenVoiceLiveStages(
+		snapshot.outputCommitAt,
+		snapshot.firstAudioAt,
+	)
+	return timings
+}
+
+func millisecondsBetweenVoiceLiveStages(start time.Time, end time.Time) int64 {
+	if start.IsZero() || end.IsZero() {
+		return -1
+	}
+	return finiteLatency(end.Sub(start).Milliseconds())
 }
 
 func durationFrom(start time.Time, value time.Time) int64 {

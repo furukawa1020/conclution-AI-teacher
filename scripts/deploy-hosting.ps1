@@ -36,6 +36,7 @@ $expectedRunUrl = "https://kotae-api-r6kgkvtrmq-an.a.run.app"
 $expectedRunWebSocketUrl = "wss://kotae-api-r6kgkvtrmq-an.a.run.app"
 $expectedVoiceStreamUrl = "$expectedRunUrl/api/v1/voice/turns:stream"
 $expectedVoiceLiveUrl = "$expectedRunWebSocketUrl/api/v1/voice/live"
+$expectedSourceRevision = "main"
 $expectedRuntimeServiceAccount = "kotae-api-runtime@$expectedProjectId.iam.gserviceaccount.com"
 $expectedBuildServiceAccount = "projects/$expectedProjectId/serviceAccounts/kotae-api-builder@$expectedProjectId.iam.gserviceaccount.com"
 $expectedStateSecretVersion = "1"
@@ -295,6 +296,47 @@ function Invoke-GcloudJson {
     return @($decoded)
 }
 
+function Assert-SourceProvenanceLabels {
+    param(
+        [AllowNull()]
+        [object] $Labels,
+
+        [Parameter(Mandatory)]
+        [string] $Boundary
+    )
+
+    if ($null -eq $Labels) {
+        throw "$Boundary is missing source provenance labels."
+    }
+    $sourceCommitProperty = $Labels.PSObject.Properties["source-commit"]
+    $sourceRevisionProperty = $Labels.PSObject.Properties["source-revision"]
+    $sourceCommit = if ($null -eq $sourceCommitProperty) {
+        ""
+    } else {
+        [string] $sourceCommitProperty.Value
+    }
+    $sourceRevision = if ($null -eq $sourceRevisionProperty) {
+        ""
+    } else {
+        [string] $sourceRevisionProperty.Value
+    }
+    $unknownSourceLabels = @(
+        $Labels.PSObject.Properties.Name | Where-Object {
+            $_ -like "source-*" -and
+            $_ -cne "source-commit" -and
+            $_ -cne "source-revision"
+        }
+    )
+    if (
+        $unknownSourceLabels.Count -ne 0 -or
+        $sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+        $sourceCommit -cne $ExpectedGitCommit -or
+        $sourceRevision -cne $expectedSourceRevision
+    ) {
+        throw "$Boundary source provenance does not match the reviewed main commit."
+    }
+}
+
 function Assert-PromotedBackendBoundary {
     $service = Invoke-GcloudJson `
         -Operation "checking the promoted Cloud Run service" `
@@ -313,6 +355,13 @@ function Assert-PromotedBackendBoundary {
     ) {
         throw "The promoted Cloud Run service does not match the reviewed service boundary."
     }
+
+    Assert-SourceProvenanceLabels `
+        -Labels $service.metadata.labels `
+        -Boundary "The promoted Cloud Run service"
+    Assert-SourceProvenanceLabels `
+        -Labels $service.spec.template.metadata.labels `
+        -Boundary "The promoted Cloud Run revision template"
 
     $serviceAnnotations = $service.metadata.annotations
     $buildAccountProperty = $serviceAnnotations.PSObject.Properties[
@@ -369,6 +418,9 @@ function Assert-PromotedBackendBoundary {
             "--quiet",
             "--verbosity=error"
         )
+    Assert-SourceProvenanceLabels `
+        -Labels $promotedRevision.metadata.labels `
+        -Boundary "The revision receiving production traffic"
     $revisionServiceLabel = $promotedRevision.metadata.labels.PSObject.Properties[
         "serving.knative.dev/service"
     ]

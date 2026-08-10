@@ -419,12 +419,12 @@ try {
         -Needle "export class PcmRing" `
         -Replacement "class PcmRing" `
         -Boundary "wasm-bindgen PcmRing export"
-    $generatedThrowHandler = @'
+    $generatedThrowHandler = ConvertTo-Lf -Text @'
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
 '@
-    $contentFreeThrowHandler = @'
+    $contentFreeThrowHandler = ConvertTo-Lf -Text @'
         __wbg___wbindgen_throw_344f42d3211c4765: function() {
             throw new Error("pcm_ring_wasm_failure");
         },
@@ -434,7 +434,7 @@ try {
         -Needle $generatedThrowHandler `
         -Replacement $contentFreeThrowHandler `
         -Boundary "wasm-bindgen content-free throw import"
-    $generatedStringReader = @'
+    $generatedStringReader = ConvertTo-Lf -Text @'
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
@@ -444,7 +444,7 @@ function getStringFromWasm0(ptr, len) {
         -Needle $generatedStringReader `
         -Replacement "" `
         -Boundary "wasm-bindgen string reader"
-    $generatedTextDecoder = @'
+    $generatedTextDecoder = ConvertTo-Lf -Text @'
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;

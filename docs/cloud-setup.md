@@ -202,7 +202,15 @@ $RuntimeSa = "kotae-api-runtime@$ProjectId.iam.gserviceaccount.com"
 $WebAppId = "<Firebase Web App ID>"
 $ImageDigest = "asia-northeast1-docker.pkg.dev/$ProjectId/<repository>/kotae-api@sha256:<verified-digest>"
 $StateSecretVersion = "<現在の本番revisionが参照しているnumeric version>"
-$GitSha = (git rev-parse --verify HEAD).Trim()
+$GitSha = (git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+$OriginMainSha = (git rev-parse --verify origin/main).Trim().ToLowerInvariant()
+if ($GitSha -cnotmatch '^[0-9a-f]{40}$' -or $GitSha -cne $OriginMainSha) {
+  throw "Cloud Run releases require one full commit equal to HEAD and origin/main."
+}
+if (-not [string]::IsNullOrWhiteSpace((git status --porcelain=v1 --untracked-files=all))) {
+  throw "Cloud Run releases require a clean tracked and untracked working tree."
+}
+$SourceRevision = "main"
 $Stage = "reader"
 $VerifierProgressWrites = "false"
 $RetrievalPolicyEnabled = "false"
@@ -216,6 +224,7 @@ $RevisionSuffix = "$Stage-$($GitSha.Substring(0, 7))-$([DateTime]::UtcNow.ToStri
   --revision-suffix=$RevisionSuffix `
   --tag="$Stage-candidate" `
   --no-traffic `
+  --update-labels="application=kotae-ai,source-commit=$GitSha,source-revision=$SourceRevision" `
   --ingress=all `
   --allow-unauthenticated `
   --service-account=$RuntimeSa `
@@ -285,13 +294,13 @@ captionだけは100%へ直行させません。candidate検証後、明示した
 & $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="$CaptionRevision=100"
 ```
 
-最終昇格前後に4 revisionを再取得し、`status.imageDigest`のunique数と`KOTAE_STATE_KEY_BASE64`のnumeric keyのunique数がそれぞれ1で、Secret keyが開始時の`$StateSecretVersion`と一致することをassertします。また`KOTAE_RETRIEVAL_BELIEF_WRITES`、`KOTAE_SPEECH_FALLBACK_MODEL`、`KOTAE_COACHING_ROLLOUT`、`KOTAE_PRIVACY_LOCATION`、`KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE`、`KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY`の6変数が全revisionから消えていなければ公開を停止します。最終trafficはcaption revisionだけ100%、tagなしでなければなりません。
+最終昇格前後に4 revisionを再取得し、`status.imageDigest`のunique数と`KOTAE_STATE_KEY_BASE64`のnumeric keyのunique数がそれぞれ1で、Secret keyが開始時の`$StateSecretVersion`と一致することをassertします。全revisionの`source-commit`は短縮せず40桁の`$GitSha`、`source-revision`は`main`と完全一致させます。最終serviceの`metadata.labels`、`spec.template.metadata.labels`、100% trafficを受けるrevisionの`metadata.labels`でも同じ2値を再取得して照合し、欠落、短縮SHA、旧値、未知の`source-*` labelなら公開を停止します。また`KOTAE_RETRIEVAL_BELIEF_WRITES`、`KOTAE_SPEECH_FALLBACK_MODEL`、`KOTAE_COACHING_ROLLOUT`、`KOTAE_PRIVACY_LOCATION`、`KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE`、`KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY`の6変数が全revisionから消えていなければ公開を停止します。最終trafficはcaption revisionだけ100%、tagなしでなければなりません。
 
 writer以降に戻せるのは新fieldを読める同一digestのreader以降のrevisionだけです。caption段階からのbehavior rollbackは同一digestのpolicy revisionへ、policyからはwriterへ戻せますが、opaque stateは破棄して新しいセッションから始めます。これにより新しい認証暗号stateが旧readerへ届く時間を作りません。privacy境界より前のtokenは同じ鍵でも復号させないため、token prefixとAADを`v2`へ切り替えており、旧`v1`とのdual-readはしません。切替時に進行中の最長15分の会話は再開できず、利用者は新しいセッションを開始します。これは移行の不便より、境界導入前の会話由来stateを再びモデルへ渡さないことを優先したものです。
 
 rollback時も`v1`と`v2`の状態は相互利用しません。revisionを戻した後はブラウザのopaque stateを破棄して新しいセッションから始めます。
 
-このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認し、さらに`configure-firestore-ttl.ps1`が必須7 policyの`ACTIVE`を確認した後だけ、`& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へtrafficを移し、全tag URLを同時に外します。caption以外の段階は100%、captionは前述の1%→10%→100% canaryを使います。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。Hosting scriptも、service rootが最新ready revisionへ100%昇格済みでPasskey gateが`true`、timeout・service account・build identityが固定値、必須TTLがすべて`ACTIVE`、`/health`が正常であることを再検証してからreleaseを作ります。
+このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認し、さらに`configure-firestore-ttl.ps1`が必須7 policyの`ACTIVE`を確認した後だけ、`& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へtrafficを移し、全tag URLを同時に外します。caption以外の段階は100%、captionは前述の1%→10%→100% canaryを使います。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。Cloud Runのrevision labelはimmutableなので、誤った`source-commit`をservice labelだけ書き換えて修正済みとは扱いません。正しいfull SHAと`main`を付けた新revisionを作り、通常のcandidate検証と段階昇格を通します。Hosting scriptも、service rootが最新ready revisionへ100%昇格済みで、service・revision template・100% revisionのsource provenanceが指定commitと一致し、Passkey gateが`true`、timeout・service account・build identityが固定値、必須TTLがすべて`ACTIVE`、`/health`が正常であることを再検証してからreleaseを作ります。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 
@@ -341,7 +350,7 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-hosting.ps1 `
   -ExpectedGitCommit (git rev-parse HEAD)
 ```
 
-Hosting release buildは、開始時と完了時のcleanな作業ツリー、`HEAD`、指定commitを照合し、全公開artifactのSHA-256とbyte数をrelease manifestへ固定します。preflightと本番deployは、指定commitが`HEAD`と`origin/main`の両方に一致し、manifestと公開artifactが完全一致しない限りCloud APIを呼びません。検証済みbyte列のsnapshotだけをuploadし、manifest自体は公開しません。引数なしの`build-web.ps1`はローカル確認用で、Hostingへreleaseできません。
+Hosting release buildは、開始時と完了時のcleanな作業ツリー、`HEAD`、指定commitを照合し、全公開artifactのSHA-256とbyte数をrelease manifestへ固定します。preflightと本番deployは、指定commitが`HEAD`と`origin/main`の両方に一致し、manifestと公開artifactが完全一致しない限りCloud APIを呼びません。さらに、Cloud Run service、revision template、100% promoted revisionの`source-commit`が同じ40桁commit、`source-revision`が`main`でなければreleaseを停止します。検証済みbyte列のsnapshotだけをuploadし、manifest自体は公開しません。引数なしの`build-web.ps1`はローカル確認用で、Hostingへreleaseできません。
 
 Passkey、`/me`等の通常APIは`https://kotae-ai.web.app/api/**`を使い、Firebase HostingがCloud Runへrewriteします。低遅延音声はHosting rewriteがWebSocketを中継しないため、固定した`https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream`と`wss://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/live`へ直接CORS/TLSで接続します。Cloud Run側はFirebase token、App Check、exact Hosting Origin、mode、quotaを検証します。Cloud RunではWebSocketも長時間HTTP requestとしてrequest timeoutの対象になるため、`420`秒は永続接続の保証ではありません。切断後の再接続は新しいrequestとして扱い、確定済み音声を自動再送しません。同期圧縮HTTP fallbackの音声は2 MiB上限なので、3分級の発話を処理できるとは保証しません。
 

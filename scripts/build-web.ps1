@@ -2,7 +2,10 @@
 param(
     [string] $CargoPath = "cargo",
 
-    [string] $WasmBindgenPath = ""
+    [string] $WasmBindgenPath = "",
+
+    [ValidatePattern("^[0-9a-fA-F]{40}$")]
+    [string] $ExpectedGitCommit = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +17,7 @@ $distRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dist\web"))
 $webSource = [System.IO.Path]::GetFullPath((Join-Path $workspace "apps\client\web"))
 $cssSource = [System.IO.Path]::GetFullPath((Join-Path $workspace "apps\client\assets\main.css"))
 $wasmInput = Join-Path $targetRoot "wasm32-unknown-unknown\release\kotae-client.wasm"
+$releaseManifestName = ".kotae-release-manifest.json"
 
 function Assert-WorkspacePath {
     param(
@@ -41,11 +45,101 @@ Assert-WorkspacePath -Path $targetRoot -Description "Cargo target directory"
 Assert-WorkspacePath -Path $distRoot -Description "Web distribution directory"
 Assert-WorkspacePath -Path $webSource -Description "Web source directory"
 
+function Invoke-ReleaseGitText {
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ApplicationInfo] $GitCommand,
+
+        [Parameter(Mandatory)]
+        [string[]] $CommandArguments,
+
+        [Parameter(Mandatory)]
+        [string] $Operation
+    )
+
+    $lines = @(& $GitCommand.Source -C $workspace @CommandArguments 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git failed while $Operation."
+    }
+    return ($lines -join [System.Environment]::NewLine).Trim()
+}
+
+function Assert-ReleaseSourceState {
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ApplicationInfo] $GitCommand,
+
+        [Parameter(Mandatory)]
+        [string] $ExpectedCommit,
+
+        [Parameter(Mandatory)]
+        [string] $Operation
+    )
+
+    $head = Invoke-ReleaseGitText `
+        -GitCommand $GitCommand `
+        -CommandArguments @("rev-parse", "--verify", "HEAD") `
+        -Operation $Operation
+    if ($head -cne $ExpectedCommit.ToLowerInvariant()) {
+        throw "Release source changed while $Operation; expected $ExpectedCommit, got $head."
+    }
+    $status = Invoke-ReleaseGitText `
+        -GitCommand $GitCommand `
+        -CommandArguments @("status", "--porcelain=v1", "--untracked-files=all") `
+        -Operation $Operation
+    if (-not [string]::IsNullOrWhiteSpace($status)) {
+        throw "Release builds require a clean tracked and untracked working tree."
+    }
+}
+
 if (-not (Test-Path -LiteralPath $webSource -PathType Container)) {
     throw "Web source directory does not exist: $webSource"
 }
 if (-not (Test-Path -LiteralPath $cssSource -PathType Leaf)) {
     throw "CSS source does not exist: $cssSource"
+}
+
+$buildLockRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace ".cache"))
+Assert-WorkspacePath -Path $buildLockRoot -Description "Web build lock directory"
+New-Item -ItemType Directory -Force -Path $buildLockRoot | Out-Null
+if (
+    ((Get-Item -LiteralPath $buildLockRoot -Force).Attributes -band
+        [System.IO.FileAttributes]::ReparsePoint) -ne 0
+) {
+    throw "Web build lock directory must not be a reparse point."
+}
+$buildLockPath = Join-Path $buildLockRoot "web-build.lock"
+try {
+    $buildLock = [System.IO.File]::Open(
+        $buildLockPath,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+} catch {
+    throw "Another web build is already using the shared target or dist directory."
+}
+
+try {
+$releaseGit = $null
+if (-not [string]::IsNullOrWhiteSpace($ExpectedGitCommit)) {
+    $ExpectedGitCommit = $ExpectedGitCommit.ToLowerInvariant()
+    $releaseGit = Get-Command "git" -CommandType Application -ErrorAction Stop
+    $repositoryRoot = Invoke-ReleaseGitText `
+        -GitCommand $releaseGit `
+        -CommandArguments @("rev-parse", "--show-toplevel") `
+        -Operation "checking the release repository root"
+    if (-not [string]::Equals(
+            [System.IO.Path]::GetFullPath($repositoryRoot).TrimEnd("\", "/"),
+            [System.IO.Path]::GetFullPath($workspace).TrimEnd("\", "/"),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Release builds must run from the expected repository root."
+    }
+    Assert-ReleaseSourceState `
+        -GitCommand $releaseGit `
+        -ExpectedCommit $ExpectedGitCommit `
+        -Operation "starting the web release build"
 }
 
 $cargoCommand = Get-Command $CargoPath -CommandType Application -ErrorAction Stop
@@ -220,7 +314,8 @@ try {
     }
 
     $totalBytes = 0L
-    foreach ($entry in @(Get-ChildItem -LiteralPath $stagingRoot -Recurse -Force)) {
+    $releaseArtifacts = @()
+    foreach ($entry in @(Get-ChildItem -LiteralPath $stagingRoot -Recurse -Force | Sort-Object FullName)) {
         if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Generated web artifacts must not contain reparse points."
         }
@@ -256,9 +351,36 @@ try {
             throw "Generated web artifact size overflow."
         }
         $totalBytes += $entry.Length
+        $releaseArtifacts += [ordered]@{
+            path = $relativePath
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry.FullName).Hash.ToLowerInvariant()
+            bytes = [long] $entry.Length
+        }
     }
     if ($totalBytes -gt 25MB) {
         throw "Generated web artifacts exceed the 25 MiB aggregate safety limit."
+    }
+
+    if ($null -ne $releaseGit) {
+        Assert-ReleaseSourceState `
+            -GitCommand $releaseGit `
+            -ExpectedCommit $ExpectedGitCommit `
+            -Operation "finalizing the web release build"
+        $manifestPath = Join-Path $stagingRoot $releaseManifestName
+        $manifest = [ordered]@{
+            schemaVersion = 1
+            sourceCommit = $ExpectedGitCommit
+            artifacts = @($releaseArtifacts)
+        }
+        $manifestJson = $manifest | ConvertTo-Json -Depth 6
+        [System.IO.File]::WriteAllText(
+            $manifestPath,
+            $manifestJson + [System.Environment]::NewLine,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        if ((Get-Item -LiteralPath $manifestPath).Length -gt 64KB) {
+            throw "Web release manifest exceeds the 64 KiB safety limit."
+        }
     }
 
     $distParent = Split-Path -Parent $distRoot
@@ -280,8 +402,14 @@ try {
     }
     Move-Item -LiteralPath $stagingRoot -Destination $distRoot
     Write-Output "WEB_DIST=$distRoot"
+    if ($null -ne $releaseGit) {
+        Write-Output "WEB_RELEASE_COMMIT=$ExpectedGitCommit"
+    }
 } finally {
     if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
+}
+} finally {
+    $buildLock.Dispose()
 }

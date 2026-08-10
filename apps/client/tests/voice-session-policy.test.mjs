@@ -46,6 +46,7 @@ import {
   createVoiceLiveServerProtocol,
   createVoiceStreamParser,
   estimateAudiblePerformanceTime,
+  INTERRUPT_ECHO_PROBE_LIMITS,
   INTERRUPT_VAD_LIMITS,
   isCleanVoiceLiveTerminalClose,
   shouldAbortVoiceTransportOnInterrupt,
@@ -4250,6 +4251,498 @@ function advancePastInterruptGuard(state, startedAt) {
   return next;
 }
 
+async function createExecutableBargeMonitorHarness({
+  echoCancellationVerified,
+  gainScheduleAllowed = true,
+} = {}) {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const source = executableBridgeFunction(
+    bridge,
+    "function startBargeInMonitoring(",
+    "function createStreamingPlayback(",
+  );
+  const clock = { now: 0 };
+  const echoState = { verified: echoCancellationVerified === true };
+  const input = { peak: 0, rms: 0 };
+  const state = {
+    abandoned: 0,
+    confirmed: 0,
+    discarded: [],
+    events: [],
+    gainSchedules: [],
+    pcmMonitorStarts: 0,
+    pcmMonitorStops: 0,
+    restoredGain: 0,
+    timer: undefined,
+    trackChanges: [],
+  };
+  const analyser = {
+    fftSize: 8,
+    getFloatTimeDomainData(pcm) {
+      pcm.fill(input.rms);
+      pcm[0] = input.peak;
+    },
+  };
+  const mediaStream = Object.freeze({});
+  const factory = new Function(
+    "dependencies",
+    `"use strict";
+let analyser = dependencies.analyser;
+let mediaStream = dependencies.mediaStream;
+let sessionEpoch = 1;
+const CustomEvent = dependencies.CustomEvent;
+const INTERRUPT_ECHO_PROBE_LIMITS = dependencies.INTERRUPT_ECHO_PROBE_LIMITS;
+const INTERRUPT_VAD_LIMITS = dependencies.INTERRUPT_VAD_LIMITS;
+const abandonInterruptRecording = dependencies.abandonInterruptRecording;
+const advanceInterruptVad = dependencies.advanceInterruptVad;
+const confirmBargeIn = dependencies.confirmBargeIn;
+const createInterruptVadState = dependencies.createInterruptVadState;
+const createRecordingState = dependencies.createRecordingState;
+const currentAudioContextFrame = dependencies.currentAudioContextFrame;
+const discardCurrentCandidate = dependencies.discardCurrentCandidate;
+const fail = dependencies.fail;
+const globalThis = dependencies.eventTarget;
+const hasLiveAudioTrack = dependencies.hasLiveAudioTrack;
+const hasVerifiedEchoCancellation = dependencies.hasVerifiedEchoCancellation;
+const maybeCommitHybridEndpoint = dependencies.maybeCommitHybridEndpoint;
+const performance = dependencies.performance;
+const requestRecordingStop = dependencies.requestRecordingStop;
+const restorePlaybackGain = dependencies.restorePlaybackGain;
+const scheduleEchoProbeGain = dependencies.scheduleEchoProbeGain;
+const sessionClock = dependencies.sessionClock;
+const setInterval = dependencies.setInterval;
+const setTracksEnabled = dependencies.setTracksEnabled;
+const startBargePcmMonitoring = dependencies.startBargePcmMonitoring;
+const startCandidateRecorder = dependencies.startCandidateRecorder;
+const stopSession = dependencies.stopSession;
+const updateVoiceReceipt = dependencies.updateVoiceReceipt;
+${source}
+return startBargeInMonitoring;`,
+  );
+  const start = factory({
+    CustomEvent: class {
+      constructor(type, options) {
+        this.detail = options?.detail;
+        this.type = type;
+      }
+    },
+    INTERRUPT_ECHO_PROBE_LIMITS,
+    INTERRUPT_VAD_LIMITS,
+    abandonInterruptRecording(recording) {
+      recording.settled = true;
+      state.abandoned += 1;
+    },
+    advanceInterruptVad,
+    analyser,
+    confirmBargeIn(_playback, _recording, candidate) {
+      candidate.confirmed = true;
+      state.confirmed += 1;
+    },
+    createInterruptVadState,
+    createRecordingState() {
+      return {
+        candidate: undefined,
+        settled: false,
+        vadHasSpeech: false,
+      };
+    },
+    currentAudioContextFrame: () => 0,
+    discardCurrentCandidate(recording, reason) {
+      state.discarded.push(reason);
+      recording.candidate = undefined;
+      return true;
+    },
+    eventTarget: {
+      dispatchEvent(event) {
+        state.events.push(event);
+        return true;
+      },
+    },
+    fail(code) {
+      throw new Error(code);
+    },
+    hasLiveAudioTrack: () => true,
+    hasVerifiedEchoCancellation: () => echoState.verified,
+    maybeCommitHybridEndpoint: () => false,
+    mediaStream,
+    performance: { now: () => clock.now },
+    requestRecordingStop: () => {},
+    restorePlaybackGain() {
+      state.restoredGain += 1;
+      return true;
+    },
+    scheduleEchoProbeGain() {
+      state.gainSchedules.push(clock.now);
+      return gainScheduleAllowed;
+    },
+    sessionClock: {
+      check: () => ({ ok: true }),
+      isStarted: () => true,
+    },
+    setInterval(callback) {
+      state.timer = callback;
+      return 1;
+    },
+    setTracksEnabled(enabled) {
+      state.trackChanges.push(enabled);
+    },
+    startBargePcmMonitoring(playback, _recording, _epoch, verification) {
+      state.pcmMonitorStarts += 1;
+      playback.bargePcmMonitor = {
+        stop() {
+          state.pcmMonitorStops += 1;
+          playback.bargePcmMonitor = undefined;
+        },
+        verification,
+      };
+      return Promise.resolve();
+    },
+    startCandidateRecorder(recording) {
+      recording.candidate = { confirmed: false };
+      return true;
+    },
+    stopSession: () => {},
+    updateVoiceReceipt: () => {},
+  });
+  const playback = {
+    coachActive: false,
+    hasStreamedAudio: () => true,
+    interruptRecording: undefined,
+    interrupted: false,
+    nativeAudio: false,
+    sources: new Set([Object.freeze({})]),
+  };
+  start(playback, 1, 0);
+  assert.equal(typeof state.timer, "function");
+  return {
+    playback,
+    setEchoCancellationVerified(verified) {
+      echoState.verified = verified;
+    },
+    state,
+    tick(now, sample = { peak: 0.15, rms: 0.05 }) {
+      clock.now = now;
+      if (typeof sample === "number") {
+        input.peak = sample;
+        input.rms = sample;
+      } else {
+        input.peak = sample.peak;
+        input.rms = sample.rms;
+      }
+      state.timer();
+    },
+  };
+}
+
+test("interrupt confirmation can be withheld without changing its state shape", () => {
+  const startedAt = 70_000;
+  let state = advancePastInterruptGuard(
+    createInterruptVadState(startedAt),
+    startedAt,
+  );
+  const firstVoiceAt =
+    startedAt +
+    INTERRUPT_VAD_LIMITS.guardMs +
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  const frames =
+    INTERRUPT_VAD_LIMITS.confirmationMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 0; frame < frames; frame += 1) {
+    state = advanceInterruptVad(
+      state,
+      {
+        now: firstVoiceAt + frame * INTERRUPT_VAD_LIMITS.intervalMs,
+        outputActive: true,
+        peak: 0.15,
+        rms: 0.05,
+      },
+      { confirmationAllowed: false },
+    );
+  }
+  assert.equal(state.phase, "provisional");
+  assert.notEqual(state.action, "confirm");
+  assert.deepEqual(Object.keys(state), [
+    "action",
+    "candidateSilenceMs",
+    "candidateStartedAt",
+    "firstVoiceAt",
+    "foregroundVoiceMs",
+    "lastVoiceAt",
+    "noiseFloor",
+    "phase",
+    "startedAt",
+    "voiceRunMs",
+  ]);
+
+  state = advanceInterruptVad(
+    state,
+    {
+      now: firstVoiceAt + frames * INTERRUPT_VAD_LIMITS.intervalMs,
+      outputActive: true,
+      peak: 0.15,
+      rms: 0.05,
+    },
+    { confirmationAllowed: true },
+  );
+  assert.equal(state.action, "confirm");
+  assert.equal(state.phase, "confirmed");
+
+  const sample = {
+    now: startedAt + 1,
+    outputActive: false,
+    peak: 0,
+    rms: 0,
+  };
+  assert.throws(
+    () =>
+      advanceInterruptVad(createInterruptVadState(startedAt), sample, {
+        confirmationAllowed: 1,
+      }),
+    /interrupt_vad_state_invalid/u,
+  );
+  assert.throws(
+    () =>
+      advanceInterruptVad(createInterruptVadState(startedAt), sample, {
+        confirmationProofSatisfied: "true",
+      }),
+    /interrupt_vad_state_invalid/u,
+  );
+});
+
+test("only an explicit true browser AEC setting is verified", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const source = executableBridgeFunction(
+    bridge,
+    "function hasVerifiedEchoCancellation(",
+    "async function startBargePcmMonitoring(",
+  );
+  const verify = new Function(
+    `"use strict";
+${source}
+return hasVerifiedEchoCancellation;`,
+  )();
+  const stream = (getSettings) => ({
+    getAudioTracks: () => [{ getSettings }],
+  });
+
+  assert.equal(
+    verify(stream(() => ({ echoCancellation: true }))),
+    true,
+  );
+  assert.equal(
+    verify(stream(() => ({ echoCancellation: false }))),
+    false,
+  );
+  assert.equal(verify(stream(() => ({}))), false);
+  assert.equal(
+    verify(
+      stream(() => {
+        throw new Error("settings_unavailable");
+      }),
+    ),
+    false,
+  );
+});
+
+test("verified AEC keeps the existing 720 ms barge gate and live PCM path", async () => {
+  const harness = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: true,
+  });
+  const frames =
+    INTERRUPT_VAD_LIMITS.confirmationMs /
+    INTERRUPT_VAD_LIMITS.intervalMs;
+  for (let frame = 1; frame <= frames; frame += 1) {
+    harness.tick(frame * INTERRUPT_VAD_LIMITS.intervalMs);
+  }
+  assert.equal(harness.state.confirmed, 1);
+  assert.deepEqual(harness.state.gainSchedules, []);
+  assert.equal(harness.state.pcmMonitorStarts, 1);
+  assert.equal(harness.state.restoredGain, 0);
+});
+
+test("unverified AEC waits for a mute tail and 240 ms clean proof", async () => {
+  const harness = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: false,
+  });
+  for (let now = 40; now < INTERRUPT_VAD_LIMITS.confirmationMs; now += 40) {
+    harness.tick(now);
+    assert.deepEqual(harness.state.gainSchedules, []);
+    assert.equal(harness.state.confirmed, 0);
+  }
+  harness.tick(INTERRUPT_VAD_LIMITS.confirmationMs);
+  assert.deepEqual(harness.state.gainSchedules, [720]);
+  assert.equal(harness.state.confirmed, 0);
+  assert.equal(harness.state.pcmMonitorStarts, 0);
+
+  for (let now = 760; now <= 1_080; now += 40) {
+    harness.tick(now);
+    assert.equal(harness.state.confirmed, 0);
+  }
+  harness.tick(1_120);
+  assert.equal(harness.state.confirmed, 1);
+  assert.equal(harness.state.restoredGain, 1);
+});
+
+test("unverified output ending before 720 ms remains probe-gated", async () => {
+  const harness = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: false,
+  });
+  for (let now = 40; now <= 680; now += 40) harness.tick(now);
+  harness.playback.sources.clear();
+  harness.tick(720);
+  assert.deepEqual(harness.state.gainSchedules, [720]);
+  assert.equal(harness.state.confirmed, 0);
+  for (let now = 760; now <= 1_080; now += 40) {
+    harness.tick(now);
+    assert.equal(harness.state.confirmed, 0);
+  }
+  harness.tick(1_120);
+  assert.equal(harness.state.confirmed, 1);
+});
+
+test("AEC loss is latched, stops live PCM, and requires a clean probe", async () => {
+  const harness = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: true,
+  });
+  for (let now = 40; now <= 680; now += 40) harness.tick(now);
+  assert.equal(harness.state.pcmMonitorStarts, 1);
+  assert.equal(harness.playback.bargePcmMonitor.verification(), true);
+  harness.setEchoCancellationVerified(false);
+  harness.tick(720);
+  assert.equal(harness.state.pcmMonitorStops, 1);
+  assert.deepEqual(harness.state.gainSchedules, [720]);
+  assert.equal(harness.state.confirmed, 0);
+
+  // A later browser setting cannot reopen the candidate's live PCM path.
+  harness.setEchoCancellationVerified(true);
+  for (let now = 760; now <= 1_080; now += 40) harness.tick(now);
+  assert.equal(harness.state.confirmed, 0);
+  harness.tick(1_120);
+  assert.equal(harness.state.confirmed, 1);
+  assert.equal(harness.state.pcmMonitorStarts, 1);
+});
+
+test("quiet unverified speech can complete on clean proof before probe timeout", async () => {
+  const harness = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: false,
+  });
+  const quiet = { peak: 0.075, rms: 0.03 };
+  for (let now = 40; now <= 320; now += 40) harness.tick(now, 0.003);
+  for (let now = 360; now <= 1_040; now += 40) harness.tick(now, quiet);
+  assert.deepEqual(harness.state.gainSchedules, [1_040]);
+  for (let now = 1_080; now <= 1_400; now += 40) {
+    harness.tick(now, quiet);
+    assert.equal(harness.state.confirmed, 0);
+  }
+  harness.tick(1_440, quiet);
+  assert.equal(harness.state.confirmed, 1);
+  assert.ok(1_440 - 360 < INTERRUPT_VAD_LIMITS.quietConfirmationMs);
+  assert.equal(harness.state.discarded.length, 0);
+});
+
+test("a probe still requires clean proof when playback output ends", async () => {
+  const harness = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: false,
+  });
+  for (let now = 40; now <= 720; now += 40) harness.tick(now);
+  harness.playback.sources.clear();
+  for (let now = 760; now <= 1_080; now += 40) {
+    harness.tick(now);
+    assert.equal(harness.state.confirmed, 0);
+  }
+  harness.tick(1_120);
+  assert.equal(harness.state.confirmed, 1);
+  assert.equal(harness.state.restoredGain, 1);
+});
+
+test("vanishing echo and a stalled probe both restore gain and discard", async () => {
+  const echo = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: false,
+  });
+  for (let now = 40; now <= 720; now += 40) echo.tick(now);
+  for (let now = 760; now <= 920; now += 40) echo.tick(now, 0);
+  assert.equal(echo.state.confirmed, 0);
+  assert.deepEqual(echo.state.discarded, ["interrupt-rejected"]);
+  assert.equal(echo.state.restoredGain, 1);
+
+  const stalled = await createExecutableBargeMonitorHarness({
+    echoCancellationVerified: false,
+  });
+  for (let now = 40; now <= 720; now += 40) stalled.tick(now);
+  stalled.tick(
+    720 + INTERRUPT_ECHO_PROBE_LIMITS.probeTimeoutMs,
+  );
+  assert.equal(stalled.state.confirmed, 0);
+  assert.deepEqual(stalled.state.discarded, ["interrupt-probe-timeout"]);
+  assert.equal(stalled.state.restoredGain, 1);
+});
+
+test("echo probe reserves its gain recovery on the Web Audio timeline", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const source = executableBridgeFunction(
+    bridge,
+    "function rampPlaybackGain(",
+    "function hasVerifiedEchoCancellation(",
+  );
+  const events = [];
+  const gain = {
+    value: 1,
+    cancelScheduledValues(at) {
+      events.push(["cancel", at]);
+    },
+    linearRampToValueAtTime(value, at) {
+      events.push(["ramp", value, at]);
+      this.value = value;
+    },
+    setValueAtTime(value, at) {
+      events.push(["set", value, at]);
+      this.value = value;
+    },
+  };
+  const audioContext = { currentTime: 10, state: "running" };
+  const runtime = new Function(
+    "dependencies",
+    `"use strict";
+let audioContext = dependencies.audioContext;
+const INTERRUPT_ECHO_PROBE_LIMITS = dependencies.INTERRUPT_ECHO_PROBE_LIMITS;
+${source}
+return Object.freeze({ restorePlaybackGain, scheduleEchoProbeGain });`,
+  )({ audioContext, INTERRUPT_ECHO_PROBE_LIMITS });
+  const playback = { gainNode: { gain } };
+
+  assert.equal(runtime.scheduleEchoProbeGain(playback), true);
+  assert.deepEqual(events, [
+    ["cancel", 10],
+    ["set", 1, 10],
+    ["ramp", 0, 10.02],
+    ["set", 0, 10.48],
+    ["ramp", 1, 10.5],
+  ]);
+  assert.equal(
+    events.at(-1)[2] - audioContext.currentTime,
+    (INTERRUPT_ECHO_PROBE_LIMITS.probeTimeoutMs +
+      INTERRUPT_ECHO_PROBE_LIMITS.muteRampMs) /
+      1_000,
+  );
+
+  audioContext.currentTime = 10.2;
+  assert.equal(runtime.restorePlaybackGain(playback), true);
+  assert.deepEqual(events.slice(-3), [
+    ["cancel", 10.2],
+    ["set", 1, 10.2],
+    ["ramp", 1, 10.219999999999999],
+  ]);
+});
+
 test("interrupt VAD ignores guarded playback and rejects short echo bursts", () => {
   const startedAt = 10_000;
   let state = advancePastInterruptGuard(
@@ -4827,7 +5320,11 @@ test("committed-response barge-in preserves foreground response mode", async () 
   assert.match(bridge, /rampPlaybackGain\(playback, 1, 0\.02\)/u);
   assert.match(bridge, /source\.connect\(gainNode\)/u);
   const bargeMonitorAt = bridge.indexOf("function startBargeInMonitoring(");
-  const bargeMonitor = bridge.slice(bargeMonitorAt, bargeMonitorAt + 3_500);
+  const bargeMonitorEnd = bridge.indexOf(
+    "\n}\n\nfunction createStreamingPlayback(",
+    bargeMonitorAt,
+  );
+  const bargeMonitor = bridge.slice(bargeMonitorAt, bargeMonitorEnd);
   assert.match(
     bargeMonitor,
     /createInterruptVadState\(guardStartedAt\)/u,
@@ -4839,7 +5336,15 @@ test("committed-response barge-in preserves foreground response mode", async () 
   assert.match(bargeMonitor, /now < vadState\.startedAt/u);
   assert.match(
     bargeMonitor,
-    /outputActive:\s*playback\.hasStreamedAudio\(\) && playback\.sources\.size > 0/u,
+    /const rawOutputActive =\s*playback\.hasStreamedAudio\(\) && playback\.sources\.size > 0/u,
+  );
+  assert.match(
+    bargeMonitor,
+    /outputActive: rawOutputActive && !probeCleanWindow/u,
+  );
+  assert.match(
+    bargeMonitor,
+    /if \(echoCancellationVerified\) \{[\s\S]*startBargePcmMonitoring\(\s*playback,\s*recording,\s*expectedEpoch,\s*\(\) => echoCancellationVerified/u,
   );
   assert.match(
     bargeMonitor,
@@ -7663,7 +8168,11 @@ test("a clear onset upgrades once to the absolute soft deadline and barge-in rem
     /vadState\.softVoiceCandidate[\s\S]*armCandidateDeadline\([\s\S]*VOICE_SESSION_LIMITS\.softCandidateCaptureLimitMs/u,
   );
   const interruptAt = bridge.indexOf("function startBargeInMonitoring(");
-  const interrupt = bridge.slice(interruptAt, interruptAt + 5_500);
+  const interruptEnd = bridge.indexOf(
+    "\n}\n\nfunction createStreamingPlayback(",
+    interruptAt,
+  );
+  const interrupt = bridge.slice(interruptAt, interruptEnd);
   assert.match(
     interrupt,
     /startCandidateRecorder\([\s\S]*vadState\.candidateStartedAt,[\s\S]*INTERRUPT_VAD_LIMITS\.candidateCaptureLimitMs/u,

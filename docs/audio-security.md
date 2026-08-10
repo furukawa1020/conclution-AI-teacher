@@ -69,7 +69,7 @@ UID leaseを取得してpipelineを開始した後に接続切断やdeadlineへ�
 - 各requestは`turnMode: intentional | foreground | ambient`を必須とし、状態tokenの有無から権限を推測しない。foregroundは返答を期待するが、外部作用や状態更新についてはambientと同じ制限を保つ
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
 - AI処理中と合成音声の再生中も、利用者が開始した会話セッション内では訂正・割り込みを受けるためマイクトラックを有効にする。端末内VADが確認する前の音声は送信せず、確認した割り込みだけをForeground turnとして送る
-- 確認前PCMはAudioWorklet内だけに保持し、短いぼやきや相づちは再生を変えず160 msで端末内の仮候補に留める。明瞭・静音のどちらも1,200 ms以上の持続音声、foreground density 0.72以上、候補全体のvoice density 0.68以上を満たした時だけ応答を中断する。候補は100 ms pre-rollを含む固定長ringへ最大2,500 ms相当を保持し、未確認のPCMを端末外へ出さない。VAD確認後はAudioContextのsample-clock cutoff、session generation、連続sequenceを検証し、credit制御でMessagePortの未処理数も固定する。turn確定は全PCMの`sealed`確認後だけ許可する
+- 確認前PCMはAudioWorklet内だけに保持し、短いぼやきや相づちは再生を変えず160 msで端末内の仮候補に留める。明瞭なforeground音声は720 ms以上かつforeground density 0.72以上、静かな音声は1,200 ms以上、どちらも候補全体のvoice density 0.68以上を満たした時だけ応答を中断する。AECを`true`と確認できない端末では、AI出力中の候補を720 ms未満で減衰せず、20 ms mute、120 ms speaker-tail除外、240 msの追加音声証明を順に通す。480 msでgain復帰を開始する予約をWeb Audio timelineへmute前に置き、設定値が失われた場合も安全側へ遷移する。AEC未確認の候補はAudioWorkletのlive PCM経路へ入れず、確定後だけMediaRecorderのHTTPS fallbackへ渡せる。AEC確認済みの候補は100 ms pre-rollを含む固定長ringへ最大2,500 ms相当を保持し、未確認のPCMを端末外へ出さない。VAD確認後はAudioContextのsample-clock cutoff、session generation、連続sequenceを検証し、credit制御でMessagePortの未処理数も固定する。turn確定は全PCMの`sealed`確認後だけ許可する
 - 割り込み待機を含むセッション全体を4分の無発話または30分の絶対上限で終了し、期限時は通信、PCMリング、録音、再生、マイクトラックを同じepochで破棄する。4分は会話時間の目標ではなく安全上の仮上限で、一往復や数秒で終えてよい。idle時計は発話確認時に更新されるため、録音開始から最大3分30秒の単一turn captureと5秒の終端待ちより後へ固定する。ただし検証済み応答の生成・再生中は4分のidle判定だけを保留し、30分の絶対上限は維持する
 - タブが非表示になった時と`pagehide`時に録音と再生を止め、マイクトラックを解放する
 - 応答を最後まで再生した時点から次の4分を数え直す。ページ非表示、`pagehide`、マイク喪失は応答中でも直ちに停止する

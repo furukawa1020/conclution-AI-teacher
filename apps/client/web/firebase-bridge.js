@@ -42,6 +42,7 @@ import {
   createVoiceLiveServerProtocol,
   createVoiceStreamParser,
   estimateAudiblePerformanceTime,
+  INTERRUPT_ECHO_PROBE_LIMITS,
   INTERRUPT_VAD_LIMITS,
   isCleanVoiceLiveTerminalClose,
   safeLiveCaptureFrame,
@@ -3388,17 +3389,59 @@ function rampPlaybackGain(playback, target, seconds) {
     !audioContext ||
     audioContext.state === "closed"
   ) {
-    return;
+    return false;
   }
   const gain = playback.gainNode.gain;
   const now = audioContext.currentTime;
-  gain.cancelScheduledValues(now);
-  gain.setValueAtTime(gain.value, now);
-  gain.linearRampToValueAtTime(target, now + seconds);
+  try {
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(gain.value, now);
+    gain.linearRampToValueAtTime(target, now + seconds);
+    return true;
+  } catch {
+    try {
+      gain.value = target;
+      return gain.value === target;
+    } catch {
+      return false;
+    }
+  }
 }
 
 function restorePlaybackGain(playback) {
-  rampPlaybackGain(playback, 1, 0.02);
+  return rampPlaybackGain(playback, 1, 0.02);
+}
+
+function scheduleEchoProbeGain(playback) {
+  if (
+    !playback?.gainNode ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    return false;
+  }
+  const gain = playback.gainNode.gain;
+  const now = audioContext.currentTime;
+  const muteAt =
+    now + INTERRUPT_ECHO_PROBE_LIMITS.muteRampMs / 1_000;
+  const restoreAt =
+    now + INTERRUPT_ECHO_PROBE_LIMITS.probeTimeoutMs / 1_000;
+  try {
+    // Reserve the recovery on the audio rendering timeline before muting.
+    // It still runs if the main thread stalls and cannot service the VAD tick.
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(gain.value, now);
+    gain.linearRampToValueAtTime(0, muteAt);
+    gain.setValueAtTime(0, restoreAt);
+    gain.linearRampToValueAtTime(
+      1,
+      restoreAt + INTERRUPT_ECHO_PROBE_LIMITS.muteRampMs / 1_000,
+    );
+    return true;
+  } catch {
+    restorePlaybackGain(playback);
+    return false;
+  }
 }
 
 function hasVerifiedEchoCancellation(stream) {
@@ -3417,7 +3460,16 @@ async function startBargePcmMonitoring(
   playback,
   recording,
   expectedEpoch,
+  verificationStillValid,
 ) {
+  const verificationRemainsValid = () => {
+    if (typeof verificationStillValid !== "function") return false;
+    try {
+      return verificationStillValid() === true;
+    } catch {
+      return false;
+    }
+  };
   const context = audioContext;
   const stream = mediaStream;
   if (
@@ -3432,6 +3484,7 @@ async function startBargePcmMonitoring(
     !stream ||
     !hasLiveAudioTrack(stream) ||
     !hasVerifiedEchoCancellation(stream) ||
+    !verificationRemainsValid() ||
     typeof globalThis.AudioWorkletNode !== "function" ||
     !context.audioWorklet ||
     typeof context.audioWorklet.addModule !== "function"
@@ -3455,7 +3508,8 @@ async function startBargePcmMonitoring(
     mediaStream !== stream ||
     context.state === "closed" ||
     !hasLiveAudioTrack(stream) ||
-    !hasVerifiedEchoCancellation(stream)
+    !hasVerifiedEchoCancellation(stream) ||
+    !verificationRemainsValid()
   ) {
     return;
   }
@@ -3565,6 +3619,7 @@ async function startBargePcmMonitoring(
         context.state === "closed" ||
         !hasLiveAudioTrack(stream) ||
         !hasVerifiedEchoCancellation(stream) ||
+        !verificationRemainsValid() ||
         recording.settled ||
         playback.interruptRecording !== recording ||
         typeof onError !== "function" ||
@@ -3592,6 +3647,9 @@ async function startBargePcmMonitoring(
         confirmed ||
         playback.bargePcmMonitor !== monitor ||
         expectedEpoch !== sessionEpoch ||
+        mediaStream !== stream ||
+        !hasVerifiedEchoCancellation(stream) ||
+        !verificationRemainsValid() ||
         !Number.isSafeInteger(candidateContextFrame) ||
         candidateContextFrame < 0 ||
         !Number.isSafeInteger(leadInFrames) ||
@@ -3670,7 +3728,9 @@ async function startBargePcmMonitoring(
         if (
           !confirmed ||
           !adopted ||
-          !Number.isSafeInteger(cutoffContextFrame)
+          !Number.isSafeInteger(cutoffContextFrame) ||
+          !hasVerifiedEchoCancellation(stream) ||
+          !verificationRemainsValid()
         ) {
           zeroizeMessage(event);
           throw new Error("voice_live_frame_invalid");
@@ -4031,8 +4091,7 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
     !Number.isFinite(guardStartedAt) ||
     guardStartedAt < 0 ||
     !analyser ||
-    !hasLiveAudioTrack(mediaStream) ||
-    !hasVerifiedEchoCancellation(mediaStream)
+    !hasLiveAudioTrack(mediaStream)
   ) {
     return;
   }
@@ -4050,9 +4109,21 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
   );
   const pcm = new Float32Array(analyser.fftSize);
   recording.vadPcm = pcm;
+  let echoCancellationVerified = hasVerifiedEchoCancellation(mediaStream);
+  let echoProbe;
+  let unverifiedOutputContaminated = false;
   let vadState = createInterruptVadState(guardStartedAt);
   playback.interruptRecording = recording;
-  void startBargePcmMonitoring(playback, recording, expectedEpoch);
+  if (echoCancellationVerified) {
+    // Raw provisional PCM is available only when the browser proves AEC.
+    // Unverified devices retain the bounded MediaRecorder/HTTPS fallback.
+    void startBargePcmMonitoring(
+      playback,
+      recording,
+      expectedEpoch,
+      () => echoCancellationVerified,
+    );
+  }
   playback.resetInterruptGuard = (nextAudibleAt) => {
     if (
       Number.isFinite(nextAudibleAt) &&
@@ -4061,6 +4132,11 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       !recording.candidate &&
       vadState.phase !== "confirmed"
     ) {
+      if (echoProbe) {
+        echoProbe = undefined;
+        restorePlaybackGain(playback);
+      }
+      unverifiedOutputContaminated = false;
       vadState = createInterruptVadState(nextAudibleAt);
     }
   };
@@ -4075,6 +4151,38 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
     }
     const now = performance.now();
     if (now < vadState.startedAt) return;
+    const rawOutputActive =
+      playback.hasStreamedAudio() && playback.sources.size > 0;
+    if (
+      echoCancellationVerified &&
+      !hasVerifiedEchoCancellation(mediaStream)
+    ) {
+      echoCancellationVerified = false;
+      if (recording.candidate) {
+        unverifiedOutputContaminated = true;
+      }
+      playback.bargePcmMonitor?.stop();
+    }
+    if (
+      echoProbe &&
+      (now >= echoProbe.expiresAt ||
+        !recording.candidate ||
+        !["candidate", "provisional"].includes(vadState.phase))
+    ) {
+      const candidate = recording.candidate;
+      echoProbe = undefined;
+      unverifiedOutputContaminated = false;
+      recording.interruptOnsetAt = undefined;
+      restorePlaybackGain(playback);
+      vadState = createInterruptVadState(now);
+      if (
+        candidate &&
+        !discardCurrentCandidate(recording, "interrupt-probe-timeout")
+      ) {
+        abandonInterruptRecording(recording);
+      }
+      return;
+    }
     analyser.getFloatTimeDomainData(pcm);
     let sumSquares = 0;
     let peak = 0;
@@ -4083,13 +4191,72 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       sumSquares += magnitude * magnitude;
       if (magnitude > peak) peak = magnitude;
     }
-    vadState = advanceInterruptVad(vadState, {
-      now,
-      outputActive:
-        playback.hasStreamedAudio() && playback.sources.size > 0,
-      peak,
-      rms: Math.sqrt(sumSquares / pcm.length),
-    });
+    const probeCleanWindow = Boolean(
+      echoProbe && now >= echoProbe.tailUntil,
+    );
+    if (
+      probeCleanWindow &&
+      echoProbe.proofBaselineVoiceMs === undefined
+    ) {
+      echoProbe.proofBaselineVoiceMs = vadState.voiceRunMs;
+    }
+    const postMuteProofReady = Boolean(
+      probeCleanWindow &&
+        vadState.voiceRunMs - echoProbe.proofBaselineVoiceMs >=
+          INTERRUPT_ECHO_PROBE_LIMITS.postMuteProofMs,
+    );
+    vadState = advanceInterruptVad(
+      vadState,
+      {
+        now,
+        outputActive: rawOutputActive && !probeCleanWindow,
+        peak,
+        rms: Math.sqrt(sumSquares / pcm.length),
+      },
+      {
+        confirmationAllowed:
+          echoCancellationVerified ||
+          (!unverifiedOutputContaminated && !rawOutputActive) ||
+          postMuteProofReady,
+        confirmationProofSatisfied: postMuteProofReady,
+      },
+    );
+    if (
+      !echoCancellationVerified &&
+      rawOutputActive &&
+      ["candidate", "provisional"].includes(vadState.phase)
+    ) {
+      unverifiedOutputContaminated = true;
+    }
+    if (
+      unverifiedOutputContaminated &&
+      !echoProbe &&
+      recording.candidate &&
+      vadState.phase === "provisional" &&
+      vadState.voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs
+    ) {
+      if (!scheduleEchoProbeGain(playback)) {
+        recording.interruptOnsetAt = undefined;
+        unverifiedOutputContaminated = false;
+        restorePlaybackGain(playback);
+        vadState = createInterruptVadState(now);
+        if (
+          !discardCurrentCandidate(recording, "interrupt-probe-unavailable")
+        ) {
+          abandonInterruptRecording(recording);
+        }
+        return;
+      }
+      echoProbe = {
+        expiresAt:
+          now + INTERRUPT_ECHO_PROBE_LIMITS.probeTimeoutMs,
+        proofBaselineVoiceMs: undefined,
+        tailUntil:
+          now +
+          INTERRUPT_ECHO_PROBE_LIMITS.muteRampMs +
+          INTERRUPT_ECHO_PROBE_LIMITS.speakerTailMs,
+      };
+    }
     recording.firstVoiceAt = vadState.firstVoiceAt;
     const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.phase === "confirmed";
@@ -4126,11 +4293,17 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       // passes the hard interruption gate.
     } else if (vadState.action === "discard") {
       recording.interruptOnsetAt = undefined;
+      echoProbe = undefined;
+      unverifiedOutputContaminated = false;
       restorePlaybackGain(playback);
       if (!discardCurrentCandidate(recording, "interrupt-rejected")) {
         abandonInterruptRecording(recording);
       }
     } else if (vadState.action === "confirm") {
+      if (echoProbe) {
+        echoProbe = undefined;
+        restorePlaybackGain(playback);
+      }
       confirmBargeIn(
         playback,
         recording,

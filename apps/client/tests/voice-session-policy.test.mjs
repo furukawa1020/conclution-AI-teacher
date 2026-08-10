@@ -741,7 +741,10 @@ test("unfinished respondent coaching keeps Native input when privacy permits", a
   );
 
   const routeStart = client.indexOf("const fn requires_staged_route(self)");
-  const routeEnd = client.indexOf("\n    const fn status(self)", routeStart);
+  const routeEnd = client.indexOf(
+    "\n    const fn yielded_after_owned_answer(self)",
+    routeStart,
+  );
   assert.notEqual(routeStart, -1);
   assert.notEqual(routeEnd, -1);
   const route = client.slice(routeStart, routeEnd);
@@ -826,7 +829,7 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
 
   assert.match(
     client,
-    /const ANSWER_SUPPORT_COPY: &str =\s*"「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する";/u,
+    /const ANSWER_SUPPORT_COPY: &str =\s*"「一問だけ手伝って」で、本人のAを確認できたらAIが黙って発話権を返す";/u,
   );
   assert.match(
     client,

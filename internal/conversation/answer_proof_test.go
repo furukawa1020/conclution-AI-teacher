@@ -107,6 +107,50 @@ func TestAnswerProofAllowsAuthorizedExpansionTriggeredByVerifiedAnswer(t *testin
 	}
 }
 
+func TestAnswerOwnershipYieldsOnlyAfterTerminalVerifiedAnswer(t *testing.T) {
+	verified := AnswerProofQuestionBoundInputAnswerFirst
+	if !answerOwnershipYieldsFloor(
+		verified,
+		AnswerProofNone,
+		string(respondent.CoachPhaseComplete),
+		string(respondent.CoachActionComplete),
+	) {
+		t.Fatal("terminal verified answer did not yield the floor")
+	}
+	if !answerOwnershipYieldsFloor(
+		AnswerProofNone,
+		verified,
+		string(respondent.CoachPhaseComplete),
+		string(respondent.CoachActionComplete),
+	) {
+		t.Fatal("private exact-final candidate did not suppress speculative TTS")
+	}
+
+	for _, test := range []struct {
+		name      string
+		proof     AnswerProof
+		candidate AnswerProof
+		phase     respondent.CoachPhase
+		action    respondent.CoachAction
+	}{
+		{name: "unverified", phase: respondent.CoachPhaseComplete, action: respondent.CoachActionComplete},
+		{name: "authorized expansion", proof: verified, phase: respondent.CoachPhaseExpanding, action: respondent.CoachActionExpand},
+		{name: "restate", proof: verified, phase: respondent.CoachPhaseAwaitingRestatement, action: respondent.CoachActionRestate},
+		{name: "release", proof: verified, phase: respondent.CoachPhaseBlocked, action: respondent.CoachActionRelease},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if answerOwnershipYieldsFloor(
+				test.proof,
+				test.candidate,
+				string(test.phase),
+				string(test.action),
+			) {
+				t.Fatal("nonterminal or unverified turn yielded the floor")
+			}
+		})
+	}
+}
+
 func TestQuestionInstanceTagIsContentFreeAndInstanceSpecific(t *testing.T) {
 	agent := &vertexAgent{continuityKey: []byte(strings.Repeat("k", 32))}
 	const (

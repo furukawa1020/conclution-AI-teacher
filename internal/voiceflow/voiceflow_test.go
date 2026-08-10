@@ -659,6 +659,45 @@ func TestPipelinePreservesDeliberateSilence(t *testing.T) {
 	}
 }
 
+func TestPipelineCarriesAnswerOwnershipProofWithoutSynthesizing(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{transcript: "東京です。", confidence: 0.95}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		AssistanceTarget: "respondent",
+		RespondentStage:  "restructure",
+		CoachPhase:       "complete",
+		CoachAction:      "complete",
+		AnswerProof:      conversation.AnswerProofQuestionBoundInputAnswerFirst,
+		ResearchStatus:   "none",
+		ResearchRecords:  []conversation.ResearchRecord{},
+		Route:            "respondent-complete-fast",
+		StateToken:       "encrypted-state",
+		SpokenReply:      "",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio:     []byte("audio"),
+		MIMEType:  "audio/webm",
+		RequestID: "0123456789abcdef01234567",
+		STTLocale: "ja-JP",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if speech.synthesizeCalls != 0 ||
+		len(result.Audio) != 0 ||
+		result.AudioMIMEType != "" ||
+		result.Caption != "" ||
+		result.AnswerProof != string(conversation.AnswerProofQuestionBoundInputAnswerFirst) {
+		t.Fatalf("answer ownership yield generated output or lost proof: %+v", result)
+	}
+}
+
 func TestPipelineRejectsPDFBeforeSpeechOrPlannerInStandardMode(t *testing.T) {
 	t.Parallel()
 	speech := &countedSpeech{fakeSpeech: fakeSpeech{

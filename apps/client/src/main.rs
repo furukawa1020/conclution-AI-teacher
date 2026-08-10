@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
-const ANSWER_SUPPORT_COPY: &str = "「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する";
+const ANSWER_SUPPORT_COPY: &str =
+    "「一問だけ手伝って」で、本人のAを確認できたらAIが黙って発話権を返す";
 const TALK_ONLY_COPY: &str = "届いた瞬間だけ知らせて、点数にはしない";
 const STANDARD_MODE_ROUTE_LABEL: &str =
     "通常会話はNative Audio / 明示した回答支援はQ-ARC + QBA Proof";
@@ -251,7 +252,21 @@ impl CoachState {
         )
     }
 
+    const fn yielded_after_owned_answer(self) -> bool {
+        matches!(
+            (self.answer_proof, self.phase, self.action),
+            (
+                AnswerProof::QuestionBoundInputAnswerFirst,
+                CoachPhase::Complete,
+                CoachAction::Complete
+            )
+        )
+    }
+
     const fn status(self) -> &'static str {
+        if self.yielded_after_owned_answer() {
+            return "回答所有権 / AI発話なし";
+        }
         if matches!(
             self.answer_proof,
             AnswerProof::QuestionBoundInputAnswerFirst
@@ -277,6 +292,9 @@ impl CoachState {
     }
 
     const fn heading(self) -> &'static str {
+        if self.yielded_after_owned_answer() {
+            return "あなたのAが先に出たので、AIは黙りました";
+        }
         if matches!(
             self.answer_proof,
             AnswerProof::QuestionBoundInputAnswerFirst
@@ -295,6 +313,9 @@ impl CoachState {
     }
 
     const fn hint(self) -> &'static str {
+        if self.yielded_after_owned_answer() {
+            return "今回の入力だけを報告された問いへ束縛し、A先頭を二重確認しました。KOTAEは答えも相づちも足さず、ここで発話権を返しました。話者・ライブネス・外部で実際にその問いを聞かれた事実・正解・能力・上達は確認していません";
+        }
         if matches!(
             self.answer_proof,
             AnswerProof::QuestionBoundInputAnswerFirst
@@ -3813,19 +3834,17 @@ mod tests {
             CoachAction::Complete,
             verified,
         );
-        assert_eq!(state.status(), "今回の入力 / A先頭確認");
-        assert_eq!(
-            state.heading(),
-            "報告された問いへの入力が、Aから始まりました"
-        );
+        assert_eq!(state.status(), "回答所有権 / AI発話なし");
+        assert_eq!(state.heading(), "あなたのAが先に出たので、AIは黙りました");
         for boundary in [
-            "今回の入力内",
+            "今回の入力だけを報告された問いへ束縛",
             "話者",
             "ライブネス",
             "外部で実際にその問いを聞かれた事実",
             "正解",
             "能力",
             "上達",
+            "発話権を返しました",
         ] {
             assert!(state.hint().contains(boundary));
         }
@@ -3836,6 +3855,18 @@ mod tests {
         assert_eq!(cleared.phase, CoachPhase::Complete);
         assert_eq!(cleared.action, CoachAction::Complete);
         assert_ne!(cleared.heading(), state.heading());
+
+        let expanding = CoachState::from_authoritative_result(
+            CoachPhase::Expanding,
+            CoachAction::Expand,
+            verified,
+        );
+        assert_eq!(expanding.status(), "今回の入力 / A先頭確認");
+        assert_eq!(
+            expanding.heading(),
+            "報告された問いへの入力が、Aから始まりました"
+        );
+        assert!(!expanding.hint().contains("AIは黙りました"));
     }
 
     #[test]
@@ -3876,7 +3907,7 @@ mod tests {
         );
         assert_eq!(
             ANSWER_SUPPORT_COPY,
-            "「一問だけ手伝って」で、AIが答えず、今回のA先頭だけ確認する"
+            "「一問だけ手伝って」で、本人のAを確認できたらAIが黙って発話権を返す"
         );
         assert_eq!(TALK_ONLY_COPY, "届いた瞬間だけ知らせて、点数にはしない");
 

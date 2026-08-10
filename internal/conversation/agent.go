@@ -2048,6 +2048,17 @@ func (agent *vertexAgent) Process(
 		responseAssistanceTarget,
 		responseRespondentStage,
 	)
+	if answerOwnershipYieldsFloor(
+		answerProof,
+		answerProofCandidate,
+		responseCoachPhase,
+		responseCoachAction,
+	) {
+		// The proof card, not another generated utterance, closes this turn.
+		// Empty speech skips TTS in HTTP and live caption-handoff paths. The
+		// authenticated state and fixed proof enum still reach the browser.
+		spokenReply = ""
+	}
 
 	return VoiceTurnResult{
 		SchemaVersion:        SchemaVersion,

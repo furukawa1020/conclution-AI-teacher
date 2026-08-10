@@ -221,13 +221,17 @@ func nativeInput() httpapi.VoiceTurnInput {
 	// handoff cannot accidentally rely on provider-final as commit authority.
 	processingCommitted := make(chan struct{})
 	close(processingCommitted)
+	processingCommittedAt := make(chan time.Time, 1)
+	processingCommittedAt <- time.Now()
+	close(processingCommittedAt)
 	return httpapi.VoiceTurnInput{
-		MIMEType:            "audio/L16",
-		NativeAudio:         true,
-		SchemaVersion:       1,
-		TurnMode:            httpapi.VoiceTurnForeground,
-		Foreground:          true,
-		ProcessingCommitted: processingCommitted,
+		MIMEType:              "audio/L16",
+		NativeAudio:           true,
+		SchemaVersion:         1,
+		TurnMode:              httpapi.VoiceTurnForeground,
+		Foreground:            true,
+		ProcessingCommitted:   processingCommitted,
+		ProcessingCommittedAt: processingCommittedAt,
 	}
 }
 
@@ -236,6 +240,124 @@ func oneFrame() <-chan []byte {
 	audio <- make([]byte, nativevoice.InputFrameBytes)
 	close(audio)
 	return audio
+}
+
+func TestStreamInputReportsDrainAndCompletedActivityEndBoundaries(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	committedAt := make(chan time.Time, 1)
+	committedAt <- base
+	close(committedAt)
+	timestamps := []time.Time{
+		base.Add(7 * time.Millisecond),
+		base.Add(11 * time.Millisecond),
+	}
+	now := func() time.Time {
+		if len(timestamps) == 0 {
+			t.Fatal("streamInput requested an unexpected timestamp")
+		}
+		value := timestamps[0]
+		timestamps = timestamps[1:]
+		return value
+	}
+	session := newScriptedSession()
+	done := make(chan streamInputResult, 1)
+
+	streamInput(
+		context.Background(),
+		session,
+		oneFrame(),
+		committedAt,
+		nil,
+		now,
+		done,
+	)
+	result := <-done
+	if result.err != nil || !result.committedAt.Equal(base) ||
+		!result.drainedAt.Equal(base.Add(7*time.Millisecond)) ||
+		!result.activityEndAt.Equal(base.Add(11*time.Millisecond)) {
+		t.Fatalf("stream input result = %+v", result)
+	}
+	if len(timestamps) != 0 || session.frames != 1 {
+		t.Fatalf("remaining timestamps=%d frames=%d", len(timestamps), session.frames)
+	}
+}
+
+func TestFailureSnapshotConsumesAlreadyCompletedStreamInput(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	done := make(chan streamInputResult, 1)
+	done <- streamInputResult{
+		committedAt:   base,
+		drainedAt:     base.Add(time.Millisecond),
+		activityEndAt: base.Add(2 * time.Millisecond),
+	}
+	read := false
+	result := streamInputResult{}
+	tryReadStreamInputResult(done, &read, &result)
+	if !read || !result.activityEndAt.Equal(base.Add(2*time.Millisecond)) {
+		t.Fatalf("read=%v result=%+v", read, result)
+	}
+	tryReadStreamInputResult(done, &read, &result)
+	if !result.activityEndAt.Equal(base.Add(2 * time.Millisecond)) {
+		t.Fatalf("a second snapshot changed the result: %+v", result)
+	}
+}
+
+func TestApplyNativeWaterfallTimingsPartitionsEveryStage(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	timings := httpapi.VoiceLiveTimings{
+		ConversationMS:       31,
+		TTSFirstChunkMS:      41,
+		FinalToFirstAudioMS:  43,
+		TTSReleaseMS:         47,
+		NativeCaptionHandoff: 1,
+	}
+	applyNativeWaterfallTimings(
+		&timings,
+		streamInputResult{
+			committedAt:   base,
+			drainedAt:     base.Add(7 * time.Millisecond),
+			activityEndAt: base.Add(11 * time.Millisecond),
+		},
+		base.Add(20*time.Millisecond),
+		base.Add(23*time.Millisecond),
+		base.Add(25*time.Millisecond),
+		base.Add(31*time.Millisecond),
+	)
+	if timings.CommitToServerDrainMS != 7 ||
+		timings.ServerDrainToActivityEndMS != 4 ||
+		timings.ActivityEndToFinalCaptionMS != 9 ||
+		timings.FinalToRiskRouteGateMS != 3 ||
+		timings.OutputCommitToFirstAudioMS != 6 {
+		t.Fatalf("waterfall timings = %+v", timings)
+	}
+	if timings.ConversationMS != 31 || timings.TTSFirstChunkMS != 41 ||
+		timings.FinalToFirstAudioMS != 43 || timings.TTSReleaseMS != 47 ||
+		timings.NativeCaptionHandoff != 1 {
+		t.Fatalf("caption handoff timings were overwritten: %+v", timings)
+	}
+}
+
+func TestApplyNativeWaterfallTimingsUsesMinusOneForMissingBoundaries(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	timings := newNativeLiveTimings(time.Time{}, time.Time{}, time.Time{})
+	applyNativeWaterfallTimings(
+		&timings,
+		streamInputResult{
+			drainedAt:     base.Add(7 * time.Millisecond),
+			activityEndAt: base.Add(11 * time.Millisecond),
+		},
+		base.Add(10*time.Millisecond),
+		base.Add(13*time.Millisecond),
+		time.Time{},
+		time.Time{},
+	)
+	if timings.CommitToServerDrainMS != -1 ||
+		timings.ServerDrainToActivityEndMS != 4 ||
+		timings.ActivityEndToFinalCaptionMS != 0 ||
+		timings.FinalToRiskRouteGateMS != 2 ||
+		timings.OutputCommitToFirstAudioMS != -1 {
+		t.Fatalf("missing-boundary timings = %+v", timings)
+	}
 }
 
 func TestNativeInputReadyFollowsSetupAndStartActivity(t *testing.T) {
@@ -348,6 +470,35 @@ func TestNativeInputReadyPrecedesAuditedNoProviderDrain(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("audited fallback did not finish after commit drain")
+	}
+}
+
+func TestNativeNoProviderFallbackReturnsMissingWaterfallSentinels(t *testing.T) {
+	service, err := New(
+		&fakeOpener{session: newScriptedSession()},
+		fakePreparer{token: "pending-state", requiresStaged: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	result, processErr := service.ProcessLive(
+		context.Background(),
+		"uid-no-provider-waterfall",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { return nil },
+	)
+	if !errors.Is(processErr, httpapi.ErrVoiceNativeFallback) {
+		t.Fatalf("ProcessLive() error = %v", processErr)
+	}
+	if result.LiveTimings.CommitToServerDrainMS != -1 ||
+		result.LiveTimings.ServerDrainToActivityEndMS != -1 ||
+		result.LiveTimings.ActivityEndToFinalCaptionMS != -1 ||
+		result.LiveTimings.FinalToRiskRouteGateMS != -1 ||
+		result.LiveTimings.OutputCommitToFirstAudioMS != -1 {
+		t.Fatalf("no-provider waterfall = %+v", result.LiveTimings)
 	}
 }
 
@@ -868,10 +1019,24 @@ func TestNativeFlowReleasesMeaningfulAudioOnlyAfterFinalInputGate(t *testing.T) 
 	defer service.Close()
 
 	var delivered []byte
+	var waterfallMu sync.Mutex
+	waterfallStages := make(map[httpapi.VoiceNativeWaterfallStage]int)
+	input := nativeInput()
+	input.OnNativeWaterfall = func(
+		stage httpapi.VoiceNativeWaterfallStage,
+		at time.Time,
+	) {
+		if at.IsZero() {
+			t.Error("native waterfall published a zero timestamp")
+		}
+		waterfallMu.Lock()
+		waterfallStages[stage]++
+		waterfallMu.Unlock()
+	}
 	result, err := service.ProcessLive(
 		context.Background(),
 		"uid-native",
-		nativeInput(),
+		input,
 		oneFrame(),
 		func(pcm []byte) error {
 			session.mu.Lock()
@@ -889,11 +1054,29 @@ func TestNativeFlowReleasesMeaningfulAudioOnlyAfterFinalInputGate(t *testing.T) 
 	}
 	if string(result.Caption) != "こんにちは。今日は何をして過ごしていましたか。" ||
 		result.Route != nativevoice.RouteNativeAudio || result.StateToken != "opaque-state" ||
-		result.LiveTimings.FinalToFirstAudioMS < 0 {
+		result.LiveTimings.FinalToFirstAudioMS < 0 ||
+		result.LiveTimings.CommitToServerDrainMS < 0 ||
+		result.LiveTimings.ServerDrainToActivityEndMS < 0 ||
+		result.LiveTimings.FinalToRiskRouteGateMS < 0 ||
+		result.LiveTimings.OutputCommitToFirstAudioMS < 0 {
 		t.Fatalf("result = %+v", result)
 	}
 	if len(delivered) != 4 || session.commits != 1 || session.frames != 1 {
 		t.Fatalf("delivery=%v commits=%d frames=%d", delivered, session.commits, session.frames)
+	}
+	waterfallMu.Lock()
+	defer waterfallMu.Unlock()
+	for _, stage := range []httpapi.VoiceNativeWaterfallStage{
+		httpapi.VoiceNativeWaterfallServerDrain,
+		httpapi.VoiceNativeWaterfallActivityEnd,
+		httpapi.VoiceNativeWaterfallFinalCaption,
+		httpapi.VoiceNativeWaterfallRiskRouteGate,
+		httpapi.VoiceNativeWaterfallOutputCommit,
+		httpapi.VoiceNativeWaterfallFirstMeaningfulPCM,
+	} {
+		if waterfallStages[stage] != 1 {
+			t.Fatalf("stage %d count = %d; all=%v", stage, waterfallStages[stage], waterfallStages)
+		}
 	}
 }
 
@@ -941,7 +1124,8 @@ func TestNativeFlowDoesNotCountDigitalSilenceAsFirstAudio(t *testing.T) {
 	}
 	if string(delivered) != string([]byte{0, 0, 0, 0}) ||
 		result.LiveTimings.TTSFirstChunkMS != -1 ||
-		result.LiveTimings.FinalToFirstAudioMS != -1 {
+		result.LiveTimings.FinalToFirstAudioMS != -1 ||
+		result.LiveTimings.OutputCommitToFirstAudioMS != -1 {
 		t.Fatalf("delivered=%v timings=%+v", delivered, result.LiveTimings)
 	}
 }
@@ -962,7 +1146,7 @@ func TestNativeFlowBlocksHighRiskCaptionBeforeAnyAudio(t *testing.T) {
 	defer service.Close()
 
 	delivered := false
-	_, err = service.ProcessLive(
+	result, err := service.ProcessLive(
 		context.Background(),
 		"uid-risk",
 		nativeInput(),
@@ -971,6 +1155,12 @@ func TestNativeFlowBlocksHighRiskCaptionBeforeAnyAudio(t *testing.T) {
 	)
 	if !errors.Is(err, httpapi.ErrVoiceNativeFallback) || delivered || session.commits != 0 {
 		t.Fatalf("err=%v delivered=%v commits=%d", err, delivered, session.commits)
+	}
+	if result.LiveTimings.CommitToServerDrainMS < 0 ||
+		result.LiveTimings.ServerDrainToActivityEndMS < 0 ||
+		result.LiveTimings.FinalToRiskRouteGateMS < 0 ||
+		result.LiveTimings.OutputCommitToFirstAudioMS != -1 {
+		t.Fatalf("fallback waterfall timings = %+v", result.LiveTimings)
 	}
 }
 

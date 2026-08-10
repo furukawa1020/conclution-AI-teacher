@@ -737,17 +737,22 @@ func (p *Pipeline) processLive(
 			}
 		}
 		return httpapi.VoiceLiveTimings{
-			STTFirstInterimMS:   firstInterimMS,
-			STTFinalMS:          firstFinalMS,
-			ConversationMS:      conversationMS,
-			TTSFirstChunkMS:     firstTTSChunkMS,
-			FinalToFirstAudioMS: finalToFirstAudioMS,
-			SpecHit:             specHit,
-			SpecMiss:            specMiss,
-			SpecCancel:          specCancel,
-			TTSPrestarted:       ttsPrestarted,
-			TTSBufferedBytes:    ttsBufferedBytes,
-			TTSReleaseMS:        ttsReleaseMS,
+			STTFirstInterimMS:           firstInterimMS,
+			STTFinalMS:                  firstFinalMS,
+			ConversationMS:              conversationMS,
+			TTSFirstChunkMS:             firstTTSChunkMS,
+			FinalToFirstAudioMS:         finalToFirstAudioMS,
+			CommitToServerDrainMS:       -1,
+			ServerDrainToActivityEndMS:  -1,
+			ActivityEndToFinalCaptionMS: -1,
+			FinalToRiskRouteGateMS:      -1,
+			OutputCommitToFirstAudioMS:  -1,
+			SpecHit:                     specHit,
+			SpecMiss:                    specMiss,
+			SpecCancel:                  specCancel,
+			TTSPrestarted:               ttsPrestarted,
+			TTSBufferedBytes:            ttsBufferedBytes,
+			TTSReleaseMS:                ttsReleaseMS,
 		}
 	}
 	var (

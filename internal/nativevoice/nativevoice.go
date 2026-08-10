@@ -142,6 +142,9 @@ func (e *Event) Clear() {
 type Session interface {
 	StartActivity(context.Context) error
 	SendPCM20ms(context.Context, []byte) error
+	// EndActivity returns successfully only after the serialized provider
+	// writer has accepted the ActivityEnd input. It does not imply that the
+	// provider has emitted its final input caption.
 	EndActivity(context.Context) error
 	CommitOutput() error
 	DiscardOutput()

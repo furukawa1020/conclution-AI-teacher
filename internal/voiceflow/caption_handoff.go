@@ -406,18 +406,23 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		}
 	}
 	result.LiveTimings = httpapi.VoiceLiveTimings{
-		STTFirstInterimMS:    -1,
-		STTFinalMS:           -1,
-		ConversationMS:       conversationMS,
-		TTSFirstChunkMS:      firstTTSChunkMS,
-		FinalToFirstAudioMS:  finalToFirstAudioMS,
-		SpecHit:              specHit,
-		SpecMiss:             specMiss,
-		SpecCancel:           specCancel,
-		TTSPrestarted:        ttsPrestarted,
-		TTSBufferedBytes:     ttsBufferedBytes,
-		TTSReleaseMS:         ttsReleaseMS,
-		NativeCaptionHandoff: 1,
+		STTFirstInterimMS:           -1,
+		STTFinalMS:                  -1,
+		ConversationMS:              conversationMS,
+		TTSFirstChunkMS:             firstTTSChunkMS,
+		FinalToFirstAudioMS:         finalToFirstAudioMS,
+		CommitToServerDrainMS:       -1,
+		ServerDrainToActivityEndMS:  -1,
+		ActivityEndToFinalCaptionMS: -1,
+		FinalToRiskRouteGateMS:      -1,
+		OutputCommitToFirstAudioMS:  -1,
+		SpecHit:                     specHit,
+		SpecMiss:                    specMiss,
+		SpecCancel:                  specCancel,
+		TTSPrestarted:               ttsPrestarted,
+		TTSBufferedBytes:            ttsBufferedBytes,
+		TTSReleaseMS:                ttsReleaseMS,
+		NativeCaptionHandoff:        1,
 	}
 	return result, nil
 }

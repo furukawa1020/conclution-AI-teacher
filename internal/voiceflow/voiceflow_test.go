@@ -698,6 +698,46 @@ func TestPipelineCarriesAnswerOwnershipProofWithoutSynthesizing(t *testing.T) {
 	}
 }
 
+func TestPipelineRejectsTerminalAnswerOwnershipSpeechBeforeSynthesis(t *testing.T) {
+	t.Parallel()
+
+	speech := &fakeSpeech{transcript: "東京です。", confidence: 0.95}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		AssistanceTarget: "respondent",
+		RespondentStage:  "restructure",
+		CoachPhase:       "complete",
+		CoachAction:      "complete",
+		AnswerProof:      conversation.AnswerProofQuestionBoundInputAnswerFirst,
+		ResearchStatus:   "none",
+		ResearchRecords:  []conversation.ResearchRecord{},
+		Route:            "respondent-complete-fast",
+		StateToken:       "encrypted-state",
+		SpokenReply:      "その答えで大丈夫です。",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio:     []byte("audio"),
+		MIMEType:  "audio/webm",
+		RequestID: "1123456789abcdef01234567",
+		STTLocale: "ja-JP",
+	})
+	stage, classified := httpapi.VoicePipelineStageOf(err)
+	if err == nil || !classified || stage != httpapi.VoicePipelineStageConversation {
+		t.Fatalf("conflict error=%v stage=%q classified=%v", err, stage, classified)
+	}
+	if speech.synthesizeCalls != 0 ||
+		len(result.Audio) != 0 ||
+		result.Caption != "" ||
+		result.AnswerProof != "" ||
+		result.StateToken != "" {
+		t.Fatalf("conflicting answer ownership escaped: %+v", result)
+	}
+}
+
 func TestPipelineRejectsPDFBeforeSpeechOrPlannerInStandardMode(t *testing.T) {
 	t.Parallel()
 	speech := &countedSpeech{fakeSpeech: fakeSpeech{

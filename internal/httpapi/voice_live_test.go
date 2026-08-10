@@ -36,6 +36,42 @@ func TestEmptyVoiceLiveTimingsMarksNativeWaterfallMissing(t *testing.T) {
 	}
 }
 
+func TestVoiceLiveLatencyProofIsExactOrderedAndOneShot(t *testing.T) {
+	valid := voiceLiveLatencyFrame{
+		Type: "latency", Version: 1,
+		SpeechEndToCommitSendMS: 120, SpeechEndToCommitAckMS: 180,
+		SpeechEndToEstimatedAudibleMS: 760,
+	}
+	if !validVoiceLiveLatencyFrame(valid) {
+		t.Fatal("valid content-free latency proof was rejected")
+	}
+	for name, mutate := range map[string]func(*voiceLiveLatencyFrame){
+		"type":             func(value *voiceLiveLatencyFrame) { value.Type = "commit" },
+		"version":          func(value *voiceLiveLatencyFrame) { value.Version = 2 },
+		"negative":         func(value *voiceLiveLatencyFrame) { value.SpeechEndToCommitSendMS = -1 },
+		"send_after_ack":   func(value *voiceLiveLatencyFrame) { value.SpeechEndToCommitSendMS = 181 },
+		"ack_after_total":  func(value *voiceLiveLatencyFrame) { value.SpeechEndToCommitAckMS = 761 },
+		"over_ten_seconds": func(value *voiceLiveLatencyFrame) { value.SpeechEndToEstimatedAudibleMS = 10_001 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if validVoiceLiveLatencyFrame(candidate) {
+				t.Fatal("invalid latency proof was accepted")
+			}
+		})
+	}
+	metrics := &voiceLiveOutputMetrics{}
+	metrics.markLatencyProof(valid)
+	duplicate := valid
+	duplicate.SpeechEndToEstimatedAudibleMS = 900
+	metrics.markLatencyProof(duplicate)
+	if got := metrics.latencyProofSnapshot(); !got.valid ||
+		got.speechEndToEstimatedAudibleMS != 760 {
+		t.Fatalf("proof snapshot = %+v, want first proof only", got)
+	}
+}
+
 func TestVoiceLiveLogIncludesContentFreeNativeWaterfall(t *testing.T) {
 	var output bytes.Buffer
 	server := &Server{logger: slog.New(slog.NewJSONHandler(&output, nil))}
@@ -46,6 +82,12 @@ func TestVoiceLiveLogIncludesContentFreeNativeWaterfall(t *testing.T) {
 		frames:        1,
 		bytes:         2,
 	}
+	metrics.markLatencyProof(voiceLiveLatencyFrame{
+		Type: "latency", Version: 1,
+		SpeechEndToCommitSendMS:       120,
+		SpeechEndToCommitAckMS:        180,
+		SpeechEndToEstimatedAudibleMS: 760,
+	})
 	metrics.markNativeCommit(base)
 	for stage, at := range map[VoiceNativeWaterfallStage]time.Time{
 		VoiceNativeWaterfallServerDrain:        base.Add(7 * time.Millisecond),
@@ -80,11 +122,17 @@ func TestVoiceLiveLogIncludesContentFreeNativeWaterfall(t *testing.T) {
 		t.Fatalf("decode voice live log: %v", err)
 	}
 	for key, want := range map[string]float64{
-		"commit_to_server_drain_ms":        7,
-		"server_drain_to_activity_end_ms":  4,
-		"activity_end_to_final_caption_ms": 9,
-		"final_to_risk_route_gate_ms":      3,
-		"output_commit_to_first_audio_ms":  6,
+		"commit_to_server_drain_ms":                   7,
+		"server_drain_to_activity_end_ms":             4,
+		"activity_end_to_final_caption_ms":            9,
+		"final_to_risk_route_gate_ms":                 3,
+		"output_commit_to_first_audio_ms":             6,
+		"speech_end_to_server_commit_lower_ms":        120,
+		"speech_end_to_server_commit_upper_ms":        180,
+		"server_commit_to_estimated_audible_lower_ms": 580,
+		"server_commit_to_estimated_audible_upper_ms": 640,
+		"latency_proof_uncertainty_ms":                60,
+		"speech_end_to_estimated_audible_ms":          760,
 	} {
 		if got := logged[key]; got != want {
 			t.Fatalf("%s = %#v, want %.0f; log=%s", key, got, want, output.String())

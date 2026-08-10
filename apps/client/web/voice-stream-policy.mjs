@@ -598,6 +598,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       startFrame.nativeAudio
         ? [
             "appCheckToken",
+            ...(startFrame.latencyProofVersion === 1 ? ["latencyProofVersion"] : []),
             "nativeCoachControl",
             "idToken",
             "nativeAudio",
@@ -611,6 +612,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
         : [
             "appCheckToken",
             "idToken",
+            ...(startFrame.latencyProofVersion === 1 ? ["latencyProofVersion"] : []),
             "nativeAudio",
             "sampleRateHz",
             "sessionState",
@@ -622,6 +624,8 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     ) ||
     startFrame.type !== "start" ||
     startFrame.version !== 1 ||
+    (startFrame.latencyProofVersion !== undefined &&
+      startFrame.latencyProofVersion !== 1) ||
     typeof startFrame.idToken !== "string" ||
     startFrame.idToken.length === 0 ||
     typeof startFrame.appCheckToken !== "string" ||
@@ -641,6 +645,8 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
   let pendingStart = Object.freeze({ ...startFrame });
   let state = "connecting";
   let inputFrameCount = 0;
+  let committedAcknowledged = false;
+  let latencyProofSent = false;
 
   function socketReady() {
     if (
@@ -694,6 +700,11 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
   }
 
   return Object.freeze({
+    acknowledgeCommitted() {
+      if (state !== "committed" || committedAcknowledged ||
+        startFrame.latencyProofVersion !== 1) invalid();
+      committedAcknowledged = true;
+    },
     close() {
       pendingStart = undefined;
       queue.clear();
@@ -717,6 +728,26 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       if (state !== "awaiting-ready") invalid();
       state = "ready";
       flush(false);
+    },
+    publishLatencyProof(proof) {
+      if (!isPlainRecord(proof) || !hasExactKeys(proof, [
+        "speechEndToCommitAckMs", "speechEndToCommitSendMs",
+        "speechEndToEstimatedAudibleMs",
+      ])) invalid();
+      const { speechEndToCommitAckMs, speechEndToCommitSendMs,
+        speechEndToEstimatedAudibleMs } = proof;
+      if (state !== "committed" || !committedAcknowledged || latencyProofSent ||
+        !Number.isSafeInteger(speechEndToCommitSendMs) ||
+        !Number.isSafeInteger(speechEndToCommitAckMs) ||
+        !Number.isSafeInteger(speechEndToEstimatedAudibleMs) ||
+        speechEndToCommitSendMs < 0 ||
+        speechEndToCommitSendMs > speechEndToCommitAckMs ||
+        speechEndToCommitAckMs > speechEndToEstimatedAudibleMs ||
+        speechEndToEstimatedAudibleMs > 10_000) invalid();
+      sendText(JSON.stringify({ type: "latency", version: 1,
+        speechEndToCommitSendMs, speechEndToCommitAckMs,
+        speechEndToEstimatedAudibleMs }));
+      latencyProofSent = true;
     },
     open() {
       if (state !== "connecting" || pendingStart === undefined) invalid();
@@ -746,7 +777,9 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     },
     snapshot() {
       return Object.freeze({
+        committedAcknowledged,
         inputFrameCount,
+        latencyProofSent,
         queuedFrames: queue.size(),
         state,
       });
@@ -819,6 +852,7 @@ export function createVoiceLiveServerProtocol(
   let coachActivated = false;
   let coachCheckpoint;
   let endpointReceived = false;
+  let committedAcknowledged = false;
   let state = "awaiting-ready";
   let totalAudioBytes = 0;
 
@@ -932,6 +966,12 @@ export function createVoiceLiveServerProtocol(
         version: 1,
       });
     }
+    if (state === "committed" && value.type === "committed") {
+      if (committedAcknowledged || audioEventCount !== 0 ||
+        !hasExactKeys(value, ["type", "version"]) || value.version !== 1) invalid();
+      committedAcknowledged = true;
+      return Object.freeze({ type: "committed", version: 1 });
+    }
     if (
       state !== "committed" ||
       value.type !== "final" ||
@@ -1021,6 +1061,7 @@ export function createVoiceLiveServerProtocol(
       return Object.freeze({
         audioEventCount,
         coachActivated,
+        committedAcknowledged,
         endpointReceived,
         state,
         totalAudioBytes,

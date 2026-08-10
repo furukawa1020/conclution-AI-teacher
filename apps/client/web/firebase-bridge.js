@@ -2711,6 +2711,7 @@ async function startVoiceLiveSession({
     clientTransport = createVoiceLiveClientTransport(socket, {
       type: "start",
       version: 1,
+      latencyProofVersion: 1,
       idToken,
       appCheckToken,
       nativeAudio,
@@ -2918,6 +2919,8 @@ async function startVoiceLiveSession({
   let authReadyMs = preflightAuthReadyMs;
   let authReadyTimer;
   let commitAt;
+  let speechEndToCommitSendMs;
+  let speechEndToCommitAckMs;
   let commitToEstimatedAudibleMs;
   let commitToFirstAudioMs;
   let firstBinaryMs;
@@ -3308,6 +3311,13 @@ async function startVoiceLiveSession({
           );
           return;
         }
+        if (message.type === "committed") {
+          if (state !== "committed" || !Number.isFinite(speechEndedAt) ||
+            Number.isFinite(speechEndToCommitAckMs)) fail("voice_response_invalid");
+          speechEndToCommitAckMs = Math.round(performance.now() - speechEndedAt);
+          clientTransport.acknowledgeCommitted();
+          return;
+        }
         if (message.type === "final") {
           if (state !== "committed" || !session.playback) {
             fail("voice_response_invalid");
@@ -3605,6 +3615,9 @@ async function startVoiceLiveSession({
       state = "committed";
       commitSent = true;
       commitAt = performance.now();
+      speechEndToCommitSendMs = Number.isFinite(speechEndedAt)
+        ? Math.round(commitAt - speechEndedAt)
+        : undefined;
       playback.armResponseInterruption(commitAt, {
         onMiss: recoverSlowVoiceStart,
         onStall: () => recoverSlowVoiceStart(true),
@@ -3638,6 +3651,23 @@ async function startVoiceLiveSession({
     recordCompletion() {
       clearSlowReplayCandidateTimer();
       emitLatency();
+    },
+    publishFirstAudible(audibleAt) {
+      if ((state !== "committed" && state !== "final") ||
+        !Number.isFinite(audibleAt) || !Number.isFinite(speechEndedAt) ||
+        !Number.isSafeInteger(speechEndToCommitSendMs) ||
+        !Number.isSafeInteger(speechEndToCommitAckMs)) return;
+      const total = Math.round(audibleAt - speechEndedAt);
+      if (total < speechEndToCommitAckMs || total > 10_000) return;
+      try {
+        clientTransport.publishLatencyProof({
+          speechEndToCommitAckMs,
+          speechEndToCommitSendMs,
+          speechEndToEstimatedAudibleMs: total,
+        });
+      } catch {
+        // Content-free diagnostics never change answer delivery or fallback.
+      }
     },
     state() {
       return state;
@@ -5001,7 +5031,7 @@ function createStreamingPlayback(
     firstAudiblePending = false;
     clearFirstAudibleTimer();
     streamedAudio = true;
-    onFirstAudible?.();
+    onFirstAudible?.(audibleAt);
     advanceCurrentVoiceStartSlo(
       sloGeneration,
       true,
@@ -5495,7 +5525,10 @@ async function finishTurn(
   const turnDeadlineAt =
     performance.now() + VOICE_TURN_CLIENT_TIMEOUT_MS;
 
-  function disarmVoiceStartDeadline() {
+  function disarmVoiceStartDeadline(audibleAt) {
+    if (Number.isFinite(audibleAt)) {
+      liveSession?.publishFirstAudible(audibleAt);
+    }
     voiceStartDeadlineActive = false;
     if (voiceStartDeadlineTimer !== undefined) {
       clearTimeout(voiceStartDeadlineTimer);

@@ -3,6 +3,25 @@ mod longitudinal;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = classifyInterruptFrame)]
+pub fn classify_interrupt_frame_for_js(
+    noise_floor: f64,
+    output_active: bool,
+    peak: f64,
+    rms: f64,
+    candidate_active: bool,
+) -> Result<u8, wasm_bindgen::JsValue> {
+    kotae_audio_core::classify_interrupt_frame(kotae_audio_core::InterruptFrameLevels {
+        noise_floor,
+        output_active,
+        peak,
+        rms,
+        candidate_active,
+    })
+    .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+}
+
 const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
 const ANSWER_SUPPORT_COPY: &str = "「代わりに答えて」でも代理回答せず、本人のAを一言から守る";

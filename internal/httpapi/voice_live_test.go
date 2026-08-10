@@ -482,6 +482,12 @@ type liveLifecycleTestService struct {
 	done        chan struct{}
 }
 
+func publishLiveTestInputReady(input VoiceTurnInput) {
+	if input.OnInputReady != nil {
+		input.OnInputReady()
+	}
+}
+
 func (*liveLifecycleTestService) Process(
 	context.Context,
 	string,
@@ -535,6 +541,7 @@ func (service *liveEndpointTestService) ProcessLiveWithEndpoint(
 	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
+	publishLiveTestInputReady(input)
 	for {
 		select {
 		case <-ctx.Done():
@@ -574,6 +581,7 @@ func (service *liveControlTestService) ProcessLiveWithControl(
 	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
+	publishLiveTestInputReady(input)
 	for {
 		select {
 		case <-ctx.Done():
@@ -660,6 +668,7 @@ func (service *liveControlTestService) ProcessLive(
 	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
+	publishLiveTestInputReady(input)
 	for {
 		select {
 		case <-ctx.Done():
@@ -693,6 +702,7 @@ func (service *liveControlTestService) ProcessLiveWithEndpoint(
 	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
+	publishLiveTestInputReady(input)
 	for {
 		select {
 		case <-ctx.Done():
@@ -740,6 +750,7 @@ func (service *liveTestVoiceService) ProcessLive(
 	service.processLiveCalls++
 	service.input = input
 	service.mu.Unlock()
+	publishLiveTestInputReady(input)
 	for {
 		select {
 		case <-ctx.Done():
@@ -818,6 +829,34 @@ func newVoiceLiveControlledTestServer(
 	handlerReturned chan<- struct{},
 	nativeLiveServices ...VoiceTurnLiveService,
 ) *httptest.Server {
+	return newVoiceLiveControlledTestServerWithNativeReadyTimeout(
+		t,
+		service,
+		verifier,
+		uidLimiter,
+		appLimiter,
+		leaseManager,
+		handshakeGate,
+		pipelineJoinTimeout,
+		0,
+		handlerReturned,
+		nativeLiveServices...,
+	)
+}
+
+func newVoiceLiveControlledTestServerWithNativeReadyTimeout(
+	t *testing.T,
+	service VoiceTurnService,
+	verifier identity.Verifier,
+	uidLimiter guard.Limiter,
+	appLimiter guard.Limiter,
+	leaseManager guard.VoiceLiveLeaseManager,
+	handshakeGate *VoiceLiveHandshakeGate,
+	pipelineJoinTimeout time.Duration,
+	nativeReadyTimeout time.Duration,
+	handlerReturned chan<- struct{},
+	nativeLiveServices ...VoiceTurnLiveService,
+) *httptest.Server {
 	t.Helper()
 	var nativeLiveService VoiceTurnLiveService
 	if len(nativeLiveServices) > 0 {
@@ -842,6 +881,7 @@ func newVoiceLiveControlledTestServer(
 			RequestTimeout:          2 * time.Second,
 			MaxRequestBytes:         13 * 1024 * 1024,
 			livePipelineJoinTimeout: pipelineJoinTimeout,
+			liveNativeReadyTimeout:  nativeReadyTimeout,
 		},
 	)
 	if handlerReturned != nil {
@@ -958,6 +998,426 @@ func writeVoiceLiveNativeStartWithCoachControl(
 	}
 	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type strongReadyLiveTestService struct {
+	started         chan struct{}
+	allowReady      <-chan struct{}
+	readyPublished  chan struct{}
+	audioReceived   chan struct{}
+	done            chan struct{}
+	failBeforeReady error
+
+	startOnce  sync.Once
+	readyOnce  sync.Once
+	audioOnce  sync.Once
+	doneOnce   sync.Once
+	mu         sync.Mutex
+	readyCalls int
+}
+
+func (*strongReadyLiveTestService) Process(
+	context.Context,
+	string,
+	VoiceTurnInput,
+) (VoiceTurnResult, error) {
+	return VoiceTurnResult{}, errors.New("buffered voice method called")
+}
+
+func (service *strongReadyLiveTestService) ProcessLive(
+	ctx context.Context,
+	_ string,
+	input VoiceTurnInput,
+	audio <-chan []byte,
+	_ func([]byte) error,
+) (VoiceTurnResult, error) {
+	service.startOnce.Do(func() {
+		if service.started != nil {
+			close(service.started)
+		}
+	})
+	defer service.doneOnce.Do(func() {
+		if service.done != nil {
+			close(service.done)
+		}
+	})
+	if service.failBeforeReady != nil {
+		return VoiceTurnResult{}, service.failBeforeReady
+	}
+	if service.allowReady != nil {
+		select {
+		case <-service.allowReady:
+		case <-ctx.Done():
+			return VoiceTurnResult{}, ctx.Err()
+		}
+	}
+	if input.OnInputReady == nil {
+		return VoiceTurnResult{}, errors.New("missing strong input-ready callback")
+	}
+	input.OnInputReady()
+	service.mu.Lock()
+	service.readyCalls++
+	service.mu.Unlock()
+	service.readyOnce.Do(func() {
+		if service.readyPublished != nil {
+			close(service.readyPublished)
+		}
+	})
+	for {
+		select {
+		case <-ctx.Done():
+			return VoiceTurnResult{}, ctx.Err()
+		case _, open := <-audio:
+			if !open {
+				return VoiceTurnResult{
+					StateToken:       "sealed-strong-ready-state",
+					DetectedDomain:   "unknown",
+					AssistanceTarget: "assistant",
+					RespondentStage:  "none",
+					CoachPhase:       "none",
+					CoachAction:      "none",
+					ResearchStatus:   "none",
+					ResearchRecords:  []ResearchRecord{},
+					Route:            "native_audio",
+				}, nil
+			}
+			service.audioOnce.Do(func() {
+				if service.audioReceived != nil {
+					close(service.audioReceived)
+				}
+			})
+		}
+	}
+}
+
+type voiceLiveWireRead struct {
+	messageType websocket.MessageType
+	payload     []byte
+	err         error
+}
+
+func TestVoiceLiveNativeReadyWaitsForProviderAndStartsPCMReaderAfterward(
+	t *testing.T,
+) {
+	allowReady := make(chan struct{})
+	service := &strongReadyLiveTestService{
+		started:        make(chan struct{}),
+		allowReady:     allowReady,
+		readyPublished: make(chan struct{}),
+		audioReceived:  make(chan struct{}),
+		done:           make(chan struct{}),
+	}
+	server := newVoiceLiveControlledTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		guard.NewMemoryVoiceLiveLeaseManager(),
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		nil,
+		service,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	select {
+	case <-service.started:
+	case <-time.After(time.Second):
+		t.Fatal("Native pipeline did not begin provider preparation")
+	}
+
+	wireRead := make(chan voiceLiveWireRead, 1)
+	go func() {
+		messageType, payload, readErr := conn.Read(ctx)
+		wireRead <- voiceLiveWireRead{
+			messageType: messageType,
+			payload:     payload,
+			err:         readErr,
+		}
+	}()
+	select {
+	case frame := <-wireRead:
+		t.Fatalf("frame arrived before provider readiness: %+v", frame)
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	// Even a protocol-violating early client frame must remain at the socket
+	// boundary until the provider proves this exact turn is input-ready.
+	if err := conn.Write(ctx, websocket.MessageBinary, liveTestPCMFrame()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-service.audioReceived:
+		t.Fatal("PCM reached the service before strong ready")
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	close(allowReady)
+	select {
+	case <-service.readyPublished:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not publish input readiness")
+	}
+	var first voiceLiveWireRead
+	select {
+	case first = <-wireRead:
+	case <-time.After(time.Second):
+		t.Fatal("browser did not receive ready after provider completion")
+	}
+	if first.err != nil || first.messageType != websocket.MessageText {
+		t.Fatalf("ready wire frame=%+v", first)
+	}
+	var ready map[string]any
+	if err := json.Unmarshal(first.payload, &ready); err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 2 || ready["type"] != "ready" ||
+		ready["version"] != float64(voiceLiveVersion) {
+		t.Fatalf("ready=%#v", ready)
+	}
+	select {
+	case <-service.audioReceived:
+	case <-time.After(time.Second):
+		t.Fatal("PCM reader did not start after strong ready")
+	}
+	commit, err := json.Marshal(voiceLiveCommitFrame{
+		Type: "commit", Version: voiceLiveVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
+		t.Fatal(err)
+	}
+	if final := readVoiceLiveJSON(t, ctx, conn); final["type"] != "final" {
+		t.Fatalf("final=%#v", final)
+	}
+	service.mu.Lock()
+	readyCalls := service.readyCalls
+	service.mu.Unlock()
+	if readyCalls != 1 {
+		t.Fatalf("input-ready callback calls=%d, want 1", readyCalls)
+	}
+}
+
+func TestVoiceLiveNativeFailureBeforeInputReadySendsNoReadyAndReleasesLease(
+	t *testing.T,
+) {
+	service := &strongReadyLiveTestService{
+		started:         make(chan struct{}),
+		done:            make(chan struct{}),
+		failBeforeReady: errors.New("provider setup failed"),
+	}
+	lease := &liveTestLease{}
+	leaseManager := &liveTestLeaseManager{lease: lease}
+	handlerReturned := make(chan struct{}, 1)
+	server := newVoiceLiveControlledTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		leaseManager,
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		handlerReturned,
+		service,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	terminal := readVoiceLiveJSON(t, ctx, conn)
+	if terminal["type"] != "error" ||
+		terminal["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("first frame=%#v, want provider error without ready", terminal)
+	}
+	if _, _, readErr := conn.Read(ctx); websocket.CloseStatus(readErr) !=
+		websocket.StatusInternalError {
+		t.Fatalf(
+			"pre-ready failure close status=%v err=%v",
+			websocket.CloseStatus(readErr),
+			readErr,
+		)
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after pre-ready provider failure")
+	}
+	lease.mu.Lock()
+	releaseCalls := lease.releaseCalls
+	lease.mu.Unlock()
+	service.mu.Lock()
+	readyCalls := service.readyCalls
+	service.mu.Unlock()
+	if readyCalls != 0 || releaseCalls != 1 {
+		t.Fatalf("ready calls=%d lease releases=%d", readyCalls, releaseCalls)
+	}
+}
+
+func TestVoiceLiveNativeReadyDeadlineCancelsProviderAndReleasesLease(
+	t *testing.T,
+) {
+	service := &strongReadyLiveTestService{
+		started:    make(chan struct{}),
+		allowReady: make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+	lease := &liveTestLease{}
+	handlerReturned := make(chan struct{}, 1)
+	server := newVoiceLiveControlledTestServerWithNativeReadyTimeout(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		&liveTestLeaseManager{lease: lease},
+		NewVoiceLiveHandshakeGate(2),
+		500*time.Millisecond,
+		50*time.Millisecond,
+		handlerReturned,
+		service,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	terminal := readVoiceLiveJSON(t, ctx, conn)
+	if terminal["type"] != "error" ||
+		terminal["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("deadline frame=%#v", terminal)
+	}
+	select {
+	case <-service.done:
+	case <-time.After(time.Second):
+		t.Fatal("provider pipeline survived the strong-ready deadline")
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("handler retained the timed-out Native turn")
+	}
+	lease.mu.Lock()
+	releaseCalls := lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 1 {
+		t.Fatalf("lease releases=%d, want 1", releaseCalls)
+	}
+}
+
+func TestVoiceLiveNativeRequestFailsClosedWithoutNativeService(t *testing.T) {
+	legacy := &liveTestVoiceService{}
+	leaseManager := &liveTestLeaseManager{}
+	server := newVoiceLiveControlledTestServer(
+		t,
+		legacy,
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		leaseManager,
+		NewVoiceLiveHandshakeGate(2),
+		0,
+		nil,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	terminal := readVoiceLiveJSON(t, ctx, conn)
+	if terminal["type"] != "error" ||
+		terminal["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("unconfigured Native frame=%#v", terminal)
+	}
+	legacy.mu.Lock()
+	processLiveCalls := legacy.processLiveCalls
+	legacy.mu.Unlock()
+	leaseManager.mu.Lock()
+	acquireCalls := leaseManager.acquireCalls
+	leaseManager.mu.Unlock()
+	if processLiveCalls != 0 || acquireCalls != 0 {
+		t.Fatalf(
+			"legacy live calls=%d lease acquires=%d, want both 0",
+			processLiveCalls,
+			acquireCalls,
+		)
+	}
+}
+
+func TestVoiceLiveNativeLateReadyAfterDisconnectDoesNotLeakPipelineOrLease(
+	t *testing.T,
+) {
+	allowReady := make(chan struct{})
+	service := &strongReadyLiveTestService{
+		started:        make(chan struct{}),
+		allowReady:     allowReady,
+		readyPublished: make(chan struct{}),
+		done:           make(chan struct{}),
+	}
+	lease := &liveTestLease{}
+	leaseManager := &liveTestLeaseManager{lease: lease}
+	handlerReturned := make(chan struct{}, 1)
+	server := newVoiceLiveControlledTestServer(
+		t,
+		&liveTestVoiceService{},
+		&liveTestVerifier{},
+		&fakeLimiter{},
+		&fakeLimiter{wantKey: "app:app-123"},
+		leaseManager,
+		NewVoiceLiveHandshakeGate(2),
+		500*time.Millisecond,
+		handlerReturned,
+		service,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeVoiceLiveNativeStart(t, ctx, conn)
+	select {
+	case <-service.started:
+	case <-time.After(time.Second):
+		t.Fatal("Native pipeline did not start")
+	}
+	conn.CloseNow()
+	close(allowReady)
+	select {
+	case <-service.done:
+	case <-time.After(time.Second):
+		t.Fatal("late-ready Native pipeline did not stop")
+	}
+	select {
+	case <-handlerReturned:
+	case <-time.After(time.Second):
+		t.Fatal("handler retained the disconnected Native turn")
+	}
+	lease.mu.Lock()
+	releaseCalls := lease.releaseCalls
+	lease.mu.Unlock()
+	if releaseCalls != 1 {
+		t.Fatalf("lease releases=%d, want 1", releaseCalls)
 	}
 }
 

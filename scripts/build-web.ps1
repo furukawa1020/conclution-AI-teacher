@@ -239,6 +239,7 @@ try {
         "passkey-policy.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
+        "voice-prepare-slo-policy.mjs",
         "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs"
     )) {
@@ -257,6 +258,7 @@ try {
         "passkey-policy.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
+        "voice-prepare-slo-policy.mjs",
         "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs",
         "assets\main.css",
@@ -339,6 +341,7 @@ try {
                 "passkey-policy.mjs",
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
+                "voice-prepare-slo-policy.mjs",
                 "voice-start-slo-policy.mjs",
                 "voice-stream-policy.mjs",
                 "assets/main.css",

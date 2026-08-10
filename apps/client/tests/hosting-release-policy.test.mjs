@@ -19,6 +19,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(build, /\[System\.IO\.FileShare\]::None/u);
   assert.match(build, /sha256\s*=\s*\(Get-FileHash/u);
   assert.match(build, /sourceCommit\s*=\s*\$ExpectedGitCommit/u);
+  assert.match(build, /"voice-prepare-slo-policy\.mjs"/u);
   assert.match(build, /"voice-start-slo-policy\.mjs"/u);
   assert.match(
     build,
@@ -40,6 +41,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$promotedRevision\.spec\.containers/u);
   assert.match(deploy, /status\.imageDigest/u);
   assert.match(deploy, /\[System\.Net\.HttpStatusCode\]::Unauthorized/u);
+  assert.match(deploy, /"voice-prepare-slo-policy\.mjs"/u);
   assert.match(deploy, /"voice-start-slo-policy\.mjs"/u);
   assert.match(
     deploy,

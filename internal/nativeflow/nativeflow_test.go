@@ -60,6 +60,7 @@ func (f fakePreparer) PrepareNativeState(string, string) (string, bool, error) {
 type fakeOpener struct {
 	session nativevoice.Session
 	opens   int
+	onOpen  func()
 }
 
 type fakeCaptionHandoffService struct {
@@ -106,6 +107,9 @@ func (f *fakeCaptionHandoff) Cancel() { f.cancels++ }
 
 func (f *fakeOpener) Open(context.Context) (nativevoice.Session, error) {
 	f.opens++
+	if f.onOpen != nil {
+		f.onOpen()
+	}
 	if f.session == nil {
 		return nil, errors.New("unavailable")
 	}
@@ -124,6 +128,9 @@ type scriptedSession struct {
 	discards   int
 	closes     int
 	frames     int
+	startCalls int
+	startErr   error
+	onStart    func()
 }
 
 func newScriptedSession(events ...nativevoice.Event) *scriptedSession {
@@ -134,7 +141,17 @@ func newScriptedSession(events ...nativevoice.Event) *scriptedSession {
 	}
 }
 
-func (s *scriptedSession) StartActivity(context.Context) error { return nil }
+func (s *scriptedSession) StartActivity(context.Context) error {
+	s.mu.Lock()
+	s.startCalls++
+	startErr := s.startErr
+	onStart := s.onStart
+	s.mu.Unlock()
+	if onStart != nil {
+		onStart()
+	}
+	return startErr
+}
 
 func (s *scriptedSession) SendPCM20ms(_ context.Context, frame []byte) error {
 	if len(frame) != nativevoice.InputFrameBytes {
@@ -219,6 +236,224 @@ func oneFrame() <-chan []byte {
 	audio <- make([]byte, nativevoice.InputFrameBytes)
 	close(audio)
 	return audio
+}
+
+func TestNativeInputReadyFollowsSetupAndStartActivity(t *testing.T) {
+	var orderMu sync.Mutex
+	var order []string
+	record := func(step string) {
+		orderMu.Lock()
+		order = append(order, step)
+		orderMu.Unlock()
+	}
+	session := newScriptedSession(
+		nativevoice.Event{
+			Kind:         nativevoice.EventInputCaption,
+			CaptionUTF8:  []byte("hello"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{
+			Kind:            nativevoice.EventAudioPCM,
+			PCM:             []byte{1, 0},
+			SampleRateHertz: nativevoice.OutputSampleRateHertz,
+		},
+		nativevoice.Event{
+			Kind:         nativevoice.EventOutputCaption,
+			CaptionUTF8:  []byte("hello there"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+	)
+	session.onStart = func() { record("start_activity") }
+	opener := &fakeOpener{
+		session: session,
+		onOpen:  func() { record("setup_complete") },
+	}
+	service, err := New(opener, fakePreparer{token: "opaque-state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	readyCalls := 0
+	input := nativeInput()
+	input.OnInputReady = func() {
+		orderMu.Lock()
+		readyCalls++
+		order = append(order, "input_ready")
+		orderMu.Unlock()
+	}
+	if _, err := service.ProcessLive(
+		context.Background(),
+		"uid-strong-ready",
+		input,
+		oneFrame(),
+		func([]byte) error { return nil },
+	); err != nil {
+		t.Fatal(err)
+	}
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	if strings.Join(order, ",") !=
+		"setup_complete,start_activity,input_ready" || readyCalls != 1 {
+		t.Fatalf("order=%v ready calls=%d", order, readyCalls)
+	}
+}
+
+func TestNativeInputReadyPrecedesAuditedNoProviderDrain(t *testing.T) {
+	opener := &fakeOpener{session: newScriptedSession()}
+	service, err := New(
+		opener,
+		fakePreparer{token: "pending-state", requiresStaged: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	ready := make(chan struct{})
+	input := nativeInput()
+	input.OnInputReady = func() { close(ready) }
+	audio := make(chan []byte)
+	outcome := make(chan error, 1)
+	go func() {
+		_, processErr := service.ProcessLive(
+			context.Background(),
+			"uid-no-provider-ready",
+			input,
+			audio,
+			func([]byte) error { return nil },
+		)
+		outcome <- processErr
+	}()
+
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("audited fallback did not publish input readiness before drain")
+	}
+	if opener.opens != 0 {
+		t.Fatalf("audited fallback opened provider %d times", opener.opens)
+	}
+	select {
+	case processErr := <-outcome:
+		t.Fatalf("fallback returned before commit drain: %v", processErr)
+	default:
+	}
+	close(audio)
+	select {
+	case processErr := <-outcome:
+		if !errors.Is(processErr, httpapi.ErrVoiceNativeFallback) {
+			t.Fatalf("err=%v", processErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("audited fallback did not finish after commit drain")
+	}
+}
+
+func TestNativeInputReadyIsNotPublishedWhenStartActivityFails(t *testing.T) {
+	session := newScriptedSession()
+	session.startErr = errors.New("start failed")
+	service, err := New(
+		&fakeOpener{session: session},
+		fakePreparer{token: "opaque-state"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	readyCalls := 0
+	input := nativeInput()
+	input.OnInputReady = func() { readyCalls++ }
+	_, processErr := service.ProcessLive(
+		context.Background(),
+		"uid-start-failure",
+		input,
+		oneFrame(),
+		func([]byte) error { return nil },
+	)
+	session.mu.Lock()
+	startCalls := session.startCalls
+	closes := session.closes
+	session.mu.Unlock()
+	if !errors.Is(processErr, errNativeFlowUnavailable) || readyCalls != 0 ||
+		startCalls != 1 || closes != 1 {
+		t.Fatalf(
+			"err=%v ready=%d starts=%d closes=%d",
+			processErr,
+			readyCalls,
+			startCalls,
+			closes,
+		)
+	}
+}
+
+type lateNativeOpener struct {
+	started chan struct{}
+	release chan struct{}
+	session nativevoice.Session
+}
+
+func (opener *lateNativeOpener) Open(context.Context) (nativevoice.Session, error) {
+	close(opener.started)
+	<-opener.release
+	return opener.session, nil
+}
+
+func TestNativeCanceledLateOpenClosesSessionWithoutPublishingReady(t *testing.T) {
+	session := newScriptedSession()
+	opener := &lateNativeOpener{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		session: session,
+	}
+	service, err := New(opener, fakePreparer{token: "opaque-state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	readyCalls := 0
+	input := nativeInput()
+	input.OnInputReady = func() { readyCalls++ }
+	outcome := make(chan error, 1)
+	go func() {
+		_, processErr := service.ProcessLive(
+			ctx,
+			"uid-late-open",
+			input,
+			oneFrame(),
+			func([]byte) error { return nil },
+		)
+		outcome <- processErr
+	}()
+	<-opener.started
+	cancel()
+	close(opener.release)
+	select {
+	case processErr := <-outcome:
+		if !errors.Is(processErr, errNativeFlowUnavailable) {
+			t.Fatalf("err=%v", processErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late provider open did not return after cancellation")
+	}
+	session.mu.Lock()
+	closes := session.closes
+	session.mu.Unlock()
+	service.mu.Lock()
+	sessions := len(service.sessions)
+	service.mu.Unlock()
+	if readyCalls != 0 || closes != 1 || sessions != 0 {
+		t.Fatalf(
+			"ready=%d closes=%d retained sessions=%d",
+			readyCalls,
+			closes,
+			sessions,
+		)
+	}
 }
 
 type orderedCaptionHandoffService struct {

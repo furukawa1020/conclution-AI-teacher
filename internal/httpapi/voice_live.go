@@ -20,12 +20,14 @@ import (
 )
 
 const (
-	voiceLiveVersion             = 1
-	voiceLiveSampleRateHz        = 16_000
-	voiceLiveFirstFrameTimeout   = 2 * time.Second
-	voiceLiveGuardTimeout        = 5 * time.Second
-	voiceLiveReaderJoinTimeout   = 500 * time.Millisecond
-	voiceLivePipelineJoinTimeout = 5 * time.Second
+	voiceLiveVersion              = 1
+	voiceLiveSampleRateHz         = 16_000
+	voiceLiveFirstFrameTimeout    = 2 * time.Second
+	voiceLiveGuardTimeout         = 5 * time.Second
+	voiceLiveNativeReadyTimeout   = 4 * time.Second
+	voiceLiveReaderJoinTimeout    = 500 * time.Millisecond
+	voiceLiveTerminalWriteTimeout = 500 * time.Millisecond
+	voiceLivePipelineJoinTimeout  = 5 * time.Second
 	// The client stops normal capture at 3m30s. The extra 30 seconds absorb
 	// lead-in and scheduling jitter while keeping the provider stream a full
 	// minute below Cloud Speech-to-Text's five-minute hard limit.
@@ -375,6 +377,15 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	if start.NativeAudio && s.voice.NativeLiveService == nil {
+		finishVoiceLiveWithError(
+			liveCtx,
+			conn,
+			voiceLiveCodeAPIUnavailable,
+			websocket.StatusInternalError,
+		)
+		return
+	}
 	quotaCtx, cancelQuota := context.WithTimeout(
 		liveCtx,
 		voiceLiveGuardTimeout,
@@ -423,6 +434,11 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	// auth_ready_ms intentionally ends at the authentication/quota/lease
+	// boundary. Native provider setup is measured outside this established
+	// semantic even though the browser's stronger ready frame now waits for it.
+	authReadyAt := time.Now()
+	authReadyMS := authReadyAt.Sub(started).Milliseconds()
 	var pipelineDone <-chan struct{}
 	defer func() {
 		s.finishVoiceLiveLease(
@@ -432,15 +448,23 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			pipelineDone,
 		)
 	}()
-	if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
-		Type:    "ready",
-		Version: voiceLiveVersion,
-	}); err != nil {
-		return
+	readyAt := time.Time{}
+	if !start.NativeAudio {
+		// Preserve the legacy and strict-mode boundary: these routes acknowledge
+		// readiness immediately after the lease and before starting their
+		// pipeline, exactly as before Native strong readiness was introduced.
+		if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
+			Type:    "ready",
+			Version: voiceLiveVersion,
+		}); err != nil {
+			return
+		}
+		readyAt = time.Now()
+		// Preserve the pre-existing non-Native telemetry boundary: its
+		// auth_ready_ms includes the successful ready write.
+		authReadyMS = readyAt.Sub(started).Milliseconds()
+		conn.SetReadLimit(voiceLiveMaxPCMFrameBytes)
 	}
-	readyAt := time.Now()
-	authReadyMS := readyAt.Sub(started).Milliseconds()
-	conn.SetReadLimit(voiceLiveMaxPCMFrameBytes)
 	processingDeadlineSignal := make(chan time.Time, 1)
 	processingCommittedSignal := make(chan struct{})
 	processingDeadlinePublished := false
@@ -465,6 +489,17 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		ProcessingTimeout:   s.voice.RequestTimeout,
 		ProcessingDeadline:  processingDeadlineSignal,
 		ProcessingCommitted: processingCommittedSignal,
+	}
+	var nativeInputReady <-chan struct{}
+	if input.NativeAudio {
+		readySignal := make(chan struct{})
+		var readyOnce sync.Once
+		input.OnInputReady = func() {
+			readyOnce.Do(func() {
+				close(readySignal)
+			})
+		}
+		nativeInputReady = readySignal
 	}
 	start.SessionState = ""
 
@@ -655,6 +690,111 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		}
 		outcomeChannel <- voiceLiveOutcome{result: result, err: processErr}
 	}()
+	if input.NativeAudio {
+		// A Native ready frame is a proof about this exact provider turn, not
+		// merely an authentication acknowledgement. The provider pipeline owns
+		// the content-free signal and may publish it only after Open has observed
+		// SetupComplete and StartActivity has succeeded. An outcome before that
+		// boundary fails closed without ever asking the browser to capture PCM.
+		readyTimeout := s.voice.liveNativeReadyTimeout
+		readyDeadline := started.Add(readyTimeout)
+		readyTimer := time.NewTimer(
+			max(time.Duration(0), time.Until(readyDeadline)),
+		)
+		stopReadyTimer := func() {
+			if !readyTimer.Stop() {
+				select {
+				case <-readyTimer.C:
+				default:
+				}
+			}
+		}
+		readyTimedOut := false
+		select {
+		case <-nativeInputReady:
+			stopReadyTimer()
+			// A ready signal racing the timer at the exact boundary is still a
+			// timeout. Never let select's random ready-case choice extend the
+			// advertised four-second wall.
+			readyTimedOut = !time.Now().Before(readyDeadline)
+			if liveCtx.Err() != nil {
+				return
+			}
+		case outcome := <-outcomeChannel:
+			stopReadyTimer()
+			s.finishUnexpectedVoiceLiveOutcome(
+				liveCtx,
+				conn,
+				outcome,
+			)
+			cancelLive()
+			s.logVoiceLiveSession(
+				liveCtx,
+				started,
+				authReadyMS,
+				time.Time{},
+				time.Time{},
+				0,
+				0,
+				outputMetrics,
+				emptyVoiceLiveTimings(),
+				true,
+				outcome.result,
+			)
+			return
+		case <-readyTimer.C:
+			readyTimedOut = true
+		case <-liveCtx.Done():
+			stopReadyTimer()
+			return
+		}
+		if readyTimedOut {
+			// Provider and lease ownership must end even when a disconnected or
+			// non-cooperative peer never acknowledges a graceful close. Cancel the
+			// pipeline first, make one bounded fixed-code write, then hard-close.
+			cancelLive()
+			terminalCtx, cancelTerminal := context.WithTimeout(
+				context.Background(),
+				voiceLiveTerminalWriteTimeout,
+			)
+			_ = writeVoiceLiveJSON(terminalCtx, conn, voiceLiveOutboundFrame{
+				Type:    "error",
+				Version: voiceLiveVersion,
+				Code:    voiceLiveCodeAPIUnavailable,
+			})
+			cancelTerminal()
+			conn.CloseNow()
+			s.logVoiceLiveSession(
+				liveCtx,
+				started,
+				authReadyMS,
+				time.Time{},
+				time.Time{},
+				0,
+				0,
+				outputMetrics,
+				emptyVoiceLiveTimings(),
+				true,
+			)
+			return
+		}
+		readyWriteCtx, cancelReadyWrite := context.WithDeadline(
+			liveCtx,
+			readyDeadline,
+		)
+		err := writeVoiceLiveJSON(readyWriteCtx, conn, voiceLiveOutboundFrame{
+			Type:    "ready",
+			Version: voiceLiveVersion,
+		})
+		cancelReadyWrite()
+		if err != nil {
+			cancelLive()
+			conn.CloseNow()
+			return
+		}
+		readyAt = time.Now()
+		conn.SetReadLimit(voiceLiveMaxPCMFrameBytes)
+	}
 
 	inputFrames := 0
 	inputBytes := 0

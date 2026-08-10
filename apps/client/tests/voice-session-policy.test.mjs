@@ -410,6 +410,7 @@ let activePasskeyController;
 let activePlayback;
 let activeRecording;
 let activeRequestController;
+let preparingLiveSession;
 let audioContext = dependencies.audioContext;
 let documentEpoch = 0;
 let mediaStream = dependencies.mediaStream;
@@ -478,11 +479,13 @@ return Object.freeze({
   discardInterruptedPlaybackRecording,
   getActivePlayback: () => activePlayback,
   getActiveRecording: () => activeRecording,
+  getPreparingLiveSession: () => preparingLiveSession,
   getSessionEpoch: () => sessionEpoch,
   haltStreamingPlayback,
   maybeAbortPlaybackTransportOnInterrupt,
   setActiveRequestController: (controller) => { activeRequestController = controller; },
   setActiveRecording: (recording) => { activeRecording = recording; },
+  setPreparingLiveSession: (session) => { preparingLiveSession = session; },
   shouldAbortPlaybackTransportOnInterrupt,
   shouldDiscardInterruptedPlaybackRecording,
   stopSession,
@@ -921,6 +924,90 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
     /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*\)/u,
   );
   assert.doesNotMatch(begin, /voice_live_capture_late/u);
+});
+
+test("Native strong ready owns Listening and PCM capture", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const liveStart = bridge.indexOf("async function startVoiceLiveSession(");
+  const liveEnd = bridge.indexOf(
+    "\n}\n\nfunction isNdjsonContentType",
+    liveStart,
+  );
+  assert.ok(liveStart >= 0);
+  assert.ok(liveEnd > liveStart);
+  const live = bridge.slice(liveStart, liveEnd);
+  const awaitReadyAt = live.indexOf("await readyPromise;");
+  const adoptAt = live.indexOf("captureHandoff.adopt({", awaitReadyAt);
+  const connectAt = live.indexOf(
+    "captureSource.connect(captureNode);",
+    awaitReadyAt,
+  );
+  const returnAt = live.lastIndexOf("return session;");
+  const fullMessageListenerAt = live.indexOf(
+    'socket.addEventListener("message", acceptSocketMessage);',
+  );
+  const preflightDetachAt = live.indexOf(
+    "detachPreflight();",
+    fullMessageListenerAt,
+  );
+  assert.ok(awaitReadyAt >= 0, "the strong ready gate must be awaited");
+  assert.ok(adoptAt > awaitReadyAt);
+  assert.ok(connectAt > awaitReadyAt);
+  assert.ok(returnAt > connectAt);
+  assert.ok(fullMessageListenerAt >= 0);
+  assert.ok(
+    preflightDetachAt > fullMessageListenerAt,
+    "the complete listener must own the socket before preflight detaches",
+  );
+  assert.match(
+    live.slice(awaitReadyAt - 350, connectAt + 80),
+    /await readyPromise;[\s\S]*expectedEpoch !== sessionEpoch[\s\S]*state !== "ready"[\s\S]*captureSource\.connect\(captureNode\)/u,
+  );
+  assert.doesNotMatch(
+    live.slice(0, awaitReadyAt),
+    /captureHandoff\.adopt\(|captureSource\.connect\(captureNode\)/u,
+    "neither handoff nor microphone capture may attach before strong ready",
+  );
+  assert.equal(
+    (
+      live.match(
+        /performance\.now\(\)\s*-\s*liveStartedAt\s*>=\s*VOICE_LIVE_LIMITS\.readyTimeoutMs/gu,
+      ) ?? []
+    ).length,
+    2,
+    "both the preflight and full socket listener must reject ready at 4 seconds",
+  );
+
+  const beginStart = bridge.indexOf("async function beginTurn(");
+  const beginEnd = bridge.indexOf(
+    "\n}\n\nasync function waitForTurnEnd",
+    beginStart,
+  );
+  const begin = bridge.slice(beginStart, beginEnd);
+  const muteAt = begin.indexOf("setStreamTracksEnabled(stream, false);");
+  const startAt = begin.indexOf("await startVoiceLiveSession({");
+  const unmuteAt = begin.indexOf("setStreamTracksEnabled(stream, true);");
+  const vadAt = begin.indexOf("createRecording(");
+  const clearPrepareAt = begin.indexOf("dispatchVoicePrepareSloClear();");
+  const choosePrepareRouteAt = begin.indexOf(
+    "const prepareGeneration =",
+  );
+  assert.ok(muteAt >= 0);
+  assert.ok(startAt > muteAt);
+  assert.ok(unmuteAt > startAt);
+  assert.ok(vadAt > unmuteAt);
+  assert.ok(clearPrepareAt >= 0);
+  assert.ok(
+    choosePrepareRouteAt > clearPrepareAt,
+    "strict and document turns must also clear the previous Native prepare result",
+  );
+  assert.match(
+    bridge,
+    /new CustomEvent\("kotae:voice-prepare-slo-clear", \{\s*detail: Object\.freeze\(\{ version: 1 \}\),\s*\}\)/u,
+  );
 });
 
 test("voice upload conversion overlaps refreshed credentials", async () => {
@@ -2063,6 +2150,12 @@ test("expiry and pagehide cancel an executable playback drain", async (t) => {
       playback.finalReceived = true;
       playback.seal();
       const drain = runtime.awaitValidatedPlaybackCompletion(playback, 1);
+      const preparationCancellations = [];
+      runtime.setPreparingLiveSession({
+        cancel(error) {
+          preparationCancellations.push(error?.message);
+        },
+      });
 
       runtime.stopSession(scenario.reason);
 
@@ -2072,6 +2165,8 @@ test("expiry and pagehide cancel an executable playback drain", async (t) => {
       );
       assert.equal(runtime.getSessionEpoch(), 2);
       assert.equal(runtime.getActivePlayback(), undefined);
+      assert.equal(runtime.getPreparingLiveSession(), undefined);
+      assert.deepEqual(preparationCancellations, [scenario.stopCode]);
       assert.equal(context.sources[0].stopped, true);
       assert.equal(state.micEnabled, false);
       assert.deepEqual(state.releasedCodes, [scenario.stopCode]);
@@ -4367,7 +4462,11 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   );
   assert.match(bridge, /new WebSocket\(VOICE_LIVE_ENDPOINT\)/u);
   const liveAt = bridge.indexOf("async function startVoiceLiveSession(");
-  const liveSession = bridge.slice(liveAt, liveAt + 30_000);
+  const liveEnd = bridge.indexOf(
+    "\n}\n\nfunction isNdjsonContentType",
+    liveAt,
+  );
+  const liveSession = bridge.slice(liveAt, liveEnd);
   assert.ok(
     liveSession.indexOf("new WebSocket(VOICE_LIVE_ENDPOINT)") <
       liveSession.indexOf("loadPcmCaptureWorklet(audioContext)"),
@@ -5505,7 +5604,11 @@ test("committed-response barge-in preserves foreground response mode", async () 
     readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
   ]);
   const confirmAt = bridge.indexOf("function confirmBargeIn(");
-  const confirm = bridge.slice(confirmAt, confirmAt + 7_000);
+  const confirmEnd = bridge.indexOf(
+    "\n}\n\nfunction startBargeInMonitoring(",
+    confirmAt,
+  );
+  const confirm = bridge.slice(confirmAt, confirmEnd);
   const manualEndAt = bridge.indexOf("function endTurn()");
   const manualEnd = bridge.slice(manualEndAt, manualEndAt + 650);
   assert.match(
@@ -5534,6 +5637,7 @@ test("committed-response barge-in preserves foreground response mode", async () 
   );
   assert.match(confirm, /new CustomEvent\("kotae:voice-interrupted"/u);
   assert.match(confirm, /finalReceived: playback\.finalReceived/u);
+  assert.match(confirm, /preparing: Boolean\(handoffPromise\)/u);
   assert.match(confirm, /activeLiveSession = undefined/u);
   assert.match(
     confirm,
@@ -5542,6 +5646,44 @@ test("committed-response barge-in preserves foreground response mode", async () 
   assert.match(
     confirm,
     /claimAmbientLiveHandoff\(/u,
+  );
+  const publishReadyAt = bridge.indexOf(
+    "function publishPendingInterruptionReady(",
+  );
+  const publishReadyEnd = bridge.indexOf(
+    "\n}\n\nfunction retirePendingLiveSession(",
+    publishReadyAt,
+  );
+  const publishReady = bridge.slice(publishReadyAt, publishReadyEnd);
+  assert.match(
+    publishReady,
+    /pending\.readyPublished = true;\s*dispatchVoiceInterruptionReady\(route\);/u,
+    "the Native/HTTP selection must be content-free and exactly once",
+  );
+  const retireAt = bridge.indexOf("function retirePendingLiveSession(");
+  const retireEnd = bridge.indexOf(
+    "\n}\n\nasync function takePendingLiveSession(",
+    retireAt,
+  );
+  const retire = bridge.slice(retireAt, retireEnd);
+  assert.match(
+    retire,
+    /preparingLiveSession = undefined;\s*preparing\.cancel\(error\);/u,
+    "the 450 ms handoff retirement must cancel a still-preparing provider immediately",
+  );
+  const waitAt = bridge.indexOf("async function waitForTurnEnd(");
+  const waitEnd = bridge.indexOf("\n}\n\nfunction endTurn(", waitAt);
+  const wait = bridge.slice(waitAt, waitEnd);
+  const awaitPendingAt = wait.indexOf("await takePendingLiveSession(");
+  const returnTurnAt = wait.indexOf("return Object.freeze({");
+  assert.ok(awaitPendingAt >= 0);
+  assert.ok(
+    returnTurnAt > awaitPendingAt,
+    "speech end must join Native-ready or HTTP fallback before Rust resumes the turn",
+  );
+  assert.match(
+    bridge,
+    /new CustomEvent\("kotae:voice-interruption-ready", \{\s*detail: Object\.freeze\(\{ route, version: 1 \}\),\s*\}\)/u,
   );
   assert.match(bridge, /getSettings\(\)\.echoCancellation === true/u);
   assert.doesNotMatch(bridge, /softDuckPlayback/u);
@@ -5728,7 +5870,11 @@ test("committed-response barge-in preserves foreground response mode", async () 
   const interruptionAt = client.indexOf(
     "fn resume_foreground_interruption(",
   );
-  const continuation = client.slice(interruptionAt, interruptionAt + 2_500);
+  const interruptionEnd = client.indexOf(
+    "\n}\n\n#[allow(clippy::too_many_arguments)]\nfn submit_turn",
+    interruptionAt,
+  );
+  const continuation = client.slice(interruptionAt, interruptionEnd);
   assert.match(continuation, /cloud::wait_for_turn_end\(\)\.await/u);
   assert.match(
     continuation,

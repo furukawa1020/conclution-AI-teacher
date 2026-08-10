@@ -4149,6 +4149,7 @@ function createStreamingPlayback(
   nativeAudio = false,
   transportKind = "live",
   coachActive = false,
+  speechEndedAt = undefined,
 ) {
   if (
     activePlayback ||
@@ -4156,6 +4157,8 @@ function createStreamingPlayback(
     audioContext.state === "closed" ||
     typeof nativeAudio !== "boolean" ||
     typeof coachActive !== "boolean" ||
+    (speechEndedAt !== undefined &&
+      (!Number.isFinite(speechEndedAt) || speechEndedAt < 0)) ||
     (transportKind !== "http" && transportKind !== "live") ||
     (nativeAudio && transportKind !== "live")
   ) {
@@ -4270,6 +4273,16 @@ function createStreamingPlayback(
     nextStartAt = startAt + buffer.duration;
 
     if (!streamedAudio && Number.isFinite(audibleAt)) {
+      // Native owns its commit-gated latency publication because it may
+      // discard provider audio before a final caption is accepted. HTTP has
+      // already committed the captured turn, so its first meaningful sample
+      // can publish the same content-free measurement here.
+      if (
+        transportKind === "http" &&
+        Number.isFinite(speechEndedAt)
+      ) {
+        dispatchVoiceStartLatency(audibleAt - speechEndedAt);
+      }
       streamedAudio = true;
       playback.armResponseInterruption(audibleAt);
       globalThis.dispatchEvent(
@@ -4772,6 +4785,7 @@ async function finishTurn(
       false,
       "http",
       coachActive,
+      recording.lastVoiceAt,
     );
     // The microphone remains disabled until the request has actually been
     // committed. After that boundary, the bounded local interruption gate can

@@ -378,6 +378,7 @@ async function createExecutablePlaybackHarness({ pcmSamples = [] } = {}) {
     clearedCandidateDeadlines: 0,
     clearedDocuments: [],
     latencyEvents: [],
+    startLatencyEvents: [],
     micEnabled: false,
     pauseEvents: [],
     releasedCodes: [],
@@ -421,6 +422,7 @@ const clearPendingDocument = dependencies.clearPendingDocument;
 const clearTimeout = dependencies.clearTimeout;
 const createVoiceStreamParser = dependencies.createVoiceStreamParser;
 const dispatchVoiceLatency = dependencies.dispatchVoiceLatency;
+const dispatchVoiceStartLatency = dependencies.dispatchVoiceStartLatency;
 const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
 const fail = dependencies.fail;
 const finishGate = dependencies.finishGate;
@@ -498,6 +500,9 @@ return Object.freeze({
     createVoiceStreamParser,
     dispatchVoiceLatency(value) {
       state.latencyEvents.push(value);
+    },
+    dispatchVoiceStartLatency(value) {
+      state.startLatencyEvents.push(value);
     },
     estimateAudiblePerformanceTime,
     eventTarget: {
@@ -795,7 +800,7 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
   );
   assert.match(
     finish,
-    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*\)/u,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*recording\.lastVoiceAt,\s*\)/u,
   );
   assert.match(
     finish,
@@ -1046,6 +1051,60 @@ test("leading silent PCM does not start Speaking or barge monitoring", async () 
       .map((event) => event.detail.sequence),
     [1],
   );
+
+  playback.finalReceived = true;
+  playback.seal();
+  for (const source of context.sources) source.end();
+  await playback.completion;
+});
+
+test("HTTP publishes start latency only for its first meaningful PCM", async () => {
+  const silentSamples = new Float32Array(2_400);
+  const meaningfulSamples = new Float32Array(2_400);
+  meaningfulSamples[0] = 0.25;
+  const { context, runtime, state } = await createExecutablePlaybackHarness({
+    pcmSamples: [silentSamples, meaningfulSamples, meaningfulSamples],
+  });
+  const playback = runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    false,
+    5,
+  );
+
+  assert.equal(playback.schedulePcm(fakePcmEvent(0)), undefined);
+  assert.deepEqual(state.startLatencyEvents, []);
+
+  const firstAudibleAt = playback.schedulePcm(fakePcmEvent(1));
+  assert.ok(Number.isFinite(firstAudibleAt));
+  assert.deepEqual(state.startLatencyEvents, [firstAudibleAt - 5]);
+
+  playback.schedulePcm(fakePcmEvent(2));
+  assert.equal(state.startLatencyEvents.length, 1);
+
+  playback.finalReceived = true;
+  playback.seal();
+  for (const source of context.sources) source.end();
+  await playback.completion;
+});
+
+test("live playback keeps latency publication at its commit gate", async () => {
+  const meaningfulSamples = new Float32Array(2_400);
+  meaningfulSamples[0] = 0.25;
+  const { context, runtime, state } = await createExecutablePlaybackHarness({
+    pcmSamples: [meaningfulSamples],
+  });
+  const playback = runtime.createStreamingPlayback(
+    1,
+    true,
+    "live",
+    false,
+    5,
+  );
+
+  playback.schedulePcm(fakePcmEvent(0));
+  assert.deepEqual(state.startLatencyEvents, []);
 
   playback.finalReceived = true;
   playback.seal();

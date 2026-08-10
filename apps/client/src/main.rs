@@ -456,6 +456,10 @@ impl CoachState {
         )
     }
 
+    const fn shows_answer_ownership_receipt(self) -> bool {
+        self.yielded_after_owned_answer()
+    }
+
     const fn status(self) -> &'static str {
         if self.yielded_after_owned_answer() {
             return "回答所有権 / AI発話なし";
@@ -3813,6 +3817,19 @@ fn App() -> Element {
                             }
                         }
                     }
+                    if coach_snapshot.shows_answer_ownership_receipt() {
+                        section {
+                            class: "answer-ownership-receipt",
+                            role: "status",
+                            aria_label: "回答所有権の確認",
+                            p { class: "answer-ownership-receipt__title", "今回の回答所有権" }
+                            ul {
+                                li { "AI代理発話 0" }
+                                li { "本人のA先頭 確認" }
+                                li { "発話権 返却" }
+                            }
+                        }
+                    }
                     if turn_notice_snapshot.is_visible() {
                         section {
                             class: "turn-notice",
@@ -4624,6 +4641,34 @@ mod tests {
             "報告された問いへの入力が、Aから始まりました"
         );
         assert!(!expanding.hint().contains("AIは黙りました"));
+    }
+
+    #[test]
+    fn answer_ownership_receipt_requires_a_terminal_verified_answer() {
+        let verified = AnswerProof::QuestionBoundInputAnswerFirst;
+        let terminal = CoachState::from_authoritative_result(
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            verified,
+        );
+        assert!(terminal.shows_answer_ownership_receipt());
+
+        for state in [
+            CoachState::from_result(CoachPhase::Complete, CoachAction::Complete),
+            CoachState::from_authoritative_result(
+                CoachPhase::Expanding,
+                CoachAction::Expand,
+                verified,
+            ),
+            CoachState::from_authoritative_result(
+                CoachPhase::Blocked,
+                CoachAction::Release,
+                verified,
+            ),
+            CoachState::NONE,
+        ] {
+            assert!(!state.shows_answer_ownership_receipt());
+        }
     }
 
     #[test]

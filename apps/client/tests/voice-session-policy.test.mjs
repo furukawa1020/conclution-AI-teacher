@@ -317,7 +317,10 @@ async function waitForPlaybackState(predicate) {
   assert.fail("playback state did not settle");
 }
 
-async function createExecutablePlaybackHarness({ pcmSamples = [] } = {}) {
+async function createExecutablePlaybackHarness({
+  pcmSamples = [],
+  performanceNow = 0,
+} = {}) {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -385,6 +388,7 @@ async function createExecutablePlaybackHarness({ pcmSamples = [] } = {}) {
     releasedCodes: [],
     resetCount: 0,
     restoredGain: 0,
+    sloStartedAt: new Map(),
   };
 
   function pcmBuffer(decodedBytes, sampleRateHz) {
@@ -415,8 +419,18 @@ const CustomEvent = dependencies.CustomEvent;
 const BARGE_PCM_LIMITS = dependencies.BARGE_PCM_LIMITS;
 const TextDecoder = dependencies.TextDecoder;
 const VOICE_STREAM_LIMITS = dependencies.VOICE_STREAM_LIMITS;
+const VOICE_START_AUDIBLE_COMMIT_LOOKAHEAD_MS = 250;
+const VOICE_START_SLO_BUDGETS = Object.freeze({
+  missedMs: 3_000,
+  stalledMs: 10_000,
+  targetMs: 1_000,
+});
 const abandonInterruptRecording = dependencies.abandonInterruptRecording;
+const advanceCurrentVoiceStartSlo = dependencies.advanceCurrentVoiceStartSlo;
+const beginCurrentVoiceStartSlo = dependencies.beginCurrentVoiceStartSlo;
+const cancelCurrentVoiceStartSlo = dependencies.cancelCurrentVoiceStartSlo;
 const classifyVoiceSessionStopReason = dependencies.classifyVoiceSessionStopReason;
+const classifyVoiceStartSloRoute = dependencies.classifyVoiceStartSloRoute;
 const candidateEventIsCurrent = dependencies.candidateEventIsCurrent;
 const clearCandidateDeadline = dependencies.clearCandidateDeadline;
 const clearPendingDocument = dependencies.clearPendingDocument;
@@ -432,6 +446,7 @@ const pcm16AudioBuffer = dependencies.pcm16AudioBuffer;
 const pcm16BytesAudioBuffer = dependencies.pcm16BytesAudioBuffer;
 const performance = dependencies.performance;
 const markSessionSpeech = dependencies.markSessionSpeech;
+const nextVoiceStartSloGeneration = dependencies.nextVoiceStartSloGeneration;
 const releaseMicrophone = dependencies.releaseMicrophone;
 const restorePlaybackGain = dependencies.restorePlaybackGain;
 const retirePendingLiveSession = dependencies.retirePendingLiveSession;
@@ -442,6 +457,7 @@ const setTimeout = dependencies.setTimeout;
 const setTracksEnabled = dependencies.setTracksEnabled;
 const shouldAbortVoiceTransportOnInterrupt = dependencies.shouldAbortVoiceTransportOnInterrupt;
 const startBargeInMonitoring = dependencies.startBargeInMonitoring;
+const updateCurrentVoiceStartSloRoute = dependencies.updateCurrentVoiceStartSloRoute;
 const validatedPlaybackDrainTimeoutMs = dependencies.validatedPlaybackDrainTimeoutMs;
 
 function rememberStoppedSession(expectedEpoch, code) {
@@ -486,11 +502,40 @@ return Object.freeze({
       recording.settled = true;
       state.abandonedInterrupts += 1;
     },
+    advanceCurrentVoiceStartSlo(generation, meaningfulAudio, now) {
+      if (!meaningfulAudio) return;
+      const startedAt = state.sloStartedAt.get(generation);
+      if (Number.isFinite(startedAt)) {
+        state.startLatencyEvents.push(now - startedAt);
+      }
+      state.sloStartedAt.delete(generation);
+    },
     audioContext: context,
+    beginCurrentVoiceStartSlo({ generation, startedAt }) {
+      state.sloStartedAt.set(generation, startedAt);
+    },
+    cancelCurrentVoiceStartSlo(generation) {
+      state.sloStartedAt.delete(generation);
+    },
     candidateEventIsCurrent(recording, candidate) {
       return recording.candidate === candidate;
     },
     classifyVoiceSessionStopReason,
+    classifyVoiceStartSloRoute({
+      coachActive,
+      coachInitiallyActive,
+      nativeAudio,
+      strictLocal,
+      transportKind,
+    }) {
+      if (strictLocal) return "strict-local";
+      if (transportKind === "http") return "http-fallback";
+      if (coachInitiallyActive) return "continuing-coach";
+      if (!nativeAudio) return "initial-answer-support";
+      return coachActive
+        ? "initial-answer-support"
+        : "native-conversation";
+    },
     clearCandidateDeadline() {
       state.clearedCandidateDeadlines += 1;
     },
@@ -530,7 +575,14 @@ return Object.freeze({
     pcm16BytesAudioBuffer(_pcm, decodedBytes, sampleRateHz) {
       return pcmBuffer(decodedBytes, sampleRateHz);
     },
-    performance: { now: () => 0 },
+    nextVoiceStartSloGeneration: (() => {
+      let generation = 0;
+      return () => {
+        generation += 1;
+        return generation;
+      };
+    })(),
+    performance: { now: () => performanceNow },
     releaseMicrophone(code) {
       state.micEnabled = false;
       state.releasedCodes.push(code);
@@ -566,6 +618,7 @@ return Object.freeze({
         state.bargeResetAt.push(nextAudibleAt);
       };
     },
+    updateCurrentVoiceStartSloRoute() {},
     validatedPlaybackDrainTimeoutMs,
   });
   return { context, runtime, state, timers };
@@ -800,11 +853,11 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
   const finish = bridge.slice(finishStart, finishEnd);
   assert.match(
     finish,
-    /createStreamingPlayback\(\s*expectedEpoch,\s*liveSession\.nativeAudio === true,\s*"live",\s*coachActive,\s*\)/u,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*liveSession\.nativeAudio === true,\s*"live",\s*coachActive,\s*recording\.lastVoiceAt,\s*strictCloudMinimization,\s*disarmVoiceStartDeadline,\s*\)/u,
   );
   assert.match(
     finish,
-    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*recording\.lastVoiceAt,\s*\)/u,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*recording\.lastVoiceAt,\s*strictCloudMinimization,\s*disarmVoiceStartDeadline,\s*\)/u,
   );
   assert.match(
     finish,
@@ -1062,6 +1115,125 @@ test("leading silent PCM does not start Speaking or barge monitoring", async () 
   await playback.completion;
 });
 
+test("queued silence cannot claim a meaningful start beyond the 10 second wall", async () => {
+  const silentBuffers = Array.from(
+    { length: 100 },
+    () => new Float32Array(2_400),
+  );
+  const meaningfulSamples = new Float32Array(2_400);
+  meaningfulSamples[0] = 0.25;
+  let disarmCalls = 0;
+  const { context, runtime, state, timers } =
+    await createExecutablePlaybackHarness({
+      pcmSamples: [...silentBuffers, meaningfulSamples],
+    });
+  const playback = runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    false,
+    0,
+    false,
+    () => {
+      disarmCalls += 1;
+    },
+  );
+  playback.armResponseInterruption(0);
+
+  for (let sequence = 0; sequence < silentBuffers.length; sequence += 1) {
+    assert.equal(playback.schedulePcm(fakePcmEvent(sequence)), undefined);
+  }
+  const audibleAt = playback.schedulePcm(
+    fakePcmEvent(silentBuffers.length),
+  );
+  assert.ok(audibleAt > 10_000);
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(disarmCalls, 0);
+  assert.deepEqual(state.startLatencyEvents, []);
+  assert.equal(
+    state.pauseEvents.filter((event) => event.type === "kotae:first-audio")
+      .length,
+    0,
+  );
+  assert.equal(timers.pending.size, 0);
+
+  const completion = assert.rejects(
+    playback.completion,
+    /voice_turn_timeout/u,
+  );
+  runtime.haltStreamingPlayback(
+    playback,
+    new Error("voice_turn_timeout"),
+  );
+  await completion;
+  assert.equal(timers.pending.size, 0);
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(disarmCalls, 0);
+  assert.equal(context.sources.every((source) => source.stopped), true);
+});
+
+test("Web Audio ownership keeps exact 250 ms and 10 second boundaries", async () => {
+  const boundarySamples = new Float32Array(5_641);
+  boundarySamples[5_640] = 0.25;
+
+  const near = await createExecutablePlaybackHarness({
+    pcmSamples: [boundarySamples],
+    performanceNow: 9_749,
+  });
+  const nearPlayback = near.runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    false,
+    0,
+  );
+  nearPlayback.armResponseInterruption(0);
+  const beforeWall = nearPlayback.schedulePcm(fakePcmEvent(0, 11_282));
+  assert.ok(
+    Math.abs(beforeWall - 9_999) < 0.001,
+    `expected 9999 ms, got ${beforeWall}`,
+  );
+  assert.equal(nearPlayback.hasStreamedAudio(), true);
+  assert.equal(near.timers.pending.size, 0);
+  nearPlayback.finalReceived = true;
+  nearPlayback.seal();
+  near.context.sources[0].end();
+  await nearPlayback.completion;
+
+  const wall = await createExecutablePlaybackHarness({
+    pcmSamples: [boundarySamples],
+    performanceNow: 9_750,
+  });
+  const wallPlayback = wall.runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    false,
+    0,
+  );
+  wallPlayback.armResponseInterruption(0);
+  const atWall = wallPlayback.schedulePcm(fakePcmEvent(0, 11_282));
+  assert.ok(
+    Math.abs(atWall - 10_000) < 0.001,
+    `expected 10000 ms, got ${atWall}`,
+  );
+  assert.equal(wallPlayback.hasPendingFirstAudible(), true);
+  assert.equal(wallPlayback.hasStreamedAudio(), false);
+  assert.equal(wall.timers.pending.size, 0);
+  wallPlayback.finalReceived = true;
+  wallPlayback.seal();
+  wall.context.sources[0].end();
+  await wallPlayback.completion;
+  assert.equal(wallPlayback.hasPendingFirstAudible(), true);
+  assert.equal(wallPlayback.hasStreamedAudio(), false);
+  assert.equal(
+    wall.state.pauseEvents.filter(
+      (event) => event.type === "kotae:first-audio",
+    ).length,
+    0,
+  );
+});
+
 test("HTTP publishes start latency only for its first meaningful PCM", async () => {
   const silentSamples = new Float32Array(2_400);
   const meaningfulSamples = new Float32Array(2_400);
@@ -1076,6 +1248,7 @@ test("HTTP publishes start latency only for its first meaningful PCM", async () 
     false,
     5,
   );
+  playback.armResponseInterruption(5);
 
   assert.equal(playback.schedulePcm(fakePcmEvent(0)), undefined);
   assert.deepEqual(state.startLatencyEvents, []);
@@ -1301,6 +1474,62 @@ test("an all-zero PCM response follows the recoverable no-reply path", async () 
   );
   assert.equal(context.sources[0].stopped, true);
   assert.equal(state.micEnabled, false);
+});
+
+test("a valid final may precede its queued meaningful Web Audio boundary", async () => {
+  const meaningfulSamples = new Float32Array(7_201);
+  meaningfulSamples[7_200] = 0.25;
+  const { context, runtime, state, timers } =
+    await createExecutablePlaybackHarness({
+      pcmSamples: [meaningfulSamples],
+    });
+  const playback = runtime.createStreamingPlayback(
+    1,
+    false,
+    "http",
+    false,
+    0,
+  );
+  playback.armResponseInterruption(0);
+  const reader = new ControlledVoiceReader();
+  const audioBase64 = Buffer.alloc(14_402).toString("base64");
+  reader.pushText(
+    streamLine({ type: "ready", version: 1 }) +
+      streamLine({
+        type: "audio",
+        version: 1,
+        sequence: 0,
+        audioBase64,
+        sampleRateHz: 24_000,
+      }) +
+      streamLine({
+        type: "final",
+        version: 1,
+        result: finalVoiceResult(),
+      }),
+  );
+  reader.close();
+
+  const completed = await runtime.consumeVoiceStream(
+    fakeVoiceStreamResponse(reader),
+    playback,
+    1,
+  );
+  assert.equal(completed.streamedAudio, true);
+  assert.equal(playback.hasPendingFirstAudible(), true);
+  assert.equal(playback.hasStreamedAudio(), false);
+  assert.equal(
+    state.pauseEvents.filter((event) => event.type === "kotae:first-audio")
+      .length,
+    0,
+  );
+  assert.equal(timers.pending.size, 1);
+  const firstAudibleDelay = timers.fireNext();
+  assert.ok(firstAudibleDelay > 250 && firstAudibleDelay < 10_000);
+  assert.equal(playback.hasPendingFirstAudible(), false);
+  assert.equal(playback.hasStreamedAudio(), true);
+  context.sources[0].end();
+  await playback.completion;
 });
 
 test("a zero-event silent final remains a valid recognition miss", async () => {
@@ -5397,7 +5626,7 @@ test("committed-response barge-in preserves foreground response mode", async () 
     "if (interruptionAbortedTransport)",
   );
   const timeoutFailureAt = finish.indexOf(
-    "if (turnTimedOut)",
+    "if (turnTimedOut || voiceStartTimedOut)",
     interruptedFailureAt,
   );
   assert.ok(stoppedSessionAt < interruptedFailureAt);
@@ -5414,7 +5643,13 @@ test("committed-response barge-in preserves foreground response mode", async () 
   const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);
   assert.match(
     schedule,
-    /if \(!streamedAudio && Number\.isFinite\(audibleAt\)\)[\s\S]*playback\.armResponseInterruption\(audibleAt\)/u,
+    /const ownsFirstAudible =[\s\S]*!streamedAudio[\s\S]*Number\.isFinite\(audibleAt\)/u,
+  );
+  const publishAt = bridge.indexOf("function publishFirstAudible(");
+  const publish = bridge.slice(publishAt, publishAt + 1_500);
+  assert.match(
+    publish,
+    /streamedAudio = true;[\s\S]*playback\.armResponseInterruption\(audibleAt\)/u,
   );
   assert.match(
     schedule,
@@ -5436,7 +5671,10 @@ test("committed-response barge-in preserves foreground response mode", async () 
   const liveSessionAt = bridge.indexOf(
     "async function startVoiceLiveSession(",
   );
-  const liveSession = bridge.slice(liveSessionAt, liveSessionAt + 30_000);
+  const liveSession = bridge.slice(
+    liveSessionAt,
+    bridge.indexOf("async function startBargePcmMonitoring(", liveSessionAt),
+  );
   assert.match(
     liveSession,
     /if \(captureHandoff === undefined\) \{[\s\S]*new AudioWorkletNode/u,
@@ -5597,7 +5835,161 @@ test("confirmed follow-up speech expires only the previous turn proof", async ()
   }
 });
 
-test("network keeps one finite deadline while validated playback drains separately", async () => {
+test("the speech-end wall cancels a still-silent validated playback drain", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const finishAt = bridge.indexOf("async function finishTurn(");
+  const finishEnd = bridge.indexOf(
+    "\n}\n\nfunction safeDocumentName",
+    finishAt,
+  );
+  const finish = bridge.slice(finishAt, finishEnd);
+  const helpersAt = finish.indexOf("  function disarmVoiceStartDeadline(");
+  const helpersEnd = finish.indexOf("\n  try {", helpersAt);
+  assert.ok(helpersAt >= 0 && helpersEnd > helpersAt);
+  const helpers = finish.slice(helpersAt, helpersEnd);
+  const timers = new FakePlaybackTimers();
+  let cancelCalls = 0;
+  const stallAdvances = [];
+  const runtime = new Function(
+    "dependencies",
+    `"use strict";
+const VOICE_START_SLO_BUDGETS = Object.freeze({ stalledMs: 10_000 });
+const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;
+const advanceCurrentVoiceStartSlo = dependencies.advanceCurrentVoiceStartSlo;
+const clearTimeout = dependencies.clearTimeout;
+const performance = dependencies.performance;
+const setTimeout = dependencies.setTimeout;
+let playback = dependencies.playback;
+let turnTimedOut = false;
+let voiceStartCancelOwner;
+let voiceStartDeadlineActive = false;
+let voiceStartDeadlineReject;
+let voiceStartDeadlineTimer;
+let voiceStartTimedOut = false;
+const voiceStartDeadlinePromise = new Promise((_, reject) => {
+  voiceStartDeadlineReject = reject;
+});
+void voiceStartDeadlinePromise.catch(() => {});
+const turnDeadlineAt = performance.now() + VOICE_TURN_CLIENT_TIMEOUT_MS;
+${helpers}
+return Object.freeze({
+  armVoiceStartDeadline,
+  awaitVoiceStartDeadlineResult,
+  disarmVoiceStartDeadline,
+  timedOut: () => voiceStartTimedOut,
+});`,
+  )({
+    advanceCurrentVoiceStartSlo: (generation, meaningfulAudio, now) => {
+      stallAdvances.push({ generation, meaningfulAudio, now });
+    },
+    clearTimeout: (id) => timers.clearTimeout(id),
+    performance: { now: () => 0 },
+    playback: {
+      hasStreamedAudio: () => false,
+      sloGeneration: 17,
+    },
+    setTimeout: (callback, delay) => timers.setTimeout(callback, delay),
+  });
+
+  runtime.armVoiceStartDeadline(0);
+  const drain = runtime.awaitVoiceStartDeadlineResult(
+    new Promise(() => {}),
+    () => {
+      cancelCalls += 1;
+    },
+  );
+  assert.equal(timers.fireNext(), 10_000);
+  await assert.rejects(drain, /voice_turn_timeout/u);
+  assert.equal(runtime.timedOut(), true);
+  assert.equal(cancelCalls, 1);
+  assert.deepEqual(stallAdvances, [
+    { generation: 17, meaningfulAudio: false, now: 10_000 },
+  ]);
+  assert.equal(timers.pending.size, 0);
+});
+
+test("slow Native recovery waits out a provisional barge candidate and never replays a checkpoint", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const helpersAt = bridge.indexOf(
+    "  function tryReplaySlowZeroAudioNativeStart()",
+  );
+  const helpersEnd = bridge.indexOf("\n\n  session = {", helpersAt);
+  assert.ok(helpersAt >= 0 && helpersEnd > helpersAt);
+  const helpers = bridge.slice(helpersAt, helpersEnd);
+  const buildRuntime = ({ candidate, snapshot }) => {
+    const failures = [];
+    const timers = new FakePlaybackTimers();
+    const playback = {
+      hasStreamedAudio: () => false,
+      interruptRecording: {
+        candidate,
+        settled: false,
+      },
+      interrupted: false,
+    };
+    const runtime = new Function(
+      "dependencies",
+      `"use strict";
+const VAD_INTERVAL_MS = 40;
+const nativeAudio = true;
+const protocol = { snapshot: () => dependencies.snapshot };
+const setTimeout = dependencies.setTimeout;
+const shouldReplayCommittedNativeTurn = dependencies.shouldReplayCommittedNativeTurn;
+let nativeFallbackAllowed = false;
+let nativeFallbackRequiresStatefulHTTP = false;
+let session = { playback: dependencies.playback };
+let slowReplayCandidateTimer;
+let slowStartStalled = false;
+let state = "committed";
+function failLive(error) {
+  dependencies.failures.push(error.message);
+  state = "failed";
+}
+${helpers}
+return Object.freeze({
+  fallbackAllowed: () => nativeFallbackAllowed,
+  recoverSlowVoiceStart,
+});`,
+    )({
+      failures,
+      playback,
+      setTimeout: (callback, delay) => timers.setTimeout(callback, delay),
+      shouldReplayCommittedNativeTurn,
+      snapshot,
+    });
+    return { failures, playback, runtime, timers };
+  };
+
+  const provisional = buildRuntime({
+    candidate: Object.freeze({ startedAt: 0 }),
+    snapshot: { audioEventCount: 0, coachActivated: false },
+  });
+  provisional.runtime.recoverSlowVoiceStart();
+  assert.deepEqual(provisional.failures, []);
+  assert.equal(provisional.runtime.fallbackAllowed(), false);
+  assert.equal(provisional.timers.pending.size, 1);
+  provisional.playback.interruptRecording.candidate = undefined;
+  assert.equal(provisional.timers.fireNext(), 40);
+  assert.deepEqual(provisional.failures, ["voice_api_unavailable"]);
+  assert.equal(provisional.runtime.fallbackAllowed(), true);
+
+  const checkpointed = buildRuntime({
+    candidate: undefined,
+    snapshot: { audioEventCount: 1, coachActivated: true },
+  });
+  checkpointed.runtime.recoverSlowVoiceStart(true);
+  assert.deepEqual(checkpointed.failures, ["voice_turn_timeout"]);
+  assert.equal(checkpointed.runtime.fallbackAllowed(), false);
+  assert.equal(checkpointed.timers.pending.size, 0);
+});
+
+test("network and voice-start deadlines keep validated playback ownership separate", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -5626,16 +6018,20 @@ test("network keeps one finite deadline while validated playback drains separate
   );
   assert.match(
     finish,
-    /const responsePromise = fetch\(VOICE_ENDPOINT[\s\S]*playback\.armResponseInterruption\(performance\.now\(\)\);[\s\S]*await awaitVoiceTurnResult\(\s*responsePromise/u,
+    /const responsePromise = fetch\(VOICE_ENDPOINT[\s\S]*playback\.armResponseInterruption\(\s*performance\.now\(\),\s*\{[\s\S]*onStall:[\s\S]*!playback\.hasStreamedAudio\(\)[\s\S]*requestController\.abort\(\)[\s\S]*\}\s*,?\s*\);[\s\S]*await awaitVoiceTurnResult\(\s*responsePromise/u,
   );
   assert.match(
     finish,
     /awaitVoiceTurnResult\(\s*consumeVoiceStream\(/u,
   );
+  assert.match(
+    finish,
+    /function awaitVoiceStartDeadlineResult\(promise, cancel\)[\s\S]*Promise\.race\(\[promise, voiceStartDeadlinePromise\]\)/u,
+  );
   assert.equal(
     (
       finish.match(
-        /await awaitValidatedPlaybackCompletion\([\s\S]*?playback,[\s\S]*?expectedEpoch,?[\s\S]*?\)/gu,
+        /await awaitVoiceStartDeadlineResult\(\s*awaitValidatedPlaybackCompletion\(/gu,
       ) ?? []
     ).length,
     2,
@@ -5650,7 +6046,7 @@ test("network keeps one finite deadline while validated playback drains separate
   );
   assert.match(
     finish,
-    /if \(turnTimedOut\) \{[\s\S]*fail\("voice_turn_timeout"\)/u,
+    /if \(turnTimedOut \|\| voiceStartTimedOut\) \{[\s\S]*fail\("voice_turn_timeout"\)/u,
   );
 
   const liveStart = bridge.indexOf(
@@ -5669,14 +6065,20 @@ test("network keeps one finite deadline while validated playback drains separate
   const commit = live.slice(commitAt, interruptAt);
   const committedAt = commit.indexOf('state = "committed"');
   const clockAt = commit.indexOf("commitAt = performance.now()");
-  const monitorAt = commit.indexOf(
-    "playback.armResponseInterruption(commitAt)",
-  );
+  const monitorAt = commit.indexOf("playback.armResponseInterruption(");
   const resultAt = commit.indexOf("const result = await resultPromise");
   assert.ok(committedAt >= 0);
   assert.ok(clockAt > committedAt);
   assert.ok(monitorAt > clockAt);
   assert.ok(resultAt > monitorAt);
+  assert.match(
+    commit,
+    /playback\.armResponseInterruption\(\s*commitAt,\s*\{[\s\S]*onMiss: recoverSlowVoiceStart,[\s\S]*onStall: \(\) => recoverSlowVoiceStart\(true\),[\s\S]*\}/u,
+  );
+  assert.match(
+    bridge,
+    /responseStartedAt = Number\.isFinite\(speechEndedAt\)[\s\S]*\? speechEndedAt[\s\S]*: guardStartedAt;[\s\S]*operationalStartedAt: guardStartedAt,[\s\S]*startedAt: responseStartedAt/u,
+  );
   assert.match(commit, /const result = await resultPromise/u);
   assert.match(commit, /finalizeMeaningfulVoiceStream\(/u);
   assert.doesNotMatch(commit, /await playback\.completion/u);
@@ -6125,14 +6527,14 @@ test("finishTurn holds the idle clock through validated playback only", async ()
 
   const beginAt = finish.indexOf("beginSessionResponse(expectedEpoch)");
   const liveDrainAt = finish.indexOf(
-    "await awaitValidatedPlaybackCompletion(\n          playback,\n          expectedEpoch,\n        )",
+    "awaitValidatedPlaybackCompletion(\n            playback,\n            expectedEpoch,\n          )",
   );
   const liveCompleteAt = finish.indexOf(
     "completeSessionResponse(expectedEpoch)",
     liveDrainAt,
   );
   const httpDrainAt = finish.lastIndexOf(
-    "await awaitValidatedPlaybackCompletion(playback, expectedEpoch)",
+    "awaitValidatedPlaybackCompletion(playback, expectedEpoch)",
   );
   const httpCompleteAt = finish.indexOf(
     "completeSessionResponse(expectedEpoch)",
@@ -7642,6 +8044,7 @@ return requestRecordingStop;`,
       },
     },
     discard: false,
+    lastVoiceAt: 0,
     resolveTurnEnded,
     settled: false,
     stopLatch: {
@@ -7687,6 +8090,7 @@ let audioContext = { state: "running" };
 const AUDIO_MAX_BYTES = 1_000_000;
 const SESSION_STATE_MAX_CHARS = 16_384;
 const VOICE_TURN_CLIENT_TIMEOUT_MS = 5_000;
+const VOICE_START_SLO_BUDGETS = Object.freeze({ stalledMs: 10_000 });
 const performance = dependencies.performance;
 const finishGate = dependencies.finishGate;
 const isValidTurnMode = () => true;
@@ -7887,8 +8291,20 @@ return dispatchVoiceStartLatency;`,
   assert.ok(scheduleAt >= 0);
   assert.match(
     schedule,
-    /Number\.isFinite\(speechEndedAt\)[\s\S]*speechEndToEstimatedAudibleMs[\s\S]*dispatchVoiceStartLatency/u,
-    "only a meaningful scheduled PCM frame may publish the start estimate",
+    /Number\.isFinite\(speechEndedAt\)[\s\S]*speechEndToEstimatedAudibleMs/u,
+    "live transport timing must retain the meaningful scheduled PCM estimate",
+  );
+  assert.doesNotMatch(schedule, /dispatchVoiceStartLatency/u);
+  const firstAudibleAt = bridge.indexOf("function publishFirstAudible(");
+  const firstAudible = bridge.slice(
+    firstAudibleAt,
+    firstAudibleAt + 1_200,
+  );
+  assert.ok(firstAudibleAt >= 0);
+  assert.match(
+    firstAudible,
+    /if \(!firstAudiblePending \|\| streamedAudio\) return;[\s\S]*advanceCurrentVoiceStartSlo\(\s*sloGeneration,\s*true,\s*audibleAt,?\s*\)/u,
+    "only the first meaningful scheduled PCM frame may finish the SLO clock",
   );
   const dispatcher = bridge.slice(
     bridge.indexOf("function dispatchVoiceStartLatency("),

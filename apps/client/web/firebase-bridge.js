@@ -55,6 +55,17 @@ import {
   VOICE_STREAM_LIMITS,
 } from "./voice-stream-policy.mjs";
 import {
+  advanceVoiceStartSlo,
+  beginVoiceStartSlo,
+  cancelVoiceStartSlo,
+  classifyVoiceStartSloLatency,
+  classifyVoiceStartSloRoute,
+  createVoiceStartSloState,
+  updateVoiceStartSloRoute,
+  VOICE_START_SLO_ACTIONS,
+  VOICE_START_SLO_BUDGETS,
+} from "./voice-start-slo-policy.mjs";
+import {
   decidePasskeyAction,
   createPasskeyRegistrationRecoveryLatch,
   decidePasskeyRegistrationRecoveryAction,
@@ -102,6 +113,7 @@ const SESSION_STATE_MAX_CHARS =
   VOICE_LIVE_LIMITS.maximumSessionStateCharacters;
 const VAD_INTERVAL_MS = VOICE_SESSION_LIMITS.vadIntervalMs;
 const VOICE_TURN_CLIENT_TIMEOUT_MS = 60_000;
+const VOICE_START_AUDIBLE_COMMIT_LOOKAHEAD_MS = 250;
 
 const ALLOWED_CONFIG_KEYS = Object.freeze([
   "apiKey",
@@ -128,6 +140,12 @@ let pendingDocument;
 let pendingDocumentTimer;
 let voiceTransportPrimed = false;
 let voiceReceiptVisible = false;
+let voiceStartSloGeneration = 0;
+let voiceStartSloDeferredMissTimer;
+let voiceStartSloHandlers;
+let voiceStartSloMissTimer;
+let voiceStartSloStallTimer;
+let voiceStartSloState = createVoiceStartSloState();
 let sessionEpoch = 0;
 let documentEpoch = 0;
 let pcmCaptureGeneration = 0;
@@ -247,6 +265,242 @@ function dispatchVoiceStartLatency(estimatedAudibleMs) {
     new CustomEvent("kotae:voice-start-latency", {
       detail: Object.freeze({ milliseconds, version: 1 }),
     }),
+  );
+}
+
+function nextVoiceStartSloGeneration() {
+  if (voiceStartSloGeneration >= Number.MAX_SAFE_INTEGER) {
+    fail("voice_response_invalid");
+  }
+  voiceStartSloGeneration += 1;
+  return voiceStartSloGeneration;
+}
+
+function clearVoiceStartSloTimer(timer, expectedGeneration) {
+  if (!timer || timer.generation !== expectedGeneration) return timer;
+  clearTimeout(timer.id);
+  return undefined;
+}
+
+function clearVoiceStartSloTimers(expectedGeneration) {
+  voiceStartSloDeferredMissTimer = clearVoiceStartSloTimer(
+    voiceStartSloDeferredMissTimer,
+    expectedGeneration,
+  );
+  voiceStartSloMissTimer = clearVoiceStartSloTimer(
+    voiceStartSloMissTimer,
+    expectedGeneration,
+  );
+  voiceStartSloStallTimer = clearVoiceStartSloTimer(
+    voiceStartSloStallTimer,
+    expectedGeneration,
+  );
+}
+
+function invokeVoiceStartSloMissHandler(handlers, state) {
+  if (typeof handlers.onMiss !== "function") return;
+  const remainingMs = handlers.missNotBefore - performance.now();
+  if (remainingMs <= 0) {
+    handlers.onMiss();
+    return;
+  }
+  if (
+    voiceStartSloDeferredMissTimer?.generation === state.generation
+  ) {
+    return;
+  }
+  const timer = {
+    generation: state.generation,
+    id: undefined,
+  };
+  timer.id = setTimeout(() => {
+    if (voiceStartSloDeferredMissTimer === timer) {
+      voiceStartSloDeferredMissTimer = undefined;
+    }
+    if (
+      voiceStartSloState.active !== true ||
+      voiceStartSloState.generation !== state.generation ||
+      voiceStartSloHandlers !== handlers
+    ) {
+      return;
+    }
+    handlers.onMiss();
+  }, remainingMs);
+  voiceStartSloDeferredMissTimer = timer;
+}
+
+function dispatchVoiceStartSloMilestone(action, state) {
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-start-slo-milestone", {
+      detail: Object.freeze({
+        generation: state.generation,
+        milestone: action,
+        route: state.route,
+        version: 1,
+      }),
+    }),
+  );
+}
+
+function dispatchVoiceStartSloObservation(measurement) {
+  const latencyMs = boundedLatency(measurement.latencyMs);
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-start-slo", {
+      detail: Object.freeze({
+        generation: measurement.generation,
+        latency_ms: latencyMs,
+        outcome: classifyVoiceStartSloLatency(latencyMs),
+        route: measurement.route,
+        version: 1,
+      }),
+    }),
+  );
+}
+
+function applyVoiceStartSloTransition(transition) {
+  const previousState = voiceStartSloState;
+  voiceStartSloState = transition.state;
+  const measurement = transition.measurement;
+  const handlers = voiceStartSloHandlers;
+  const cancelGeneration = previousState.active
+    ? previousState.generation
+    : transition.state.generation;
+  // Timer ownership is revoked before any synchronous CustomEvent listener can
+  // re-enter the bridge and create a replacement generation.
+  for (const action of transition.actions) {
+    if (action === VOICE_START_SLO_ACTIONS.CANCEL_TIMERS) {
+      clearVoiceStartSloTimers(cancelGeneration);
+    }
+  }
+  for (const action of transition.actions) {
+    if (action === VOICE_START_SLO_ACTIONS.CANCEL_TIMERS) {
+      continue;
+    }
+    if (
+      voiceStartSloState.generation !== transition.state.generation
+    ) {
+      break;
+    }
+    dispatchVoiceStartSloMilestone(action, transition.state);
+    // A delayed timer and meaningful audio can enter the same transition.
+    // Publish the measured miss, but never cancel or replay audio that has
+    // already won the single playback owner.
+    if (
+      measurement !== null ||
+      handlers?.generation !== transition.state.generation ||
+      voiceStartSloState.active !== true ||
+      voiceStartSloState.generation !== transition.state.generation
+    ) {
+      continue;
+    }
+    if (action === VOICE_START_SLO_ACTIONS.THREE_SECOND_MISS) {
+      invokeVoiceStartSloMissHandler(handlers, transition.state);
+    } else if (action === VOICE_START_SLO_ACTIONS.TEN_SECOND_STALL) {
+      handlers.onStall?.();
+    }
+  }
+  if (
+    measurement !== null &&
+    voiceStartSloState.generation === transition.state.generation
+  ) {
+    dispatchVoiceStartSloObservation(measurement);
+    if (
+      voiceStartSloState.generation === transition.state.generation
+    ) {
+      dispatchVoiceStartLatency(measurement.latencyMs);
+    }
+  }
+  if (
+    !voiceStartSloState.active &&
+    voiceStartSloState.generation === transition.state.generation &&
+    voiceStartSloHandlers?.generation === transition.state.generation
+  ) {
+    voiceStartSloHandlers = undefined;
+  }
+}
+
+function advanceCurrentVoiceStartSlo(
+  generation,
+  meaningfulAudio,
+  now = performance.now(),
+) {
+  applyVoiceStartSloTransition(
+    advanceVoiceStartSlo(voiceStartSloState, {
+      generation,
+      meaningfulAudio,
+      now,
+    }),
+  );
+}
+
+function beginCurrentVoiceStartSlo({
+  generation,
+  onMiss,
+  onStall,
+  operationalStartedAt,
+  route,
+  startedAt,
+}) {
+  if (
+    !Number.isFinite(operationalStartedAt) ||
+    operationalStartedAt < startedAt
+  ) {
+    fail("voice_response_invalid");
+  }
+  const transition = beginVoiceStartSlo(voiceStartSloState, {
+    generation,
+    route,
+    startedAt,
+  });
+  applyVoiceStartSloTransition(transition);
+  voiceStartSloHandlers = Object.freeze({
+    generation,
+    missNotBefore:
+      operationalStartedAt + VOICE_START_SLO_BUDGETS.missedMs,
+    onMiss: typeof onMiss === "function" ? onMiss : undefined,
+    onStall: typeof onStall === "function" ? onStall : undefined,
+  });
+  const now = performance.now();
+  const missTimer = { generation, id: undefined };
+  missTimer.id = setTimeout(
+    () => {
+      if (voiceStartSloMissTimer === missTimer) {
+        voiceStartSloMissTimer = undefined;
+      }
+      advanceCurrentVoiceStartSlo(generation, false);
+    },
+    Math.max(
+      0,
+      startedAt + VOICE_START_SLO_BUDGETS.missedMs - now,
+    ),
+  );
+  voiceStartSloMissTimer = missTimer;
+  const stallTimer = { generation, id: undefined };
+  stallTimer.id = setTimeout(
+    () => {
+      if (voiceStartSloStallTimer === stallTimer) {
+        voiceStartSloStallTimer = undefined;
+      }
+      advanceCurrentVoiceStartSlo(generation, false);
+    },
+    Math.max(
+      0,
+      startedAt + VOICE_START_SLO_BUDGETS.stalledMs - now,
+    ),
+  );
+  voiceStartSloStallTimer = stallTimer;
+}
+
+function updateCurrentVoiceStartSloRoute(generation, route) {
+  voiceStartSloState = updateVoiceStartSloRoute(
+    voiceStartSloState,
+    { generation, route },
+  );
+}
+
+function cancelCurrentVoiceStartSlo(generation) {
+  applyVoiceStartSloTransition(
+    cancelVoiceStartSlo(voiceStartSloState, { generation }),
   );
 }
 
@@ -2531,6 +2785,8 @@ async function startVoiceLiveSession({
   let nativeFallbackAllowed = false;
   let nativeFallbackRequiresStatefulHTTP = false;
   let latencyDispatched = false;
+  let slowReplayCandidateTimer;
+  let slowStartStalled = false;
   let terminalCloseTimer;
   let finalResult;
   let readySettled = false;
@@ -2731,7 +2987,15 @@ async function startVoiceLiveSession({
     }
   }
 
+  function clearSlowReplayCandidateTimer() {
+    if (slowReplayCandidateTimer !== undefined) {
+      clearTimeout(slowReplayCandidateTimer);
+      slowReplayCandidateTimer = undefined;
+    }
+  }
+
   function failLive(error) {
+    clearSlowReplayCandidateTimer();
     if (
       state === "failed" ||
       state === "cancelled" ||
@@ -2949,9 +3213,6 @@ async function startVoiceLiveSession({
         if (Number.isFinite(speechEndedAt)) {
           speechEndToEstimatedAudibleMs =
             audibleAt - speechEndedAt;
-          dispatchVoiceStartLatency(
-            speechEndToEstimatedAudibleMs,
-          );
         }
       }
     } catch (error) {
@@ -2960,6 +3221,52 @@ async function startVoiceLiveSession({
           ? error
           : new Error("voice_response_invalid"),
       );
+    }
+  }
+
+  function tryReplaySlowZeroAudioNativeStart() {
+    const snapshot = protocol.snapshot();
+    const replay = shouldReplayCommittedNativeTurn({
+      audioEventCount: snapshot.audioEventCount,
+      coachActivated: snapshot.coachActivated,
+      code: "voice_api_unavailable",
+      committed: state === "committed",
+      interrupted: session?.playback?.interrupted === true,
+      nativeAudio,
+    });
+    if (!replay) return false;
+    nativeFallbackAllowed = true;
+    nativeFallbackRequiresStatefulHTTP = false;
+    failLive(new Error("voice_api_unavailable"));
+    return true;
+  }
+
+  function recoverSlowVoiceStart(stalled = false) {
+    slowStartStalled ||= stalled;
+    const interruptRecording = session?.playback?.interruptRecording;
+    if (
+      interruptRecording?.candidate &&
+      !interruptRecording.settled
+    ) {
+      if (slowReplayCandidateTimer === undefined) {
+        slowReplayCandidateTimer = setTimeout(() => {
+          slowReplayCandidateTimer = undefined;
+          recoverSlowVoiceStart();
+        }, VAD_INTERVAL_MS);
+      }
+      return;
+    }
+    if (tryReplaySlowZeroAudioNativeStart()) return;
+    if (
+      slowStartStalled &&
+      state === "committed" &&
+      session?.playback &&
+      !session.playback.hasStreamedAudio() &&
+      session?.playback?.interrupted !== true
+    ) {
+      // Silent/sub-threshold PCM and an already bound Coach checkpoint both
+      // forbid replay, but neither may masquerade as an audible response.
+      failLive(new Error("voice_turn_timeout"));
     }
   }
 
@@ -3032,6 +3339,7 @@ async function startVoiceLiveSession({
       );
     },
     cancel(error = new Error("request_cancelled")) {
+      clearSlowReplayCandidateTimer();
       if (
         state === "cancelled" ||
         state === "failed" ||
@@ -3147,7 +3455,10 @@ async function startVoiceLiveSession({
       state = "committed";
       commitSent = true;
       commitAt = performance.now();
-      playback.armResponseInterruption(commitAt);
+      playback.armResponseInterruption(commitAt, {
+        onMiss: recoverSlowVoiceStart,
+        onStall: () => recoverSlowVoiceStart(true),
+      });
 
       const result = await resultPromise;
       const snapshot = protocol.snapshot();
@@ -3158,6 +3469,7 @@ async function startVoiceLiveSession({
       );
     },
     interrupt(error = new Error("voice_interrupted")) {
+      clearSlowReplayCandidateTimer();
       const finalized = state === "final" || state === "complete";
       if (!finalized) {
         state = "cancelled";
@@ -3174,6 +3486,7 @@ async function startVoiceLiveSession({
       emitLatency(bargeHaltMs);
     },
     recordCompletion() {
+      clearSlowReplayCandidateTimer();
       emitLatency();
     },
     state() {
@@ -4325,6 +4638,8 @@ function createStreamingPlayback(
   transportKind = "live",
   coachActive = false,
   speechEndedAt = undefined,
+  strictLocal = false,
+  onFirstAudible = undefined,
 ) {
   if (
     activePlayback ||
@@ -4332,6 +4647,9 @@ function createStreamingPlayback(
     audioContext.state === "closed" ||
     typeof nativeAudio !== "boolean" ||
     typeof coachActive !== "boolean" ||
+    typeof strictLocal !== "boolean" ||
+    (onFirstAudible !== undefined &&
+      typeof onFirstAudible !== "function") ||
     (speechEndedAt !== undefined &&
       (!Number.isFinite(speechEndedAt) || speechEndedAt < 0)) ||
     (transportKind !== "http" && transportKind !== "live") ||
@@ -4348,6 +4666,18 @@ function createStreamingPlayback(
   let settled = false;
   let streamedAudio = false;
   let responseCommitted = false;
+  let responseStartedAt;
+  let firstAudiblePending = false;
+  let firstAudibleTimer;
+  const coachInitiallyActive = coachActive;
+  const sloGeneration = nextVoiceStartSloGeneration();
+  let sloRoute = classifyVoiceStartSloRoute({
+    coachActive,
+    coachInitiallyActive,
+    nativeAudio,
+    strictLocal,
+    transportKind,
+  });
   const playbackContext = audioContext;
   const sources = new Set();
   const gainNode = playbackContext.createGain();
@@ -4377,6 +4707,42 @@ function createStreamingPlayback(
       }
     }
     return undefined;
+  }
+
+  function clearFirstAudibleTimer() {
+    if (firstAudibleTimer !== undefined) {
+      clearTimeout(firstAudibleTimer);
+      firstAudibleTimer = undefined;
+    }
+  }
+
+  function publishFirstAudible(audibleAt, event) {
+    if (!firstAudiblePending || streamedAudio) return;
+    if (
+      Number.isFinite(responseStartedAt) &&
+      audibleAt >=
+        responseStartedAt + VOICE_START_SLO_BUDGETS.stalledMs
+    ) {
+      // The speech-end hard wall owns this boundary. A throttled timer or an
+      // `ended` callback may observe the source later, but cannot turn a
+      // post-deadline slot into a successful start.
+      return;
+    }
+    firstAudiblePending = false;
+    clearFirstAudibleTimer();
+    streamedAudio = true;
+    onFirstAudible?.();
+    advanceCurrentVoiceStartSlo(
+      sloGeneration,
+      true,
+      audibleAt,
+    );
+    playback.armResponseInterruption(audibleAt);
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:first-audio", {
+        detail: Object.freeze({ sequence: event.sequence, version: 1 }),
+      }),
+    );
   }
 
   function scheduleBuffer(buffer, event) {
@@ -4417,11 +4783,20 @@ function createStreamingPlayback(
     const audibleAt = Number.isFinite(meaningfulOffset)
       ? scheduledAudibleAt + meaningfulOffset * 1_000
       : undefined;
+    const ownsFirstAudible =
+      !streamedAudio &&
+      !firstAudiblePending &&
+      Number.isFinite(audibleAt);
     pendingSources += 1;
     sources.add(source);
     source.addEventListener(
       "ended",
       () => {
+        if (ownsFirstAudible) {
+          // Background timer throttling cannot make a source that already
+          // played disappear from the first-audible proof.
+          publishFirstAudible(audibleAt, event);
+        }
         sources.delete(source);
         source.disconnect();
         pendingSources -= 1;
@@ -4447,24 +4822,30 @@ function createStreamingPlayback(
     }
     nextStartAt = startAt + buffer.duration;
 
-    if (!streamedAudio && Number.isFinite(audibleAt)) {
-      // Native owns its commit-gated latency publication because it may
-      // discard provider audio before a final caption is accepted. HTTP has
-      // already committed the captured turn, so its first meaningful sample
-      // can publish the same content-free measurement here.
-      if (
-        transportKind === "http" &&
-        Number.isFinite(speechEndedAt)
-      ) {
-        dispatchVoiceStartLatency(audibleAt - speechEndedAt);
-      }
-      streamedAudio = true;
-      playback.armResponseInterruption(audibleAt);
-      globalThis.dispatchEvent(
-        new CustomEvent("kotae:first-audio", {
-          detail: Object.freeze({ sequence: event.sequence, version: 1 }),
-        }),
+    if (ownsFirstAudible) {
+      firstAudiblePending = true;
+      const audibleDelayMs = Math.max(
+        0,
+        audibleAt - performance.now(),
       );
+      const beforeAbsoluteStall =
+        !Number.isFinite(responseStartedAt) ||
+        audibleAt <
+          responseStartedAt + VOICE_START_SLO_BUDGETS.stalledMs;
+      if (beforeAbsoluteStall) {
+        if (
+          audibleDelayMs <= VOICE_START_AUDIBLE_COMMIT_LOOKAHEAD_MS
+        ) {
+          // Web Audio now owns a near-term output slot. Longer queued silence
+          // keeps the SLO live until the real audible boundary or hard stall.
+          publishFirstAudible(audibleAt, event);
+        } else {
+          firstAudibleTimer = setTimeout(
+            () => publishFirstAudible(audibleAt, event),
+            audibleDelayMs,
+          );
+        }
+      }
     }
     return audibleAt;
   }
@@ -4481,6 +4862,14 @@ function createStreamingPlayback(
         fail("voice_response_invalid");
       }
       playback.coachActive = true;
+      sloRoute = classifyVoiceStartSloRoute({
+        coachActive: true,
+        coachInitiallyActive,
+        nativeAudio,
+        strictLocal,
+        transportKind,
+      });
+      updateCurrentVoiceStartSloRoute(sloGeneration, sloRoute);
       if (
         playback.interruptRecording &&
         !playback.interruptRecording.settled
@@ -4488,17 +4877,39 @@ function createStreamingPlayback(
         playback.interruptRecording.coachActive = true;
       }
     },
-    armResponseInterruption(guardStartedAt) {
+    armResponseInterruption(
+      guardStartedAt,
+      { onMiss, onStall } = {},
+    ) {
       if (
         !Number.isFinite(guardStartedAt) ||
         guardStartedAt < 0 ||
+        (onMiss !== undefined && typeof onMiss !== "function") ||
+        (onStall !== undefined && typeof onStall !== "function") ||
         settled ||
-        sealed ||
-        expectedEpoch !== sessionEpoch
+        (sealed && !responseCommitted) ||
+        expectedEpoch !== sessionEpoch ||
+        (Number.isFinite(speechEndedAt) &&
+          speechEndedAt > guardStartedAt)
       ) {
         fail("voice_response_invalid");
       }
-      responseCommitted = true;
+      if (!responseCommitted) {
+        responseCommitted = true;
+        responseStartedAt = Number.isFinite(speechEndedAt)
+          ? speechEndedAt
+          : guardStartedAt;
+        beginCurrentVoiceStartSlo({
+          generation: sloGeneration,
+          onMiss,
+          onStall,
+          operationalStartedAt: guardStartedAt,
+          route: sloRoute,
+          startedAt: responseStartedAt,
+        });
+      } else if (onMiss !== undefined || onStall !== undefined) {
+        fail("voice_response_invalid");
+      }
       if (playback.interruptRecording) {
         playback.resetInterruptGuard?.(guardStartedAt);
       } else {
@@ -4521,8 +4932,10 @@ function createStreamingPlayback(
     finalReceived: false,
     gainNode,
     nativeAudio,
+    sloGeneration,
     transportKind,
     hasCommittedResponse: () => responseCommitted,
+    hasPendingFirstAudible: () => firstAudiblePending,
     hasStreamedAudio: () => streamedAudio,
     interruptRecording: undefined,
     interrupted: false,
@@ -4530,6 +4943,9 @@ function createStreamingPlayback(
     reject(error) {
       if (settled) return;
       settled = true;
+      firstAudiblePending = false;
+      clearFirstAudibleTimer();
+      cancelCurrentVoiceStartSlo(sloGeneration);
       rejectCompletion(error);
     },
     schedule(event) {
@@ -4553,6 +4969,9 @@ function createStreamingPlayback(
         fail("voice_response_invalid");
       }
       sealed = true;
+      if (!firstAudiblePending) {
+        cancelCurrentVoiceStartSlo(sloGeneration);
+      }
       if (pendingSources === 0) {
         settled = true;
         stopBargeInMonitoring(playback);
@@ -4632,17 +5051,28 @@ function finalizeMeaningfulVoiceStream(
 ) {
   if (
     !playback ||
+    typeof playback.hasPendingFirstAudible !== "function" ||
     typeof playback.hasStreamedAudio !== "function" ||
     !Number.isSafeInteger(audioEventCount) ||
     audioEventCount < 0
   ) {
     fail("voice_response_invalid");
   }
+  const pendingFirstAudible =
+    playback.hasPendingFirstAudible() === true;
   const streamedAudio = playback.hasStreamedAudio() === true;
-  if (streamedAudio && audioEventCount === 0) {
+  if (
+    (streamedAudio && audioEventCount === 0) ||
+    (pendingFirstAudible && (streamedAudio || audioEventCount === 0))
+  ) {
     fail("voice_response_invalid");
   }
-  if (!streamedAudio && audioEventCount > 0 && !playback.interrupted) {
+  if (
+    !streamedAudio &&
+    !pendingFirstAudible &&
+    audioEventCount > 0 &&
+    !playback.interrupted
+  ) {
     // A syntactically valid PCM stream can still be entirely silent. Treat it
     // as the existing recoverable no-reply failure instead of reporting that
     // the assistant spoke when no meaningful sample reached playback.
@@ -4783,11 +5213,87 @@ async function finishTurn(
   let requestController;
   let responseClockActive = false;
   let turnTimedOut = false;
+  let voiceStartCancelOwner;
+  let voiceStartDeadlineActive = false;
+  let voiceStartDeadlineReject;
+  let voiceStartDeadlineTimer;
+  let voiceStartTimedOut = false;
+  const voiceStartDeadlinePromise = new Promise((_, reject) => {
+    voiceStartDeadlineReject = reject;
+  });
+  void voiceStartDeadlinePromise.catch(() => {});
   const turnDeadlineAt =
     performance.now() + VOICE_TURN_CLIENT_TIMEOUT_MS;
+
+  function disarmVoiceStartDeadline() {
+    voiceStartDeadlineActive = false;
+    if (voiceStartDeadlineTimer !== undefined) {
+      clearTimeout(voiceStartDeadlineTimer);
+      voiceStartDeadlineTimer = undefined;
+    }
+  }
+
+  function armVoiceStartDeadline(speechEndedAt) {
+    const now = performance.now();
+    if (
+      !Number.isFinite(speechEndedAt) ||
+      speechEndedAt < 0 ||
+      speechEndedAt > now
+    ) {
+      fail("voice_turn_invalid");
+    }
+    voiceStartDeadlineActive = true;
+    voiceStartDeadlineTimer = setTimeout(() => {
+      voiceStartDeadlineTimer = undefined;
+      if (!voiceStartDeadlineActive) return;
+      voiceStartDeadlineActive = false;
+      voiceStartTimedOut = true;
+      if (
+        Number.isSafeInteger(playback?.sloGeneration) &&
+        playback.hasStreamedAudio?.() === false
+      ) {
+        // The master timer was registered before transport/playback timers.
+        // Publish the current generation's exact stall boundary before
+        // cancellation can revoke its controller ownership.
+        try {
+          advanceCurrentVoiceStartSlo(
+            playback.sloGeneration,
+            false,
+            speechEndedAt + VOICE_START_SLO_BUDGETS.stalledMs,
+          );
+        } catch {
+          // Telemetry or a nested recovery failure cannot revoke the hard
+          // cancellation and single public timeout below.
+        }
+      }
+      const owner = voiceStartCancelOwner;
+      voiceStartCancelOwner = undefined;
+      try {
+        owner?.cancel?.();
+      } catch {
+        // The single timeout error below remains the public reason.
+      }
+      voiceStartDeadlineReject(new Error("voice_turn_timeout"));
+    }, Math.max(
+      0,
+      speechEndedAt + VOICE_START_SLO_BUDGETS.stalledMs - now,
+    ));
+  }
+
   async function awaitVoiceTurnResult(promise, cancel) {
+    if (voiceStartTimedOut) {
+      try {
+        cancel?.();
+      } finally {
+        throw new Error("voice_turn_timeout");
+      }
+    }
     const remainingMs = Math.max(0, turnDeadlineAt - performance.now());
     let timeout;
+    const cancelOwner = Object.freeze({ cancel });
+    if (voiceStartDeadlineActive) {
+      voiceStartCancelOwner = cancelOwner;
+    }
     const deadline = new Promise((_, reject) => {
       timeout = setTimeout(() => {
         turnTimedOut = true;
@@ -4799,9 +5305,43 @@ async function finishTurn(
       }, Math.ceil(remainingMs));
     });
     try {
-      return await Promise.race([promise, deadline]);
+      return await Promise.race([
+        promise,
+        deadline,
+        ...(voiceStartDeadlineActive
+          ? [voiceStartDeadlinePromise]
+          : []),
+      ]);
     } finally {
       clearTimeout(timeout);
+      if (voiceStartCancelOwner === cancelOwner) {
+        voiceStartCancelOwner = undefined;
+      }
+    }
+  }
+
+  async function awaitVoiceStartDeadlineResult(promise, cancel) {
+    if (voiceStartTimedOut) {
+      try {
+        cancel?.();
+      } finally {
+        throw new Error("voice_turn_timeout");
+      }
+    }
+    if (!voiceStartDeadlineActive) {
+      return promise;
+    }
+    const cancelOwner = Object.freeze({ cancel });
+    voiceStartCancelOwner = cancelOwner;
+    try {
+      // Validated playback is deliberately outside the 60 second network
+      // deadline, but it remains inside the speech-end +10 second start proof
+      // until the first meaningful output slot disarms that proof.
+      return await Promise.race([promise, voiceStartDeadlinePromise]);
+    } finally {
+      if (voiceStartCancelOwner === cancelOwner) {
+        voiceStartCancelOwner = undefined;
+      }
     }
   }
   try {
@@ -4816,6 +5356,7 @@ async function finishTurn(
       fail(stoppedSessionCode(expectedEpoch));
     }
     responseClockActive = true;
+    armVoiceStartDeadline(recording.lastVoiceAt);
 
     documentForTurn = pendingDocument;
     if (documentForTurn) {
@@ -4823,9 +5364,12 @@ async function finishTurn(
     }
     liveSession = activeLiveSession;
     if (!liveSession) {
-      liveSession = await takePendingLiveSession(
-        recording,
-        expectedEpoch,
+      liveSession = await awaitVoiceTurnResult(
+        takePendingLiveSession(recording, expectedEpoch),
+        () =>
+          retirePendingLiveSession(
+            new Error("voice_turn_timeout"),
+          ),
       );
     }
     if (
@@ -4852,7 +5396,7 @@ async function finishTurn(
         fail("audio_playback_blocked");
       }
       if (audioContext.state === "suspended") {
-        await audioContext.resume();
+        await awaitVoiceTurnResult(audioContext.resume());
       }
       if (expectedEpoch !== sessionEpoch) {
         fail(stoppedSessionCode(expectedEpoch));
@@ -4862,6 +5406,9 @@ async function finishTurn(
         liveSession.nativeAudio === true,
         "live",
         coachActive,
+        recording.lastVoiceAt,
+        strictCloudMinimization,
+        disarmVoiceStartDeadline,
       );
       try {
         const completed = await awaitVoiceTurnResult(
@@ -4871,10 +5418,24 @@ async function finishTurn(
           ),
           () => liveSession.cancel(new Error("voice_turn_timeout")),
         );
-        await awaitValidatedPlaybackCompletion(
-          playback,
-          expectedEpoch,
+        await awaitVoiceStartDeadlineResult(
+          awaitValidatedPlaybackCompletion(
+            playback,
+            expectedEpoch,
+          ),
+          () =>
+            haltStreamingPlayback(
+              playback,
+              new Error("voice_turn_timeout"),
+            ),
         );
+        if (
+          completed.streamedAudio &&
+          !playback.hasStreamedAudio() &&
+          !playback.interrupted
+        ) {
+          fail("voice_turn_timeout");
+        }
         liveSession.recordCompletion();
         if (!completeSessionResponse(expectedEpoch)) {
           fail(stoppedSessionCode(expectedEpoch));
@@ -4888,6 +5449,7 @@ async function finishTurn(
       } catch (error) {
         if (
           turnTimedOut ||
+          voiceStartTimedOut ||
           !liveSession.canFallback() ||
           playback.interrupted ||
           expectedEpoch !== sessionEpoch ||
@@ -4939,6 +5501,7 @@ async function finishTurn(
         capture.blob.arrayBuffer(),
         secureCredentials(),
       ]),
+      () => rejectRecording(recording, "voice_turn_timeout"),
     );
     audioBase64 = arrayBufferToBase64(audioBuffer);
     const { appCheckToken, idToken } = credentials;
@@ -4950,7 +5513,7 @@ async function finishTurn(
       fail("audio_playback_blocked");
     }
     if (audioContext.state === "suspended") {
-      await audioContext.resume();
+      await awaitVoiceTurnResult(audioContext.resume());
     }
     if (expectedEpoch !== sessionEpoch) {
       fail(stoppedSessionCode(expectedEpoch));
@@ -4961,6 +5524,8 @@ async function finishTurn(
       "http",
       coachActive,
       recording.lastVoiceAt,
+      strictCloudMinimization,
+      disarmVoiceStartDeadline,
     );
     // The microphone remains disabled until the request has actually been
     // committed. After that boundary, the bounded local interruption gate can
@@ -4996,7 +5561,14 @@ async function finishTurn(
       },
       body: JSON.stringify(payload),
     });
-    playback.armResponseInterruption(performance.now());
+    playback.armResponseInterruption(performance.now(), {
+      onStall: () => {
+        if (!playback.hasStreamedAudio()) {
+          voiceStartTimedOut = true;
+          requestController.abort();
+        }
+      },
+    });
     const response = await awaitVoiceTurnResult(
       responsePromise,
       () => requestController.abort(),
@@ -5013,7 +5585,21 @@ async function finishTurn(
       ),
       () => requestController.abort(),
     );
-    await awaitValidatedPlaybackCompletion(playback, expectedEpoch);
+    await awaitVoiceStartDeadlineResult(
+      awaitValidatedPlaybackCompletion(playback, expectedEpoch),
+      () =>
+        haltStreamingPlayback(
+          playback,
+          new Error("voice_turn_timeout"),
+        ),
+    );
+    if (
+      completed.streamedAudio &&
+      !playback.hasStreamedAudio() &&
+      !playback.interrupted
+    ) {
+      fail("voice_turn_timeout");
+    }
     if (!completeSessionResponse(expectedEpoch)) {
       fail(stoppedSessionCode(expectedEpoch));
     }
@@ -5049,7 +5635,7 @@ async function finishTurn(
     if (interruptionAbortedTransport) {
       fail("voice_interrupted");
     }
-    if (turnTimedOut) {
+    if (turnTimedOut || voiceStartTimedOut) {
       fail("voice_turn_timeout");
     }
     if (error && typeof error === "object" && error.name === "AbortError") {
@@ -5057,6 +5643,7 @@ async function finishTurn(
     }
     throw error;
   } finally {
+    disarmVoiceStartDeadline();
     if (responseClockActive) {
       // Provider/network failures must not leave idle expiry suspended or
       // grant a fresh idle lease. Only validated playback completes a

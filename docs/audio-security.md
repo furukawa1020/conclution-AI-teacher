@@ -8,6 +8,8 @@
 
 ここでいう「KOTAE側で保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話本文を書かないという意味です。標準liveの音声は発話ごとのrequest dataとしてVertex AI Native Audioへ、raw audioから始まる段階経路ではregional STTへ渡し、KOTAEはrequest終了後に履歴を保持しません。回答支援の初回・継続caption handoffではNative input captionをCloud Run内のplanner/controllerが平文で扱いますが、regional STTは扱いません。一方、処理に必要な平文は端末、Cloud Run、Vertex AI、および該当する段階経路のSpeech-to-Text、Sensitive Data Protection（DLP）、Text-to-Speechから見えます。Firebase Authenticationも認証用アカウント情報を扱います。E2EE、完全な端末内処理、完全なPII除去、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。管理サービス側のデータ利用・ログ条件は公式契約とproject設定を別に確認します。
 
+開始速度eventは`generation`、有限`route`、有限`outcome`、bounded latencyまたは固定milestoneだけで、音声、caption、transcript、credential、会話stateを受け取りません。1秒は発話終了から最初の有意味出力までの目標、3秒はmiss観測点です。Native safe replayはそれとは別にcommit+3秒と未確定barge-in候補の解決を待ち、zero-audioかつcheckpoint未発行の既存predicateを通る場合だけです。commit+3秒が発話終了+10秒より後なら再試行権限は生じません。10秒はcapture、認証、transport、予約再生までを覆うzero-meaningful-audioの絶対停止点です。Web Audio slotもこの停止点より前かつ現在から250 ms以内の時だけ所有時に先行確定し、遠いslotは推定可聴境界まで待ちます。silent finalなどで先にterminal結果へ達したturnは10秒まで保持しません。どのdeadlineも公開済み音声やCoach checkpointを二重生成する権限にはしません。server側も有効な無音PCMをframes/bytesには計上しますが、first-audio clockはWebSocket書込に成功した最初の有意味PCMでのみ開始します。
+
 ## データフローと所在地
 
 ```text
@@ -55,7 +57,7 @@ raw audioから始まる段階経路のSTT、該当するDLP、文字列planner�
 
 Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEはその境界まで使わず、端末では録音開始から最大3分30秒、Cloud Runでは受信開始から4分（20 ms PCMを最大12,000 frame、7,680,000 byte）で止めます。録音開始後に発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めた場合にも残りは約3分あります。ただし、無音や間も端末の3分30秒へ含まれ、3分30秒の実発話を保証するものではありません。provider上限まで60秒を残し、providerのendpoint通知は助言に留め、端末VADとの一致なしにcommitしません。commit後に得た最終文字起こし全体が160 Unicode code point以上の場合だけ、PII検査後の現在turn内で意味を変えない中心点の足場を使えます。これは長期効果や技能を判定する機能ではなく、途中候補、過去turn、保存済み本文から中心点を作りません。
 
-端末VADが音声を確認した後、最後のvoiced frameから700 ms無音が続いた時は、`kotae:voice-receipt`の固定enumだけで「ここまで届いています」を視覚表示します。発話が再開すれば表示を消し、文字起こし、要約、理解判定、confidence、発話本文はeventへ入れません。ダミーの固定音声によるreceiptは生成も再生もしません。通常Native、初回回答支援、継続Coachを別系列にし、commitまたはspeech-endから最初の実質音声frameまで1,000 ms以内を運用SLOとして記録します。現行のroute metadataでは初回Q-ARCと初回caption handoffを互いに分離できないため、この二つは「初回回答支援」として合算し、別系列の実測とは表示しません。視覚表示や意図的な無音`wait`は達成扱いにしません。1秒はブラウザのevent loop、回線、managed modelを含む絶対上限の保証ではありません。利用者は「ここで返して」で長い終端待ちを明示的に飛ばせます。
+端末VADが音声を確認した後、最後のvoiced frameから700 ms無音が続いた時は、`kotae:voice-receipt`の固定enumだけで「ここまで届いています」を視覚表示します。発話が再開すれば表示を消し、文字起こし、要約、理解判定、confidence、発話本文はeventへ入れません。ダミーの固定音声によるreceiptは生成も再生もしません。通常Native、初回回答支援、継続Coachを別系列にし、発話終了から最初の実質音声frameまで1,000 ms以内を運用SLOとして記録します。現行のroute metadataでは初回Q-ARCと初回caption handoffを互いに分離できないため、この二つは「初回回答支援」として合算し、別系列の実測とは表示しません。視覚表示や意図的な無音`wait`は達成扱いにしません。1秒はブラウザのevent loop、回線、managed modelを含む絶対上限の保証ではありません。利用者は「ここで返して」で長い終端待ちを明示的に飛ばせます。
 
 live WebSocketには、WebSocket upgrade前からGo側で6分の外側deadlineを置きます。4分のcapture deadlineと、commit時点から始まる最大50秒のモデル・TTS処理deadlineは別です。長く話した時間をモデル処理時間へ加算せず、逆に長いcaptureでcommit後の処理枠を先食いもしません。検証済みlive routeだけ接続deadlineを延長し、通常routeはread/write/idle各120秒を維持します。Cloud RunではWebSocketもrequest timeoutの対象なので、service側はGoの6分より1分長い`--timeout=420`へ固定します。アプリがdeadline処理する前に基盤側が接続を切る競合を避けるためです。
 

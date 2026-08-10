@@ -239,6 +239,7 @@ try {
         "passkey-policy.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
+        "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs"
     )) {
         $source = Join-Path $webSource $name
@@ -256,6 +257,7 @@ try {
         "passkey-policy.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
+        "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs",
         "assets\main.css",
         "wasm\kotae_client.js",
@@ -284,6 +286,9 @@ try {
     }
     if ($bridge -notmatch [regex]::Escape('from "./voice-session-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice session policy module."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./voice-start-slo-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited voice start SLO policy module."
     }
     if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice stream policy module."
@@ -334,6 +339,7 @@ try {
                 "passkey-policy.mjs",
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
+                "voice-start-slo-policy.mjs",
                 "voice-stream-policy.mjs",
                 "assets/main.css",
                 "wasm/kotae_client.js",

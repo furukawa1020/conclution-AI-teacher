@@ -1497,6 +1497,7 @@ func TestAgentExplicitRespondentCoachReasksLateAnswerOnce(t *testing.T) {
 		uid          = "uid-explicit-coach-late-answer"
 		questionText = "上司に、導入目的は何かと聞かれました"
 		lateAnswer   = "判断のばらつきを減らすためです。目的は評価基準をそろえることです"
+		restated     = "目的は評価基準をそろえることです。判断のばらつきを減らすためです"
 		proxyDraft   = "AIが本人の代わりに作った回答です。"
 		reask        = "そこまでちゃんと聞こえています。今の言葉は変えず、答えになっている一文から続けても大丈夫です。"
 	)
@@ -1509,6 +1510,14 @@ func TestAgentExplicitRespondentCoachReasksLateAnswerOnce(t *testing.T) {
 		"目的は評価基準をそろえることです",
 		proxyDraft,
 	)
+	restatedPlan := coachAttemptPlan(
+		answercontract.OperatorPurpose,
+		answercontract.SlotPurpose,
+		"導入目的",
+		restated,
+		"目的は評価基準をそろえることです",
+		proxyDraft,
+	)
 	fake := &fakeGenerator{generations: []fakeGeneration{
 		{body: encodePlan(t, awaiting)},
 		{body: encodePlan(t, late)},
@@ -1518,6 +1527,14 @@ func TestAgentExplicitRespondentCoachReasksLateAnswerOnce(t *testing.T) {
 			lateAnswer,
 			"目的は評価基準をそろえることです",
 			answercontract.PositionLater,
+		))},
+		{body: encodePlan(t, restatedPlan)},
+		{body: encodeContract(t, coachCriticContract(
+			answercontract.OperatorPurpose,
+			answercontract.SlotPurpose,
+			restated,
+			"目的は評価基準をそろえることです",
+			answercontract.PositionFirst,
 		))},
 	}}
 	agent := newTestAgent(t, fake)
@@ -1575,6 +1592,29 @@ func TestAgentExplicitRespondentCoachReasksLateAnswerOnce(t *testing.T) {
 	if following.Support != nil &&
 		following.Support.VerifiedFirstAnswers != 0 {
 		t.Fatalf("late answer was counted as a verified first answer: %#v", following.Support)
+	}
+	if following.PendingAnswer.AnswerTransitionEvidence !=
+		AnswerTransitionEvidenceQuestionBoundInputClauseLater {
+		t.Fatalf("late verifier agreement was not retained as finite evidence: %#v", following.PendingAnswer)
+	}
+
+	third, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     restated,
+		StateToken:    second.StateToken,
+		InputOrigin:   InputOriginCommittedVoice,
+	})
+	if err != nil {
+		t.Fatalf("same A first: %v", err)
+	}
+	assertCoachMetadata(t, third, "complete", "complete")
+	if third.AnswerProof != AnswerProofQuestionBoundInputAnswerFirst ||
+		third.AnswerTransitionProof !=
+			AnswerTransitionProofQuestionBoundInputClauseLaterToFirst {
+		t.Fatalf("verified transition proofs = %#v", third)
+	}
+	if third.SpokenReply != "" {
+		t.Fatalf("transition proof added AI speech: %q", third.SpokenReply)
 	}
 }
 

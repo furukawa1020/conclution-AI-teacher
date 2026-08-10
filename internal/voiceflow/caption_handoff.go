@@ -288,6 +288,11 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 				handoff.input,
 				outcome.decision,
 			)
+			outcome.decision.AnswerTransitionProof =
+				committedSpeculativeAnswerTransitionProof(
+					handoff.input,
+					outcome.decision,
+				)
 			result = voiceResultFromDecision(handoff.input, outcome.decision)
 			if spokenReply == "" {
 				adoptedDecision = true

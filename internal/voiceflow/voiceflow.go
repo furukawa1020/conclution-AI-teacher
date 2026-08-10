@@ -860,6 +860,8 @@ func (p *Pipeline) processLive(
 					specHit = 1
 					outcome.decision.AnswerProof =
 						committedSpeculativeAnswerProof(input, outcome.decision)
+					outcome.decision.AnswerTransitionProof =
+						committedSpeculativeAnswerTransitionProof(input, outcome.decision)
 					result = voiceResultFromDecision(input, outcome.decision)
 					spokenReply = outcome.decision.SpokenReply
 					adoptedSpeculation = true
@@ -1758,17 +1760,18 @@ func voiceResultFromDecision(
 	decision conversation.VoiceTurnResult,
 ) httpapi.VoiceTurnResult {
 	return httpapi.VoiceTurnResult{
-		StateToken:       decision.StateToken,
-		DetectedDomain:   decision.Domain,
-		AssistanceTarget: decision.AssistanceTarget,
-		RespondentStage:  decision.RespondentStage,
-		CoachPhase:       decision.CoachPhase,
-		CoachAction:      decision.CoachAction,
-		AnswerProof:      string(decision.AnswerProof),
-		ResearchStatus:   decision.ResearchStatus,
-		ResearchRecords:  researchRecords(decision.ResearchRecords),
-		Route:            decision.Route,
-		NeedsPaper:       decision.Intervention.Act == "paper_check",
+		StateToken:            decision.StateToken,
+		DetectedDomain:        decision.Domain,
+		AssistanceTarget:      decision.AssistanceTarget,
+		RespondentStage:       decision.RespondentStage,
+		CoachPhase:            decision.CoachPhase,
+		CoachAction:           decision.CoachAction,
+		AnswerProof:           string(decision.AnswerProof),
+		AnswerTransitionProof: string(decision.AnswerTransitionProof),
+		ResearchStatus:        decision.ResearchStatus,
+		ResearchRecords:       researchRecords(decision.ResearchRecords),
+		Route:                 decision.Route,
+		NeedsPaper:            decision.Intervention.Act == "paper_check",
 	}
 }
 
@@ -1786,6 +1789,23 @@ func committedSpeculativeAnswerProof(
 		return conversation.AnswerProofNone
 	}
 	return decision.AnswerProofCandidate
+}
+
+func committedSpeculativeAnswerTransitionProof(
+	input httpapi.VoiceTurnInput,
+	decision conversation.VoiceTurnResult,
+) conversation.AnswerTransitionProof {
+	if input.StrictCloudMinimization || input.Document != nil ||
+		(decision.AnswerTransitionProof != "" &&
+			decision.AnswerTransitionProof !=
+				conversation.AnswerTransitionProofNone) ||
+		decision.AnswerProofCandidate !=
+			conversation.AnswerProofQuestionBoundInputAnswerFirst ||
+		decision.AnswerTransitionProofCandidate !=
+			conversation.AnswerTransitionProofQuestionBoundInputClauseLaterToFirst {
+		return conversation.AnswerTransitionProofNone
+	}
+	return decision.AnswerTransitionProofCandidate
 }
 
 func terminalAnswerOwnershipSpeechConflict(

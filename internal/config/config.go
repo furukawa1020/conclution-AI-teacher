@@ -45,6 +45,8 @@ type Config struct {
 	AnswerProofWrites            bool
 	VerifierProgressWrites       bool
 	RetrievalPolicyEnabled       bool
+	AnswerTransitionWrites       bool
+	AnswerTransitionEnabled      bool
 	SpeechLocation               string
 	SpeechModel                  string
 	SpeechVoice                  string
@@ -203,6 +205,20 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	answerTransitionWrites, err := envStrictBool(
+		"KOTAE_ANSWER_TRANSITION_WRITES",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	answerTransitionEnabled, err := envStrictBool(
+		"KOTAE_ANSWER_TRANSITION_ENABLED",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	nativeAudioEnabled, err := envStrictBool(
 		"KOTAE_NATIVE_AUDIO_ENABLED",
 		false,
@@ -239,6 +255,8 @@ func Load() (Config, error) {
 		AnswerProofWrites:           answerProofWrites,
 		VerifierProgressWrites:      verifierProgressWrites,
 		RetrievalPolicyEnabled:      retrievalPolicyEnabled,
+		AnswerTransitionWrites:      answerTransitionWrites,
+		AnswerTransitionEnabled:     answerTransitionEnabled,
 		SpeechLocation:              envOr("KOTAE_SPEECH_LOCATION", defaultSpeechLocation),
 		SpeechModel:                 envOr("KOTAE_SPEECH_MODEL", defaultSpeechModel),
 		SpeechVoice:                 envOr("KOTAE_SPEECH_VOICE", defaultSpeechVoice),
@@ -288,6 +306,18 @@ func Load() (Config, error) {
 	if cfg.VerifierProgressWrites && !cfg.StateV2Writes {
 		return Config{}, errors.New(
 			"KOTAE_VERIFIER_PROGRESS_WRITES requires KOTAE_STATE_V2_WRITES",
+		)
+	}
+	if cfg.AnswerTransitionWrites &&
+		(!cfg.StateV2Writes || !cfg.AnswerProofWrites) {
+		return Config{}, errors.New(
+			"KOTAE_ANSWER_TRANSITION_WRITES requires KOTAE_STATE_V2_WRITES and KOTAE_ANSWER_PROOF_WRITES",
+		)
+	}
+	if cfg.AnswerTransitionEnabled &&
+		(!cfg.AnswerTransitionWrites || !cfg.RetrievalPolicyEnabled) {
+		return Config{}, errors.New(
+			"KOTAE_ANSWER_TRANSITION_ENABLED requires KOTAE_ANSWER_TRANSITION_WRITES and KOTAE_RETRIEVAL_POLICY_ENABLED",
 		)
 	}
 	if cfg.NativeCaptionHandoffEnabled && !cfg.NativeAudioEnabled {

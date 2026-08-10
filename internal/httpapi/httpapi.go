@@ -127,22 +127,23 @@ const (
 )
 
 type VoiceTurnResult struct {
-	Audio            []byte
-	AudioMIMEType    string
-	StateToken       string
-	DetectedDomain   string
-	AssistanceTarget string
-	RespondentStage  string
-	CoachPhase       string
-	CoachAction      string
-	AnswerProof      string
-	ResearchStatus   string
-	PrivacyStatus    string
-	ResearchRecords  []ResearchRecord
-	Route            string
-	NeedsPaper       bool
-	Caption          string
-	LiveTimings      VoiceLiveTimings
+	Audio                 []byte
+	AudioMIMEType         string
+	StateToken            string
+	DetectedDomain        string
+	AssistanceTarget      string
+	RespondentStage       string
+	CoachPhase            string
+	CoachAction           string
+	AnswerProof           string
+	AnswerTransitionProof string
+	ResearchStatus        string
+	PrivacyStatus         string
+	ResearchRecords       []ResearchRecord
+	Route                 string
+	NeedsPaper            bool
+	Caption               string
+	LiveTimings           VoiceLiveTimings
 }
 
 // VoiceRespondentCheckpoint is the finite, server-authored control envelope
@@ -625,11 +626,14 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"coachPhase":       result.CoachPhase,
 		"coachAction":      result.CoachAction,
 		"answerProof":      normalizedAnswerProof(result.AnswerProof),
-		"researchStatus":   result.ResearchStatus,
-		"researchRecords":  result.ResearchRecords,
-		"privacyStatus":    result.PrivacyStatus,
-		"route":            result.Route,
-		"needsPaper":       result.NeedsPaper,
+		"answerTransitionProof": normalizedAnswerTransitionProof(
+			result.AnswerTransitionProof,
+		),
+		"researchStatus":  result.ResearchStatus,
+		"researchRecords": result.ResearchRecords,
+		"privacyStatus":   result.PrivacyStatus,
+		"route":           result.Route,
+		"needsPaper":      result.NeedsPaper,
 	}); err != nil {
 		s.logger.WarnContext(ctx, "voice response write failed",
 			"request_id", requestIDFromContext(ctx),
@@ -771,6 +775,9 @@ func normalizedAudioMIME(value string) string {
 
 func validateVoiceResult(result VoiceTurnResult) error {
 	answerProof := normalizedAnswerProof(result.AnswerProof)
+	answerTransitionProof := normalizedAnswerTransitionProof(
+		result.AnswerTransitionProof,
+	)
 	if result.PrivacyStatus == "blocked" {
 		if len(result.Audio) != 0 || result.AudioMIMEType != "" ||
 			result.StateToken != "" || result.Caption != "" ||
@@ -779,6 +786,7 @@ func validateVoiceResult(result VoiceTurnResult) error {
 			result.RespondentStage != "none" ||
 			result.CoachPhase != "none" || result.CoachAction != "none" ||
 			answerProof != "none" ||
+			answerTransitionProof != "none" ||
 			result.ResearchStatus != "none" ||
 			result.ResearchRecords == nil || len(result.ResearchRecords) != 0 ||
 			result.Route != "strict-privacy-blocked" || result.NeedsPaper {
@@ -813,6 +821,14 @@ func validateVoiceResult(result VoiceTurnResult) error {
 			result.CoachPhase,
 			result.CoachAction,
 		) ||
+		!validAnswerTransitionProofMetadata(
+			answerTransitionProof,
+			answerProof,
+			result.AssistanceTarget,
+			result.RespondentStage,
+			result.CoachPhase,
+			result.CoachAction,
+		) ||
 		(result.ResearchStatus != "none" &&
 			result.ResearchStatus != "needs_primary_evidence" &&
 			result.ResearchStatus != "unavailable") ||
@@ -831,6 +847,11 @@ func validateVoiceResult(result VoiceTurnResult) error {
 				result.RespondentStage != "none")) ||
 		!validResearchRecords(result.ResearchStatus, result.ResearchRecords) {
 		return errors.New("voice result has inconsistent metadata")
+	}
+	if answerTransitionProof != "none" &&
+		(len(result.Audio) != 0 || result.AudioMIMEType != "" ||
+			result.Caption != "") {
+		return errors.New("answer transition proof must yield the audio floor")
 	}
 	if result.PrivacyStatus == "clear" &&
 		(result.StateToken != "" || result.ResearchStatus != "none" ||
@@ -857,6 +878,34 @@ func normalizedAnswerProof(value string) string {
 		return "none"
 	}
 	return value
+}
+
+func normalizedAnswerTransitionProof(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
+}
+
+func validAnswerTransitionProofMetadata(
+	proof string,
+	answerProof string,
+	assistanceTarget string,
+	respondentStage string,
+	coachPhase string,
+	coachAction string,
+) bool {
+	switch proof {
+	case "none":
+		return true
+	case "question_bound_input_clause_later_to_first":
+		return answerProof == "question_bound_input_answer_first" &&
+			assistanceTarget == "respondent" &&
+			respondentStage == "restructure" &&
+			coachPhase == "complete" && coachAction == "complete"
+	default:
+		return false
+	}
 }
 
 func validAnswerProofMetadata(
@@ -896,6 +945,10 @@ func validateVoiceResultMode(
 	if normalizedAnswerProof(result.AnswerProof) != "none" &&
 		(input.StrictCloudMinimization || input.Document != nil) {
 		return errors.New("answer proof is unavailable for this request mode")
+	}
+	if normalizedAnswerTransitionProof(result.AnswerTransitionProof) != "none" &&
+		(input.StrictCloudMinimization || input.Document != nil) {
+		return errors.New("answer transition proof is unavailable for this request mode")
 	}
 	if input.StrictCloudMinimization {
 		if result.PrivacyStatus != "clear" && result.PrivacyStatus != "blocked" {

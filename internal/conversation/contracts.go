@@ -118,32 +118,36 @@ type InlinePDF struct {
 }
 
 type VoiceTurnResult struct {
-	SchemaVersion    int         `json:"schemaVersion"`
-	Domain           string      `json:"domain"`
-	Intent           string      `json:"intent"`
-	AssistanceTarget string      `json:"assistance_target"`
-	RespondentStage  string      `json:"respondent_stage"`
-	CoachPhase       string      `json:"coach_phase"`
-	CoachAction      string      `json:"coach_action"`
-	AnswerProof      AnswerProof `json:"answer_proof"`
+	SchemaVersion         int                   `json:"schemaVersion"`
+	Domain                string                `json:"domain"`
+	Intent                string                `json:"intent"`
+	AssistanceTarget      string                `json:"assistance_target"`
+	RespondentStage       string                `json:"respondent_stage"`
+	CoachPhase            string                `json:"coach_phase"`
+	CoachAction           string                `json:"coach_action"`
+	AnswerProof           AnswerProof           `json:"answer_proof"`
+	AnswerTransitionProof AnswerTransitionProof `json:"answer_transition_proof"`
 	// AnswerProofCandidate is process-private evidence produced for both
 	// provisional and committed voice input. The voice pipeline may promote it
 	// only after its exact final-transcript commit boundary. It is never
 	// serialized, persisted, or returned by an HTTP handler.
-	AnswerProofCandidate AnswerProof            `json:"-"`
-	ResearchStatus       string                 `json:"research_status"`
-	ResearchRecords      []ResearchRecord       `json:"research_records"`
-	LatentQuestion       string                 `json:"latent_question"`
-	ArgumentStructure    string                 `json:"argument_structure"`
-	InterventionPolicy   string                 `json:"intervention_policy"`
-	SpokenReply          string                 `json:"spoken_reply"`
-	Confidence           float64                `json:"confidence"`
-	Intervention         ArbiterDecision        `json:"intervention"`
-	SelfCorrectionGrace  bool                   `json:"self_correction_grace"`
-	AnswerContract       answercontract.Metrics `json:"answer_contract_metrics"`
-	Route                string                 `json:"route"`
-	NeedsClarification   bool                   `json:"needs_clarification"`
-	StateToken           string                 `json:"state_token"`
+	AnswerProofCandidate AnswerProof `json:"-"`
+	// AnswerTransitionProofCandidate is process-private and may be promoted
+	// only by the same exact-final voice boundary as AnswerProofCandidate.
+	AnswerTransitionProofCandidate AnswerTransitionProof  `json:"-"`
+	ResearchStatus                 string                 `json:"research_status"`
+	ResearchRecords                []ResearchRecord       `json:"research_records"`
+	LatentQuestion                 string                 `json:"latent_question"`
+	ArgumentStructure              string                 `json:"argument_structure"`
+	InterventionPolicy             string                 `json:"intervention_policy"`
+	SpokenReply                    string                 `json:"spoken_reply"`
+	Confidence                     float64                `json:"confidence"`
+	Intervention                   ArbiterDecision        `json:"intervention"`
+	SelfCorrectionGrace            bool                   `json:"self_correction_grace"`
+	AnswerContract                 answercontract.Metrics `json:"answer_contract_metrics"`
+	Route                          string                 `json:"route"`
+	NeedsClarification             bool                   `json:"needs_clarification"`
+	StateToken                     string                 `json:"state_token"`
 }
 
 // AnswerProof is a content-free, current-turn server attestation. It is not a
@@ -156,6 +160,27 @@ type AnswerProof string
 const (
 	AnswerProofNone                          AnswerProof = "none"
 	AnswerProofQuestionBoundInputAnswerFirst AnswerProof = "question_bound_input_answer_first"
+)
+
+// AnswerTransitionProof is a content-free, current-turn attestation that the
+// same question-bound, person-originated answer clause moved from later in the
+// preceding turn to the front of this turn. It is not a score, identity proof,
+// correctness claim, or evidence of durable learning.
+type AnswerTransitionProof string
+
+const (
+	AnswerTransitionProofNone                                 AnswerTransitionProof = "none"
+	AnswerTransitionProofQuestionBoundInputClauseLaterToFirst AnswerTransitionProof = "question_bound_input_clause_later_to_first"
+)
+
+// AnswerTransitionEvidence is the finite encrypted-state antecedent for
+// QBA-Delta. It contains no question, answer, transcript, evidence span, or
+// generated text.
+type AnswerTransitionEvidence string
+
+const (
+	AnswerTransitionEvidenceNone                          AnswerTransitionEvidence = ""
+	AnswerTransitionEvidenceQuestionBoundInputClauseLater AnswerTransitionEvidence = "question_bound_input_clause_later"
 )
 
 // ResearchRecord is bounded, current-turn discovery metadata. It deliberately
@@ -218,20 +243,21 @@ type ThoughtStateDelta struct {
 // request for one bounded follow-up; it carries no question or answer text and
 // is never model-writable.
 type PendingAnswerFrame struct {
-	Active                bool                          `json:"active"`
-	Operator              answercontract.Operator       `json:"operator,omitempty"`
-	Subject               string                        `json:"subject,omitempty"`
-	RequiredSlots         []answercontract.RequiredSlot `json:"required_slots,omitempty"`
-	ExpansionOperator     answercontract.Operator       `json:"expansion_operator,omitempty"`
-	Phase                 respondent.CoachPhase         `json:"phase,omitempty"`
-	Attempts              uint8                         `json:"attempts,omitempty"`
-	AssistantFollowUp     bool                          `json:"assistant_follow_up,omitempty"`
-	ExpansionOptIn        bool                          `json:"expansion_opt_in,omitempty"`
-	RestatementTag        string                        `json:"restatement_tag,omitempty"`
-	QuestionInstanceTag   string                        `json:"question_instance_tag,omitempty"`
-	QuestionContinuityTag string                        `json:"question_continuity_tag,omitempty"`
-	ContinuityTag         string                        `json:"continuity_tag,omitempty"`
-	NativeCoachScopeTag   string                        `json:"native_coach_scope_tag,omitempty"`
+	Active                   bool                          `json:"active"`
+	Operator                 answercontract.Operator       `json:"operator,omitempty"`
+	Subject                  string                        `json:"subject,omitempty"`
+	RequiredSlots            []answercontract.RequiredSlot `json:"required_slots,omitempty"`
+	ExpansionOperator        answercontract.Operator       `json:"expansion_operator,omitempty"`
+	Phase                    respondent.CoachPhase         `json:"phase,omitempty"`
+	Attempts                 uint8                         `json:"attempts,omitempty"`
+	AssistantFollowUp        bool                          `json:"assistant_follow_up,omitempty"`
+	ExpansionOptIn           bool                          `json:"expansion_opt_in,omitempty"`
+	RestatementTag           string                        `json:"restatement_tag,omitempty"`
+	QuestionInstanceTag      string                        `json:"question_instance_tag,omitempty"`
+	QuestionContinuityTag    string                        `json:"question_continuity_tag,omitempty"`
+	ContinuityTag            string                        `json:"continuity_tag,omitempty"`
+	AnswerTransitionEvidence AnswerTransitionEvidence      `json:"answer_transition_evidence,omitempty"`
+	NativeCoachScopeTag      string                        `json:"native_coach_scope_tag,omitempty"`
 	// VerifierProgress is a fixed-size posterior over current-question verifier
 	// progress. It carries no prose, answer, transcript, diagnosis, or retrieval
 	// claim and is never exposed to a model prompt.
@@ -394,6 +420,12 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		// traffic does not mutate otherwise authenticated v1 state.
 		frame.Subject = collapseSpace(frame.Subject)
 	}
+	switch frame.AnswerTransitionEvidence {
+	case AnswerTransitionEvidenceNone,
+		AnswerTransitionEvidenceQuestionBoundInputClauseLater:
+	default:
+		return PendingAnswerFrame{}, ErrInvalidStateToken
+	}
 	if !ok ||
 		!expansionOK ||
 		!activeCoachPhase(frame.Phase) ||
@@ -425,6 +457,12 @@ func normalizePendingAnswer(frame PendingAnswerFrame) (PendingAnswerFrame, error
 		(frame.RestatementTag != "" &&
 			(frame.Phase != respondent.CoachPhaseAwaitingRestatement ||
 				!validCoachRestatementTag(frame.RestatementTag))) ||
+		(frame.AnswerTransitionEvidence != AnswerTransitionEvidenceNone &&
+			(frame.Phase != respondent.CoachPhaseAwaitingRestatement ||
+				frame.QuestionInstanceTag == "" ||
+				frame.QuestionContinuityTag == "" ||
+				frame.ContinuityTag == "" ||
+				frame.AssistantFollowUp || frame.ExpansionOptIn)) ||
 		len(frame.RequiredSlots) == 0 ||
 		len(frame.RequiredSlots) > answercontract.MaxRequiredSlots {
 		return PendingAnswerFrame{}, ErrInvalidStateToken

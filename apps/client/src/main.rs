@@ -408,11 +408,20 @@ enum AnswerProof {
     QuestionBoundInputAnswerFirst,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AnswerTransitionProof {
+    #[default]
+    None,
+    QuestionBoundInputClauseLaterToFirst,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CoachState {
     phase: CoachPhase,
     action: CoachAction,
     answer_proof: AnswerProof,
+    answer_transition_proof: AnswerTransitionProof,
 }
 
 impl CoachState {
@@ -420,6 +429,7 @@ impl CoachState {
         phase: CoachPhase::None,
         action: CoachAction::None,
         answer_proof: AnswerProof::None,
+        answer_transition_proof: AnswerTransitionProof::None,
     };
 
     const fn from_result(phase: CoachPhase, action: CoachAction) -> Self {
@@ -427,6 +437,7 @@ impl CoachState {
             phase,
             action,
             answer_proof: AnswerProof::None,
+            answer_transition_proof: AnswerTransitionProof::None,
         }
     }
 
@@ -434,11 +445,13 @@ impl CoachState {
         phase: CoachPhase,
         action: CoachAction,
         answer_proof: AnswerProof,
+        answer_transition_proof: AnswerTransitionProof,
     ) -> Self {
         Self {
             phase,
             action,
             answer_proof,
+            answer_transition_proof,
         }
     }
 
@@ -447,6 +460,7 @@ impl CoachState {
             phase: self.phase,
             action: self.action,
             answer_proof: AnswerProof::None,
+            answer_transition_proof: AnswerTransitionProof::None,
         }
     }
 
@@ -479,7 +493,27 @@ impl CoachState {
         self.yielded_after_owned_answer()
     }
 
+    const fn proved_later_to_first_transition(self) -> bool {
+        matches!(
+            (
+                self.answer_proof,
+                self.answer_transition_proof,
+                self.phase,
+                self.action,
+            ),
+            (
+                AnswerProof::QuestionBoundInputAnswerFirst,
+                AnswerTransitionProof::QuestionBoundInputClauseLaterToFirst,
+                CoachPhase::Complete,
+                CoachAction::Complete,
+            )
+        )
+    }
+
     const fn status(self) -> &'static str {
+        if self.proved_later_to_first_transition() {
+            return "同じA / 後ろから先頭へ";
+        }
         if self.yielded_after_owned_answer() {
             return "回答所有権 / AI発話なし";
         }
@@ -508,6 +542,9 @@ impl CoachState {
     }
 
     const fn heading(self) -> &'static str {
+        if self.proved_later_to_first_transition() {
+            return "同じAの一文が、後ろから先頭へ移りました";
+        }
         if self.yielded_after_owned_answer() {
             return "あなたのAが先に出たので、AIは黙りました";
         }
@@ -529,6 +566,9 @@ impl CoachState {
     }
 
     const fn hint(self) -> &'static str {
+        if self.proved_later_to_first_transition() {
+            return "AIは答えを足していません";
+        }
         if self.yielded_after_owned_answer() {
             return "今回の入力だけを報告された問いへ束縛し、A先頭を二重確認しました。KOTAEは答えも相づちも足さず、ここで発話権を返しました。話者・ライブネス・外部で実際にその問いを聞かれた事実・正解・能力・上達は確認していません";
         }
@@ -715,6 +755,7 @@ impl CloudState {
 
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct VoiceTurnResult {
     audio_base64: String,
     audio_mime_type: String,
@@ -729,6 +770,8 @@ struct VoiceTurnResult {
     coach_action: CoachAction,
     #[serde(default)]
     answer_proof: AnswerProof,
+    #[serde(default)]
+    answer_transition_proof: AnswerTransitionProof,
     route: String,
     needs_paper: bool,
     research_status: ResearchStatus,
@@ -2547,6 +2590,23 @@ fn submit_turn(
             return;
         }
 
+        if !valid_answer_transition_proof_metadata(
+            result.answer_transition_proof,
+            result.answer_proof,
+            &result.assistance_target,
+            &result.respondent_stage,
+            result.coach_phase,
+            result.coach_action,
+            strict_snapshot,
+            consumed_document,
+        ) {
+            cloud::stop_session();
+            voice_state.set(VoiceState::Error(
+                "回答遷移の境界を検証できなかったため停止しました",
+            ));
+            return;
+        }
+
         if !valid_voice_privacy_metadata(
             strict_snapshot,
             &result.privacy_status,
@@ -2647,10 +2707,16 @@ fn submit_turn(
         } else {
             result.answer_proof
         };
+        let answer_transition_proof = if result.interrupted {
+            AnswerTransitionProof::None
+        } else {
+            result.answer_transition_proof
+        };
         coach_state.set(CoachState::from_authoritative_result(
             result.coach_phase,
             result.coach_action,
             answer_proof,
+            answer_transition_proof,
         ));
         if result.interrupted {
             // The final frame reached a clean terminal EOF, so commit its
@@ -2927,6 +2993,32 @@ fn valid_answer_proof_metadata(
                     (coach_phase, coach_action),
                     (CoachPhase::Complete, CoachAction::Complete)
                         | (CoachPhase::Expanding, CoachAction::Expand)
+                )
+        }
+    }
+}
+
+fn valid_answer_transition_proof_metadata(
+    proof: AnswerTransitionProof,
+    answer_proof: AnswerProof,
+    assistance_target: &str,
+    respondent_stage: &str,
+    coach_phase: CoachPhase,
+    coach_action: CoachAction,
+    strict_cloud_minimization: bool,
+    consumed_document: bool,
+) -> bool {
+    match proof {
+        AnswerTransitionProof::None => true,
+        AnswerTransitionProof::QuestionBoundInputClauseLaterToFirst => {
+            !strict_cloud_minimization
+                && !consumed_document
+                && matches!(answer_proof, AnswerProof::QuestionBoundInputAnswerFirst)
+                && assistance_target == "respondent"
+                && respondent_stage == "restructure"
+                && matches!(
+                    (coach_phase, coach_action),
+                    (CoachPhase::Complete, CoachAction::Complete)
                 )
         }
     }
@@ -4370,21 +4462,22 @@ fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSWER_SUPPORT_COPY, AnswerProof, COACH_CHECKPOINT_MAX_CHARS, CloudState, CoachAction,
-        CoachPhase, CoachState, NATIVE_RESPONDENT_COACH_ROUTE, NEW_PASSKEY_ACCOUNT_ACTION,
-        ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
-        PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
-        PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
-        PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
-        RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
-        STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, TurnNotice, VoicePrepareLatency, VoicePrepareOutcome, VoicePrepareResult,
-        VoicePrepareRoute, VoiceReceipt, VoiceStartLatency, VoiceStartOutcome, VoiceStartRoute,
-        VoiceState, VoiceTurnMode, cloud_state_for_display, confirmed_voice_input_state,
-        interrupted_voice_state, interruption_ready_voice_state, passkey_focus_target,
-        recoverable_wait_turn_code, requires_passkey_choice,
-        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
-        turn_mode_for_gesture_epoch, valid_answer_proof_metadata, valid_coach_checkpoint_keys,
+        ANSWER_SUPPORT_COPY, AnswerProof, AnswerTransitionProof, COACH_CHECKPOINT_MAX_CHARS,
+        CloudState, CoachAction, CoachPhase, CoachState, NATIVE_RESPONDENT_COACH_ROUTE,
+        NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
+        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
+        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget,
+        PasskeySetupFeedback, RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING,
+        STANDARD_MODE_ROUTE_COPY, STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY,
+        SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, TurnNotice, VoicePrepareLatency,
+        VoicePrepareOutcome, VoicePrepareResult, VoicePrepareRoute, VoiceReceipt,
+        VoiceStartLatency, VoiceStartOutcome, VoiceStartRoute, VoiceState, VoiceTurnMode,
+        cloud_state_for_display, confirmed_voice_input_state, interrupted_voice_state,
+        interruption_ready_voice_state, passkey_focus_target, recoverable_wait_turn_code,
+        requires_passkey_choice, requires_passkey_registration_recovery, session_stop_pauses,
+        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_answer_proof_metadata,
+        valid_answer_transition_proof_metadata, valid_coach_checkpoint_keys,
         valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
         valid_streamed_audio_metadata, valid_voice_pause_metadata, valid_voice_prepare_slo_clear,
         valid_voice_privacy_metadata, valid_voice_receipt_metadata, validated_voice_prepare_slo,
@@ -4402,6 +4495,12 @@ mod tests {
 
     fn deserialize_answer_proof(value: &str) -> Result<AnswerProof, serde::de::value::Error> {
         AnswerProof::deserialize(value.into_deserializer())
+    }
+
+    fn deserialize_answer_transition_proof(
+        value: &str,
+    ) -> Result<AnswerTransitionProof, serde::de::value::Error> {
+        AnswerTransitionProof::deserialize(value.into_deserializer())
     }
 
     fn voice_prepare_slo_keys() -> Vec<String> {
@@ -4626,6 +4725,7 @@ mod tests {
             CoachPhase::Complete,
             CoachAction::Complete,
             verified,
+            AnswerTransitionProof::None,
         );
         assert_eq!(state.status(), "回答所有権 / AI発話なし");
         assert_eq!(state.heading(), "あなたのAが先に出たので、AIは黙りました");
@@ -4653,6 +4753,7 @@ mod tests {
             CoachPhase::Expanding,
             CoachAction::Expand,
             verified,
+            AnswerTransitionProof::None,
         );
         assert_eq!(expanding.status(), "今回の入力 / A先頭確認");
         assert_eq!(
@@ -4669,6 +4770,7 @@ mod tests {
             CoachPhase::Complete,
             CoachAction::Complete,
             verified,
+            AnswerTransitionProof::None,
         );
         assert!(terminal.shows_answer_ownership_receipt());
 
@@ -4678,11 +4780,13 @@ mod tests {
                 CoachPhase::Expanding,
                 CoachAction::Expand,
                 verified,
+                AnswerTransitionProof::None,
             ),
             CoachState::from_authoritative_result(
                 CoachPhase::Blocked,
                 CoachAction::Release,
                 verified,
+                AnswerTransitionProof::None,
             ),
             CoachState::NONE,
         ] {
@@ -4691,11 +4795,83 @@ mod tests {
     }
 
     #[test]
+    fn answer_transition_proof_is_exact_current_turn_and_unscored() {
+        let transition = AnswerTransitionProof::QuestionBoundInputClauseLaterToFirst;
+        assert!(valid_answer_transition_proof_metadata(
+            transition,
+            AnswerProof::QuestionBoundInputAnswerFirst,
+            "respondent",
+            "restructure",
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            false,
+            false,
+        ));
+        for (answer_proof, phase, strict, pdf) in [
+            (AnswerProof::None, CoachPhase::Complete, false, false),
+            (
+                AnswerProof::QuestionBoundInputAnswerFirst,
+                CoachPhase::Expanding,
+                false,
+                false,
+            ),
+            (
+                AnswerProof::QuestionBoundInputAnswerFirst,
+                CoachPhase::Complete,
+                true,
+                false,
+            ),
+            (
+                AnswerProof::QuestionBoundInputAnswerFirst,
+                CoachPhase::Complete,
+                false,
+                true,
+            ),
+        ] {
+            assert!(!valid_answer_transition_proof_metadata(
+                transition,
+                answer_proof,
+                "respondent",
+                "restructure",
+                phase,
+                CoachAction::Complete,
+                strict,
+                pdf,
+            ));
+        }
+        assert!(deserialize_answer_transition_proof("none").is_ok());
+        assert!(
+            deserialize_answer_transition_proof("question_bound_input_clause_later_to_first")
+                .is_ok()
+        );
+        assert!(deserialize_answer_transition_proof("later_to_first").is_err());
+
+        let state = CoachState::from_authoritative_result(
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            AnswerProof::QuestionBoundInputAnswerFirst,
+            transition,
+        );
+        assert_eq!(state.heading(), "同じAの一文が、後ろから先頭へ移りました");
+        assert_eq!(state.hint(), "AIは答えを足していません");
+        for forbidden in ["点", "スコア", "streak", "レベル", "上達", "正解"] {
+            assert!(!state.status().contains(forbidden));
+            assert!(!state.heading().contains(forbidden));
+            assert!(!state.hint().contains(forbidden));
+        }
+
+        let cleared = state.without_answer_proof();
+        assert_eq!(cleared.answer_proof, AnswerProof::None);
+        assert_eq!(cleared.answer_transition_proof, AnswerTransitionProof::None);
+    }
+
+    #[test]
     fn confirmed_voice_input_event_can_only_clear_the_current_proof() {
         let verified = CoachState::from_authoritative_result(
             CoachPhase::Expanding,
             CoachAction::Expand,
             AnswerProof::QuestionBoundInputAnswerFirst,
+            AnswerTransitionProof::None,
         );
         let exact_keys = ["version".to_string()];
         let cleared = confirmed_voice_input_state(verified, 1.0, &exact_keys).unwrap();

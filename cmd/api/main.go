@@ -253,6 +253,8 @@ func main() {
 			cfg.AnswerProofWrites,
 			cfg.VerifierProgressWrites,
 			cfg.RetrievalPolicyEnabled,
+			cfg.AnswerTransitionWrites,
+			cfg.AnswerTransitionEnabled,
 		)
 		if err != nil {
 			logger.Error("initialize conversation agent", "error", err)

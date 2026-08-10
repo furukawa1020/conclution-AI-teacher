@@ -93,6 +93,17 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.doesNotMatch(deploy, /"pcm-ring-worklet-runtime\.js"/u);
   assert.doesNotMatch(deploy, /"wasm[\\/]kotae_pcm_ring\.js"/u);
   assert.match(build, /BEGIN audited wasm-bindgen sync glue/u);
+  for (const fragment of [
+    "generatedThrowHandler",
+    "contentFreeThrowHandler",
+    "generatedStringReader",
+    "generatedTextDecoder",
+  ]) {
+    assert.ok(
+      build.includes(`$${fragment} = ConvertTo-Lf -Text @'`),
+      `${fragment} must ignore checkout line endings`,
+    );
+  }
   assert.match(build, /PCM Worklet bundle is not a single reviewed synchronous module/u);
   assert.match(browserRunner, /const PROFILE_CLEANUP_ATTEMPTS = 12/u);
   assert.match(browserRunner, /new Set\(\["EACCES", "EBUSY", "ENOTEMPTY", "EPERM"\]\)/u);

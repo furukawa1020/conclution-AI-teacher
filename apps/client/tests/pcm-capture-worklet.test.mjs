@@ -11,7 +11,7 @@ import {
 const publishedWorkletSource = readFileSync(
   new URL("../web/pcm-capture-worklet.js", import.meta.url),
   "utf8",
-);
+).replaceAll("\r\n", "\n").replaceAll("\r", "\n");
 const runtimeImport =
   'import { createPcmRing } from "./pcm-ring-worklet-runtime.js";';
 assert.equal(publishedWorkletSource.startsWith(`${runtimeImport}\n`), true);

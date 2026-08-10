@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
 const (
@@ -188,10 +189,11 @@ func (metrics *voiceLiveOutputMetrics) deliver(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	meaningful := speechio.PCM16HasMeaningfulSample(audio)
 	if err := conn.Write(ctx, websocket.MessageBinary, audio); err != nil {
 		return err
 	}
-	if metrics.firstOutputAt.IsZero() {
+	if meaningful && metrics.firstOutputAt.IsZero() {
 		metrics.firstOutputAt = time.Now()
 	}
 	metrics.frames++

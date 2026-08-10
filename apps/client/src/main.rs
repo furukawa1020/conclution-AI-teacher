@@ -129,22 +129,26 @@ impl VoiceReceipt {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VoiceStartLatency {
     milliseconds: u32,
+    outcome: VoiceStartOutcome,
+    route: VoiceStartRoute,
 }
 
 impl VoiceStartLatency {
     const ONE_SECOND_GOAL_MS: u32 = 1_000;
     const MAXIMUM_EVENT_MS: f64 = 120_000.0;
+    const MAXIMUM_GENERATION: u64 = 9_007_199_254_740_991;
 
     const fn is_on_target(self) -> bool {
-        self.milliseconds <= Self::ONE_SECOND_GOAL_MS
+        matches!(self.outcome, VoiceStartOutcome::OnTarget)
     }
 
     fn status(self) -> String {
         let seconds = f64::from(self.milliseconds) / 1_000.0;
+        let route = self.route.label();
         if self.is_on_target() {
-            format!("返答開始 約{seconds:.1}秒 / 1秒目標内")
+            format!("返答開始 約{seconds:.1}秒 / {route} / 1秒目標内")
         } else {
-            format!("返答開始 約{seconds:.1}秒 / さらに短縮中")
+            format!("返答開始 約{seconds:.1}秒 / {route} / さらに短縮中")
         }
     }
 
@@ -153,6 +157,70 @@ impl VoiceStartLatency {
             "voice-status__latency is-on-target"
         } else {
             "voice-status__latency"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceStartOutcome {
+    OnTarget,
+    Slow,
+    Missed,
+    Stalled,
+}
+
+impl VoiceStartOutcome {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "on-target" => Some(Self::OnTarget),
+            "slow" => Some(Self::Slow),
+            "missed" => Some(Self::Missed),
+            "stalled" => Some(Self::Stalled),
+            _ => None,
+        }
+    }
+
+    fn for_latency(milliseconds: f64) -> Self {
+        if milliseconds <= f64::from(VoiceStartLatency::ONE_SECOND_GOAL_MS) {
+            Self::OnTarget
+        } else if milliseconds < 3_000.0 {
+            Self::Slow
+        } else if milliseconds < 10_000.0 {
+            Self::Missed
+        } else {
+            Self::Stalled
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceStartRoute {
+    NativeConversation,
+    InitialAnswerSupport,
+    ContinuingCoach,
+    HttpFallback,
+    StrictLocal,
+}
+
+impl VoiceStartRoute {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "native-conversation" => Some(Self::NativeConversation),
+            "initial-answer-support" => Some(Self::InitialAnswerSupport),
+            "continuing-coach" => Some(Self::ContinuingCoach),
+            "http-fallback" => Some(Self::HttpFallback),
+            "strict-local" => Some(Self::StrictLocal),
+            _ => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::NativeConversation => "通常会話",
+            Self::InitialAnswerSupport => "初回回答支援",
+            Self::ContinuingCoach => "継続Coach",
+            Self::HttpFallback => "HTTP fallback",
+            Self::StrictLocal => "厳格経路",
         }
     }
 }
@@ -619,8 +687,8 @@ mod cloud {
         VoiceTurnMode, VoiceTurnResult, WaitTurnError, coach_action_from_checkpoint,
         coach_phase_from_checkpoint, confirmed_voice_input_state, recoverable_finish_turn_code,
         recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
-        valid_coach_checkpoint_metadata, valid_voice_pause_metadata, valid_voice_receipt_metadata,
-        validated_voice_start_latency,
+        valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
+        valid_voice_pause_metadata, valid_voice_receipt_metadata, validated_voice_start_slo,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -694,6 +762,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct VoiceStartSloListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     impl Drop for FirstAudioListener {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
@@ -734,6 +807,15 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:voice-start-latency",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for VoiceStartSloListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-start-slo",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -1097,20 +1179,11 @@ mod cloud {
             else {
                 return;
             };
-            let milliseconds = if milliseconds.is_null() {
-                None
-            } else {
-                let Some(value) = milliseconds.as_f64() else {
-                    return;
-                };
-                Some(value)
-            };
-            let Some(next_latency) =
-                validated_voice_start_latency(milliseconds, version, &key_names)
-            else {
+            if !valid_legacy_voice_start_latency_clear(milliseconds.is_null(), version, &key_names)
+            {
                 return;
-            };
-            voice_start_latency.set(next_latency);
+            }
+            voice_start_latency.set(None);
         });
         window
             .add_event_listener_with_callback(
@@ -1119,6 +1192,81 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(VoiceStartLatencyListener { window, callback }))
+    }
+
+    pub fn install_voice_start_slo_listener(
+        mut voice_start_latency: Signal<Option<super::VoiceStartLatency>>,
+    ) -> Option<Rc<VoiceStartSloListener>> {
+        let window = web_sys::window()?;
+        let mut latest_generation = 0_u64;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Some(key_names) = keys
+                .iter()
+                .map(|key| key.as_string())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Ok(generation) = js_sys::Reflect::get(&detail, &JsValue::from_str("generation"))
+            else {
+                return;
+            };
+            let Some(generation) = generation.as_f64() else {
+                return;
+            };
+            let Ok(latency_ms) = js_sys::Reflect::get(&detail, &JsValue::from_str("latency_ms"))
+            else {
+                return;
+            };
+            let Some(latency_ms) = latency_ms.as_f64() else {
+                return;
+            };
+            let Ok(outcome) = js_sys::Reflect::get(&detail, &JsValue::from_str("outcome")) else {
+                return;
+            };
+            let Some(outcome) = outcome.as_string() else {
+                return;
+            };
+            let Ok(route) = js_sys::Reflect::get(&detail, &JsValue::from_str("route")) else {
+                return;
+            };
+            let Some(route) = route.as_string() else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            let Some(next_latency) = validated_voice_start_slo(
+                &mut latest_generation,
+                generation,
+                latency_ms,
+                &outcome,
+                &route,
+                version,
+                &key_names,
+            ) else {
+                return;
+            };
+            voice_start_latency.set(Some(next_latency));
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:voice-start-slo",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(VoiceStartSloListener { window, callback }))
     }
 
     pub fn install_first_audio_listener(
@@ -1556,6 +1704,12 @@ mod cloud {
     }
 
     pub fn install_voice_start_latency_listener(
+        _voice_start_latency: Signal<Option<VoiceStartLatency>>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_voice_start_slo_listener(
         _voice_start_latency: Signal<Option<VoiceStartLatency>>,
     ) -> Option<Listener> {
         None
@@ -2189,25 +2343,48 @@ fn valid_voice_receipt_metadata(phase: &str, version: f64, field_count: u32) -> 
     field_count == 2 && version == 1.0 && matches!(phase, "received" | "clear")
 }
 
-fn validated_voice_start_latency(
-    milliseconds: Option<f64>,
+fn valid_legacy_voice_start_latency_clear(
+    milliseconds_is_null: bool,
     version: f64,
     keys: &[String],
-) -> Option<Option<VoiceStartLatency>> {
-    if version != 1.0 || keys != ["milliseconds", "version"] {
-        return None;
-    }
-    let Some(milliseconds) = milliseconds else {
-        return Some(None);
-    };
-    if !milliseconds.is_finite()
-        || !(0.0..=VoiceStartLatency::MAXIMUM_EVENT_MS).contains(&milliseconds)
+) -> bool {
+    milliseconds_is_null && version == 1.0 && keys == ["milliseconds", "version"]
+}
+
+fn validated_voice_start_slo(
+    latest_generation: &mut u64,
+    generation: f64,
+    latency_ms: f64,
+    outcome: &str,
+    route: &str,
+    version: f64,
+    keys: &[String],
+) -> Option<VoiceStartLatency> {
+    if version != 1.0
+        || keys != ["generation", "latency_ms", "outcome", "route", "version"]
+        || !generation.is_finite()
+        || generation.fract() != 0.0
+        || !(1.0..=VoiceStartLatency::MAXIMUM_GENERATION as f64).contains(&generation)
+        || !latency_ms.is_finite()
+        || !(0.0..=VoiceStartLatency::MAXIMUM_EVENT_MS).contains(&latency_ms)
     {
         return None;
     }
-    Some(Some(VoiceStartLatency {
-        milliseconds: milliseconds.round() as u32,
-    }))
+    let outcome = VoiceStartOutcome::from_wire(outcome)?;
+    if outcome != VoiceStartOutcome::for_latency(latency_ms) {
+        return None;
+    }
+    let route = VoiceStartRoute::from_wire(route)?;
+    let generation = generation as u64;
+    if generation <= *latest_generation {
+        return None;
+    }
+    *latest_generation = generation;
+    Some(VoiceStartLatency {
+        milliseconds: latency_ms.round() as u32,
+        outcome,
+        route,
+    })
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -2858,6 +3035,8 @@ fn App() -> Element {
         use_hook(|| cloud::install_voice_input_confirmed_listener(coach_state));
     let _voice_start_latency_listener =
         use_hook(|| cloud::install_voice_start_latency_listener(voice_start_latency));
+    let _voice_start_slo_listener =
+        use_hook(|| cloud::install_voice_start_slo_listener(voice_start_latency));
     let _first_audio_listener =
         use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
     let _coach_checkpoint_listener =
@@ -3668,13 +3847,15 @@ mod tests {
         PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
         STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceStartLatency, VoiceState, VoiceTurnMode,
-        cloud_state_for_display, confirmed_voice_input_state, passkey_focus_target,
-        recoverable_wait_turn_code, requires_passkey_choice,
-        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
-        turn_mode_for_gesture_epoch, valid_answer_proof_metadata, valid_coach_checkpoint_keys,
-        valid_coach_checkpoint_metadata, valid_streamed_audio_metadata, valid_voice_pause_metadata,
-        valid_voice_privacy_metadata, valid_voice_receipt_metadata, validated_voice_start_latency,
+        TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceStartLatency, VoiceStartOutcome,
+        VoiceStartRoute, VoiceState, VoiceTurnMode, cloud_state_for_display,
+        confirmed_voice_input_state, passkey_focus_target, recoverable_wait_turn_code,
+        requires_passkey_choice, requires_passkey_registration_recovery, session_stop_pauses,
+        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_answer_proof_metadata,
+        valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
+        valid_legacy_voice_start_latency_clear, valid_streamed_audio_metadata,
+        valid_voice_pause_metadata, valid_voice_privacy_metadata, valid_voice_receipt_metadata,
+        validated_voice_start_slo,
     };
     use serde::{Deserialize, de::IntoDeserializer};
 
@@ -4155,48 +4336,265 @@ mod tests {
     }
 
     #[test]
-    fn voice_start_latency_is_exact_current_turn_metadata() {
-        let keys = ["milliseconds".to_string(), "version".to_string()];
-        let on_target = validated_voice_start_latency(Some(842.4), 1.0, &keys)
-            .expect("valid event")
-            .expect("measured event");
+    fn voice_start_slo_is_exact_current_turn_metadata() {
+        let keys = [
+            "generation".to_string(),
+            "latency_ms".to_string(),
+            "outcome".to_string(),
+            "route".to_string(),
+            "version".to_string(),
+        ];
+        let mut latest_generation = 0;
+        let on_target = validated_voice_start_slo(
+            &mut latest_generation,
+            1.0,
+            842.4,
+            "on-target",
+            "native-conversation",
+            1.0,
+            &keys,
+        )
+        .expect("valid event");
         assert_eq!(on_target.milliseconds, 842);
+        assert_eq!(on_target.outcome, VoiceStartOutcome::OnTarget);
+        assert_eq!(on_target.route, VoiceStartRoute::NativeConversation);
         assert!(on_target.is_on_target());
-        assert_eq!(on_target.status(), "返答開始 約0.8秒 / 1秒目標内");
-
-        let over_target = validated_voice_start_latency(Some(1_249.7), 1.0, &keys)
-            .expect("valid event")
-            .expect("measured event");
-        assert_eq!(over_target.milliseconds, 1_250);
-        assert!(!over_target.is_on_target());
-        assert_eq!(over_target.status(), "返答開始 約1.2秒 / さらに短縮中");
-
         assert_eq!(
-            validated_voice_start_latency(None, 1.0, &keys),
-            Some(None),
-            "a new turn clears the prior measurement",
+            on_target.status(),
+            "返答開始 約0.8秒 / 通常会話 / 1秒目標内"
         );
-        for invalid in [
-            validated_voice_start_latency(Some(-0.1), 1.0, &keys),
-            validated_voice_start_latency(Some(f64::NAN), 1.0, &keys),
-            validated_voice_start_latency(
-                Some(VoiceStartLatency::MAXIMUM_EVENT_MS + 0.1),
+        assert_eq!(latest_generation, 1);
+
+        let over_target = validated_voice_start_slo(
+            &mut latest_generation,
+            2.0,
+            1_249.7,
+            "slow",
+            "initial-answer-support",
+            1.0,
+            &keys,
+        )
+        .expect("valid event");
+        assert_eq!(over_target.milliseconds, 1_250);
+        assert_eq!(over_target.outcome, VoiceStartOutcome::Slow);
+        assert_eq!(over_target.route, VoiceStartRoute::InitialAnswerSupport);
+        assert!(!over_target.is_on_target());
+        assert_eq!(
+            over_target.status(),
+            "返答開始 約1.2秒 / 初回回答支援 / さらに短縮中"
+        );
+
+        let missed = validated_voice_start_slo(
+            &mut latest_generation,
+            3.0,
+            3_000.0,
+            "missed",
+            "continuing-coach",
+            1.0,
+            &keys,
+        )
+        .expect("valid missed event");
+        assert_eq!(missed.outcome, VoiceStartOutcome::Missed);
+        assert_eq!(missed.route, VoiceStartRoute::ContinuingCoach);
+        assert!(missed.status().contains("継続Coach"));
+
+        let stalled = validated_voice_start_slo(
+            &mut latest_generation,
+            4.0,
+            10_000.0,
+            "stalled",
+            "http-fallback",
+            1.0,
+            &keys,
+        )
+        .expect("valid stalled event");
+        assert_eq!(stalled.outcome, VoiceStartOutcome::Stalled);
+        assert_eq!(stalled.route, VoiceStartRoute::HttpFallback);
+        assert!(stalled.status().contains("HTTP fallback"));
+
+        let strict = validated_voice_start_slo(
+            &mut latest_generation,
+            5.0,
+            1_000.0,
+            "on-target",
+            "strict-local",
+            1.0,
+            &keys,
+        )
+        .expect("valid strict event");
+        assert_eq!(strict.route, VoiceStartRoute::StrictLocal);
+        assert!(strict.status().contains("厳格経路"));
+    }
+
+    #[test]
+    fn voice_start_slo_generation_is_safe_and_strictly_monotonic() {
+        let keys = [
+            "generation".to_string(),
+            "latency_ms".to_string(),
+            "outcome".to_string(),
+            "route".to_string(),
+            "version".to_string(),
+        ];
+        let mut latest_generation = 0;
+        assert!(
+            validated_voice_start_slo(
+                &mut latest_generation,
+                7.0,
+                500.0,
+                "on-target",
+                "native-conversation",
                 1.0,
                 &keys,
-            ),
-            validated_voice_start_latency(Some(500.0), 2.0, &keys),
-            validated_voice_start_latency(
-                Some(500.0),
+            )
+            .is_some()
+        );
+        for duplicate_or_stale in [7.0, 6.0, 1.0] {
+            assert_eq!(
+                validated_voice_start_slo(
+                    &mut latest_generation,
+                    duplicate_or_stale,
+                    500.0,
+                    "on-target",
+                    "native-conversation",
+                    1.0,
+                    &keys,
+                ),
+                None
+            );
+        }
+        assert_eq!(latest_generation, 7);
+
+        assert!(
+            validated_voice_start_slo(
+                &mut latest_generation,
+                VoiceStartLatency::MAXIMUM_GENERATION as f64,
+                500.0,
+                "on-target",
+                "native-conversation",
+                1.0,
+                &keys,
+            )
+            .is_some()
+        );
+        assert_eq!(latest_generation, VoiceStartLatency::MAXIMUM_GENERATION);
+
+        for invalid_generation in [
+            -1.0,
+            0.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            VoiceStartLatency::MAXIMUM_GENERATION as f64 + 1.0,
+        ] {
+            let mut isolated_generation = 0;
+            assert_eq!(
+                validated_voice_start_slo(
+                    &mut isolated_generation,
+                    invalid_generation,
+                    500.0,
+                    "on-target",
+                    "native-conversation",
+                    1.0,
+                    &keys,
+                ),
+                None
+            );
+            assert_eq!(isolated_generation, 0);
+        }
+    }
+
+    #[test]
+    fn voice_start_slo_rejects_invalid_values_and_extra_content() {
+        let keys = [
+            "generation".to_string(),
+            "latency_ms".to_string(),
+            "outcome".to_string(),
+            "route".to_string(),
+            "version".to_string(),
+        ];
+        for (latency, outcome) in [
+            (-0.1, "on-target"),
+            (f64::NAN, "on-target"),
+            (f64::INFINITY, "on-target"),
+            (VoiceStartLatency::MAXIMUM_EVENT_MS + 0.1, "stalled"),
+            (500.0, "slow"),
+            (3_000.0, "slow"),
+        ] {
+            let mut latest_generation = 0;
+            assert_eq!(
+                validated_voice_start_slo(
+                    &mut latest_generation,
+                    1.0,
+                    latency,
+                    outcome,
+                    "native-conversation",
+                    1.0,
+                    &keys,
+                ),
+                None
+            );
+            assert_eq!(latest_generation, 0);
+        }
+
+        for (outcome, route, version) in [
+            ("unknown", "native-conversation", 1.0),
+            ("on-target", "unknown", 1.0),
+            ("on-target", "native-conversation", 2.0),
+        ] {
+            let mut latest_generation = 0;
+            assert_eq!(
+                validated_voice_start_slo(
+                    &mut latest_generation,
+                    1.0,
+                    500.0,
+                    outcome,
+                    route,
+                    version,
+                    &keys,
+                ),
+                None
+            );
+        }
+
+        let mut latest_generation = 0;
+        assert_eq!(
+            validated_voice_start_slo(
+                &mut latest_generation,
+                1.0,
+                500.0,
+                "on-target",
+                "native-conversation",
                 1.0,
                 &[
-                    "milliseconds".to_string(),
+                    "generation".to_string(),
+                    "latency_ms".to_string(),
+                    "outcome".to_string(),
+                    "route".to_string(),
                     "transcript".to_string(),
                     "version".to_string(),
                 ],
             ),
-        ] {
-            assert_eq!(invalid, None);
-        }
+            None
+        );
+        assert_eq!(latest_generation, 0);
+    }
+
+    #[test]
+    fn legacy_voice_start_latency_only_clears_on_exact_null_event() {
+        let keys = ["milliseconds".to_string(), "version".to_string()];
+        assert!(valid_legacy_voice_start_latency_clear(true, 1.0, &keys));
+        assert!(!valid_legacy_voice_start_latency_clear(false, 1.0, &keys));
+        assert!(!valid_legacy_voice_start_latency_clear(true, 2.0, &keys));
+
+        assert!(!valid_legacy_voice_start_latency_clear(
+            true,
+            1.0,
+            &[
+                "milliseconds".to_string(),
+                "transcript".to_string(),
+                "version".to_string(),
+            ],
+        ));
     }
 
     #[test]

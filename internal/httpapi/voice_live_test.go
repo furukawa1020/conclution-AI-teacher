@@ -25,6 +25,149 @@ const (
 	liveTestPCMFrameBytes = 640
 )
 
+type voiceLiveOutputMetricObservation struct {
+	firstOutputAt time.Time
+	frames        int
+	bytes         int
+	err           error
+}
+
+func exerciseVoiceLiveOutputMetrics(
+	t *testing.T,
+	chunks [][]byte,
+) ([]voiceLiveOutputMetricObservation, [][]byte) {
+	t.Helper()
+	observations := make(chan []voiceLiveOutputMetricObservation, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			observations <- []voiceLiveOutputMetricObservation{{err: err}}
+			return
+		}
+		defer conn.CloseNow()
+		metrics := &voiceLiveOutputMetrics{}
+		metrics.markCommitted()
+		result := make([]voiceLiveOutputMetricObservation, 0, len(chunks))
+		for _, chunk := range chunks {
+			deliveryErr := metrics.deliver(request.Context(), conn, chunk)
+			firstOutputAt, frames, bytes := metrics.snapshot()
+			result = append(result, voiceLiveOutputMetricObservation{
+				firstOutputAt: firstOutputAt,
+				frames:        frames,
+				bytes:         bytes,
+				err:           deliveryErr,
+			})
+		}
+		observations <- result
+		_ = conn.Close(websocket.StatusNormalClosure, "complete")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(
+		ctx,
+		"ws"+strings.TrimPrefix(server.URL, "http"),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	received := make([][]byte, 0, len(chunks))
+	for {
+		messageType, payload, readErr := conn.Read(ctx)
+		if readErr != nil {
+			if websocket.CloseStatus(readErr) != websocket.StatusNormalClosure {
+				t.Fatal(readErr)
+			}
+			break
+		}
+		if messageType != websocket.MessageBinary {
+			t.Fatalf("output metrics published non-binary message type %v", messageType)
+		}
+		received = append(received, append([]byte(nil), payload...))
+	}
+	select {
+	case result := <-observations:
+		return result, received
+	case <-ctx.Done():
+		t.Fatal("output metrics observations timed out")
+		return nil, nil
+	}
+}
+
+func TestVoiceLiveOutputMetricsStartsAtFirstPublishedMeaningfulPCM(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		meaningful []byte
+	}{
+		{name: "positive threshold", meaningful: []byte{33, 0}},
+		{name: "negative threshold", meaningful: []byte{223, 255}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			chunks := [][]byte{
+				{0, 0, 0, 0},
+				{32, 0},
+				{224, 255},
+				test.meaningful,
+				{33, 0},
+			}
+			observed, received := exerciseVoiceLiveOutputMetrics(t, chunks)
+			if len(observed) != len(chunks) || len(received) != len(chunks) {
+				t.Fatalf("observations=%d received=%d, want %d", len(observed), len(received), len(chunks))
+			}
+			for index := 0; index < 3; index++ {
+				if observed[index].err != nil || !observed[index].firstOutputAt.IsZero() {
+					t.Fatalf("non-meaningful chunk %d started audio clock: %+v", index, observed[index])
+				}
+			}
+			firstMeaningfulAt := observed[3].firstOutputAt
+			if observed[3].err != nil || firstMeaningfulAt.IsZero() {
+				t.Fatalf("meaningful chunk did not start audio clock: %+v", observed[3])
+			}
+			if observed[4].err != nil || observed[4].firstOutputAt != firstMeaningfulAt {
+				t.Fatalf("later meaningful chunk moved first audio clock: %+v", observed[4])
+			}
+			for index, chunk := range chunks {
+				if !bytes.Equal(received[index], chunk) {
+					t.Fatalf("published chunk %d=%v, want %v", index, received[index], chunk)
+				}
+			}
+		})
+	}
+}
+
+func TestVoiceLiveOutputMetricsAllSilentAndOddPCMNeverStartAudioClock(t *testing.T) {
+	t.Parallel()
+	chunks := [][]byte{
+		{0, 0, 0, 0},
+		{32, 0},
+		{224, 255},
+		{33, 0, 255},
+	}
+	observed, received := exerciseVoiceLiveOutputMetrics(t, chunks)
+	if len(observed) != len(chunks) {
+		t.Fatalf("observations=%d, want %d", len(observed), len(chunks))
+	}
+	for index := 0; index < 3; index++ {
+		if observed[index].err != nil || !observed[index].firstOutputAt.IsZero() {
+			t.Fatalf("silent chunk %d started audio clock: %+v", index, observed[index])
+		}
+	}
+	if observed[3].err == nil || !observed[3].firstOutputAt.IsZero() {
+		t.Fatalf("odd PCM changed output metrics: %+v", observed[3])
+	}
+	if observed[3].frames != observed[2].frames || observed[3].bytes != observed[2].bytes {
+		t.Fatalf("odd PCM changed counters: before=%+v after=%+v", observed[2], observed[3])
+	}
+	if len(received) != 3 {
+		t.Fatalf("published chunks=%d, want 3 valid silent chunks", len(received))
+	}
+}
+
 func TestVoiceLiveBudgetsSupportThreeMinuteMonologueBelowProviderLimit(
 	t *testing.T,
 ) {

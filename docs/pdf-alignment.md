@@ -17,11 +17,13 @@ PDFが扱う中心課題は、AIが質問へ正答できないことではない
 
 標準live turnは通常、`us-central1`のVertex AI Native Audioへ原音を送る。最終入力captionから、利用者が入力内で相手から聞かれたものとして報告した質問への回答支援を明示的に頼んだとサーバーが決定論的に判定した場合は、生成済みのNative音声を破棄する。対象条件を満たす新規scopeでは、質問本文・回答候補・transcriptを入力に持たない質問拘束済みQ-ARCが有限template IDとslotを選び、監査済みrendererだけがopen-slot cueへ変換する。繰り返し同一になった暫定captionからdecisionとstreaming TTSをprivate commit buffer内で先行できるが、空白だけを正規化した候補byte列とfinal captionの完全一致、browser commit、同じ報告質問由来の用途分離HMACへ束縛したAES-256-GCM認証暗号stateを含む有限coach checkpointがそろうまで判断・state・PCMを非公開に保つ。汎用scope、汎用checkpoint、cached cueは使わない。不一致は先読みした状態とPCMを破棄し、final captionを一度だけ処理する。それ以外はNativeのfinal input captionを監査済み段階plannerへ直接渡し、同じ原音を東京リージョンSTTへもう一度通さない。段階plannerは、同じ解析済み質問span、質問主題、確定入力内の全required-slot evidenceを用途分離した非可逆tagへ束縛するため、同じ主題の別質問や次の無関係な発話を「Aへの回答」として完了にしない。質問・回答・逐語録はDBへ永続化せず、短期stateにも具体的な質問本文を入れない。第三者が現実にその質問をした事実や現在の話者は検証しない。
 
-Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とする。継続turnもNative Audioでfinal captionを確定し、そのcaptionを監査済み段階controllerへ直接donateする。同じ原音を東京リージョンSTTへ二重通過させない。本人が答えた後は、Meaning Gateと独立LAC criticを有限signalへ射影し、現在の質問に対する検証の進行だけを表す5状態verifier-progress audit posteriorをBayes更新する。`wait / elicit / restate / complete / release`の全候補に対するutilityと安全maskから制御を選ぶが、本人のretrieval状態は推定せず、progressには質問、回答、逐語録、診断、人物特性を入れない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audio応答へ戻る。通常Native会話、初回回答支援、継続turnは別系列で、commitまたはspeech-endから最初の実質音声frameまで1,000 ms以内を運用SLOとして計測する。現行のroute metadataでは初回Q-ARCと初回caption handoffを互いに分離できないため、両者は初回回答支援へ合算する。視覚的な受領表示や無音`wait`は実質音声へ数えず、ダミーの固定音声は生成も再生もしない。1秒は回線・端末・managed modelを含む絶対上限の保証ではない。
+Respondent Coachが一問を保留している間は、サーバーが認証した有限の保留stateを権限の正本とする。継続turnもNative Audioでfinal captionを確定し、そのcaptionを監査済み段階controllerへ直接donateする。同じ原音を東京リージョンSTTへ二重通過させない。本人が答えた後は、Meaning Gateと独立LAC criticを有限signalへ射影し、現在の質問に対する検証の進行だけを表す5状態verifier-progress audit posteriorをBayes更新する。`wait / elicit / restate / complete / release`の全候補に対するutilityと安全maskから制御を選ぶが、本人のretrieval状態は推定せず、progressには質問、回答、逐語録、診断、人物特性を入れない。`complete`と、聞き直しを止める`release`は保留状態ではないため、その表示後に開始する次turnから通常のNative Audio応答へ戻る。通常Native会話、初回回答支援、継続turnは別系列で、発話終了から最初の実質音声frameまで1,000 ms以内を運用SLOとして計測する。現行のroute metadataでは初回Q-ARCと初回caption handoffを互いに分離できないため、両者は初回回答支援へ合算する。視覚的な受領表示や無音`wait`は実質音声へ数えず、ダミーの固定音声は生成も再生もしない。1秒は回線・端末・managed modelを含む絶対上限の保証ではない。
 
 一般の`complete`は「あなたの言葉を受け取りました」「あなた自身の言葉が出ました」という今回限りのreceiptに留め、A-firstを推測しない。別のQBA Proofは、確定音声入力の現在turnについて、同じ報告質問spanと確定入力の回答evidenceの非可逆tagがそろい、決定論的Meaning Gateと独立LAC criticの双方が全required slotとA-firstで一致した場合だけ表示する。そこでも外部質問の実在、質問への正答、「上達した」「別の人にも同じように答えられる」、話者の身元は判定・実証しない。
 
 約3分まとまらずに話した場合も、時間だけで失敗や能力不足と判定しない。現在のlive経路は端末で録音開始から最大3分30秒、Cloud Run側で最大4分のcaptureを受け、Go側のlive接続を6分、Cloud Runのrequest timeoutを420秒に制限する。発話が確定しない無音候補は録音開始後最大30秒で終了するため、その上限直前から話し始めても約3分は残るが、3分30秒の実発話を保証するものではない。commit後のfinal transcriptが160 Unicode code point以上の場合だけ、サーバーが今回限りの長い発話と判定し、現在turn内で本人が明示した中心点を、条件や不確実性を変えず第一文へ置いて自然に応答する。160未満でも通常会話は続け、長さだけを根拠に指導、採点、言い直し要求をしない。
+
+この1秒SLOは「待っています」という固定音や受領表示を早く返す指標ではなく、本人の発話終了から、そのturnへ最初の実質的な音声支援が届くまでの指標である。通常Native、初回回答支援、継続Coach、HTTP fallback、厳格経路を有限routeとして分け、最初の有意味PCMだけで達成を判定する。Web Audio slotも発話終了+10秒より前かつ現在から250 ms以内の時だけ所有時に先行確定し、それより遠いslotは推定可聴境界を待つ。3秒miss後もNative commitから3秒と未確定の割り込み候補の解決を待ち、本人への音声もCoach stateも一度も公開していない既存のzero-event条件を満たす場合に限って一回だけ安全にfallbackし、公開後のturnを速度のために二重応答させない。commit+3秒が絶対停止点より後ならfallbackせず、発話終了+10秒でcapture、認証、transport、長い先頭無音の後へ予約された再生まで含め、有意味音声のないturnを停止する。silent finalなどの既存terminal経路は10秒を待たない。
 
 ## PDFの場面との対応
 
@@ -96,7 +98,7 @@ topic探索で使うのはCrossrefのindex date filterであり、発表日の�
 - 録音開始から3分30秒を超える一turn capture、Cloud Speech-to-Textのstreaming上限をまたぐsession継続、発話途中の意味へ介入する完全増分校正。端末上限には発話前の無音や発話中の間も含まれる
 - 任意Web、複数論文本文、claim単位の自動検証
 - 本人を対象にした有効性、誤修復率、負荷軽減の実証
-- 通常Native route、Q-ARCとcaption handoffを合算した初回回答支援、継続Coach routeそれぞれの実端末speech-end / commitから最初の実質音声frameまでのp50 / p95と1,000 ms SLO達成率。現行のroute metadataでは初回Q-ARCとcaption handoffを互いに分離できない。無音`wait`や受領表示で達成扱いにしない
+- 通常Native route、Q-ARCとcaption handoffを合算した初回回答支援、継続Coach routeそれぞれの実端末speech-endから最初の実質音声frameまでのp50 / p95と1,000 ms SLO達成率。現行のroute metadataでは初回Q-ARCとcaption handoffを互いに分離できない。無音`wait`や受領表示で達成扱いにしない
 
 これらを「実装済み」「安全」とは表示しない。現在の受け答え支援では、利用者が相手の質問を自分で言い直し、その後に自分の答えを話す形だけを対象にする。長期効果は、事前登録した比較試験、未見質問、一定期間後の追跡、本人の同意と撤回・削除を含む評価が終わるまで主張しない。
 

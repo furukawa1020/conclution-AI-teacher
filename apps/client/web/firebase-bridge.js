@@ -98,6 +98,10 @@ const VOICE_ENDPOINT =
 const VOICE_LIVE_ENDPOINT =
   "wss://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/live";
 const PCM_CAPTURE_WORKLET_URL = "/pcm-capture-worklet.js";
+const PCM_RING_WASM_URL = "/wasm/kotae_pcm_ring_bg.wasm";
+const PCM_RING_WASM_MAX_BYTES = 256 * 1024;
+const PCM_RING_FETCH_TIMEOUT_MS = 3_000;
+const PCM_CAPTURE_WORKLET_LOAD_TIMEOUT_MS = 3_500;
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
 const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/health`;
 const PASSKEY_REGISTRATION_BEGIN_ENDPOINT =
@@ -178,6 +182,7 @@ const sessionExpiryWatchdog = createSessionExpiryWatchdog({
   setTimer: (callback, delay) => setTimeout(callback, delay),
 });
 const pcmCaptureWorkletLoads = new WeakMap();
+let pcmRingModuleLoad;
 
 function setVoiceReceiptVisible(visible) {
   if (typeof visible !== "boolean" || visible === voiceReceiptVisible) {
@@ -2707,10 +2712,76 @@ function liveVoiceSupported(stream) {
   );
 }
 
+function loadPcmRingModule() {
+  if (!pcmRingModuleLoad) {
+    const load = (async () => {
+      if (
+        typeof AbortController !== "function" ||
+        typeof WebAssembly !== "object" ||
+        typeof WebAssembly.compile !== "function"
+      ) {
+        throw new Error("voice_api_unavailable");
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        PCM_RING_FETCH_TIMEOUT_MS,
+      );
+      try {
+        const response = await fetch(PCM_RING_WASM_URL, {
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error("voice_api_unavailable");
+        }
+        const bytes = await response.arrayBuffer();
+        if (
+          !(bytes instanceof ArrayBuffer) ||
+          bytes.byteLength === 0 ||
+          bytes.byteLength > PCM_RING_WASM_MAX_BYTES
+        ) {
+          throw new Error("voice_api_unavailable");
+        }
+        return WebAssembly.compile(bytes);
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
+    pcmRingModuleLoad = load;
+    void load.catch(() => {
+      if (pcmRingModuleLoad === load) {
+        pcmRingModuleLoad = undefined;
+      }
+    });
+  }
+  return pcmRingModuleLoad;
+}
+
+function boundedPcmWorkletLoad(load) {
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error("voice_api_unavailable")),
+      PCM_CAPTURE_WORKLET_LOAD_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([load, deadline]).finally(() => {
+    clearTimeout(timeout);
+  });
+}
+
 function loadPcmCaptureWorklet(context) {
   let load = pcmCaptureWorkletLoads.get(context);
   if (!load) {
-    load = context.audioWorklet.addModule(PCM_CAPTURE_WORKLET_URL);
+    const pending = (async () => {
+      const [pcmRingModule] = await Promise.all([
+        loadPcmRingModule(),
+        context.audioWorklet.addModule(PCM_CAPTURE_WORKLET_URL),
+      ]);
+      return pcmRingModule;
+    })();
+    load = boundedPcmWorkletLoad(pending);
     pcmCaptureWorkletLoads.set(context, load);
     void load.catch(() => {
       if (pcmCaptureWorkletLoads.get(context) === load) {
@@ -2886,10 +2957,11 @@ async function startVoiceLiveSession({
   });
   socket.addEventListener("error", acceptPreflightError, { once: true });
 
+  let pcmRingModule;
   let workletTimeout;
   if (captureHandoff === undefined) {
     try {
-      await Promise.race([
+      pcmRingModule = await Promise.race([
         loadPcmCaptureWorklet(audioContext),
         new Promise((_, reject) => {
           workletTimeout = setTimeout(
@@ -2958,6 +3030,7 @@ async function startVoiceLiveSession({
               CONFIRMED_SPEECH_PCM_LIMITS.maximumFrames,
             maximumQueuedFrames:
               VOICE_LIVE_LIMITS.maximumQueuedInputFrames,
+            pcmRingModule,
           },
         },
       );
@@ -3281,7 +3354,10 @@ async function startVoiceLiveSession({
         lastSequence: captureExpectedSequence - 1,
         sealing: captureSealing,
       });
-      if (signal === "capture_overflow") {
+      if (
+        signal === "capture_invalid" ||
+        signal === "capture_overflow"
+      ) {
         throw new Error("voice_api_unavailable");
       }
       settleCaptureSeal();
@@ -4088,8 +4164,9 @@ async function startBargePcmMonitoring(
     return;
   }
 
+  let pcmRingModule;
   try {
-    await loadPcmCaptureWorklet(context);
+    pcmRingModule = await loadPcmCaptureWorklet(context);
   } catch {
     return;
   }
@@ -4135,6 +4212,7 @@ async function startBargePcmMonitoring(
         maximumPreConfirmFrames: BARGE_PCM_LIMITS.maximumFrames,
         maximumQueuedFrames:
           VOICE_LIVE_LIMITS.maximumQueuedInputFrames,
+        pcmRingModule,
       },
     });
     source = context.createMediaStreamSource(stream);
@@ -4353,7 +4431,10 @@ async function startBargePcmMonitoring(
         lastSequence: expectedSequence - 1,
         sealing,
       });
-      if (signal === "capture_overflow") {
+      if (
+        signal === "capture_invalid" ||
+        signal === "capture_overflow"
+      ) {
         throw new Error("voice_api_unavailable");
       }
       settleSeal();

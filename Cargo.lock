@@ -1732,6 +1732,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kotae-pcm-ring"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "zeroize",
+]
+
+[[package]]
 name = "lazy-js-bundle"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

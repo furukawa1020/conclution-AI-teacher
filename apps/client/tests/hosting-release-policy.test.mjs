@@ -37,6 +37,8 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
     build,
     /from "\.\/voice-start-slo-policy\.mjs";/u,
   );
+  assert.match(build, /kotae_pcm_ring_bg\.wasm/u);
+  assert.match(build, /Length -le 0 -or \$pcmRingWasmArtifact\.Length -gt 256KB/u);
 
   assert.match(
     deploy,
@@ -46,7 +48,52 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$originMain\s+-cne\s+\$ExpectedGitCommit/u);
   assert.match(deploy, /status",\s*"--porcelain=v1",\s*"--untracked-files=all"/u);
   assert.match(deploy, /Hosting artifact does not match its release manifest/u);
-  assert.match(deploy, /\$hostingSnapshot\s*=\s*Assert-HostingArtifact/u);
+  assert.match(deploy, /\$manifestBytes\s*=\s*\[System\.IO\.File\]::ReadAllBytes/u);
+  assert.match(
+    deploy,
+    /\$manifestSha256\s*=\s*ConvertTo-Sha256Hex\s+-Bytes\s+\$manifestBytes/u,
+  );
+  assert.match(deploy, /\$hostingRelease\s*=\s*Assert-HostingArtifact/u);
+  assert.match(
+    deploy,
+    /\$hostingSnapshot\s*=\s*\$hostingRelease\.Snapshot/u,
+  );
+  assert.match(
+    deploy,
+    /\$browserGatePath\s*=\s*Join-Path\s+\$PSScriptRoot\s+"test-browser-audio\.mjs"/u,
+  );
+  assert.match(
+    deploy,
+    /"--dist",\s*\$publicRoot,[\s\S]+"--expected-commit",\s*\$ExpectedGitCommit,[\s\S]+"--expected-manifest-sha256",\s*\$ExpectedManifestSha256/u,
+  );
+  assert.match(deploy, /if\s*\(\$commandExitCode\s+-ne\s+0\)/u);
+  assert.match(deploy, /\$result\.status\s+-cne\s+"passed"/u);
+  assert.match(
+    deploy,
+    /\$resultProperties\s*=\s*@\(\$result\.PSObject\.Properties\.Name\s*\|\s*Sort-Object\)/u,
+  );
+  assert.match(deploy, /\[int\]\s*\$result\.sameContextReuseFrames\s+-ne\s+2/u);
+  assert.match(
+    deploy,
+    /\[bool\]\s*\$result\.senderDetachGuardPassed\s+-ne\s+\$true/u,
+  );
+  assert.match(deploy, /\$result\.provenance\s+-cne\s+"release"/u);
+  assert.match(
+    deploy,
+    /\$result\.sourceCommit\s+-cne\s+\$ExpectedGitCommit/u,
+  );
+  assert.match(
+    deploy,
+    /\$result\.manifestSha256\s+-cne\s+\$ExpectedManifestSha256/u,
+  );
+  assert.equal(
+    (deploy.match(/^Assert-BrowserAudioGate\s+`$/gmu) ?? []).length,
+    1,
+  );
+  assert.match(
+    deploy,
+    /Assert-HostingReleaseSource\s+\$hostingRelease\s*=\s*Assert-HostingArtifact\s+-Root\s+\$publicRoot\s+\$hostingSnapshot\s*=\s*\$hostingRelease\.Snapshot\s+Assert-BrowserAudioGate\s+`\s+-ExpectedManifestSha256\s+\$hostingRelease\.ManifestSha256\s+Assert-PromotedBackendBoundary\s+if\s*\(\$PreflightOnly\)/u,
+  );
   assert.match(deploy, /Get-GzipBytes -Bytes \(\[byte\[\]\] \$hostingSnapshot\[\$relative\]\)/u);
   assert.doesNotMatch(deploy, /Get-GzipBytes -Path/u);
   assert.match(deploy, /"run",\s*"revisions",\s*"describe"/u);
@@ -65,6 +112,19 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.equal(
     (deploy.match(/-ExpectedGitCommit\s+\$ExpectedGitCommit/g) ?? []).length,
     3,
+  );
+  assert.equal(
+    (deploy.match(/"--expected-commit",\s*\$ExpectedGitCommit/g) ?? [])
+      .length,
+    1,
+  );
+  assert.equal(
+    (
+      deploy.match(
+        /"--expected-manifest-sha256",\s*\$ExpectedManifestSha256/g,
+      ) ?? []
+    ).length,
+    1,
   );
   assert.equal(
     (
@@ -136,6 +196,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
     deploy,
     /from "\.\/voice-start-slo-policy\.mjs";/u,
   );
+  assert.match(deploy, /kotae_pcm_ring_bg\.wasm/u);
+  assert.match(deploy, /Length -le 0 -or \$pcmRingWasmArtifact\.Length -gt 256KB/u);
+  assert.doesNotMatch(deploy, /"pcm-ring-worklet-runtime\.js"/u);
+  assert.doesNotMatch(deploy, /"wasm[\\/]kotae_pcm_ring\.js"/u);
 
   assert.match(cloudSetup, /\$SourceRevision\s*=\s*"main"/u);
   assert.match(

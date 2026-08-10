@@ -1,3 +1,5 @@
+import { createPcmRing } from "./pcm-ring-worklet-runtime.js";
+
 const OUTPUT_SAMPLE_RATE_HZ = 16_000;
 const FRAME_SAMPLES = 320;
 const FRAME_BYTES = FRAME_SAMPLES * 2;
@@ -6,6 +8,9 @@ const FRAME_BYTES = FRAME_SAMPLES * 2;
 const MAXIMUM_PRE_CONFIRM_FRAMES = 125;
 const MAXIMUM_QUEUED_FRAMES = 200;
 const CONTROL_VERSION = 1;
+const RING_PUSH_INSERTED = 1;
+const RING_PUSH_INSERTED_AFTER_EVICTION = 2;
+const RING_PUSH_FULL = 3;
 
 function isPositiveSafeInteger(value, maximum) {
   return (
@@ -55,6 +60,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
         "generation",
         "maximumPreConfirmFrames",
         "maximumQueuedFrames",
+        "pcmRingModule",
       ]) ||
       !isPositiveSafeInteger(
         processorOptions.generation,
@@ -97,13 +103,30 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.frameOffset = 0;
     this.frameContextFrame = undefined;
 
-    this.preConfirmRing = new Array(this.maximumPreConfirmFrames).fill(null);
-    this.preConfirmHead = 0;
-    this.preConfirmCount = 0;
-
-    this.confirmedQueue = new Array(this.maximumQueuedFrames).fill(null);
-    this.confirmedHead = 0;
-    this.confirmedCount = 0;
+    if (typeof createPcmRing !== "function") {
+      throw new Error("pcm_ring_runtime_unavailable");
+    }
+    try {
+      this.preConfirmRing = createPcmRing(
+        processorOptions.pcmRingModule,
+        this.maximumPreConfirmFrames,
+        true,
+      );
+      this.confirmedQueue = createPcmRing(
+        processorOptions.pcmRingModule,
+        this.maximumQueuedFrames,
+        false,
+      );
+      this.ringsReleased = false;
+    } catch (error) {
+      try {
+        this.preConfirmRing?.clear?.();
+        this.preConfirmRing?.free?.();
+      } catch {
+        // Construction is already fail-closed.
+      }
+      throw error;
+    }
     this.credit = 0;
     this.sequence = 0;
     this.confirmedCutoffContextFrame = undefined;
@@ -142,27 +165,21 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   }
 
   clearPreConfirmRing() {
-    for (let index = 0; index < this.preConfirmRing.length; index += 1) {
-      const entry = this.preConfirmRing[index];
-      if (entry !== null) {
-        zeroizeBuffer(entry.pcm);
-        this.preConfirmRing[index] = null;
-      }
+    if (this.ringsReleased) return;
+    try {
+      this.preConfirmRing.clear();
+    } catch {
+      // The processor remains fail-closed even if the Wasm instance faulted.
     }
-    this.preConfirmHead = 0;
-    this.preConfirmCount = 0;
   }
 
   clearConfirmedQueue() {
-    for (let index = 0; index < this.confirmedQueue.length; index += 1) {
-      const entry = this.confirmedQueue[index];
-      if (entry !== null) {
-        zeroizeBuffer(entry.pcm);
-        this.confirmedQueue[index] = null;
-      }
+    if (this.ringsReleased) return;
+    try {
+      this.confirmedQueue.clear();
+    } catch {
+      // The processor remains fail-closed even if the Wasm instance faulted.
     }
-    this.confirmedHead = 0;
-    this.confirmedCount = 0;
   }
 
   clearPrivateAudio() {
@@ -176,10 +193,60 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.credit = 0;
   }
 
+  releaseRings() {
+    if (this.ringsReleased) return;
+    this.clearPreConfirmRing();
+    this.clearConfirmedQueue();
+    this.ringsReleased = true;
+    for (const ring of [this.preConfirmRing, this.confirmedQueue]) {
+      try {
+        ring.free();
+      } catch {
+        // clear already wiped all retained frames before ownership release.
+      }
+    }
+  }
+
+  countRing(ring, maximum) {
+    let count;
+    try {
+      count = ring.count();
+    } catch {
+      this.failClosed();
+      return undefined;
+    }
+    if (
+      !Number.isSafeInteger(count) ||
+      count < 0 ||
+      count > maximum
+    ) {
+      this.failClosed();
+      return undefined;
+    }
+    return count;
+  }
+
   failClosed() {
     if (this.state === "stopped") return;
     this.clearPrivateAudio();
+    this.releaseRings();
     this.state = "stopped";
+    this.postError("capture_invalid");
+  }
+
+  postError(code) {
+    if (this.errorPosted) return;
+    this.errorPosted = true;
+    try {
+      this.port.postMessage(Object.freeze({
+        type: "error",
+        version: CONTROL_VERSION,
+        generation: this.generation,
+        code,
+      }));
+    } catch {
+      // The processor is already fail-closed and contains no retained audio.
+    }
   }
 
   failOverflow(extraEntry) {
@@ -189,46 +256,33 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     }
     if (extraEntry !== undefined) zeroizeBuffer(extraEntry.pcm);
     this.clearPrivateAudio();
+    this.releaseRings();
     this.state = "stopped";
-    if (this.errorPosted) return;
-    this.errorPosted = true;
-    try {
-      this.port.postMessage(Object.freeze({
-        type: "error",
-        version: CONTROL_VERSION,
-        generation: this.generation,
-        code: "capture_overflow",
-      }));
-    } catch {
-      // The processor is already fail-closed and contains no retained audio.
-    }
+    this.postError("capture_overflow");
   }
 
   pushPreConfirm(entry) {
-    if (this.preConfirmCount === this.maximumPreConfirmFrames) {
-      const evicted = this.preConfirmRing[this.preConfirmHead];
-      if (evicted !== null) zeroizeBuffer(evicted.pcm);
-      this.preConfirmRing[this.preConfirmHead] = entry;
-      this.preConfirmHead =
-        (this.preConfirmHead + 1) % this.maximumPreConfirmFrames;
-      return;
+    let result = 0;
+    try {
+      result = this.preConfirmRing.push(
+        entry.contextFrame,
+        new Uint8Array(entry.pcm),
+      );
+    } catch {
+      result = 0;
+    } finally {
+      zeroizeBuffer(entry.pcm);
     }
-    const index =
-      (this.preConfirmHead + this.preConfirmCount) %
-      this.maximumPreConfirmFrames;
-    this.preConfirmRing[index] = entry;
-    this.preConfirmCount += 1;
+    if (
+      result !== RING_PUSH_INSERTED &&
+      result !== RING_PUSH_INSERTED_AFTER_EVICTION
+    ) {
+      this.failClosed();
+    }
   }
 
   shiftPreConfirm() {
-    if (this.preConfirmCount === 0) return undefined;
-    const entry = this.preConfirmRing[this.preConfirmHead];
-    this.preConfirmRing[this.preConfirmHead] = null;
-    this.preConfirmHead =
-      (this.preConfirmHead + 1) % this.maximumPreConfirmFrames;
-    this.preConfirmCount -= 1;
-    if (this.preConfirmCount === 0) this.preConfirmHead = 0;
-    return entry ?? undefined;
+    return this.shiftRing(this.preConfirmRing);
   }
 
   enqueueConfirmed(entry) {
@@ -239,35 +293,57 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       zeroizeBuffer(entry.pcm);
       return;
     }
-    if (this.confirmedCount === this.maximumQueuedFrames) {
-      this.failOverflow(entry);
+    let result = 0;
+    try {
+      result = this.confirmedQueue.push(
+        entry.contextFrame,
+        new Uint8Array(entry.pcm),
+      );
+    } catch {
+      result = 0;
+    } finally {
+      zeroizeBuffer(entry.pcm);
+    }
+    if (result === RING_PUSH_FULL) {
+      this.failOverflow();
       return;
     }
-    const index =
-      (this.confirmedHead + this.confirmedCount) %
-      this.maximumQueuedFrames;
-    this.confirmedQueue[index] = entry;
-    this.confirmedCount += 1;
+    if (result !== RING_PUSH_INSERTED) {
+      this.failClosed();
+      return;
+    }
     this.flushConfirmed();
   }
 
   shiftConfirmed() {
-    if (this.confirmedCount === 0) return undefined;
-    const entry = this.confirmedQueue[this.confirmedHead];
-    this.confirmedQueue[this.confirmedHead] = null;
-    this.confirmedHead =
-      (this.confirmedHead + 1) % this.maximumQueuedFrames;
-    this.confirmedCount -= 1;
-    if (this.confirmedCount === 0) this.confirmedHead = 0;
-    return entry ?? undefined;
+    return this.shiftRing(this.confirmedQueue);
+  }
+
+  shiftRing(ring) {
+    const pcm = new ArrayBuffer(FRAME_BYTES);
+    let contextFrame;
+    try {
+      contextFrame = ring.shiftInto(new Uint8Array(pcm));
+    } catch {
+      zeroizeBuffer(pcm);
+      this.failClosed();
+      return undefined;
+    }
+    if (!Number.isSafeInteger(contextFrame) || contextFrame < 0) {
+      zeroizeBuffer(pcm);
+      this.failClosed();
+      return undefined;
+    }
+    return { contextFrame, pcm };
   }
 
   flushConfirmed() {
-    while (
-      this.credit > 0 &&
-      this.confirmedCount > 0 &&
-      this.state !== "stopped"
-    ) {
+    while (this.credit > 0 && this.state !== "stopped") {
+      const confirmedCount = this.countRing(
+        this.confirmedQueue,
+        this.maximumQueuedFrames,
+      );
+      if (confirmedCount === undefined || confirmedCount === 0) break;
       const entry = this.shiftConfirmed();
       if (entry === undefined) {
         this.failClosed();
@@ -284,6 +360,11 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       });
       try {
         this.port.postMessage(message, [completed]);
+        if (completed.byteLength !== 0) {
+          zeroizeBuffer(completed);
+          this.failClosed();
+          return;
+        }
       } catch {
         zeroizeBuffer(completed);
         this.failClosed();
@@ -296,13 +377,13 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   }
 
   maybePostSealed() {
-    if (
-      this.state !== "sealing" ||
-      this.confirmedCount !== 0 ||
-      this.sealedPosted
-    ) {
-      return;
-    }
+    if (this.state !== "sealing" || this.sealedPosted) return;
+    const confirmedCount = this.countRing(
+      this.confirmedQueue,
+      this.maximumQueuedFrames,
+    );
+    if (confirmedCount === undefined) return;
+    if (confirmedCount !== 0) return;
     this.sealedPosted = true;
     try {
       this.port.postMessage(Object.freeze({
@@ -315,6 +396,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       // No audio remains queued; terminal failure is already fail-closed.
     }
     this.credit = 0;
+    this.releaseRings();
     this.state = "stopped";
   }
 
@@ -398,7 +480,12 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.credit = control.initialCredit;
     this.state = "confirmed";
 
-    while (this.preConfirmCount > 0 && this.state === "confirmed") {
+    while (this.state === "confirmed") {
+      const preConfirmCount = this.countRing(
+        this.preConfirmRing,
+        this.maximumPreConfirmFrames,
+      );
+      if (preConfirmCount === undefined || preConfirmCount === 0) break;
       const entry = this.shiftPreConfirm();
       if (entry === undefined) {
         this.failClosed();
@@ -472,6 +559,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       return;
     }
     this.clearPrivateAudio();
+    this.releaseRings();
     this.state = "stopped";
   }
 

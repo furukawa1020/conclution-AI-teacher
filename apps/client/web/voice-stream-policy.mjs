@@ -523,9 +523,12 @@ export function safeLiveCaptureSignal(
   if (
     value.type === "error" &&
     hasExactKeys(value, ["code", "generation", "type", "version"]) &&
-    value.code === "capture_overflow"
+    (
+      value.code === "capture_invalid" ||
+      value.code === "capture_overflow"
+    )
   ) {
-    return "capture_overflow";
+    return value.code;
   }
   if (
     sealing &&

@@ -21,7 +21,7 @@ KOTAE ReflexとLACは、このプロジェクトで設計・実装している�
 
 ```text
 Rust / Dioxus / Wasm UI
-  └─ ブラウザJavaScript境界: MediaRecorder、VAD、Firebase SDK
+  └─ ブラウザ境界: MediaRecorder / Web Audio、Rust/Wasm PCM ring、Firebase SDK
        └─ Firebase Hosting /api rewrite または固定Cloud Run URLへ認証付きTLS
             └─ WebSocket、HTTPS stream、またはPOST /api/v1/voice/turns
                  └─ Cloud Run / Go
@@ -61,7 +61,8 @@ AI応答中の割り込み候補は、すでに利用者が開始したsession�
 ```text
 apps/client              Rust + Dioxus 0.7 Web/Wasm UI
 apps/client/web          ブラウザAPIとFirebase SDKだけを扱うJavaScript境界
-crates/audio_core        Rust VAD実験実装。現在の公開capture経路には未接続
+crates/audio_core        公開割込み経路のcontent-free音響frame判定
+crates/pcm_ring          AudioWorklet内の固定長・zeroizing PCM所有権
 crates/audio_vault       将来研究用の暗号化コア。現在の公開音声経路には未接続
 cmd/api                  Cloud Run向けGo API
 internal/conversation    Thought State Graph、EVI、モデル経路、暗号化状態

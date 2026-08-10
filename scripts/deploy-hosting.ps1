@@ -4,6 +4,10 @@ param(
     [ValidatePattern("^[a-z][a-z0-9-]{4,28}[a-z0-9]$")]
     [string] $ProjectId,
 
+    [Parameter(Mandatory)]
+    [ValidatePattern("^[0-9a-fA-F]{40}$")]
+    [string] $ExpectedGitCommit,
+
     [string] $SiteId = "kotae-ai",
 
     [string] $PublicDirectory = "dist/web",
@@ -34,6 +38,8 @@ $expectedVoiceStreamUrl = "$expectedRunUrl/api/v1/voice/turns:stream"
 $expectedVoiceLiveUrl = "$expectedRunWebSocketUrl/api/v1/voice/live"
 $expectedRuntimeServiceAccount = "kotae-api-runtime@$expectedProjectId.iam.gserviceaccount.com"
 $expectedBuildServiceAccount = "projects/$expectedProjectId/serviceAccounts/kotae-api-builder@$expectedProjectId.iam.gserviceaccount.com"
+$expectedStateSecretVersion = "1"
+$releaseManifestName = ".kotae-release-manifest.json"
 $requiredTtlCollectionGroups = @(
     "evaluations",
     "evaluationRateLimits",
@@ -45,6 +51,7 @@ $requiredTtlCollectionGroups = @(
 )
 
 $workspace = Split-Path -Parent $PSScriptRoot
+$ExpectedGitCommit = $ExpectedGitCommit.ToLowerInvariant()
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace $PublicDirectory))
 $expectedPublicRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dist\web"))
 if ([System.IO.Path]::IsPathRooted($GcloudPath)) {
@@ -85,10 +92,9 @@ if (-not (Test-Path -LiteralPath $gcloud -PathType Leaf)) {
 function Get-GzipBytes {
     param(
         [Parameter(Mandatory)]
-        [string] $Path
+        [byte[]] $Bytes
     )
 
-    $inputBytes = [System.IO.File]::ReadAllBytes($Path)
     $output = [System.IO.MemoryStream]::new()
     try {
         $gzip = [System.IO.Compression.GZipStream]::new(
@@ -97,7 +103,7 @@ function Get-GzipBytes {
             $true
         )
         try {
-            $gzip.Write($inputBytes, 0, $inputBytes.Length)
+            $gzip.Write($Bytes, 0, $Bytes.Length)
         } finally {
             $gzip.Dispose()
         }
@@ -105,6 +111,60 @@ function Get-GzipBytes {
         return ,$output.ToArray()
     } finally {
         $output.Dispose()
+    }
+}
+
+function Invoke-ReleaseGitText {
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ApplicationInfo] $GitCommand,
+
+        [Parameter(Mandatory)]
+        [string[]] $CommandArguments,
+
+        [Parameter(Mandatory)]
+        [string] $Operation
+    )
+
+    $lines = @(& $GitCommand.Source -C $workspace @CommandArguments 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git failed while $Operation."
+    }
+    return ($lines -join [System.Environment]::NewLine).Trim()
+}
+
+function Assert-HostingReleaseSource {
+    $git = Get-Command "git" -CommandType Application -ErrorAction Stop
+    $repositoryRoot = Invoke-ReleaseGitText `
+        -GitCommand $git `
+        -CommandArguments @("rev-parse", "--show-toplevel") `
+        -Operation "checking the Hosting release repository root"
+    if (-not [string]::Equals(
+            [System.IO.Path]::GetFullPath($repositoryRoot).TrimEnd("\", "/"),
+            [System.IO.Path]::GetFullPath($workspace).TrimEnd("\", "/"),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "Hosting releases must run from the expected repository root."
+    }
+
+    $head = Invoke-ReleaseGitText `
+        -GitCommand $git `
+        -CommandArguments @("rev-parse", "--verify", "HEAD") `
+        -Operation "checking the Hosting release commit"
+    $originMain = Invoke-ReleaseGitText `
+        -GitCommand $git `
+        -CommandArguments @("rev-parse", "--verify", "origin/main") `
+        -Operation "checking origin/main for the Hosting release"
+    if ($head -cne $ExpectedGitCommit -or $originMain -cne $ExpectedGitCommit) {
+        throw "Hosting release commit must equal both HEAD and origin/main."
+    }
+
+    $status = Invoke-ReleaseGitText `
+        -GitCommand $git `
+        -CommandArguments @("status", "--porcelain=v1", "--untracked-files=all") `
+        -Operation "checking the Hosting release working tree"
+    if (-not [string]::IsNullOrWhiteSpace($status)) {
+        throw "Hosting releases require a clean tracked and untracked working tree."
     }
 }
 
@@ -249,12 +309,9 @@ function Assert-PromotedBackendBoundary {
 
     if (
         $service.metadata.name -cne $expectedRunService -or
-        $service.status.url.TrimEnd("/") -cne $expectedRunUrl -or
-        $service.spec.template.spec.serviceAccountName -cne $expectedRuntimeServiceAccount -or
-        [int] $service.spec.template.spec.timeoutSeconds -ne 420 -or
-        [int] $service.spec.template.spec.containerConcurrency -ne 4
+        $service.status.url.TrimEnd("/") -cne $expectedRunUrl
     ) {
-        throw "The promoted Cloud Run service does not match the reviewed runtime boundary."
+        throw "The promoted Cloud Run service does not match the reviewed service boundary."
     }
 
     $serviceAnnotations = $service.metadata.annotations
@@ -284,21 +341,74 @@ function Assert-PromotedBackendBoundary {
     }
 
     $traffic = @($service.status.traffic)
+    $trafficTag = $null
+    if ($traffic.Count -eq 1) {
+        $trafficTagProperty = $traffic[0].PSObject.Properties["tag"]
+        if ($null -ne $trafficTagProperty) {
+            $trafficTag = [string] $trafficTagProperty.Value
+        }
+    }
     if (
         $traffic.Count -ne 1 -or
         [int] $traffic[0].percent -ne 100 -or
         [string]::IsNullOrWhiteSpace([string] $traffic[0].revisionName) -or
-        [string] $traffic[0].revisionName -cne [string] $service.status.latestReadyRevisionName
+        [string] $traffic[0].revisionName -cne [string] $service.status.latestReadyRevisionName -or
+        -not [string]::IsNullOrWhiteSpace($trafficTag)
     ) {
-        throw "The latest ready Cloud Run revision is not the sole promoted revision."
+        throw "The latest ready Cloud Run revision is not the sole tagless promoted revision."
     }
 
-    $containers = @($service.spec.template.spec.containers)
+    $promotedRevisionName = [string] $traffic[0].revisionName
+    $promotedRevision = Invoke-GcloudJson `
+        -Operation "checking the revision that receives production traffic" `
+        -CommandArguments @(
+            "run", "revisions", "describe", $promotedRevisionName,
+            "--project=$ProjectId",
+            "--region=$RunRegion",
+            "--format=json",
+            "--quiet",
+            "--verbosity=error"
+        )
+    $revisionServiceLabel = $promotedRevision.metadata.labels.PSObject.Properties[
+        "serving.knative.dev/service"
+    ]
+    $revisionAnnotations = $promotedRevision.metadata.annotations
+    $executionEnvironment = $revisionAnnotations.PSObject.Properties[
+        "run.googleapis.com/execution-environment"
+    ]
+    $startupCpuBoost = $revisionAnnotations.PSObject.Properties[
+        "run.googleapis.com/startup-cpu-boost"
+    ]
+    if (
+        $promotedRevision.metadata.name -cne $promotedRevisionName -or
+        $null -eq $revisionServiceLabel -or
+        [string] $revisionServiceLabel.Value -cne $expectedRunService -or
+        $null -eq $executionEnvironment -or
+        [string] $executionEnvironment.Value -cne "gen2" -or
+        $null -eq $startupCpuBoost -or
+        [string] $startupCpuBoost.Value -cne "true" -or
+        $promotedRevision.spec.serviceAccountName -cne $expectedRuntimeServiceAccount -or
+        [int] $promotedRevision.spec.timeoutSeconds -ne 420 -or
+        [int] $promotedRevision.spec.containerConcurrency -ne 4
+    ) {
+        throw "The revision receiving production traffic does not match the reviewed runtime boundary."
+    }
+
+    $containers = @($promotedRevision.spec.containers)
     if ($containers.Count -ne 1) {
         throw "The promoted Cloud Run service must contain exactly one container."
     }
+    $container = $containers[0]
+    if (
+        [string] $container.resources.limits.cpu -cne "1" -or
+        [string] $container.resources.limits.memory -cne "1Gi" -or
+        [string] $container.image -cnotmatch '^asia-northeast1-docker\.pkg\.dev/kotae-ai-u22-2026/cloud-run-source-deploy/kotae-api@sha256:[0-9a-f]{64}$' -or
+        [string] $promotedRevision.status.imageDigest -cne [string] $container.image
+    ) {
+        throw "The promoted Cloud Run image or resource limits are outside the reviewed boundary."
+    }
     $environment = @{}
-    foreach ($entry in @($containers[0].env)) {
+    foreach ($entry in @($container.env)) {
         $nameProperty = $entry.PSObject.Properties["name"]
         if ($null -eq $nameProperty -or [string]::IsNullOrWhiteSpace([string] $nameProperty.Value)) {
             throw "The promoted Cloud Run service contains an invalid environment entry."
@@ -355,14 +465,14 @@ function Assert-PromotedBackendBoundary {
         }
     }
 
-    $stateSecret = @($containers[0].env | Where-Object { $_.name -ceq "KOTAE_STATE_KEY_BASE64" })
+    $stateSecret = @($container.env | Where-Object { $_.name -ceq "KOTAE_STATE_KEY_BASE64" })
     if ($stateSecret.Count -ne 1) {
         throw "The promoted Cloud Run service does not have one state-key binding."
     }
     $secretReference = $stateSecret[0].valueFrom.secretKeyRef
     if (
         $secretReference.name -cne "kotae-conversation-state" -or
-        [string] $secretReference.key -notmatch '^[1-9][0-9]*$'
+        [string] $secretReference.key -cne $expectedStateSecretVersion
     ) {
         throw "The promoted Cloud Run state key is not bound to a pinned Secret version."
     }
@@ -409,6 +519,23 @@ function Assert-PromotedBackendBoundary {
     if ($health.status -cne "ok" -or $health.service -cne $expectedRunService) {
         throw "The promoted Cloud Run health boundary did not validate."
     }
+
+    $boundaryClient = [System.Net.Http.HttpClient]::new()
+    $boundaryResponse = $null
+    try {
+        $boundaryClient.Timeout = [System.TimeSpan]::FromSeconds(20)
+        $boundaryResponse = $boundaryClient.GetAsync(
+            "$expectedRunUrl/api/v1/me"
+        ).GetAwaiter().GetResult()
+        if ($boundaryResponse.StatusCode -ne [System.Net.HttpStatusCode]::Unauthorized) {
+            throw "The promoted Cloud Run unauthenticated identity boundary did not return HTTP 401."
+        }
+    } finally {
+        if ($null -ne $boundaryResponse) {
+            $boundaryResponse.Dispose()
+        }
+        $boundaryClient.Dispose()
+    }
 }
 
 function Assert-HostingArtifact {
@@ -416,6 +543,34 @@ function Assert-HostingArtifact {
         [Parameter(Mandatory)]
         [string] $Root
     )
+
+    $manifestPath = Join-Path $Root $releaseManifestName
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Hosting release manifest is missing. Build with -ExpectedGitCommit first."
+    }
+    $manifestEntry = Get-Item -LiteralPath $manifestPath -Force
+    if (
+        ($manifestEntry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $manifestEntry.Length -gt 64KB
+    ) {
+        throw "Hosting release manifest is outside the reviewed boundary."
+    }
+    try {
+        $manifest = [System.IO.File]::ReadAllText(
+            $manifestPath,
+            [System.Text.UTF8Encoding]::new($false, $true)
+        ) | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Hosting release manifest is not valid UTF-8 JSON."
+    }
+    $manifestProperties = @($manifest.PSObject.Properties.Name | Sort-Object)
+    if (
+        ($manifestProperties -join ",") -cne "artifacts,schemaVersion,sourceCommit" -or
+        [int] $manifest.schemaVersion -ne 1 -or
+        [string] $manifest.sourceCommit -cne $ExpectedGitCommit
+    ) {
+        throw "Hosting release manifest identity does not match the reviewed commit."
+    }
 
     $requiredFiles = @(
         "index.html",
@@ -436,7 +591,37 @@ function Assert-HostingArtifact {
         }
     }
 
+    $manifestArtifacts = @($manifest.artifacts)
+    if ($manifestArtifacts.Count -eq 0) {
+        throw "Hosting release manifest contains no artifacts."
+    }
+    $manifestByPath = @{}
+    foreach ($artifact in $manifestArtifacts) {
+        $artifactProperties = @($artifact.PSObject.Properties.Name | Sort-Object)
+        $path = [string] $artifact.path
+        $sha256 = [string] $artifact.sha256
+        $bytes = [long] $artifact.bytes
+        if (
+            ($artifactProperties -join ",") -cne "bytes,path,sha256" -or
+            [string]::IsNullOrWhiteSpace($path) -or
+            $path -ceq $releaseManifestName -or
+            $path -match '(^|/)\.\.(/|$)' -or
+            $path.StartsWith("/", [System.StringComparison]::Ordinal) -or
+            $path.Contains("\") -or
+            $sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $bytes -lt 0 -or
+            $manifestByPath.ContainsKey($path)
+        ) {
+            throw "Hosting release manifest contains an invalid artifact entry."
+        }
+        $manifestByPath[$path] = [pscustomobject]@{
+            sha256 = $sha256
+            bytes = $bytes
+        }
+    }
+
     $totalBytes = 0L
+    $snapshot = [ordered]@{}
     $entries = @(Get-ChildItem -LiteralPath $Root -Recurse -Force)
     foreach ($entry in $entries) {
         if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -460,7 +645,8 @@ function Assert-HostingArtifact {
                 "voice-stream-policy.mjs",
                 "assets/main.css",
                 "wasm/kotae_client.js",
-                "wasm/kotae_client_bg.wasm"
+                "wasm/kotae_client_bg.wasm",
+                $releaseManifestName
             ) -or
             $relativePath -match '^wasm/snippets/[A-Za-z0-9._/-]+\.js$'
         )
@@ -474,13 +660,35 @@ function Assert-HostingArtifact {
             throw "Hosting artifact size overflow."
         }
         $totalBytes += $entry.Length
+        if ($relativePath -ceq $releaseManifestName) {
+            continue
+        }
+        if (-not $manifestByPath.ContainsKey($relativePath)) {
+            throw "Hosting release manifest is missing an artifact."
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($entry.FullName)
+        $expectedArtifact = $manifestByPath[$relativePath]
+        if (
+            [long] $bytes.Length -ne [long] $expectedArtifact.bytes -or
+            (ConvertTo-Sha256Hex -Bytes $bytes) -cne [string] $expectedArtifact.sha256
+        ) {
+            throw "Hosting artifact does not match its release manifest: $relativePath"
+        }
+        $snapshot[$relativePath] = $bytes
     }
     if ($totalBytes -gt 25MB) {
         throw "Hosting artifacts exceed the 25 MiB aggregate safety limit."
     }
+    if ($snapshot.Count -ne $manifestByPath.Count) {
+        throw "Hosting release manifest contains a missing or unexpected artifact."
+    }
 
-    $bridgePath = Join-Path $Root "firebase-bridge.js"
-    $bridge = [System.IO.File]::ReadAllText($bridgePath, [System.Text.Encoding]::UTF8)
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    try {
+        $bridge = $strictUtf8.GetString([byte[]] $snapshot["firebase-bridge.js"])
+    } catch {
+        throw "firebase-bridge.js is not valid UTF-8."
+    }
     $siteKeyMatch = [regex]::Match(
         $bridge,
         '(?m)^\s*const\s+RECAPTCHA_SITE_KEY\s*=\s*"(?<key>[^"]+)";\s*$'
@@ -515,29 +723,33 @@ function Assert-HostingArtifact {
         throw "firebase-bridge.js is not bound to the expected Cloud Run live voice endpoint."
     }
 
-    $bootstrap = [System.IO.File]::ReadAllText(
-        (Join-Path $Root "bootstrap.js"),
-        [System.Text.Encoding]::UTF8
-    )
+    try {
+        $bootstrap = $strictUtf8.GetString([byte[]] $snapshot["bootstrap.js"])
+    } catch {
+        throw "bootstrap.js is not valid UTF-8."
+    }
     $bridgeImport = $bootstrap.IndexOf('import("/firebase-bridge.js")', [System.StringComparison]::Ordinal)
     $wasmImport = $bootstrap.IndexOf('import("/wasm/kotae_client.js")', [System.StringComparison]::Ordinal)
     if ($bridgeImport -lt 0 -or $wasmImport -lt 0 -or $bridgeImport -gt $wasmImport) {
         throw "bootstrap.js must load firebase-bridge.js before the Rust/Wasm module."
     }
 
-    $index = [System.IO.File]::ReadAllText(
-        (Join-Path $Root "index.html"),
-        [System.Text.Encoding]::UTF8
-    )
+    try {
+        $index = $strictUtf8.GetString([byte[]] $snapshot["index.html"])
+    } catch {
+        throw "index.html is not valid UTF-8."
+    }
     if (
         [regex]::Matches($index, '<script\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count -ne 1 -or
         $index -notmatch '<script\s+type="module"\s+src="/bootstrap\.js"></script>'
     ) {
         throw "index.html must contain only the external bootstrap.js module script."
     }
+    return ,$snapshot
 }
 
-Assert-HostingArtifact -Root $publicRoot
+Assert-HostingReleaseSource
+$hostingSnapshot = Assert-HostingArtifact -Root $publicRoot
 Assert-PromotedBackendBoundary
 if ($PreflightOnly) {
     Write-Output "HOSTING_PREFLIGHT=PASS"
@@ -586,14 +798,13 @@ try {
 
     $fileHashes = [ordered]@{}
     $gzipByHash = @{}
-    $files = @(Get-ChildItem -LiteralPath $publicRoot -Recurse -File -Force | Sort-Object FullName)
-    if ($files.Count -eq 0) {
+    $artifactPaths = @($hostingSnapshot.Keys | Sort-Object)
+    if ($artifactPaths.Count -eq 0) {
         throw "Hosting public directory is empty."
     }
 
-    foreach ($file in $files) {
-        $relative = $file.FullName.Substring($publicRoot.Length).TrimStart("\", "/").Replace("\", "/")
-        $gzipBytes = Get-GzipBytes -Path $file.FullName
+    foreach ($relative in $artifactPaths) {
+        $gzipBytes = Get-GzipBytes -Bytes ([byte[]] $hostingSnapshot[$relative])
         $hash = ConvertTo-Sha256Hex -Bytes $gzipBytes
         $fileHashes["/$relative"] = $hash
         $gzipByHash[$hash] = $gzipBytes

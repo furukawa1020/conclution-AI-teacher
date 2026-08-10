@@ -324,13 +324,18 @@ powershell -ExecutionPolicy Bypass -File scripts/configure-firestore-ttl.ps1 `
 Web buildとHosting deployはリポジトリのscriptを使います。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build-web.ps1
+powershell -ExecutionPolicy Bypass -File scripts/build-web.ps1 `
+  -ExpectedGitCommit (git rev-parse HEAD)
 powershell -ExecutionPolicy Bypass -File scripts/deploy-hosting.ps1 `
   -ProjectId kotae-ai-u22-2026 `
+  -ExpectedGitCommit (git rev-parse HEAD) `
   -PreflightOnly
 powershell -ExecutionPolicy Bypass -File scripts/deploy-hosting.ps1 `
-  -ProjectId kotae-ai-u22-2026
+  -ProjectId kotae-ai-u22-2026 `
+  -ExpectedGitCommit (git rev-parse HEAD)
 ```
+
+Hosting release buildは、開始時と完了時のcleanな作業ツリー、`HEAD`、指定commitを照合し、全公開artifactのSHA-256とbyte数をrelease manifestへ固定します。preflightと本番deployは、指定commitが`HEAD`と`origin/main`の両方に一致し、manifestと公開artifactが完全一致しない限りCloud APIを呼びません。検証済みbyte列のsnapshotだけをuploadし、manifest自体は公開しません。引数なしの`build-web.ps1`はローカル確認用で、Hostingへreleaseできません。
 
 Passkey、`/me`等の通常APIは`https://kotae-ai.web.app/api/**`を使い、Firebase HostingがCloud Runへrewriteします。低遅延音声はHosting rewriteがWebSocketを中継しないため、固定した`https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream`と`wss://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/live`へ直接CORS/TLSで接続します。Cloud Run側はFirebase token、App Check、exact Hosting Origin、mode、quotaを検証します。Cloud RunではWebSocketも長時間HTTP requestとしてrequest timeoutの対象になるため、`420`秒は永続接続の保証ではありません。切断後の再接続は新しいrequestとして扱い、確定済み音声を自動再送しません。同期圧縮HTTP fallbackの音声は2 MiB上限なので、3分級の発話を処理できるとは保証しません。
 

@@ -42,9 +42,6 @@ export const INTERRUPT_VAD_LIMITS = Object.freeze({
   quietConfirmationMs: 1_200,
   minimumVoiceDensity: 0.68,
   minimumForegroundDensity: 0.72,
-  // Once a candidate has started, keep a small release hysteresis so a
-  // syllable boundary does not repeatedly fall out of the voice floor.
-  continuationThresholdRatio: 0.86,
   guardMs: 320,
   intervalMs: 40,
   maximumCaptureMs: 3 * 60_000 + 30_000,
@@ -102,6 +99,38 @@ export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
   maximumBytes: 48_000,
   maximumFrames: 75,
 });
+
+const INTERRUPT_FRAME_GUARD_VOICED = 1 << 0;
+const INTERRUPT_FRAME_VOICED = 1 << 1;
+const INTERRUPT_FRAME_FOREGROUND_VOICED = 1 << 2;
+let interruptFrameClassifier = null;
+
+export function installInterruptFrameClassifier(classifier) {
+  if (
+    typeof classifier !== "function" ||
+    interruptFrameClassifier !== null
+  ) {
+    throw new TypeError("interrupt_vad_classifier_install_invalid");
+  }
+  interruptFrameClassifier = classifier;
+}
+
+function classifyInterruptFrame(levels) {
+  if (interruptFrameClassifier === null) {
+    throw new TypeError("interrupt_vad_classifier_unavailable");
+  }
+  const flags = interruptFrameClassifier(
+    levels.noiseFloor,
+    levels.outputActive,
+    levels.peak,
+    levels.rms,
+    levels.candidateActive,
+  );
+  if (!Number.isSafeInteger(flags) || flags < 0 || flags > 7) {
+    throw new TypeError("interrupt_vad_classifier_result_invalid");
+  }
+  return flags;
+}
 
 function erasePcmFrame(frame) {
   if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
@@ -1335,11 +1364,15 @@ export function advanceInterruptVad(
   }
 
   if (now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs) {
+    const frameFlags = classifyInterruptFrame({
+      candidateActive: ["candidate", "provisional"].includes(phase),
+      noiseFloor,
+      outputActive,
+      peak,
+      rms,
+    });
     const guardVoiced =
-      rms >=
-        Math.max(outputActive ? 0.05 : 0.03, noiseFloor * 4.5) &&
-      peak >=
-        Math.max(outputActive ? 0.12 : 0.08, noiseFloor * 9);
+      (frameFlags & INTERRUPT_FRAME_GUARD_VOICED) !== 0;
     if (guardVoiced) {
       if (!["candidate", "provisional"].includes(phase)) {
         phase = "candidate";
@@ -1389,32 +1422,22 @@ export function advanceInterruptVad(
   }
   if (phase === "guard") phase = "armed";
 
-  const rmsThreshold = Math.max(
-    outputActive ? 0.026 : 0.014,
-    noiseFloor * (outputActive ? 3.2 : 2.35),
-  );
-  const peakThreshold = Math.max(
-    outputActive ? 0.065 : 0.035,
-    noiseFloor * (outputActive ? 7 : 5),
-  );
   const candidateActive = ["candidate", "provisional"].includes(
     phase,
   );
-  const thresholdRatio = candidateActive
-    ? INTERRUPT_VAD_LIMITS.continuationThresholdRatio
-    : 1;
-  const voiced =
-    rms >= rmsThreshold * thresholdRatio &&
-    peak >= peakThreshold * thresholdRatio;
+  const frameFlags = classifyInterruptFrame({
+    candidateActive,
+    noiseFloor,
+    outputActive,
+    peak,
+    rms,
+  });
+  const voiced = (frameFlags & INTERRUPT_FRAME_VOICED) !== 0;
   // Absolute thresholds reject playback leakage; the noise-floor multiples
   // keep the fast path calibrated in both quiet and noisy rooms. This is only
   // accumulated evidence: one loud cough cannot latch the foreground floor.
   const foregroundVoiced =
-    voiced &&
-    rms >=
-      Math.max(outputActive ? 0.045 : 0.026, noiseFloor * 5) &&
-    peak >=
-      Math.max(outputActive ? 0.12 : 0.07, noiseFloor * 9);
+    (frameFlags & INTERRUPT_FRAME_FOREGROUND_VOICED) !== 0;
 
   if (phase === "confirmed") {
     if (voiced) {

@@ -8,6 +8,93 @@ use core::fmt;
 
 const SILENCE_DBFS: f32 = -120.0;
 
+pub const INTERRUPT_FRAME_GUARD_VOICED: u8 = 1 << 0;
+pub const INTERRUPT_FRAME_VOICED: u8 = 1 << 1;
+pub const INTERRUPT_FRAME_FOREGROUND_VOICED: u8 = 1 << 2;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterruptFrameLevels {
+    pub noise_floor: f64,
+    pub output_active: bool,
+    pub peak: f64,
+    pub rms: f64,
+    pub candidate_active: bool,
+}
+
+/// Classifies one interruption-VAD frame without retaining PCM or features.
+///
+/// The bit contract is deliberately finite so the Wasm boundary cannot carry
+/// raw audio. Time, density, and confirmation remain in the caller's bounded
+/// state machine; this function is the single production implementation of
+/// the acoustic threshold decision.
+pub fn classify_interrupt_frame(levels: InterruptFrameLevels) -> Result<u8, DetectorError> {
+    if !levels.noise_floor.is_finite()
+        || !(0.0..=1.0).contains(&levels.noise_floor)
+        || !levels.peak.is_finite()
+        || !(0.0..=1.0).contains(&levels.peak)
+        || !levels.rms.is_finite()
+        || !(0.0..=1.0).contains(&levels.rms)
+    {
+        return Err(DetectorError::InvalidInterruptFrameLevels);
+    }
+
+    let guard_voiced = levels.rms
+        >= (if levels.output_active {
+            0.05_f64
+        } else {
+            0.03_f64
+        })
+        .max(levels.noise_floor * 4.5)
+        && levels.peak
+            >= (if levels.output_active {
+                0.12_f64
+            } else {
+                0.08_f64
+            })
+            .max(levels.noise_floor * 9.0);
+    let rms_threshold = (if levels.output_active {
+        0.026_f64
+    } else {
+        0.014_f64
+    })
+    .max(levels.noise_floor * if levels.output_active { 3.2 } else { 2.35 });
+    let peak_threshold = (if levels.output_active {
+        0.065_f64
+    } else {
+        0.035_f64
+    })
+    .max(levels.noise_floor * if levels.output_active { 7.0 } else { 5.0 });
+    let threshold_ratio = if levels.candidate_active { 0.86 } else { 1.0 };
+    let voiced = levels.rms >= rms_threshold * threshold_ratio
+        && levels.peak >= peak_threshold * threshold_ratio;
+    let foreground_voiced = voiced
+        && levels.rms
+            >= (if levels.output_active {
+                0.045_f64
+            } else {
+                0.026_f64
+            })
+            .max(levels.noise_floor * 5.0)
+        && levels.peak
+            >= (if levels.output_active {
+                0.12_f64
+            } else {
+                0.07_f64
+            })
+            .max(levels.noise_floor * 9.0);
+
+    Ok((if guard_voiced {
+        INTERRUPT_FRAME_GUARD_VOICED
+    } else {
+        0
+    }) | (if voiced { INTERRUPT_FRAME_VOICED } else { 0 })
+        | (if foreground_voiced {
+            INTERRUPT_FRAME_FOREGROUND_VOICED
+        } else {
+            0
+        }))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DetectorConfig {
     pub sample_rate_hz: u32,
@@ -106,6 +193,7 @@ pub enum DetectorError {
     InvalidConfiguration(&'static str),
     WrongFrameLength { expected: usize, actual: usize },
     NonFiniteSample,
+    InvalidInterruptFrameLevels,
 }
 
 impl fmt::Display for DetectorError {
@@ -119,6 +207,8 @@ impl fmt::Display for DetectorError {
                 )
             }
             Self::NonFiniteSample => formatter.write_str("PCM frame contains a non-finite sample"),
+            Self::InvalidInterruptFrameLevels => formatter
+                .write_str("interruption frame levels must be finite values from zero to one"),
         }
     }
 }
@@ -357,6 +447,59 @@ mod tests {
         assert_eq!(
             detector.process_frame(&frame),
             Err(DetectorError::NonFiniteSample)
+        );
+    }
+
+    #[test]
+    fn interruption_classifier_preserves_playback_and_candidate_thresholds() {
+        let quiet = classify_interrupt_frame(InterruptFrameLevels {
+            noise_floor: 0.004,
+            output_active: false,
+            peak: 0.035,
+            rms: 0.014,
+            candidate_active: false,
+        })
+        .expect("valid frame");
+        assert_eq!(quiet & INTERRUPT_FRAME_VOICED, INTERRUPT_FRAME_VOICED);
+        assert_eq!(quiet & INTERRUPT_FRAME_FOREGROUND_VOICED, 0);
+
+        let playback_leak = classify_interrupt_frame(InterruptFrameLevels {
+            noise_floor: 0.004,
+            output_active: true,
+            peak: 0.10,
+            rms: 0.04,
+            candidate_active: false,
+        })
+        .expect("valid frame");
+        assert_eq!(
+            playback_leak & INTERRUPT_FRAME_VOICED,
+            INTERRUPT_FRAME_VOICED
+        );
+        assert_eq!(playback_leak & INTERRUPT_FRAME_GUARD_VOICED, 0);
+        assert_eq!(playback_leak & INTERRUPT_FRAME_FOREGROUND_VOICED, 0);
+
+        let continued = classify_interrupt_frame(InterruptFrameLevels {
+            noise_floor: 0.004,
+            output_active: true,
+            peak: 0.056,
+            rms: 0.023,
+            candidate_active: true,
+        })
+        .expect("valid frame");
+        assert_eq!(continued & INTERRUPT_FRAME_VOICED, INTERRUPT_FRAME_VOICED);
+    }
+
+    #[test]
+    fn interruption_classifier_rejects_invalid_levels() {
+        assert_eq!(
+            classify_interrupt_frame(InterruptFrameLevels {
+                noise_floor: 0.004,
+                output_active: false,
+                peak: f64::NAN,
+                rms: 0.02,
+                candidate_active: false,
+            }),
+            Err(DetectorError::InvalidInterruptFrameLevels)
         );
     }
 }

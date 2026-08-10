@@ -49,6 +49,7 @@ import {
   INTERRUPT_ECHO_PROBE_LIMITS,
   INTERRUPT_VAD_LIMITS,
   isCleanVoiceLiveTerminalClose,
+  installInterruptFrameClassifier,
   shouldAbortVoiceTransportOnInterrupt,
   shouldStartAmbientLiveHandoff,
   safeLiveCaptureFrame,
@@ -59,6 +60,39 @@ import {
   VOICE_PLAYBACK_LIMITS,
   VOICE_STREAM_LIMITS,
 } from "../web/voice-stream-policy.mjs";
+
+installInterruptFrameClassifier(
+  (noiseFloor, outputActive, peak, rms, candidateActive) => {
+    const guardVoiced =
+      rms >= Math.max(outputActive ? 0.05 : 0.03, noiseFloor * 4.5) &&
+      peak >= Math.max(outputActive ? 0.12 : 0.08, noiseFloor * 9);
+    // Test oracle for the reviewed Rust contract. Production has no JS
+    // acoustic-classification fallback or duplicate threshold source.
+    const thresholdRatio = candidateActive ? 0.86 : 1;
+    const voiced =
+      rms >=
+        Math.max(
+          outputActive ? 0.026 : 0.014,
+          noiseFloor * (outputActive ? 3.2 : 2.35),
+        ) *
+          thresholdRatio &&
+      peak >=
+        Math.max(
+          outputActive ? 0.065 : 0.035,
+          noiseFloor * (outputActive ? 7 : 5),
+        ) *
+          thresholdRatio;
+    const foregroundVoiced =
+      voiced &&
+      rms >= Math.max(outputActive ? 0.045 : 0.026, noiseFloor * 5) &&
+      peak >= Math.max(outputActive ? 0.12 : 0.07, noiseFloor * 9);
+    return (
+      Number(guardVoiced) |
+      (Number(voiced) << 1) |
+      (Number(foregroundVoiced) << 2)
+    );
+  },
+);
 
 test("the content-free receipt stays inside a sub-three-second budget", () => {
   assert.equal(VOICE_RECEIPT_LIMITS.visibleAfterSilenceMs, 700);

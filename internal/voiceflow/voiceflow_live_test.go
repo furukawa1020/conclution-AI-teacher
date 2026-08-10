@@ -1410,7 +1410,7 @@ func TestSpeculativeAudioCommitBufferRejectsUnalignedPCM(t *testing.T) {
 	}
 }
 
-func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) {
+func TestPipelineLivePublishesSilentAnswerOwnershipOnlyAtExactFinal(t *testing.T) {
 	t.Parallel()
 	const utterance = "この仕組みを詳しく説明して"
 	finalGate := make(chan struct{})
@@ -1439,7 +1439,7 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 		},
 		session: session,
 	}
-	speculativeDecision := liveTestDecision("先読みした回答", "spec-state")
+	speculativeDecision := liveTestDecision("", "spec-state")
 	speculativeDecision.AssistanceTarget = "respondent"
 	speculativeDecision.RespondentStage = "restructure"
 	speculativeDecision.CoachPhase = "complete"
@@ -1509,32 +1509,93 @@ func TestPipelineLiveKeepsSpeculativeResultPrivateUntilExactFinal(t *testing.T) 
 	if outcome.err != nil {
 		t.Fatal(outcome.err)
 	}
-	if chunk := <-delivered; !bytes.Equal(chunk, []byte{33, 0}) {
-		t.Fatalf("delivered=%v", chunk)
+	select {
+	case chunk := <-delivered:
+		t.Fatalf("answer ownership receipt emitted PCM: %v", chunk)
+	default:
 	}
 	if outcome.result.StateToken != "spec-state" ||
-		outcome.result.Caption != "先読みした回答" ||
+		outcome.result.Caption != "" ||
 		outcome.result.AnswerProof != "question_bound_input_answer_first" ||
-		speech.synthesizedText != "先読みした回答" {
+		speech.synthesizedText != "" {
 		t.Fatalf("result=%+v synthesized=%q", outcome.result, speech.synthesizedText)
 	}
 	if outcome.result.LiveTimings.SpecHit != 1 ||
 		outcome.result.LiveTimings.SpecMiss != 0 ||
 		outcome.result.LiveTimings.SpecCancel != 0 ||
-		outcome.result.LiveTimings.TTSPrestarted != 1 ||
-		outcome.result.LiveTimings.TTSBufferedBytes != 2 ||
-		outcome.result.LiveTimings.TTSReleaseMS < 0 ||
-		outcome.result.LiveTimings.FinalToFirstAudioMS < 0 {
+		outcome.result.LiveTimings.TTSPrestarted != 0 ||
+		outcome.result.LiveTimings.TTSBufferedBytes != 0 ||
+		outcome.result.LiveTimings.TTSReleaseMS != -1 ||
+		outcome.result.LiveTimings.FinalToFirstAudioMS != -1 {
 		t.Fatalf("timings=%+v", outcome.result.LiveTimings)
 	}
-	if speech.streamCalls != 1 {
-		t.Fatalf("synthesis calls=%d want 1", speech.streamCalls)
+	if speech.streamCalls != 0 {
+		t.Fatalf("synthesis calls=%d want 0", speech.streamCalls)
 	}
 	turns := agent.recordedTurns()
 	if len(turns) != 1 ||
 		!turns[0].Speculative ||
 		turns[0].Utterance != utterance {
 		t.Fatalf("turns=%+v", turns)
+	}
+}
+
+func TestLiveSpeculationRejectsTerminalAnswerOwnershipSpeechBeforeSynthesis(
+	t *testing.T,
+) {
+	t.Parallel()
+	const utterance = "この仕組みを詳しく説明して"
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			fakeSpeech: fakeSpeech{},
+			chunks:     [][]byte{{33, 0}},
+		},
+	}
+	decision := liveTestDecision("その答えで大丈夫です。", "spec-state")
+	decision.AssistanceTarget = "respondent"
+	decision.RespondentStage = "restructure"
+	decision.CoachPhase = "complete"
+	decision.CoachAction = "complete"
+	decision.AnswerProofCandidate =
+		conversation.AnswerProofQuestionBoundInputAnswerFirst
+	agent := &speculativeTestAgent{
+		speculativeResult: decision,
+		started:           make(chan struct{}),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := 0
+	speculation := pipeline.startLiveSpeculation(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{RequestID: "spec-conflict"},
+		utterance,
+		speech,
+		func([]byte) error {
+			delivered++
+			return nil
+		},
+	)
+	if speculation == nil {
+		t.Fatal("eligible speculation was not started")
+	}
+	outcome := <-speculation.outcome
+	if !errors.Is(outcome.err, errAnswerOwnershipSpeechConflict) {
+		t.Fatalf("conflict error=%v", outcome.err)
+	}
+	if outcome.synthesis != nil ||
+		speech.streamCalls != 0 ||
+		speech.synthesizedText != "" ||
+		delivered != 0 {
+		t.Fatalf(
+			"conflicting speculation synthesized: synthesis=%v calls=%d text=%q delivered=%d",
+			outcome.synthesis != nil,
+			speech.streamCalls,
+			speech.synthesizedText,
+			delivered,
+		)
 	}
 }
 

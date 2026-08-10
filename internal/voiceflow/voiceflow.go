@@ -95,6 +95,9 @@ var (
 	errProcessingDeadlineInvalid = errors.New(
 		"voiceflow: live processing deadline is invalid",
 	)
+	errAnswerOwnershipSpeechConflict = errors.New(
+		"voiceflow: terminal answer ownership proof cannot include generated speech",
+	)
 )
 
 type speculativeAudioCommitBuffer struct {
@@ -1010,6 +1013,9 @@ func (p *Pipeline) startLiveSpeculation(
 		decision, err := p.agent.Process(speculationCtx, uid, turn)
 		durationMS := time.Since(started).Milliseconds()
 		var synthesis *speculativeSynthesis
+		if err == nil && terminalAnswerOwnershipSpeechConflict(decision) {
+			err = errAnswerOwnershipSpeechConflict
+		}
 		if err == nil && decision.SpokenReply != "" {
 			speculation.mu.Lock()
 			if contextErr := speculationCtx.Err(); contextErr != nil {
@@ -1656,6 +1662,11 @@ func (p *Pipeline) prepareRecognizedTurn(
 			httpapi.VoicePipelineStageConversation,
 		)
 	}
+	if terminalAnswerOwnershipSpeechConflict(decision) {
+		return httpapi.VoiceTurnResult{}, "", httpapi.NewVoicePipelineFailure(
+			httpapi.VoicePipelineStageConversation,
+		)
+	}
 	if input.StrictCloudMinimization {
 		if decision.ResearchStatus != "none" ||
 			len(decision.ResearchRecords) != 0 {
@@ -1770,6 +1781,18 @@ func committedSpeculativeAnswerProof(
 		return conversation.AnswerProofNone
 	}
 	return decision.AnswerProofCandidate
+}
+
+func terminalAnswerOwnershipSpeechConflict(
+	decision conversation.VoiceTurnResult,
+) bool {
+	if decision.SpokenReply == "" ||
+		(decision.AnswerProof != conversation.AnswerProofQuestionBoundInputAnswerFirst &&
+			decision.AnswerProofCandidate != conversation.AnswerProofQuestionBoundInputAnswerFirst) {
+		return false
+	}
+	return decision.CoachPhase == "complete" &&
+		decision.CoachAction == "complete"
 }
 
 func (p *Pipeline) silentRecognitionResult(

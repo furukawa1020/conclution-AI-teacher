@@ -205,6 +205,13 @@ func (s *Service) processLive(
 		// frame closes audio. Drain and wipe capture without opening a provider;
 		// returning before commit would be treated as an unexpected pipeline
 		// failure and the client could not replay its held MediaRecorder turn.
+		// This is the sole audited no-provider readiness path: state preparation
+		// has completed, and publishing before the drain lets the transport begin
+		// capture without falsely claiming that a provider session was opened.
+		if ctx.Err() != nil || s.ctx.Err() != nil {
+			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+		}
+		publishNativeInputReady(&input)
 		if err := discardNativeInputUntilCommit(ctx, audio); err != nil {
 			return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 		}
@@ -224,6 +231,14 @@ func (s *Service) processLive(
 	if err := pooled.session.StartActivity(ctx); err != nil {
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 	}
+	// Opener.Open returns only after the provider's SetupComplete frame. Do not
+	// let the browser capture a byte until both that boundary and this turn's
+	// StartActivity write have succeeded. Re-check cancellation because a test
+	// or alternate provider may return success concurrently with cancellation.
+	if ctx.Err() != nil || s.ctx.Err() != nil {
+		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+	}
+	publishNativeInputReady(&input)
 
 	sendDone := make(chan error, 1)
 	go streamInput(ctx, pooled.session, audio, sendDone)
@@ -572,6 +587,17 @@ func (s *Service) processLive(
 	clear(inputCaption)
 	clear(caption)
 	return result, nil
+}
+
+func publishNativeInputReady(input *httpapi.VoiceTurnInput) {
+	if input == nil {
+		return
+	}
+	callback := input.OnInputReady
+	input.OnInputReady = nil
+	if callback != nil {
+		callback()
+	}
 }
 
 func discardNativeInputUntilCommit(ctx context.Context, audio <-chan []byte) error {

@@ -66,6 +66,15 @@ import {
   VOICE_START_SLO_BUDGETS,
 } from "./voice-start-slo-policy.mjs";
 import {
+  beginVoicePrepareSlo,
+  cancelVoicePrepareSlo,
+  completeVoicePrepareSlo,
+  createVoicePrepareSloState,
+  toVoicePrepareSloWireDetail,
+  VOICE_PREPARE_SLO_RESULTS,
+  VOICE_PREPARE_SLO_ROUTES,
+} from "./voice-prepare-slo-policy.mjs";
+import {
   decidePasskeyAction,
   createPasskeyRegistrationRecoveryLatch,
   decidePasskeyRegistrationRecoveryAction,
@@ -135,11 +144,14 @@ let activeRecording;
 let activeRequestController;
 let activePlayback;
 let activeLiveSession;
+let preparingLiveSession;
 let pendingLiveSession;
 let pendingDocument;
 let pendingDocumentTimer;
 let voiceTransportPrimed = false;
 let voiceReceiptVisible = false;
+let voicePrepareSloGeneration = 0;
+let voicePrepareSloState = createVoicePrepareSloState();
 let voiceStartSloGeneration = 0;
 let voiceStartSloDeferredMissTimer;
 let voiceStartSloHandlers;
@@ -266,6 +278,75 @@ function dispatchVoiceStartLatency(estimatedAudibleMs) {
       detail: Object.freeze({ milliseconds, version: 1 }),
     }),
   );
+}
+
+function nextVoicePrepareSloGeneration() {
+  if (voicePrepareSloGeneration >= Number.MAX_SAFE_INTEGER) {
+    fail("voice_turn_invalid");
+  }
+  voicePrepareSloGeneration += 1;
+  return voicePrepareSloGeneration;
+}
+
+function dispatchVoicePrepareSloObservation(observation) {
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-prepare-slo", {
+      detail: Object.freeze(
+        toVoicePrepareSloWireDetail(observation),
+      ),
+    }),
+  );
+}
+
+function dispatchVoicePrepareSloClear() {
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-prepare-slo-clear", {
+      detail: Object.freeze({ version: 1 }),
+    }),
+  );
+}
+
+function beginCurrentVoicePrepareSlo(route, startedAt) {
+  const generation = nextVoicePrepareSloGeneration();
+  const transition = beginVoicePrepareSlo(voicePrepareSloState, {
+    generation,
+    route,
+    startedAt,
+  });
+  voicePrepareSloState = transition.state;
+  return generation;
+}
+
+function completeCurrentVoicePrepareSlo(
+  generation,
+  result,
+  route,
+  endedAt = performance.now(),
+) {
+  const transition = completeVoicePrepareSlo(voicePrepareSloState, {
+    endedAt,
+    generation,
+    result,
+    route,
+  });
+  voicePrepareSloState = transition.state;
+  if (transition.observation !== null) {
+    dispatchVoicePrepareSloObservation(transition.observation);
+  }
+}
+
+function cancelCurrentVoicePrepareSlo(
+  generation,
+  endedAt = performance.now(),
+) {
+  const transition = cancelVoicePrepareSlo(voicePrepareSloState, {
+    endedAt,
+    generation,
+  });
+  voicePrepareSloState = transition.state;
+  if (transition.observation !== null) {
+    dispatchVoicePrepareSloObservation(transition.observation);
+  }
 }
 
 function nextVoiceStartSloGeneration() {
@@ -2109,6 +2190,7 @@ async function beginTurn(
     typeof coachActive !== "boolean" ||
     activeRecording ||
     activeLiveSession ||
+    preparingLiveSession ||
     pendingLiveSession ||
     beginGate.isBusy() ||
     finishGate.isBusy() ||
@@ -2126,6 +2208,18 @@ async function beginTurn(
   if (beginToken === null) {
     fail("voice_turn_invalid");
   }
+  const prepareStartedAt = performance.now();
+  // A preparation observation is current-turn only. Clear the previous route
+  // even when this turn deliberately uses strict or document HTTP handling and
+  // therefore emits no Native preparation terminal event.
+  dispatchVoicePrepareSloClear();
+  const prepareGeneration =
+    !strictCloudMinimization && !pendingDocument
+      ? beginCurrentVoicePrepareSlo(
+          VOICE_PREPARE_SLO_ROUTES.NATIVE_READY,
+          prepareStartedAt,
+        )
+      : undefined;
 
   try {
     const sessionStatus = sessionClock.begin();
@@ -2153,12 +2247,17 @@ async function beginTurn(
           expectedEpoch,
           turnMode === "intentional",
         );
+        // Provider preparation is content-free. A newly granted microphone
+        // starts enabled in browsers, so mute it immediately while the exact
+        // Native provider turn proves SetupComplete + StartActivity.
+        setStreamTracksEnabled(stream, false);
         await ensureAudioGraph(stream, expectedEpoch);
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
         }
 
-        setStreamTracksEnabled(stream, true);
+        // The live capture graph is also attached only after the strong ready
+        // boundary inside startVoiceLiveSession.
         // A continuing Respondent Coach can keep the low-latency Native input
         // path. Its caption is handed to the bounded coach controller; the
         // server must publish the exact authenticated checkpoint before response PCM.
@@ -2179,6 +2278,9 @@ async function beginTurn(
           liveSession?.cancel(new Error(stopCode));
           fail(stopCode);
         }
+        // Listening starts here: strong Native ready has succeeded, or the
+        // bounded preparation attempt has already selected HTTP fallback.
+        setStreamTracksEnabled(stream, true);
         // Attach the privacy-gated PCM capture before arming VAD. A user may
         // start talking immediately after pressing the button; arming VAD
         // first could confirm speech while the AudioWorklet was still loading
@@ -2190,6 +2292,17 @@ async function beginTurn(
           coachActive,
         );
         activeRecording = recording;
+        if (prepareGeneration !== undefined) {
+          completeCurrentVoicePrepareSlo(
+            prepareGeneration,
+            liveSession
+              ? VOICE_PREPARE_SLO_RESULTS.READY
+              : VOICE_PREPARE_SLO_RESULTS.FALLBACK,
+            liveSession
+              ? VOICE_PREPARE_SLO_ROUTES.NATIVE_READY
+              : VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+          );
+        }
         return Object.freeze({ state: "listening" });
       },
       () => {
@@ -2202,6 +2315,11 @@ async function beginTurn(
         }
       },
     );
+  } catch (error) {
+    if (prepareGeneration !== undefined) {
+      cancelCurrentVoicePrepareSlo(prepareGeneration);
+    }
+    throw error;
   } finally {
     beginGate.release(beginToken);
   }
@@ -2246,6 +2364,22 @@ async function waitForTurnEnd() {
   } else {
     if (!markSessionSpeech(recording.expectedEpoch)) {
       fail("session_expired");
+    }
+    if (pendingLiveSession?.recording === recording) {
+      // An interrupted turn may keep speaking into a bounded local handoff
+      // while its exact Native provider turn prepares. Before Rust leaves the
+      // preparation state, resolve that handoff or select HTTP fallback after
+      // the existing 450 ms post-speech budget.
+      await takePendingLiveSession(
+        recording,
+        recording.expectedEpoch,
+      );
+      if (
+        recording.expectedEpoch !== sessionEpoch ||
+        activeRecording !== recording
+      ) {
+        fail(stoppedSessionCode(recording.expectedEpoch));
+      }
     }
   }
   return Object.freeze({
@@ -2644,6 +2778,13 @@ async function startVoiceLiveSession({
       ) {
         fail("voice_response_invalid");
       }
+      if (
+        performance.now() - liveStartedAt >=
+        VOICE_LIVE_LIMITS.readyTimeoutMs
+      ) {
+        failPreflight(new Error("voice_api_unavailable"));
+        return;
+      }
       clientTransport.markReady();
       preflightAuthReadyMs = performance.now() - liveStartedAt;
       preflightState = "ready";
@@ -2705,12 +2846,12 @@ async function startVoiceLiveSession({
       if (workletTimeout !== undefined) clearTimeout(workletTimeout);
     }
   }
-  detachPreflight();
   if (
     expectedEpoch !== sessionEpoch ||
     !audioContext ||
     audioContext.state === "closed"
   ) {
+    detachPreflight();
     if (
       socket.readyState === WebSocket.CONNECTING ||
       socket.readyState === WebSocket.OPEN
@@ -2721,6 +2862,7 @@ async function startVoiceLiveSession({
     fail(stoppedSessionCode(expectedEpoch));
   }
   if (preflightError) {
+    detachPreflight();
     return undefined;
   }
 
@@ -2751,6 +2893,7 @@ async function startVoiceLiveSession({
       );
       captureSource = audioContext.createMediaStreamSource(stream);
     } catch {
+      detachPreflight();
       captureNode?.disconnect();
       captureSource?.disconnect();
       if (
@@ -3109,6 +3252,13 @@ async function startVoiceLiveSession({
         if (message.type === "ready") {
           if (state !== "awaiting-ready") {
             fail("voice_response_invalid");
+          }
+          if (
+            performance.now() - liveStartedAt >=
+            VOICE_LIVE_LIMITS.readyTimeoutMs
+          ) {
+            failLive(new Error("voice_api_unavailable"));
+            return;
           }
           state = "ready";
           authReadyMs = performance.now() - liveStartedAt;
@@ -3552,6 +3702,11 @@ async function startVoiceLiveSession({
     () => failLive(new Error("voice_api_unavailable")),
     { once: true },
   );
+  // Keep the preflight listeners attached until the complete session listener
+  // set is installed. Provider ready may arrive in the synchronous gap between
+  // worklet loading and session construction; swapping listeners in this order
+  // makes that frame impossible to lose.
+  detachPreflight();
   authReadyTimer = setTimeout(
     () => failLive(new Error("voice_api_unavailable")),
     Math.max(
@@ -3576,6 +3731,35 @@ async function startVoiceLiveSession({
   ) {
     failLive(new Error("voice_api_unavailable"));
     return undefined;
+  }
+  if (preparingLiveSession) {
+    session.cancel(new Error("voice_turn_invalid"));
+    return undefined;
+  }
+  preparingLiveSession = session;
+  try {
+    // For a Native turn the server's ready frame is the strong input gate:
+    // authentication, quota, UID lease, provider SetupComplete, and
+    // StartActivity have all succeeded. Do not connect the capture graph or
+    // let Rust publish Listening while any of those boundaries are pending.
+    await readyPromise;
+  } catch {
+    if (preparingLiveSession === session) {
+      preparingLiveSession = undefined;
+    }
+    return undefined;
+  }
+  if (preparingLiveSession === session) {
+    preparingLiveSession = undefined;
+  }
+  if (
+    expectedEpoch !== sessionEpoch ||
+    state !== "ready" ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    session.cancel(new Error(stoppedSessionCode(expectedEpoch)));
+    fail(stoppedSessionCode(expectedEpoch));
   }
   if (captureHandoff) {
     try {
@@ -4092,6 +4276,34 @@ async function startBargePcmMonitoring(
   }
 }
 
+function dispatchVoiceInterruptionReady(route) {
+  if (
+    route !== VOICE_PREPARE_SLO_ROUTES.NATIVE_READY &&
+    route !== VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK
+  ) {
+    fail("voice_response_invalid");
+  }
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:voice-interruption-ready", {
+      detail: Object.freeze({ route, version: 1 }),
+    }),
+  );
+}
+
+function publishPendingInterruptionReady(pending, route) {
+  if (
+    !pending ||
+    pending.readyPublished ||
+    pending.expectedEpoch !== sessionEpoch ||
+    pending.recording !== activeRecording
+  ) {
+    return false;
+  }
+  pending.readyPublished = true;
+  dispatchVoiceInterruptionReady(route);
+  return true;
+}
+
 function retirePendingLiveSession(
   error = new Error("request_cancelled"),
   expectedPending = pendingLiveSession,
@@ -4104,6 +4316,14 @@ function retirePendingLiveSession(
   if (pending.retired) return;
   pending.retired = true;
   pending.captureHandoff?.stop();
+  if (
+    pending.preparingSession &&
+    preparingLiveSession === pending.preparingSession
+  ) {
+    const preparing = pending.preparingSession;
+    preparingLiveSession = undefined;
+    preparing.cancel(error);
+  }
   void pending.promise
     .then((liveSession) => liveSession?.cancel(error))
     .catch(() => {});
@@ -4139,6 +4359,10 @@ async function takePendingLiveSession(recording, expectedEpoch) {
   }
 
   if (nextLiveSession === timedOut) {
+    publishPendingInterruptionReady(
+      pending,
+      VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+    );
     retirePendingLiveSession(
       new Error("voice_live_handoff_timeout"),
       pending,
@@ -4164,12 +4388,22 @@ async function takePendingLiveSession(recording, expectedEpoch) {
     activeRecording !== recording ||
     (activeLiveSession && activeLiveSession !== nextLiveSession)
   ) {
+    if (!nextLiveSession && !pending.retired) {
+      publishPendingInterruptionReady(
+        pending,
+        VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+      );
+    }
     nextLiveSession?.cancel(
       new Error(stoppedSessionCode(expectedEpoch)),
     );
     return undefined;
   }
   activeLiveSession = nextLiveSession;
+  publishPendingInterruptionReady(
+    pending,
+    VOICE_PREPARE_SLO_ROUTES.NATIVE_READY,
+  );
   return nextLiveSession;
 }
 
@@ -4314,6 +4548,9 @@ function confirmBargeIn(
           stream: mediaStream,
         })
       : undefined;
+  const handoffPreparingSession = handoffPromise
+    ? preparingLiveSession
+    : undefined;
   if (!handoffPromise) {
     captureHandoff?.stop();
     if (!preserveLiveCoachState) {
@@ -4339,7 +4576,9 @@ function confirmBargeIn(
     const pending = {
       expectedEpoch: handoffEpoch,
       captureHandoff,
+      preparingSession: handoffPreparingSession,
       promise: Promise.resolve(handoffPromise),
+      readyPublished: false,
       recording,
       retired: false,
     };
@@ -4349,6 +4588,10 @@ function confirmBargeIn(
         if (!nextLiveSession) {
           captureHandoff?.stop();
           if (pendingLiveSession === pending) {
+            publishPendingInterruptionReady(
+              pending,
+              VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+            );
             pendingLiveSession = undefined;
           }
           return;
@@ -4358,6 +4601,14 @@ function confirmBargeIn(
           return;
         }
         if (recording.settled) {
+          publishPendingInterruptionReady(
+            pending,
+            VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+          );
+          if (pendingLiveSession === pending) {
+            pendingLiveSession = undefined;
+          }
+          captureHandoff?.stop();
           nextLiveSession.cancel(new Error("request_cancelled"));
           return;
         }
@@ -4373,14 +4624,32 @@ function confirmBargeIn(
         );
         if (claimed) {
           activeLiveSession = claimed;
+          publishPendingInterruptionReady(
+            pending,
+            VOICE_PREPARE_SLO_ROUTES.NATIVE_READY,
+          );
           if (pendingLiveSession === pending) {
             pendingLiveSession = undefined;
           }
+        } else {
+          publishPendingInterruptionReady(
+            pending,
+            VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+          );
+          if (pendingLiveSession === pending) {
+            pendingLiveSession = undefined;
+          }
+          captureHandoff?.stop();
+          nextLiveSession.cancel(new Error("request_cancelled"));
         }
       })
       .catch(() => {
         captureHandoff?.stop();
         if (pendingLiveSession === pending) {
+          publishPendingInterruptionReady(
+            pending,
+            VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
+          );
           pendingLiveSession = undefined;
         }
         // The MediaRecorder candidate remains the ambient HTTP fallback.
@@ -4390,6 +4659,7 @@ function confirmBargeIn(
     new CustomEvent("kotae:voice-interrupted", {
       detail: Object.freeze({
         finalReceived: playback.finalReceived,
+        preparing: Boolean(handoffPromise),
         version: 1,
       }),
     }),
@@ -5706,6 +5976,11 @@ function stopSession(reason = "request_cancelled") {
     activeLiveSession = undefined;
     liveSession.cancel(new Error(stopCode));
   }
+  if (preparingLiveSession) {
+    const liveSession = preparingLiveSession;
+    preparingLiveSession = undefined;
+    liveSession.cancel(new Error(stopCode));
+  }
   retirePendingLiveSession(new Error(stopCode));
   if (activePlayback) {
     const playback = activePlayback;
@@ -5743,6 +6018,7 @@ function hasActiveVoiceSession() {
     beginGate.isBusy() ||
     activeRequestController ||
     activeLiveSession ||
+    preparingLiveSession ||
     pendingLiveSession ||
     activePlayback ||
     finishGate.isBusy() ||

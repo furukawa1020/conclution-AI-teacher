@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	maxAudioBytes    = 2 * 1024 * 1024
+	maxAudioBytes = 2 * 1024 * 1024
 	// maxDocumentBytes remains only as the historical request-envelope ceiling
 	// asserted by package tests. Runtime document fields are rejected before
 	// this or any other decoder is consulted.
@@ -95,6 +95,14 @@ type VoiceTurnInput struct {
 	// ProcessingCommitted is a broadcast-only server signal. A closed channel
 	// means no new speculative model work may start.
 	ProcessingCommitted <-chan struct{}
+	// OnInputReady is a content-free, server-authored live transport callback.
+	// A Native Audio service invokes it exactly once only after the current
+	// turn's provider session has completed setup and accepted StartActivity.
+	// The transport wraps it as a one-shot signal and does not begin reading PCM
+	// from the browser until that signal has been observed. Audited fallbacks
+	// that deliberately open no provider invoke it immediately before draining
+	// the committed input turn.
+	OnInputReady func()
 }
 
 type VoiceTurnResult struct {
@@ -339,6 +347,10 @@ type VoiceOptions struct {
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
 	livePipelineJoinTimeout time.Duration
+	// liveNativeReadyTimeout is test-configurable inside this package. Native
+	// provider preparation is content-free but must never outlive the browser's
+	// bounded preflight window or retain its UID lease after HTTP fallback.
+	liveNativeReadyTimeout time.Duration
 }
 
 type Server struct {
@@ -428,6 +440,10 @@ func NewWithVoiceAndPasskeys(
 	if voice.livePipelineJoinTimeout <= 0 ||
 		voice.livePipelineJoinTimeout > voiceLivePipelineJoinTimeout {
 		voice.livePipelineJoinTimeout = voiceLivePipelineJoinTimeout
+	}
+	if voice.liveNativeReadyTimeout <= 0 ||
+		voice.liveNativeReadyTimeout > voiceLiveNativeReadyTimeout {
+		voice.liveNativeReadyTimeout = voiceLiveNativeReadyTimeout
 	}
 	server := &Server{
 		logger:                   logger,
@@ -965,6 +981,7 @@ func clearVoiceInput(input *VoiceTurnInput) {
 		clear(input.Document.Data)
 		input.Document.Data = nil
 	}
+	input.OnInputReady = nil
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

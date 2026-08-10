@@ -10,6 +10,8 @@
 
 開始速度eventは`generation`、有限`route`、有限`outcome`、bounded latencyまたは固定milestoneだけで、音声、caption、transcript、credential、会話stateを受け取りません。1秒は発話終了から最初の有意味出力までの目標、3秒はmiss観測点です。Native safe replayはそれとは別にcommit+3秒と未確定barge-in候補の解決を待ち、zero-audioかつcheckpoint未発行の既存predicateを通る場合だけです。commit+3秒が発話終了+10秒より後なら再試行権限は生じません。10秒はcapture、認証、transport、予約再生までを覆うzero-meaningful-audioの絶対停止点です。Web Audio slotもこの停止点より前かつ現在から250 ms以内の時だけ所有時に先行確定し、遠いslotは推定可聴境界まで待ちます。silent finalなどで先にterminal結果へ達したturnは10秒まで保持しません。どのdeadlineも公開済み音声やCoach checkpointを二重生成する権限にはしません。server側も有効な無音PCMをframes/bytesには計上しますが、first-audio clockはWebSocket書込に成功した最初の有意味PCMでのみ開始します。
 
+この返答開始eventとは別に、開始操作の受理から`Listening`までを`kotae:voice-prepare-slo`で計測します。wire値は単調な`generation`、丸めた`latency_ms`、有限`outcome / result / route`、固定`version`だけで、音声、caption、transcript、credential、stateを含みません。1,000 ms以下をon-target、1,000 ms超3,000 ms未満をslow、3,000 ms以上4,000 ms未満をmissed、4,000 ms以上をtimed-outとします。Native live preflightが4,000 ms以内にreadyにならない場合は、PCM captureとVAD開始より前に認証付きHTTP fallbackへ移ります。このprepare clockはspeech-endから有意味PCMまでの1秒・3秒・10秒clockを短縮も延長もしません。
+
 ## データフローと所在地
 
 ```text
@@ -68,6 +70,9 @@ UID leaseを取得してpipelineを開始した後に接続切断やdeadlineへ�
 ## マイクとセッション制御
 
 - 最初のタップを明示的な開始操作とし、開始前はマイクを取得しない
+- 標準Native turnの開始操作後は、新しく取得したマイクtrackを直ちにmuteする。serverの`ready`は認証・quota・UID leaseに加え、そのturnでproviderを使う場合の`SetupComplete`受信と`StartActivity`成功を待つ。ブラウザはこの`ready`より前にクラウドPCM captureを接続せず、VADを開始せず、`Listening`を表示しない。providerを開かない監査済みfallbackではstate準備完了を入力受入境界とし、providerを開いたとは扱わない
+- AI応答への割り込み候補は開始済みsessionの端末内VAD、bounded MediaRecorder、対応端末の固定長PCM ringで確認する。AEC確認済み・stateful drain不要のpre-final Native live・PCM handoffがそろう場合だけ新providerを裏で準備し、候補PCMはstrong ready前に送信・adoptしない。発話終了後にNative readyを最大450 ms待ち、間に合わなければHTTP fallbackへ切り替える。それ以外は新providerを準備せずMediaRecorderのHTTP経路へ直ちに進む。準備経路は発話終了とroute確定の両方を待ち、stop・pagehide・session epoch変更では準備中provider、ring、MediaRecorderを破棄する
+- providerを使うbrowser turnごとに接続を新規作成して終了時に閉じる。cross-turn pooling、session resumption、provider session再利用は現在の保証に含めない。`/health` warmupはprocessの応答だけを確かめ、次のturnのprovider readyを証明しない
 - 各requestは`turnMode: intentional | foreground | ambient`を必須とし、状態tokenの有無から権限を推測しない。foregroundは返答を期待するが、外部作用や状態更新についてはambientと同じ制限を保つ
 - 端末側VADは発話区間を決めるためだけに使い、声紋認証、感情診断、病気や性格の推定に使わない
 - AI処理中と合成音声の再生中も、利用者が開始した会話セッション内では訂正・割り込みを受けるためマイクトラックを有効にする。端末内VADが確認する前の音声は送信せず、確認した割り込みだけをForeground turnとして送る

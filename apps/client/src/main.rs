@@ -43,7 +43,7 @@ enum PasskeySetupFeedback {
     Error(&'static str),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VoiceState {
     Ready,
     RequestingPermission,
@@ -221,6 +221,127 @@ impl VoiceStartRoute {
             Self::ContinuingCoach => "継続Coach",
             Self::HttpFallback => "HTTP fallback",
             Self::StrictLocal => "厳格経路",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VoicePrepareLatency {
+    milliseconds: u64,
+    outcome: VoicePrepareOutcome,
+    result: VoicePrepareResult,
+    route: VoicePrepareRoute,
+}
+
+impl VoicePrepareLatency {
+    const ONE_SECOND_GOAL_MS: u32 = 1_000;
+    const MAXIMUM_EVENT_MS: f64 = 9_007_199_254_740_991.0;
+    const MAXIMUM_GENERATION: u64 = 9_007_199_254_740_991;
+
+    const fn is_on_target(self) -> bool {
+        matches!(self.outcome, VoicePrepareOutcome::OnTarget)
+    }
+
+    fn status(self) -> String {
+        let seconds = self.milliseconds as f64 / 1_000.0;
+        let result = self.result.label(self.route);
+        format!("会話準備 約{seconds:.1}秒 / {result}")
+    }
+
+    const fn class_name(self) -> &'static str {
+        if self.is_on_target() {
+            "voice-status__latency is-on-target"
+        } else {
+            "voice-status__latency"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoicePrepareOutcome {
+    OnTarget,
+    Slow,
+    Missed,
+    TimedOut,
+}
+
+impl VoicePrepareOutcome {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "on-target" => Some(Self::OnTarget),
+            "slow" => Some(Self::Slow),
+            "missed" => Some(Self::Missed),
+            "timed-out" => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+
+    const fn for_rounded_latency(milliseconds: u64) -> Self {
+        if milliseconds <= VoicePrepareLatency::ONE_SECOND_GOAL_MS as u64 {
+            Self::OnTarget
+        } else if milliseconds < 3_000 {
+            Self::Slow
+        } else if milliseconds < 4_000 {
+            Self::Missed
+        } else {
+            Self::TimedOut
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoicePrepareResult {
+    Ready,
+    Fallback,
+    Cancelled,
+    Error,
+}
+
+impl VoicePrepareResult {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "ready" => Some(Self::Ready),
+            "fallback" => Some(Self::Fallback),
+            "cancelled" => Some(Self::Cancelled),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    const fn is_valid_for(self, route: VoicePrepareRoute) -> bool {
+        match self {
+            Self::Ready => matches!(route, VoicePrepareRoute::NativeReady),
+            Self::Fallback => matches!(route, VoicePrepareRoute::HttpFallback),
+            Self::Cancelled | Self::Error => true,
+        }
+    }
+
+    const fn label(self, route: VoicePrepareRoute) -> &'static str {
+        match (self, route) {
+            (Self::Ready, VoicePrepareRoute::NativeReady) => "音声入力準備済み",
+            (Self::Fallback, VoicePrepareRoute::HttpFallback) => "HTTP退避",
+            (Self::Cancelled, VoicePrepareRoute::NativeReady) => "音声入力準備キャンセル",
+            (Self::Cancelled, VoicePrepareRoute::HttpFallback) => "HTTP退避キャンセル",
+            (Self::Error, VoicePrepareRoute::NativeReady) => "音声入力準備エラー",
+            (Self::Error, VoicePrepareRoute::HttpFallback) => "HTTP退避エラー",
+            (Self::Ready, VoicePrepareRoute::HttpFallback)
+            | (Self::Fallback, VoicePrepareRoute::NativeReady) => "無効な準備経路",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoicePrepareRoute {
+    NativeReady,
+    HttpFallback,
+}
+
+impl VoicePrepareRoute {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "native-ready" => Some(Self::NativeReady),
+            "http-fallback" => Some(Self::HttpFallback),
+            _ => None,
         }
     }
 }
@@ -685,10 +806,12 @@ mod cloud {
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
         ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
         VoiceTurnMode, VoiceTurnResult, WaitTurnError, coach_action_from_checkpoint,
-        coach_phase_from_checkpoint, confirmed_voice_input_state, recoverable_finish_turn_code,
-        recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
-        valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
-        valid_voice_pause_metadata, valid_voice_receipt_metadata, validated_voice_start_slo,
+        coach_phase_from_checkpoint, confirmed_voice_input_state, interrupted_voice_state,
+        interruption_ready_voice_state, recoverable_finish_turn_code, recoverable_wait_turn_code,
+        session_stop_pauses, valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
+        valid_legacy_voice_start_latency_clear, valid_voice_pause_metadata,
+        valid_voice_prepare_slo_clear, valid_voice_receipt_metadata, validated_voice_prepare_slo,
+        validated_voice_start_slo,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -767,6 +890,12 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct VoicePrepareSloListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+        clear_callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     impl Drop for FirstAudioListener {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
@@ -821,9 +950,23 @@ mod cloud {
         }
     }
 
+    impl Drop for VoicePrepareSloListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-prepare-slo",
+                self.callback.as_ref().unchecked_ref(),
+            );
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-prepare-slo-clear",
+                self.clear_callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
     pub(super) struct VoiceInterruptedListener {
         window: web_sys::Window,
         callback: Closure<dyn FnMut(web_sys::Event)>,
+        ready_callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
     impl Drop for VoiceInterruptedListener {
@@ -831,6 +974,10 @@ mod cloud {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:voice-interrupted",
                 self.callback.as_ref().unchecked_ref(),
+            );
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:voice-interruption-ready",
+                self.ready_callback.as_ref().unchecked_ref(),
             );
         }
     }
@@ -1269,6 +1416,138 @@ mod cloud {
         Some(Rc::new(VoiceStartSloListener { window, callback }))
     }
 
+    pub fn install_voice_prepare_slo_listener(
+        mut voice_prepare_latency: Signal<Option<super::VoicePrepareLatency>>,
+    ) -> Option<Rc<VoicePrepareSloListener>> {
+        let window = web_sys::window()?;
+        let mut latest_generation = 0_u64;
+        let mut clear_voice_prepare_latency = voice_prepare_latency;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Some(key_names) = keys
+                .iter()
+                .map(|key| key.as_string())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Ok(generation) = js_sys::Reflect::get(&detail, &JsValue::from_str("generation"))
+            else {
+                return;
+            };
+            let Some(generation) = generation.as_f64() else {
+                return;
+            };
+            let Ok(latency_ms) = js_sys::Reflect::get(&detail, &JsValue::from_str("latency_ms"))
+            else {
+                return;
+            };
+            let Some(latency_ms) = latency_ms.as_f64() else {
+                return;
+            };
+            let Ok(outcome) = js_sys::Reflect::get(&detail, &JsValue::from_str("outcome")) else {
+                return;
+            };
+            let Some(outcome) = outcome.as_string() else {
+                return;
+            };
+            let Ok(result) = js_sys::Reflect::get(&detail, &JsValue::from_str("result")) else {
+                return;
+            };
+            let Some(result) = result.as_string() else {
+                return;
+            };
+            let Ok(route) = js_sys::Reflect::get(&detail, &JsValue::from_str("route")) else {
+                return;
+            };
+            let Some(route) = route.as_string() else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            let Some(next_latency) = validated_voice_prepare_slo(
+                &mut latest_generation,
+                generation,
+                latency_ms,
+                &outcome,
+                &result,
+                &route,
+                version,
+                &key_names,
+            ) else {
+                return;
+            };
+            voice_prepare_latency.set(Some(next_latency));
+        });
+        let clear_callback =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+                let event_value = event.as_ref();
+                let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail"))
+                else {
+                    return;
+                };
+                let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                    return;
+                };
+                let keys = js_sys::Object::keys(detail_object);
+                let Some(key_names) = keys
+                    .iter()
+                    .map(|key| key.as_string())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
+                let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version"))
+                else {
+                    return;
+                };
+                let Some(version) = version.as_f64() else {
+                    return;
+                };
+                if valid_voice_prepare_slo_clear(version, &key_names) {
+                    clear_voice_prepare_latency.set(None);
+                }
+            });
+        if window
+            .add_event_listener_with_callback(
+                "kotae:voice-prepare-slo",
+                callback.as_ref().unchecked_ref(),
+            )
+            .is_err()
+        {
+            return None;
+        }
+        if window
+            .add_event_listener_with_callback(
+                "kotae:voice-prepare-slo-clear",
+                clear_callback.as_ref().unchecked_ref(),
+            )
+            .is_err()
+        {
+            let _ = window.remove_event_listener_with_callback(
+                "kotae:voice-prepare-slo",
+                callback.as_ref().unchecked_ref(),
+            );
+            return None;
+        }
+        Some(Rc::new(VoicePrepareSloListener {
+            window,
+            callback,
+            clear_callback,
+        }))
+    }
+
     pub fn install_first_audio_listener(
         mut voice_state: Signal<VoiceState>,
         mut voice_receipt: Signal<VoiceReceipt>,
@@ -1386,21 +1665,123 @@ mod cloud {
         mut voice_state: Signal<VoiceState>,
     ) -> Option<Rc<VoiceInterruptedListener>> {
         let window = web_sys::window()?;
-        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-            if matches!(
+        let mut ready_voice_state = voice_state;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Some(key_names) = keys
+                .iter()
+                .map(|key| key.as_string())
+                .collect::<Option<Vec<_>>>()
+            else {
+                return;
+            };
+            let Ok(final_received) =
+                js_sys::Reflect::get(&detail, &JsValue::from_str("finalReceived"))
+            else {
+                return;
+            };
+            let Some(final_received) = final_received.as_bool() else {
+                return;
+            };
+            let Ok(preparing) = js_sys::Reflect::get(&detail, &JsValue::from_str("preparing"))
+            else {
+                return;
+            };
+            let Some(preparing) = preparing.as_bool() else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            let Some(version) = version.as_f64() else {
+                return;
+            };
+            let Some(next_state) = interrupted_voice_state(
                 *voice_state.peek(),
-                VoiceState::Thinking | VoiceState::Speaking
-            ) {
-                voice_state.set(VoiceState::Listening);
-            }
+                final_received,
+                preparing,
+                version,
+                &key_names,
+            ) else {
+                return;
+            };
+            voice_state.set(next_state);
         });
-        window
+        let ready_callback =
+            Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+                let event_value = event.as_ref();
+                let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail"))
+                else {
+                    return;
+                };
+                let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                    return;
+                };
+                let keys = js_sys::Object::keys(detail_object);
+                let Some(key_names) = keys
+                    .iter()
+                    .map(|key| key.as_string())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
+                let Ok(route) = js_sys::Reflect::get(&detail, &JsValue::from_str("route")) else {
+                    return;
+                };
+                let Some(route) = route.as_string() else {
+                    return;
+                };
+                let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version"))
+                else {
+                    return;
+                };
+                let Some(version) = version.as_f64() else {
+                    return;
+                };
+                let Some(next_state) = interruption_ready_voice_state(
+                    *ready_voice_state.peek(),
+                    &route,
+                    version,
+                    &key_names,
+                ) else {
+                    return;
+                };
+                ready_voice_state.set(next_state);
+            });
+        if window
             .add_event_listener_with_callback(
                 "kotae:voice-interrupted",
                 callback.as_ref().unchecked_ref(),
             )
-            .ok()?;
-        Some(Rc::new(VoiceInterruptedListener { window, callback }))
+            .is_err()
+        {
+            return None;
+        }
+        if window
+            .add_event_listener_with_callback(
+                "kotae:voice-interruption-ready",
+                ready_callback.as_ref().unchecked_ref(),
+            )
+            .is_err()
+        {
+            let _ = window.remove_event_listener_with_callback(
+                "kotae:voice-interrupted",
+                callback.as_ref().unchecked_ref(),
+            );
+            return None;
+        }
+        Some(Rc::new(VoiceInterruptedListener {
+            window,
+            callback,
+            ready_callback,
+        }))
     }
 
     pub fn install_voice_session_paused_listener(
@@ -1620,8 +2001,8 @@ const fn cloud_state_for_display(
 mod cloud {
     use super::{
         CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeySetupFeedback,
-        ResearchRecord, ResearchStatus, VoiceReceipt, VoiceStartLatency, VoiceState, VoiceTurnMode,
-        VoiceTurnResult, WaitTurnError,
+        ResearchRecord, ResearchStatus, VoicePrepareLatency, VoiceReceipt, VoiceStartLatency,
+        VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -1711,6 +2092,12 @@ mod cloud {
 
     pub fn install_voice_start_slo_listener(
         _voice_start_latency: Signal<Option<VoiceStartLatency>>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_voice_prepare_slo_listener(
+        _voice_prepare_latency: Signal<Option<VoicePrepareLatency>>,
     ) -> Option<Listener> {
         None
     }
@@ -1927,7 +2314,12 @@ fn resume_foreground_interruption(
     mut turn_notice: Signal<TurnNotice>,
     strict_cloud_minimization: Signal<bool>,
 ) {
-    voice_state.set(VoiceState::Listening);
+    // A confirmed interruption is already held locally, but a fresh Native
+    // provider turn may still be proving strong ready. Keep the preparation
+    // state until JS publishes Native-ready or selects HTTP fallback.
+    if *voice_state.peek() != VoiceState::RequestingPermission {
+        voice_state.set(VoiceState::Listening);
+    }
     spawn(async move {
         let has_speech = match cloud::wait_for_turn_end().await {
             Ok(has_speech) => has_speech,
@@ -2351,6 +2743,46 @@ fn valid_legacy_voice_start_latency_clear(
     milliseconds_is_null && version == 1.0 && keys == ["milliseconds", "version"]
 }
 
+fn valid_voice_prepare_slo_clear(version: f64, keys: &[String]) -> bool {
+    version == 1.0 && keys == ["version"]
+}
+
+fn interrupted_voice_state(
+    state: VoiceState,
+    _final_received: bool,
+    preparing: bool,
+    version: f64,
+    keys: &[String],
+) -> Option<VoiceState> {
+    if version != 1.0
+        || keys != ["finalReceived", "preparing", "version"]
+        || !matches!(state, VoiceState::Thinking | VoiceState::Speaking)
+    {
+        return None;
+    }
+    Some(if preparing {
+        VoiceState::RequestingPermission
+    } else {
+        VoiceState::Listening
+    })
+}
+
+fn interruption_ready_voice_state(
+    state: VoiceState,
+    route: &str,
+    version: f64,
+    keys: &[String],
+) -> Option<VoiceState> {
+    if version != 1.0
+        || keys != ["route", "version"]
+        || VoicePrepareRoute::from_wire(route).is_none()
+        || state != VoiceState::RequestingPermission
+    {
+        return None;
+    }
+    Some(VoiceState::Listening)
+}
+
 fn validated_voice_start_slo(
     latest_generation: &mut u64,
     generation: f64,
@@ -2383,6 +2815,58 @@ fn validated_voice_start_slo(
     Some(VoiceStartLatency {
         milliseconds: latency_ms.round() as u32,
         outcome,
+        route,
+    })
+}
+
+fn validated_voice_prepare_slo(
+    latest_generation: &mut u64,
+    generation: f64,
+    latency_ms: f64,
+    outcome: &str,
+    result: &str,
+    route: &str,
+    version: f64,
+    keys: &[String],
+) -> Option<VoicePrepareLatency> {
+    if version != 1.0
+        || keys
+            != [
+                "generation",
+                "latency_ms",
+                "outcome",
+                "result",
+                "route",
+                "version",
+            ]
+        || !generation.is_finite()
+        || generation.fract() != 0.0
+        || !(1.0..=VoicePrepareLatency::MAXIMUM_GENERATION as f64).contains(&generation)
+        || !latency_ms.is_finite()
+        || !(0.0..=VoicePrepareLatency::MAXIMUM_EVENT_MS).contains(&latency_ms)
+    {
+        return None;
+    }
+
+    let milliseconds = latency_ms.round() as u64;
+    let outcome = VoicePrepareOutcome::from_wire(outcome)?;
+    if outcome != VoicePrepareOutcome::for_rounded_latency(milliseconds) {
+        return None;
+    }
+    let result = VoicePrepareResult::from_wire(result)?;
+    let route = VoicePrepareRoute::from_wire(route)?;
+    if !result.is_valid_for(route) {
+        return None;
+    }
+    let generation = generation as u64;
+    if generation <= *latest_generation {
+        return None;
+    }
+    *latest_generation = generation;
+    Some(VoicePrepareLatency {
+        milliseconds,
+        outcome,
+        result,
         route,
     })
 }
@@ -2991,6 +3475,7 @@ fn App() -> Element {
     let mut voice_state = use_signal(|| VoiceState::Ready);
     let voice_receipt = use_signal(|| VoiceReceipt::Clear);
     let voice_start_latency = use_signal(|| None::<VoiceStartLatency>);
+    let voice_prepare_latency = use_signal(|| None::<VoicePrepareLatency>);
     let mut generation = use_signal(|| 0_u64);
     let mut session_state = use_signal(String::new);
     let mut detected_domain = use_signal(String::new);
@@ -3037,6 +3522,8 @@ fn App() -> Element {
         use_hook(|| cloud::install_voice_start_latency_listener(voice_start_latency));
     let _voice_start_slo_listener =
         use_hook(|| cloud::install_voice_start_slo_listener(voice_start_latency));
+    let _voice_prepare_slo_listener =
+        use_hook(|| cloud::install_voice_prepare_slo_listener(voice_prepare_latency));
     let _first_audio_listener =
         use_hook(|| cloud::install_first_audio_listener(voice_state, voice_receipt));
     let _coach_checkpoint_listener =
@@ -3068,6 +3555,7 @@ fn App() -> Element {
     let state_snapshot = *voice_state.read();
     let receipt_snapshot = *voice_receipt.read();
     let voice_start_latency_snapshot = *voice_start_latency.read();
+    let voice_prepare_latency_snapshot = *voice_prepare_latency.read();
     let receipt_is_visible = receipt_snapshot.is_visible_for(state_snapshot);
     let coach_snapshot = *coach_state.read();
     let turn_notice_snapshot = *turn_notice.read();
@@ -3309,6 +3797,13 @@ fn App() -> Element {
                             p { class: "voice-status__transport", {state_snapshot.hint()} }
                             }
                         if state_snapshot.session_active() {
+                            if let Some(latency) = voice_prepare_latency_snapshot {
+                                p {
+                                    class: latency.class_name(),
+                                    aria_label: "会話経路の準備時間",
+                                    {latency.status()}
+                                }
+                            }
                             if let Some(latency) = voice_start_latency_snapshot {
                                 p {
                                     class: latency.class_name(),
@@ -3847,14 +4342,16 @@ mod tests {
         PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
         RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
         STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
-        TALK_ONLY_COPY, TurnNotice, VoiceReceipt, VoiceStartLatency, VoiceStartOutcome,
-        VoiceStartRoute, VoiceState, VoiceTurnMode, cloud_state_for_display,
-        confirmed_voice_input_state, passkey_focus_target, recoverable_wait_turn_code,
-        requires_passkey_choice, requires_passkey_registration_recovery, session_stop_pauses,
-        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_answer_proof_metadata,
-        valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
-        valid_legacy_voice_start_latency_clear, valid_streamed_audio_metadata,
-        valid_voice_pause_metadata, valid_voice_privacy_metadata, valid_voice_receipt_metadata,
+        TALK_ONLY_COPY, TurnNotice, VoicePrepareLatency, VoicePrepareOutcome, VoicePrepareResult,
+        VoicePrepareRoute, VoiceReceipt, VoiceStartLatency, VoiceStartOutcome, VoiceStartRoute,
+        VoiceState, VoiceTurnMode, cloud_state_for_display, confirmed_voice_input_state,
+        interrupted_voice_state, interruption_ready_voice_state, passkey_focus_target,
+        recoverable_wait_turn_code, requires_passkey_choice,
+        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
+        turn_mode_for_gesture_epoch, valid_answer_proof_metadata, valid_coach_checkpoint_keys,
+        valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
+        valid_streamed_audio_metadata, valid_voice_pause_metadata, valid_voice_prepare_slo_clear,
+        valid_voice_privacy_metadata, valid_voice_receipt_metadata, validated_voice_prepare_slo,
         validated_voice_start_slo,
     };
     use serde::{Deserialize, de::IntoDeserializer};
@@ -3869,6 +4366,80 @@ mod tests {
 
     fn deserialize_answer_proof(value: &str) -> Result<AnswerProof, serde::de::value::Error> {
         AnswerProof::deserialize(value.into_deserializer())
+    }
+
+    fn voice_prepare_slo_keys() -> Vec<String> {
+        [
+            "generation",
+            "latency_ms",
+            "outcome",
+            "result",
+            "route",
+            "version",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    #[test]
+    fn voice_prepare_slo_clear_is_exact_and_content_free() {
+        assert!(valid_voice_prepare_slo_clear(1.0, &["version".to_string()],));
+        for (version, keys) in [
+            (2.0, vec!["version".to_string()]),
+            (1.0, vec!["transcript".to_string(), "version".to_string()]),
+            (1.0, Vec::new()),
+        ] {
+            assert!(!valid_voice_prepare_slo_clear(version, &keys));
+        }
+    }
+
+    #[test]
+    fn interrupted_listening_waits_for_native_ready_or_http_selection() {
+        let interrupted_keys = [
+            "finalReceived".to_string(),
+            "preparing".to_string(),
+            "version".to_string(),
+        ];
+        assert_eq!(
+            interrupted_voice_state(VoiceState::Speaking, false, true, 1.0, &interrupted_keys,),
+            Some(VoiceState::RequestingPermission),
+        );
+        assert_eq!(
+            interrupted_voice_state(VoiceState::Thinking, true, false, 1.0, &interrupted_keys,),
+            Some(VoiceState::Listening),
+        );
+        let ready_keys = ["route".to_string(), "version".to_string()];
+        for route in ["native-ready", "http-fallback"] {
+            assert_eq!(
+                interruption_ready_voice_state(
+                    VoiceState::RequestingPermission,
+                    route,
+                    1.0,
+                    &ready_keys,
+                ),
+                Some(VoiceState::Listening),
+            );
+        }
+        assert_eq!(
+            interruption_ready_voice_state(VoiceState::Thinking, "native-ready", 1.0, &ready_keys,),
+            None,
+        );
+        assert_eq!(
+            interrupted_voice_state(
+                VoiceState::Speaking,
+                false,
+                true,
+                1.0,
+                &[
+                    "finalReceived".to_string(),
+                    "preparing".to_string(),
+                    "transcript".to_string(),
+                    "version".to_string(),
+                ],
+            ),
+            None,
+        );
     }
 
     #[test]
@@ -4573,6 +5144,261 @@ mod tests {
                     "transcript".to_string(),
                     "version".to_string(),
                 ],
+            ),
+            None
+        );
+        assert_eq!(latest_generation, 0);
+    }
+
+    #[test]
+    fn voice_prepare_slo_accepts_exact_metadata_and_separate_status() {
+        let keys = voice_prepare_slo_keys();
+        let mut latest_generation = 0;
+        let ready = validated_voice_prepare_slo(
+            &mut latest_generation,
+            1.0,
+            842.4,
+            "on-target",
+            "ready",
+            "native-ready",
+            1.0,
+            &keys,
+        )
+        .expect("valid Native preparation event");
+        assert_eq!(ready.milliseconds, 842);
+        assert_eq!(ready.outcome, VoicePrepareOutcome::OnTarget);
+        assert_eq!(ready.result, VoicePrepareResult::Ready);
+        assert_eq!(ready.route, VoicePrepareRoute::NativeReady);
+        assert!(ready.is_on_target());
+        assert_eq!(ready.status(), "会話準備 約0.8秒 / 音声入力準備済み");
+        assert_eq!(latest_generation, 1);
+
+        let fallback = validated_voice_prepare_slo(
+            &mut latest_generation,
+            2.0,
+            1_249.7,
+            "slow",
+            "fallback",
+            "http-fallback",
+            1.0,
+            &keys,
+        )
+        .expect("valid HTTP fallback preparation event");
+        assert_eq!(fallback.milliseconds, 1_250);
+        assert_eq!(fallback.outcome, VoicePrepareOutcome::Slow);
+        assert_eq!(fallback.result, VoicePrepareResult::Fallback);
+        assert_eq!(fallback.route, VoicePrepareRoute::HttpFallback);
+        assert!(!fallback.is_on_target());
+        assert_eq!(fallback.status(), "会話準備 約1.2秒 / HTTP退避");
+        assert_eq!(latest_generation, 2);
+
+        for (generation, result, route, label) in [
+            (3.0, "cancelled", "native-ready", "音声入力準備キャンセル"),
+            (4.0, "cancelled", "http-fallback", "HTTP退避キャンセル"),
+            (5.0, "error", "native-ready", "音声入力準備エラー"),
+            (6.0, "error", "http-fallback", "HTTP退避エラー"),
+        ] {
+            let event = validated_voice_prepare_slo(
+                &mut latest_generation,
+                generation,
+                4_000.0,
+                "timed-out",
+                result,
+                route,
+                1.0,
+                &keys,
+            )
+            .expect("cancelled and error results accept either route");
+            assert!(event.status().contains(label));
+        }
+    }
+
+    #[test]
+    fn voice_prepare_slo_uses_rounded_latency_at_every_boundary() {
+        let keys = voice_prepare_slo_keys();
+        for (latency_ms, expected_milliseconds, outcome, expected_outcome) in [
+            (0.0, 0, "on-target", VoicePrepareOutcome::OnTarget),
+            (1_000.49, 1_000, "on-target", VoicePrepareOutcome::OnTarget),
+            (1_000.5, 1_001, "slow", VoicePrepareOutcome::Slow),
+            (2_999.49, 2_999, "slow", VoicePrepareOutcome::Slow),
+            (2_999.5, 3_000, "missed", VoicePrepareOutcome::Missed),
+            (3_999.49, 3_999, "missed", VoicePrepareOutcome::Missed),
+            (3_999.5, 4_000, "timed-out", VoicePrepareOutcome::TimedOut),
+            (
+                VoicePrepareLatency::MAXIMUM_EVENT_MS,
+                VoicePrepareLatency::MAXIMUM_GENERATION,
+                "timed-out",
+                VoicePrepareOutcome::TimedOut,
+            ),
+        ] {
+            let mut latest_generation = 0;
+            let event = validated_voice_prepare_slo(
+                &mut latest_generation,
+                1.0,
+                latency_ms,
+                outcome,
+                "cancelled",
+                "native-ready",
+                1.0,
+                &keys,
+            )
+            .expect("canonical rounded boundary event");
+            assert_eq!(event.milliseconds, expected_milliseconds);
+            assert_eq!(event.outcome, expected_outcome);
+        }
+
+        for (latency_ms, noncanonical_outcome) in [
+            (1_000.49, "slow"),
+            (1_000.5, "on-target"),
+            (2_999.49, "missed"),
+            (2_999.5, "slow"),
+            (3_999.49, "timed-out"),
+            (3_999.5, "missed"),
+        ] {
+            let mut latest_generation = 0;
+            assert_eq!(
+                validated_voice_prepare_slo(
+                    &mut latest_generation,
+                    1.0,
+                    latency_ms,
+                    noncanonical_outcome,
+                    "cancelled",
+                    "native-ready",
+                    1.0,
+                    &keys,
+                ),
+                None
+            );
+            assert_eq!(latest_generation, 0);
+        }
+    }
+
+    #[test]
+    fn voice_prepare_slo_generation_is_safe_and_listener_local_monotonic() {
+        let keys = voice_prepare_slo_keys();
+        let mut latest_generation = 0;
+        assert!(
+            validated_voice_prepare_slo(
+                &mut latest_generation,
+                7.0,
+                500.0,
+                "on-target",
+                "ready",
+                "native-ready",
+                1.0,
+                &keys,
+            )
+            .is_some()
+        );
+        for duplicate_or_stale in [7.0, 6.0, 1.0] {
+            assert_eq!(
+                validated_voice_prepare_slo(
+                    &mut latest_generation,
+                    duplicate_or_stale,
+                    500.0,
+                    "on-target",
+                    "ready",
+                    "native-ready",
+                    1.0,
+                    &keys,
+                ),
+                None
+            );
+        }
+        assert_eq!(latest_generation, 7);
+
+        assert!(
+            validated_voice_prepare_slo(
+                &mut latest_generation,
+                VoicePrepareLatency::MAXIMUM_GENERATION as f64,
+                500.0,
+                "on-target",
+                "ready",
+                "native-ready",
+                1.0,
+                &keys,
+            )
+            .is_some()
+        );
+        assert_eq!(latest_generation, VoicePrepareLatency::MAXIMUM_GENERATION);
+
+        for invalid_generation in [
+            -1.0,
+            0.0,
+            1.5,
+            f64::NAN,
+            f64::INFINITY,
+            VoicePrepareLatency::MAXIMUM_GENERATION as f64 + 1.0,
+        ] {
+            let mut isolated_generation = 0;
+            assert_eq!(
+                validated_voice_prepare_slo(
+                    &mut isolated_generation,
+                    invalid_generation,
+                    500.0,
+                    "on-target",
+                    "ready",
+                    "native-ready",
+                    1.0,
+                    &keys,
+                ),
+                None
+            );
+            assert_eq!(isolated_generation, 0);
+        }
+    }
+
+    #[test]
+    fn voice_prepare_slo_rejects_extra_unknown_and_inconsistent_content() {
+        let keys = voice_prepare_slo_keys();
+        for (latency_ms, outcome, result, route, version) in [
+            (-0.1, "on-target", "ready", "native-ready", 1.0),
+            (f64::NAN, "on-target", "ready", "native-ready", 1.0),
+            (f64::INFINITY, "on-target", "ready", "native-ready", 1.0),
+            (
+                VoicePrepareLatency::MAXIMUM_EVENT_MS + 2.0,
+                "timed-out",
+                "error",
+                "native-ready",
+                1.0,
+            ),
+            (500.0, "unknown", "ready", "native-ready", 1.0),
+            (500.0, "on-target", "unknown", "native-ready", 1.0),
+            (500.0, "on-target", "ready", "unknown", 1.0),
+            (500.0, "on-target", "ready", "native-ready", 2.0),
+            (500.0, "on-target", "ready", "http-fallback", 1.0),
+            (500.0, "on-target", "fallback", "native-ready", 1.0),
+        ] {
+            let mut latest_generation = 0;
+            assert_eq!(
+                validated_voice_prepare_slo(
+                    &mut latest_generation,
+                    1.0,
+                    latency_ms,
+                    outcome,
+                    result,
+                    route,
+                    version,
+                    &keys,
+                ),
+                None
+            );
+            assert_eq!(latest_generation, 0);
+        }
+
+        let mut keys_with_extra = keys;
+        keys_with_extra.insert(5, "transcript".to_string());
+        let mut latest_generation = 0;
+        assert_eq!(
+            validated_voice_prepare_slo(
+                &mut latest_generation,
+                1.0,
+                500.0,
+                "on-target",
+                "ready",
+                "native-ready",
+                1.0,
+                &keys_with_extra,
             ),
             None
         );

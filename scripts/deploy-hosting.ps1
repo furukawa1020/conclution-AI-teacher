@@ -25,6 +25,12 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.Net.Http
 
+$releaseProvenancePath = Join-Path $PSScriptRoot "release-provenance.ps1"
+if (-not (Test-Path -LiteralPath $releaseProvenancePath -PathType Leaf)) {
+    throw "The release provenance policy is missing."
+}
+. $releaseProvenancePath
+
 $expectedProjectId = "kotae-ai-u22-2026"
 $expectedProjectNumber = "551920539470"
 $expectedAppId = "1:551920539470:web:6518baf6d84d7ab89eb01f"
@@ -296,47 +302,6 @@ function Invoke-GcloudJson {
     return @($decoded)
 }
 
-function Assert-SourceProvenanceLabels {
-    param(
-        [AllowNull()]
-        [object] $Labels,
-
-        [Parameter(Mandatory)]
-        [string] $Boundary
-    )
-
-    if ($null -eq $Labels) {
-        throw "$Boundary is missing source provenance labels."
-    }
-    $sourceCommitProperty = $Labels.PSObject.Properties["source-commit"]
-    $sourceRevisionProperty = $Labels.PSObject.Properties["source-revision"]
-    $sourceCommit = if ($null -eq $sourceCommitProperty) {
-        ""
-    } else {
-        [string] $sourceCommitProperty.Value
-    }
-    $sourceRevision = if ($null -eq $sourceRevisionProperty) {
-        ""
-    } else {
-        [string] $sourceRevisionProperty.Value
-    }
-    $unknownSourceLabels = @(
-        $Labels.PSObject.Properties.Name | Where-Object {
-            $_ -like "source-*" -and
-            $_ -cne "source-commit" -and
-            $_ -cne "source-revision"
-        }
-    )
-    if (
-        $unknownSourceLabels.Count -ne 0 -or
-        $sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
-        $sourceCommit -cne $ExpectedGitCommit -or
-        $sourceRevision -cne $expectedSourceRevision
-    ) {
-        throw "$Boundary source provenance does not match the reviewed main commit."
-    }
-}
-
 function Assert-PromotedBackendBoundary {
     $service = Invoke-GcloudJson `
         -Operation "checking the promoted Cloud Run service" `
@@ -357,9 +322,13 @@ function Assert-PromotedBackendBoundary {
     }
 
     Assert-SourceProvenanceLabels `
+        -ExpectedGitCommit $ExpectedGitCommit `
+        -ExpectedSourceRevision $expectedSourceRevision `
         -Labels $service.metadata.labels `
         -Boundary "The promoted Cloud Run service"
     Assert-SourceProvenanceLabels `
+        -ExpectedGitCommit $ExpectedGitCommit `
+        -ExpectedSourceRevision $expectedSourceRevision `
         -Labels $service.spec.template.metadata.labels `
         -Boundary "The promoted Cloud Run revision template"
 
@@ -390,24 +359,10 @@ function Assert-PromotedBackendBoundary {
     }
 
     $traffic = @($service.status.traffic)
-    $trafficTag = $null
-    if ($traffic.Count -eq 1) {
-        $trafficTagProperty = $traffic[0].PSObject.Properties["tag"]
-        if ($null -ne $trafficTagProperty) {
-            $trafficTag = [string] $trafficTagProperty.Value
-        }
-    }
-    if (
-        $traffic.Count -ne 1 -or
-        [int] $traffic[0].percent -ne 100 -or
-        [string]::IsNullOrWhiteSpace([string] $traffic[0].revisionName) -or
-        [string] $traffic[0].revisionName -cne [string] $service.status.latestReadyRevisionName -or
-        -not [string]::IsNullOrWhiteSpace($trafficTag)
-    ) {
-        throw "The latest ready Cloud Run revision is not the sole tagless promoted revision."
-    }
-
-    $promotedRevisionName = [string] $traffic[0].revisionName
+    $promotedRevisionName = Get-SolePromotedRevisionName `
+        -Traffic $traffic `
+        -LatestReadyRevisionName ([string] $service.status.latestReadyRevisionName) `
+        -Boundary "The promoted Cloud Run traffic"
     $promotedRevision = Invoke-GcloudJson `
         -Operation "checking the revision that receives production traffic" `
         -CommandArguments @(
@@ -419,6 +374,8 @@ function Assert-PromotedBackendBoundary {
             "--verbosity=error"
         )
     Assert-SourceProvenanceLabels `
+        -ExpectedGitCommit $ExpectedGitCommit `
+        -ExpectedSourceRevision $expectedSourceRevision `
         -Labels $promotedRevision.metadata.labels `
         -Boundary "The revision receiving production traffic"
     $revisionServiceLabel = $promotedRevision.metadata.labels.PSObject.Properties[

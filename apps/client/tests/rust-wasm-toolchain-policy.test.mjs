@@ -96,6 +96,9 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
   assert.match(policy, /\+\$\(\$Configuration\.rust\.toolchain\)/u);
   assert.match(installer, /archive SHA-256 does not match/u);
   assert.match(installer, /archive contains an unexpected path/u);
+  assert.ok(
+    (installer.match(/Select-Object -First 1/gu) ?? []).length >= 3,
+  );
   assert.match(fixture, /ItemType Junction/u);
   assert.match(fixture, /ItemType SymbolicLink/u);
   assert.match(fixture, /symlink or reparse ancestor/u);

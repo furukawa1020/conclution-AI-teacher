@@ -48,9 +48,17 @@ $extractRoot = Join-Path $stagingRoot "extract"
 New-Item -ItemType Directory -Path $extractRoot | Out-Null
 
 try {
-    $curl = Get-Command "curl.exe" -CommandType Application -ErrorAction SilentlyContinue
+    $curl = Get-Command `
+        "curl.exe" `
+        -CommandType Application `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
     if ($null -eq $curl) {
-        $curl = Get-Command "curl" -CommandType Application -ErrorAction Stop
+        $curl = Get-Command `
+            "curl" `
+            -CommandType Application `
+            -ErrorAction Stop |
+            Select-Object -First 1
     }
     & $curl.Source `
         --fail `
@@ -70,7 +78,11 @@ try {
         throw "wasm-bindgen release archive SHA-256 does not match the reviewed asset."
     }
 
-    $tar = Get-Command "tar" -CommandType Application -ErrorAction Stop
+    $tar = Get-Command `
+        "tar" `
+        -CommandType Application `
+        -ErrorAction Stop |
+        Select-Object -First 1
     $archiveEntries = @(& $tar.Source -tzf $archivePath)
     if ($LASTEXITCODE -ne 0 -or $archiveEntries.Count -ne 7) {
         throw "wasm-bindgen release archive shape is outside the reviewed boundary."

@@ -328,7 +328,7 @@ barge-in候補は開始済みsessionの端末内VAD、bounded MediaRecorder、�
 | `passkeyClientRateLimits` | Passkeyの登録・認証それぞれのbegin/finish、計4 ceremony APIで共有するclient単位rate counter | `expiresAt`、48時間 |
 | `passkeyAppRateLimits` | 計4 ceremony APIで共有するFirebase App単位サーキットブレーカー | `expiresAt`、48時間 |
 | `passkey_ceremonies_v1` | App ID・purpose・challengeへ束縛した単回ceremony | `expiresAt`、5分 |
-| `passkey_users_v1` / `passkey_handles_v1` / `passkey_credentials_v1` | 仮名UID、user handle、public credential、sign counter等。秘密鍵は含まない | TTLなし。削除・回復UIは未実装 |
+| `passkey_users_v1` / `passkey_handles_v1` / `passkey_credentials_v1` | 仮名UID、user handle、public credential、sign counter等。秘密鍵は含まない。保存層にはraw credential IDを返さない一覧と、最後の1件を残す原子的失効primitiveがある | TTLなし。公開管理route/UI、既存accountへの追加、回復、account削除は未実装。詳細は[`passkey-credential-lifecycle.md`](passkey-credential-lifecycle.md) |
 | `voiceLiveLeases` | SHA-256化UIDとランダム所有者だけを持つlive同時接続lease。音声・文字起こし・raw UIDは保存しない | `expiresAt`、最長7分 |
 
 ```powershell

@@ -12,6 +12,12 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $workspace = Split-Path -Parent $PSScriptRoot
+$toolchainPolicyPath = Join-Path $PSScriptRoot "rust-wasm-toolchain.ps1"
+if (-not (Test-Path -LiteralPath $toolchainPolicyPath -PathType Leaf)) {
+    throw "The Rust/Wasm release toolchain policy is missing."
+}
+. $toolchainPolicyPath
+$releaseToolchainConfiguration = Get-ReleaseToolchainConfiguration
 $targetRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace ".cache\cargo-target"))
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $workspace "dist\web"))
 $webSource = [System.IO.Path]::GetFullPath((Join-Path $workspace "apps\client\web"))
@@ -216,7 +222,16 @@ if (-not [string]::IsNullOrWhiteSpace($ExpectedGitCommit)) {
 $cargoCommand = Get-Command $CargoPath -CommandType Application -ErrorAction Stop
 
 if ([string]::IsNullOrWhiteSpace($WasmBindgenPath)) {
-    $workspaceWasmBindgen = Join-Path $workspace ".tools\wasm-bindgen-0.2.126\wasm-bindgen.exe"
+    $toolchainPlatformKey = Get-ReleaseToolchainPlatformKey
+    $toolchainPlatforms = $releaseToolchainConfiguration.wasmBindgen.platforms
+    $toolchainPlatform = $toolchainPlatforms.PSObject.Properties[
+        $toolchainPlatformKey
+    ].Value
+    $workspaceWasmBindgen = Join-Path (
+        Join-Path (
+            Join-Path $workspace ".tools"
+        ) "wasm-bindgen-0.2.126"
+    ) (Join-Path $toolchainPlatformKey ([string] $toolchainPlatform.executableName))
     $profileRoots = @(
         [Environment]::GetFolderPath("UserProfile"),
         $env:USERPROFILE
@@ -225,7 +240,11 @@ if ([string]::IsNullOrWhiteSpace($WasmBindgenPath)) {
         Select-Object -Unique
     $userWasmBindgen = $profileRoots |
         ForEach-Object {
-            Join-Path $_ ".dx\tools\wasm-bindgen-0.2.126\wasm-bindgen.exe"
+            Join-Path (
+                Join-Path (
+                    Join-Path $_ ".dx"
+                ) "tools"
+            ) (Join-Path "wasm-bindgen-0.2.126" ([string] $toolchainPlatform.executableName))
         } |
         Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
         Select-Object -First 1
@@ -236,19 +255,17 @@ if ([string]::IsNullOrWhiteSpace($WasmBindgenPath)) {
     } else {
         $wasmBindgenCommand = Get-Command "wasm-bindgen" -CommandType Application -ErrorAction SilentlyContinue
         if ($null -eq $wasmBindgenCommand) {
-            throw "wasm-bindgen 0.2.126 is required. Run the verified Dioxus tool installation first."
+            throw "wasm-bindgen 0.2.126 is required. Run scripts/install-release-wasm-bindgen.ps1 first."
         }
         $WasmBindgenPath = $wasmBindgenCommand.Source
     }
 }
 $wasmBindgen = [System.IO.Path]::GetFullPath($WasmBindgenPath)
-if (-not (Test-Path -LiteralPath $wasmBindgen -PathType Leaf)) {
-    throw "wasm-bindgen does not exist: $wasmBindgen"
-}
-$wasmBindgenVersion = ((& $wasmBindgen --version) | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $wasmBindgenVersion -notmatch 'wasm-bindgen\s+0\.2\.126(?:\s|$)') {
-    throw "Expected wasm-bindgen 0.2.126, got '$wasmBindgenVersion'."
-}
+$releaseToolchain = Assert-ReleaseToolchain `
+    -WorkspaceRoot $workspace `
+    -CargoPath $cargoCommand.Source `
+    -WasmBindgenPath $wasmBindgen `
+    -Configuration $releaseToolchainConfiguration
 
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
 if (
@@ -260,7 +277,7 @@ if (
 $previousTargetDirectory = $env:CARGO_TARGET_DIR
 try {
     $env:CARGO_TARGET_DIR = $targetRoot
-    & $cargoCommand.Source build `
+    & $cargoCommand.Source "+$($releaseToolchain.rustToolchain)" build `
         --manifest-path (Join-Path $workspace "Cargo.toml") `
         --package kotae-client `
         --package kotae-pcm-ring `
@@ -310,6 +327,9 @@ if (
 }
 
 try {
+    $null = Assert-WasmBindgenExecutable `
+        -WasmBindgenPath $wasmBindgen `
+        -Configuration $releaseToolchainConfiguration
     & $wasmBindgen `
         --target web `
         --out-dir $wasmOutput `
@@ -320,6 +340,9 @@ try {
         throw "wasm-bindgen failed."
     }
 
+    $null = Assert-WasmBindgenExecutable `
+        -WasmBindgenPath $wasmBindgen `
+        -Configuration $releaseToolchainConfiguration
     & $wasmBindgen `
         --target web `
         --out-dir $pcmRingBindgenOutput `
@@ -706,14 +729,18 @@ function decodeText(ptr, len) {
     }
 
     if ($null -ne $releaseGit) {
+        $null = Assert-WasmBindgenExecutable `
+            -WasmBindgenPath $wasmBindgen `
+            -Configuration $releaseToolchainConfiguration
         Assert-ReleaseSourceState `
             -GitCommand $releaseGit `
             -ExpectedCommit $ExpectedGitCommit `
             -Operation "finalizing the web release build"
         $manifestPath = Join-Path $stagingRoot $releaseManifestName
         $manifest = [ordered]@{
-            schemaVersion = 1
+            schemaVersion = 2
             sourceCommit = $ExpectedGitCommit
+            toolchain = $releaseToolchain
             artifacts = @($releaseArtifacts)
         }
         $manifestJson = $manifest | ConvertTo-Json -Depth 6

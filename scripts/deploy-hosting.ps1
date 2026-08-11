@@ -30,6 +30,12 @@ if (-not (Test-Path -LiteralPath $releaseProvenancePath -PathType Leaf)) {
     throw "The release provenance policy is missing."
 }
 . $releaseProvenancePath
+$toolchainPolicyPath = Join-Path $PSScriptRoot "rust-wasm-toolchain.ps1"
+if (-not (Test-Path -LiteralPath $toolchainPolicyPath -PathType Leaf)) {
+    throw "The Rust/Wasm release toolchain policy is missing."
+}
+. $toolchainPolicyPath
+$releaseToolchainConfiguration = Get-ReleaseToolchainConfiguration
 
 $expectedProjectId = "kotae-ai-u22-2026"
 $expectedProjectNumber = "551920539470"
@@ -641,12 +647,15 @@ function Assert-HostingArtifact {
     $manifestSha256 = ConvertTo-Sha256Hex -Bytes $manifestBytes
     $manifestProperties = @($manifest.PSObject.Properties.Name | Sort-Object)
     if (
-        ($manifestProperties -join ",") -cne "artifacts,schemaVersion,sourceCommit" -or
-        [int] $manifest.schemaVersion -ne 1 -or
+        ($manifestProperties -join ",") -cne "artifacts,schemaVersion,sourceCommit,toolchain" -or
+        [int] $manifest.schemaVersion -ne 2 -or
         [string] $manifest.sourceCommit -cne $ExpectedGitCommit
     ) {
         throw "Hosting release manifest identity does not match the reviewed commit."
     }
+    Assert-ReleaseToolchainProvenance `
+        -Toolchain $manifest.toolchain `
+        -Configuration $releaseToolchainConfiguration
 
     $requiredFiles = @(
         "index.html",

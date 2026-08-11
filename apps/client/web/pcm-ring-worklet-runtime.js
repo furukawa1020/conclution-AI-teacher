@@ -5,6 +5,9 @@ import {
 
 let initialized = false;
 const MAXIMUM_CAPACITY = 200;
+const PCM_RING_FRAME_BYTES = 640;
+const RING_PUSH_INVALID = 0;
+const RING_SHIFT_INVALID = -2;
 
 function hasRingContract(value) {
   return Boolean(
@@ -13,16 +16,59 @@ function hasRingContract(value) {
       typeof value.clear === "function" &&
       typeof value.count === "function" &&
       typeof value.free === "function" &&
+      typeof value.generation === "function" &&
       typeof value.push === "function" &&
       typeof value.shiftInto === "function",
   );
 }
 
-export function createPcmRing(module, capacity, overwriteOldest) {
+function verifyGenerationIsolation(ring, generation) {
+  const staleGeneration =
+    generation === Number.MAX_SAFE_INTEGER
+      ? generation - 1
+      : generation + 1;
+  const probe = new Uint8Array(PCM_RING_FRAME_BYTES);
+  const destination = new Uint8Array(PCM_RING_FRAME_BYTES);
+  probe.fill(0xa5);
+  destination.fill(0x3c);
+  try {
+    const stalePush = ring.push(staleGeneration, 0, probe);
+    const staleCount = ring.count(staleGeneration);
+    const staleShift = ring.shiftInto(staleGeneration, destination);
+    const staleClear = ring.clear(staleGeneration);
+    if (
+      stalePush !== RING_PUSH_INVALID ||
+      staleCount !== -1 ||
+      staleShift !== RING_SHIFT_INVALID ||
+      staleClear !== false ||
+      destination.some((byte) => byte !== 0x3c) ||
+      ring.count(generation) !== 0
+    ) {
+      try {
+        ring.clear(generation);
+      } catch {
+        // The caller frees this invalid ring below.
+      }
+      throw new Error("pcm_ring_generation_boundary_invalid");
+    }
+  } finally {
+    probe.fill(0);
+    destination.fill(0);
+  }
+}
+
+export function createPcmRing(
+  module,
+  generation,
+  capacity,
+  overwriteOldest,
+) {
   if (!(module instanceof WebAssembly.Module)) {
     throw new Error("invalid_pcm_ring_module");
   }
   if (
+    !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
     !Number.isSafeInteger(capacity) ||
     capacity <= 0 ||
     capacity > MAXIMUM_CAPACITY ||
@@ -34,11 +80,12 @@ export function createPcmRing(module, capacity, overwriteOldest) {
     initSync({ module });
     initialized = true;
   }
-  const ring = new PcmRing(capacity, overwriteOldest);
+  const ring = new PcmRing(generation, capacity, overwriteOldest);
   if (
     !hasRingContract(ring) ||
+    ring.generation() !== generation ||
     ring.capacity() !== capacity ||
-    ring.count() !== 0
+    ring.count(generation) !== 0
   ) {
     try {
       ring?.free?.();
@@ -46,6 +93,17 @@ export function createPcmRing(module, capacity, overwriteOldest) {
       // The constructor boundary is already fail-closed.
     }
     throw new Error("invalid_pcm_ring_contract");
+  }
+  try {
+    verifyGenerationIsolation(ring, generation);
+  } catch (error) {
+    try {
+      ring.clear(generation);
+      ring.free();
+    } catch {
+      // The generation boundary already failed closed.
+    }
+    throw error;
   }
   return ring;
 }

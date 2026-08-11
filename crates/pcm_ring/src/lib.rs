@@ -48,6 +48,7 @@ impl Slot {
 }
 
 pub struct PcmRing {
+    generation: u64,
     slots: Vec<Slot>,
     head: usize,
     count: usize,
@@ -56,11 +57,19 @@ pub struct PcmRing {
 }
 
 impl PcmRing {
-    pub fn new(capacity: usize, overflow_policy: OverflowPolicy) -> Result<Self, &'static str> {
+    pub fn new(
+        generation: u64,
+        capacity: usize,
+        overflow_policy: OverflowPolicy,
+    ) -> Result<Self, &'static str> {
+        if generation == 0 {
+            return Err("invalid_generation");
+        }
         if capacity == 0 || capacity > MAXIMUM_CAPACITY {
             return Err("invalid_capacity");
         }
         Ok(Self {
+            generation,
             slots: (0..capacity).map(|_| Slot::empty()).collect(),
             head: 0,
             count: 0,
@@ -73,8 +82,12 @@ impl PcmRing {
         self.slots.len()
     }
 
-    pub fn count(&self) -> usize {
-        self.count
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn count(&self, generation: u64) -> Option<usize> {
+        (generation == self.generation).then_some(self.count)
     }
 
     pub fn is_full(&self) -> bool {
@@ -115,12 +128,15 @@ impl PcmRing {
         PushResult::Inserted
     }
 
-    pub fn push(&mut self, context_frame: u64, pcm: &[u8]) -> PushResult {
+    pub fn push(&mut self, generation: u64, context_frame: u64, pcm: &[u8]) -> PushResult {
+        if generation != self.generation {
+            return PushResult::Invalid;
+        }
         self.push_frame(context_frame, pcm)
     }
 
-    pub fn shift_into(&mut self, destination: &mut [u8]) -> Option<u64> {
-        if destination.len() != FRAME_BYTES || self.count == 0 {
+    pub fn shift_into(&mut self, generation: u64, destination: &mut [u8]) -> Option<u64> {
+        if generation != self.generation || destination.len() != FRAME_BYTES || self.count == 0 {
             return None;
         }
         let slot = &mut self.slots[self.head];
@@ -138,7 +154,15 @@ impl PcmRing {
         Some(context_frame)
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&mut self, generation: u64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.wipe_all();
+        true
+    }
+
+    fn wipe_all(&mut self) {
         self.slots.iter_mut().for_each(Slot::wipe);
         self.head = 0;
         self.count = 0;
@@ -148,7 +172,7 @@ impl PcmRing {
 
 impl Drop for PcmRing {
     fn drop(&mut self) {
-        self.clear();
+        self.wipe_all();
     }
 }
 
@@ -179,15 +203,25 @@ mod wasm_boundary {
     #[wasm_bindgen(js_class = PcmRing)]
     impl WasmPcmRing {
         #[wasm_bindgen(constructor)]
-        pub fn new(capacity: u32, overwrite_oldest: bool) -> WasmPcmRing {
+        pub fn new(generation: f64, capacity: u32, overwrite_oldest: bool) -> WasmPcmRing {
             let policy = if overwrite_oldest {
                 OverflowPolicy::OverwriteOldest
             } else {
                 OverflowPolicy::Reject
             };
             Self {
-                inner: PcmRing::new(capacity as usize, policy).ok(),
+                inner: parse_context_frame(generation)
+                    .filter(|generation| *generation > 0)
+                    .and_then(|generation| {
+                        PcmRing::new(generation, capacity as usize, policy).ok()
+                    }),
             }
+        }
+
+        pub fn generation(&self) -> f64 {
+            self.inner
+                .as_ref()
+                .map_or(-1.0, |inner| inner.generation() as f64)
         }
 
         pub fn capacity(&self) -> u32 {
@@ -196,12 +230,21 @@ mod wasm_boundary {
                 .map_or(0, |inner| inner.capacity() as u32)
         }
 
-        pub fn count(&self) -> u32 {
-            self.inner.as_ref().map_or(0, |inner| inner.count() as u32)
+        pub fn count(&self, generation: f64) -> i32 {
+            let Some(generation) = parse_context_frame(generation) else {
+                return -1;
+            };
+            self.inner
+                .as_ref()
+                .and_then(|inner| inner.count(generation))
+                .map_or(-1, |count| count as i32)
         }
 
-        pub fn push(&mut self, context_frame: f64, pcm: &Uint8Array) -> u8 {
+        pub fn push(&mut self, generation: f64, context_frame: f64, pcm: &Uint8Array) -> u8 {
             let Some(inner) = self.inner.as_mut() else {
+                return PushResult::Invalid as u8;
+            };
+            let Some(generation) = parse_context_frame(generation) else {
                 return PushResult::Invalid as u8;
             };
             let Some(context_frame) = parse_context_frame(context_frame) else {
@@ -212,24 +255,30 @@ mod wasm_boundary {
             }
             let mut frame = [0_u8; FRAME_BYTES];
             pcm.copy_to(&mut frame);
-            let result = inner.push_frame(context_frame, &frame) as u8;
+            let result = inner.push(generation, context_frame, &frame) as u8;
             frame.zeroize();
             result
         }
 
         #[wasm_bindgen(js_name = shiftInto)]
-        pub fn shift_into(&mut self, destination: &Uint8Array) -> f64 {
+        pub fn shift_into(&mut self, generation: f64, destination: &Uint8Array) -> f64 {
             let Some(inner) = self.inner.as_mut() else {
+                return -2.0;
+            };
+            let Some(generation) = parse_context_frame(generation) else {
                 return -2.0;
             };
             if destination.length() as usize != FRAME_BYTES {
                 return -2.0;
             }
-            if inner.count() == 0 {
+            let Some(count) = inner.count(generation) else {
+                return -2.0;
+            };
+            if count == 0 {
                 return -1.0;
             }
             let mut pcm = [0_u8; FRAME_BYTES];
-            let Some(context_frame) = inner.shift_into(&mut pcm) else {
+            let Some(context_frame) = inner.shift_into(generation, &mut pcm) else {
                 pcm.zeroize();
                 return -2.0;
             };
@@ -238,10 +287,13 @@ mod wasm_boundary {
             context_frame as f64
         }
 
-        pub fn clear(&mut self) {
-            if let Some(inner) = self.inner.as_mut() {
-                inner.clear();
-            }
+        pub fn clear(&mut self, generation: f64) -> bool {
+            let Some(generation) = parse_context_frame(generation) else {
+                return false;
+            };
+            self.inner
+                .as_mut()
+                .is_some_and(|inner| inner.clear(generation))
         }
     }
 }
@@ -256,67 +308,74 @@ mod tests {
 
     #[test]
     fn capacity_is_finite_and_nonzero() {
-        assert!(PcmRing::new(0, OverflowPolicy::Reject).is_err());
-        assert!(PcmRing::new(MAXIMUM_CAPACITY + 1, OverflowPolicy::Reject).is_err());
-        assert!(PcmRing::new(MAXIMUM_CAPACITY, OverflowPolicy::Reject).is_ok());
+        assert!(PcmRing::new(1, 0, OverflowPolicy::Reject).is_err());
+        assert!(PcmRing::new(1, MAXIMUM_CAPACITY + 1, OverflowPolicy::Reject).is_err());
+        assert!(PcmRing::new(1, MAXIMUM_CAPACITY, OverflowPolicy::Reject).is_ok());
+        assert!(PcmRing::new(0, 1, OverflowPolicy::Reject).is_err());
     }
 
     #[test]
     fn overwrite_ring_keeps_only_newest_frames_in_fifo_order() {
-        let mut ring = PcmRing::new(2, OverflowPolicy::OverwriteOldest).unwrap();
-        assert_eq!(ring.push(10, &frame(1)), PushResult::Inserted);
-        assert_eq!(ring.push(20, &frame(2)), PushResult::Inserted);
-        assert_eq!(ring.push(30, &frame(3)), PushResult::InsertedAfterEviction);
-        assert_eq!(ring.count(), 2);
+        let mut ring = PcmRing::new(7, 2, OverflowPolicy::OverwriteOldest).unwrap();
+        assert_eq!(ring.push(7, 10, &frame(1)), PushResult::Inserted);
+        assert_eq!(ring.push(7, 20, &frame(2)), PushResult::Inserted);
+        assert_eq!(
+            ring.push(7, 30, &frame(3)),
+            PushResult::InsertedAfterEviction
+        );
+        assert_eq!(ring.count(7), Some(2));
 
         let mut output = [0_u8; FRAME_BYTES];
-        assert_eq!(ring.shift_into(&mut output), Some(20));
+        assert_eq!(ring.shift_into(7, &mut output), Some(20));
         assert_eq!(output, frame(2));
-        assert_eq!(ring.shift_into(&mut output), Some(30));
+        assert_eq!(ring.shift_into(7, &mut output), Some(30));
         assert_eq!(output, frame(3));
-        assert_eq!(ring.shift_into(&mut output), None);
+        assert_eq!(ring.shift_into(7, &mut output), None);
     }
 
     #[test]
     fn reject_ring_never_changes_when_full() {
-        let mut ring = PcmRing::new(1, OverflowPolicy::Reject).unwrap();
-        assert_eq!(ring.push(10, &frame(4)), PushResult::Inserted);
-        assert_eq!(ring.push(20, &frame(9)), PushResult::Full);
-        assert_eq!(ring.count(), 1);
+        let mut ring = PcmRing::new(8, 1, OverflowPolicy::Reject).unwrap();
+        assert_eq!(ring.push(8, 10, &frame(4)), PushResult::Inserted);
+        assert_eq!(ring.push(8, 20, &frame(9)), PushResult::Full);
+        assert_eq!(ring.count(8), Some(1));
 
         let mut output = [0_u8; FRAME_BYTES];
-        assert_eq!(ring.shift_into(&mut output), Some(10));
+        assert_eq!(ring.shift_into(8, &mut output), Some(10));
         assert_eq!(output, frame(4));
     }
 
     #[test]
     fn invalid_frames_are_never_retained() {
-        let mut ring = PcmRing::new(2, OverflowPolicy::Reject).unwrap();
-        assert_eq!(ring.push(1, &[7_u8; FRAME_BYTES - 1]), PushResult::Invalid);
-        assert_eq!(ring.count(), 0);
-        assert_eq!(ring.shift_into(&mut [0_u8; FRAME_BYTES - 1]), None);
+        let mut ring = PcmRing::new(9, 2, OverflowPolicy::Reject).unwrap();
+        assert_eq!(
+            ring.push(9, 1, &[7_u8; FRAME_BYTES - 1]),
+            PushResult::Invalid
+        );
+        assert_eq!(ring.count(9), Some(0));
+        assert_eq!(ring.shift_into(9, &mut [0_u8; FRAME_BYTES - 1]), None);
     }
 
     #[test]
     fn duplicate_or_backward_context_frames_fail_without_mutation() {
-        let mut ring = PcmRing::new(3, OverflowPolicy::Reject).unwrap();
-        assert_eq!(ring.push(20, &frame(1)), PushResult::Inserted);
-        assert_eq!(ring.push(20, &frame(2)), PushResult::Invalid);
-        assert_eq!(ring.push(19, &frame(3)), PushResult::Invalid);
-        assert_eq!(ring.count(), 1);
+        let mut ring = PcmRing::new(10, 3, OverflowPolicy::Reject).unwrap();
+        assert_eq!(ring.push(10, 20, &frame(1)), PushResult::Inserted);
+        assert_eq!(ring.push(10, 20, &frame(2)), PushResult::Invalid);
+        assert_eq!(ring.push(10, 19, &frame(3)), PushResult::Invalid);
+        assert_eq!(ring.count(10), Some(1));
 
         let mut output = [0_u8; FRAME_BYTES];
-        assert_eq!(ring.shift_into(&mut output), Some(20));
+        assert_eq!(ring.shift_into(10, &mut output), Some(20));
         assert_eq!(output, frame(1));
     }
 
     #[test]
     fn clear_wipes_entries_and_resets_fifo() {
-        let mut ring = PcmRing::new(2, OverflowPolicy::Reject).unwrap();
-        assert_eq!(ring.push(1, &frame(1)), PushResult::Inserted);
-        assert_eq!(ring.push(2, &frame(2)), PushResult::Inserted);
-        ring.clear();
-        assert_eq!(ring.count(), 0);
+        let mut ring = PcmRing::new(11, 2, OverflowPolicy::Reject).unwrap();
+        assert_eq!(ring.push(11, 1, &frame(1)), PushResult::Inserted);
+        assert_eq!(ring.push(11, 2, &frame(2)), PushResult::Inserted);
+        assert!(ring.clear(11));
+        assert_eq!(ring.count(11), Some(0));
         assert_eq!(ring.head, 0);
         assert!(ring.slots.iter().all(|slot| !slot.occupied));
         assert!(
@@ -355,5 +414,24 @@ mod tests {
         assert!(!entry.occupied);
         assert_eq!(entry.context_frame, 0);
         assert!(entry.pcm.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn stale_generation_cannot_read_mutate_or_clear_the_owner_ring() {
+        let mut ring = PcmRing::new(41, 2, OverflowPolicy::Reject).unwrap();
+        assert_eq!(ring.generation(), 41);
+        assert_eq!(ring.push(41, 10, &frame(0xa5)), PushResult::Inserted);
+
+        assert_eq!(ring.count(42), None);
+        assert_eq!(ring.push(42, 20, &frame(0x5a)), PushResult::Invalid);
+        assert!(!ring.clear(42));
+        let mut stale_output = frame(0x3c);
+        assert_eq!(ring.shift_into(42, &mut stale_output), None);
+        assert_eq!(stale_output, frame(0x3c));
+
+        assert_eq!(ring.count(41), Some(1));
+        let mut owner_output = [0_u8; FRAME_BYTES];
+        assert_eq!(ring.shift_into(41, &mut owner_output), Some(10));
+        assert_eq!(owner_output, frame(0xa5));
     }
 }

@@ -109,18 +109,20 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     try {
       this.preConfirmRing = createPcmRing(
         processorOptions.pcmRingModule,
+        this.generation,
         this.maximumPreConfirmFrames,
         true,
       );
       this.confirmedQueue = createPcmRing(
         processorOptions.pcmRingModule,
+        this.generation,
         this.maximumQueuedFrames,
         false,
       );
       this.ringsReleased = false;
     } catch (error) {
       try {
-        this.preConfirmRing?.clear?.();
+        this.preConfirmRing?.clear?.(this.generation);
         this.preConfirmRing?.free?.();
       } catch {
         // Construction is already fail-closed.
@@ -167,7 +169,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   clearPreConfirmRing() {
     if (this.ringsReleased) return;
     try {
-      this.preConfirmRing.clear();
+      this.preConfirmRing.clear(this.generation);
     } catch {
       // The processor remains fail-closed even if the Wasm instance faulted.
     }
@@ -176,7 +178,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   clearConfirmedQueue() {
     if (this.ringsReleased) return;
     try {
-      this.confirmedQueue.clear();
+      this.confirmedQueue.clear(this.generation);
     } catch {
       // The processor remains fail-closed even if the Wasm instance faulted.
     }
@@ -210,7 +212,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   countRing(ring, maximum) {
     let count;
     try {
-      count = ring.count();
+      count = ring.count(this.generation);
     } catch {
       this.failClosed();
       return undefined;
@@ -265,6 +267,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     let result = 0;
     try {
       result = this.preConfirmRing.push(
+        this.generation,
         entry.contextFrame,
         new Uint8Array(entry.pcm),
       );
@@ -296,6 +299,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     let result = 0;
     try {
       result = this.confirmedQueue.push(
+        this.generation,
         entry.contextFrame,
         new Uint8Array(entry.pcm),
       );
@@ -323,7 +327,10 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     const pcm = new ArrayBuffer(FRAME_BYTES);
     let contextFrame;
     try {
-      contextFrame = ring.shiftInto(new Uint8Array(pcm));
+      contextFrame = ring.shiftInto(
+        this.generation,
+        new Uint8Array(pcm),
+      );
     } catch {
       zeroizeBuffer(pcm);
       this.failClosed();

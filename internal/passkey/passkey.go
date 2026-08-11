@@ -26,14 +26,15 @@ import (
 )
 
 const (
-	ceremonyTTL         = 5 * time.Minute
-	registrationUse     = "registration-v1"
-	authenticationUse   = "authentication-v1"
-	passkeyAuthMethod   = "passkey-v1"
-	passkeyAtClaim      = "kotae_passkey_at"
-	maxExactJSONInteger = int64(1<<53 - 1)
-	maxCredentialBody   = 256 * 1024
-	maxCredentials      = 8
+	ceremonyTTL           = 5 * time.Minute
+	registrationUse       = "registration-v1"
+	credentialAdditionUse = "credential-addition-v1"
+	authenticationUse     = "authentication-v1"
+	passkeyAuthMethod     = "passkey-v1"
+	passkeyAtClaim        = "kotae_passkey_at"
+	maxExactJSONInteger   = int64(1<<53 - 1)
+	maxCredentialBody     = 256 * 1024
+	maxCredentials        = 8
 )
 
 var (
@@ -45,6 +46,7 @@ var (
 	ErrLastCredential             = errors.New("last passkey credential cannot be revoked")
 	ErrAuthentication             = errors.New("passkey authentication failed")
 	ErrRegistration               = errors.New("passkey registration failed")
+	ErrCredentialRegistration     = errors.New("passkey credential registration failed")
 	ErrConcurrentAssertion        = errors.New("passkey credential changed concurrently")
 )
 
@@ -63,11 +65,24 @@ type Config struct {
 }
 
 type Service struct {
-	webAuthn *webauthn.WebAuthn
-	store    Store
-	minter   TokenMinter
-	now      func() time.Time
-	random   io.Reader
+	webAuthn      *webauthn.WebAuthn
+	registrations registrationCeremonies
+	store         Store
+	minter        TokenMinter
+	now           func() time.Time
+	random        io.Reader
+}
+
+type registrationCeremonies interface {
+	BeginRegistration(
+		webauthn.User,
+		...webauthn.RegistrationOption,
+	) (*protocol.CredentialCreation, *webauthn.SessionData, error)
+	FinishRegistration(
+		webauthn.User,
+		webauthn.SessionData,
+		*http.Request,
+	) (*webauthn.Credential, error)
 }
 
 type BeginRegistrationResult struct {
@@ -118,11 +133,12 @@ func New(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("initialize WebAuthn: %w", err)
 	}
 	return &Service{
-		webAuthn: wa,
-		store:    cfg.Store,
-		minter:   cfg.TokenMinter,
-		now:      cfg.Now,
-		random:   cfg.Random,
+		webAuthn:      wa,
+		registrations: wa,
+		store:         cfg.Store,
+		minter:        cfg.TokenMinter,
+		now:           cfg.Now,
+		random:        cfg.Random,
 	}, nil
 }
 
@@ -142,7 +158,7 @@ func (s *Service) BeginRegistration(
 		return BeginRegistrationResult{}, fmt.Errorf("generate passkey user handle: %w", err)
 	}
 	user := &User{UID: "pk_" + uid, UserHandle: handle}
-	options, session, err := s.webAuthn.BeginRegistration(
+	options, session, err := s.registrations.BeginRegistration(
 		user,
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			RequireResidentKey: boolPtr(true),
@@ -208,7 +224,7 @@ func (s *Service) FinishRegistration(
 		return FinishResult{}, ErrRegistration
 	}
 	limitCredentialRequest(response)
-	credential, err := s.webAuthn.FinishRegistration(user, session, response)
+	credential, err := s.registrations.FinishRegistration(user, session, response)
 	if err != nil || credential == nil || !credential.Flags.UserVerified {
 		return FinishResult{}, ErrRegistration
 	}
@@ -217,6 +233,134 @@ func (s *Service) FinishRegistration(
 		return FinishResult{}, ErrRegistration
 	}
 	return s.mint(ctx, user.UID, verifiedAt)
+}
+
+// BeginCredentialRegistration starts an additional credential ceremony for
+// an already verified account. The caller must supply the UID and app ID from
+// the verified principal, never from request-controlled identifiers.
+func (s *Service) BeginCredentialRegistration(
+	ctx context.Context,
+	appID, principalUID string,
+) (BeginRegistrationResult, error) {
+	appID = strings.TrimSpace(appID)
+	principalUID = strings.TrimSpace(principalUID)
+	if appID == "" || principalUID == "" {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	user, err := s.store.LoadUserByUID(ctx, principalUID)
+	if err != nil || user == nil || user.UID != principalUID ||
+		len(user.UserHandle) == 0 || len(user.Credentials) == 0 ||
+		len(user.Credentials) >= maxCredentials {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	ceremonyUser := credentialRegistrationUser{user: user}
+	options, session, err := s.registrations.BeginRegistration(
+		ceremonyUser,
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			RequireResidentKey: boolPtr(true),
+			ResidentKey:        protocol.ResidentKeyRequirementRequired,
+			UserVerification:   protocol.VerificationRequired,
+		}),
+		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
+	)
+	if err != nil || options == nil || session == nil {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	issuedAt := s.now().UTC()
+	if issuedAt.IsZero() {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	session.Expires = issuedAt.Add(ceremonyTTL)
+	ceremonyID, err := s.randomToken(32)
+	if err != nil {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	sessionJSON, err := json.Marshal(session)
+	if err != nil {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	record := Ceremony{
+		Purpose:         credentialAdditionUse,
+		AppIDDigest:     digestString(appID),
+		PrincipalDigest: digestString(principalUID),
+		UserHandle:      append([]byte(nil), user.UserHandle...),
+		SessionJSON:     sessionJSON,
+		ExpiresAt:       session.Expires,
+		CreatedAt:       issuedAt,
+	}
+	if err := s.store.PutCeremony(ctx, ceremonyID, record); err != nil {
+		return BeginRegistrationResult{}, ErrCredentialRegistration
+	}
+	return BeginRegistrationResult{CeremonyID: ceremonyID, Options: options}, nil
+}
+
+// FinishCredentialRegistration consumes the principal-bound ceremony before
+// any detailed validation. A substituted principal or malformed response can
+// therefore never leave a replayable management ceremony behind.
+func (s *Service) FinishCredentialRegistration(
+	ctx context.Context,
+	appID, principalUID, ceremonyID string,
+	response *http.Request,
+) error {
+	appID = strings.TrimSpace(appID)
+	principalUID = strings.TrimSpace(principalUID)
+	if response == nil || appID == "" || principalUID == "" {
+		return ErrCredentialRegistration
+	}
+	record, err := s.store.ConsumeCeremony(
+		ctx,
+		strings.TrimSpace(ceremonyID),
+		credentialAdditionUse,
+		digestString(appID),
+		s.now().UTC(),
+	)
+	if err != nil || record.TargetUID != "" ||
+		!constantTimeEqual(record.PrincipalDigest, digestString(principalUID)) {
+		return ErrCredentialRegistration
+	}
+	var session webauthn.SessionData
+	if err := json.Unmarshal(record.SessionJSON, &session); err != nil ||
+		!constantTimeEqual(session.UserID, record.UserHandle) {
+		return ErrCredentialRegistration
+	}
+	user, err := s.store.LoadUserByUID(ctx, principalUID)
+	if err != nil || user == nil || user.UID != principalUID ||
+		len(user.Credentials) == 0 || len(user.Credentials) >= maxCredentials ||
+		!constantTimeEqual(user.UserHandle, record.UserHandle) {
+		return ErrCredentialRegistration
+	}
+	limitCredentialRequest(response)
+	credential, err := s.registrations.FinishRegistration(
+		credentialRegistrationUser{user: user},
+		session,
+		response,
+	)
+	if err != nil || credential == nil || !credential.Flags.UserVerified ||
+		credential.Authenticator.CloneWarning {
+		return ErrCredentialRegistration
+	}
+	if err := s.store.CreateCredential(ctx, user, *credential, s.now().UTC()); err != nil {
+		return ErrCredentialRegistration
+	}
+	return nil
+}
+
+// credentialRegistrationUser keeps the protocol-required opaque user handle
+// while preventing the raw Firebase UID from entering WebAuthn options.
+type credentialRegistrationUser struct {
+	user *User
+}
+
+func (u credentialRegistrationUser) WebAuthnID() []byte {
+	return append([]byte(nil), u.user.UserHandle...)
+}
+
+func (credentialRegistrationUser) WebAuthnName() string { return "kotae-account" }
+
+func (credentialRegistrationUser) WebAuthnDisplayName() string { return "コタエーAI利用者" }
+
+func (u credentialRegistrationUser) WebAuthnCredentials() []webauthn.Credential {
+	return u.user.WebAuthnCredentials()
 }
 
 func (s *Service) BeginAuthentication(

@@ -30,11 +30,15 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 type Ceremony struct {
 	Purpose     string
 	AppIDDigest []byte
-	TargetUID   string
-	UserHandle  []byte
-	SessionJSON []byte
-	ExpiresAt   time.Time
-	CreatedAt   time.Time
+	// PrincipalDigest binds authenticated management ceremonies to the
+	// verified principal without persisting the raw Firebase UID in the
+	// short-lived ceremony document.
+	PrincipalDigest []byte
+	TargetUID       string
+	UserHandle      []byte
+	SessionJSON     []byte
+	ExpiresAt       time.Time
+	CreatedAt       time.Time
 }
 
 type StoredCredential struct {

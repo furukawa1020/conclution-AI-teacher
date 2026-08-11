@@ -305,6 +305,7 @@ func (s *MemoryStore) validateCredentialStateLocked(
 
 func cloneCeremony(record Ceremony) Ceremony {
 	record.AppIDDigest = append([]byte(nil), record.AppIDDigest...)
+	record.PrincipalDigest = append([]byte(nil), record.PrincipalDigest...)
 	record.UserHandle = append([]byte(nil), record.UserHandle...)
 	record.SessionJSON = append([]byte(nil), record.SessionJSON...)
 	return record

@@ -477,6 +477,7 @@ async function run() {
     zeroOutputCapture: true,
     wasmModuleCloned: true,
     directWasmGenerationIsolation: true,
+    temporalVadClockValidated: true,
     preConfirmFrames: 0,
     wrappedFrames: wrapState.frames.length,
     frameBytes: FRAME_BYTES,

@@ -195,6 +195,20 @@ mod wasm_boundary {
 
     use super::{FRAME_BYTES, OverflowPolicy, PcmRing, PushResult, parse_context_frame};
 
+    /// Browser release fixture for the same audio-core clock transition used
+    /// by the production client Wasm. It carries timing metadata only.
+    #[wasm_bindgen(js_name = temporalVadClockSelfTest)]
+    pub fn temporal_vad_clock_self_test() -> bool {
+        let Ok(tick) = kotae_audio_core::advance_temporal_vad_clock(48_000, 1_000, 1_480, 6_280)
+        else {
+            return false;
+        };
+        tick.credited_ms == 40.0
+            && tick.elapsed_ms == 110.0
+            && kotae_audio_core::advance_temporal_vad_clock(48_000, 1_000, 6_280, 6_280).is_err()
+            && kotae_audio_core::advance_temporal_vad_clock(48_000, 1_000, 6_280, 6_279).is_err()
+    }
+
     #[wasm_bindgen(js_name = PcmRing)]
     pub struct WasmPcmRing {
         inner: Option<PcmRing>,

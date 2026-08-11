@@ -48,6 +48,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$originMain\s+-cne\s+\$ExpectedGitCommit/u);
   assert.match(deploy, /status",\s*"--porcelain=v1",\s*"--untracked-files=all"/u);
   assert.match(deploy, /Hosting artifact does not match its release manifest/u);
+  assert.equal(
+    (deploy.match(/"temporal-vad-clock\.mjs"/gu) ?? []).length,
+    2,
+  );
   assert.match(deploy, /\$manifestBytes\s*=\s*\[System\.IO\.File\]::ReadAllBytes/u);
   assert.match(
     deploy,
@@ -76,6 +80,14 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(
     deploy,
     /\[bool\]\s*\$result\.directWasmGenerationIsolation\s+-ne\s+\$true/u,
+  );
+  assert.match(
+    deploy,
+    /\[bool\]\s*\$result\.temporalVadClockValidated\s+-ne\s+\$true/u,
+  );
+  assert.match(
+    deploy,
+    /directWasmGenerationIsolation,freshGenerationFrames,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture/u,
   );
   assert.match(
     deploy,

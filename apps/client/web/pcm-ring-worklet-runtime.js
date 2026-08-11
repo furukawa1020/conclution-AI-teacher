@@ -1,6 +1,7 @@
 import {
   initSync,
   PcmRing,
+  temporalVadClockSelfTest,
 } from "/wasm/kotae_pcm_ring.js";
 
 let initialized = false;
@@ -78,6 +79,9 @@ export function createPcmRing(
   }
   if (!initialized) {
     initSync({ module });
+    if (temporalVadClockSelfTest() !== true) {
+      throw new Error("temporal_vad_clock_self_test_failed");
+    }
     initialized = true;
   }
   const ring = new PcmRing(generation, capacity, overwriteOldest);

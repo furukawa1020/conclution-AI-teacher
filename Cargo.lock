@@ -1736,6 +1736,7 @@ name = "kotae-pcm-ring"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "kotae-audio-core",
  "wasm-bindgen",
  "zeroize",
 ]

@@ -46,7 +46,12 @@ test("bootstrap installs the classifier before launching the Wasm UI", async () 
     "installInterruptFrameClassifier(classifyInterruptFrame)",
   );
   const launch = bootstrap.indexOf("await init()");
+  const clockInstall = bootstrap.indexOf(
+    "installTemporalVadClockAdvancer(advanceTemporalVadClock)",
+  );
   assert.ok(classifierImport >= 0);
   assert.ok(classifierInstall > classifierImport);
   assert.ok(launch > classifierInstall);
+  assert.ok(clockInstall >= 0);
+  assert.ok(launch > clockInstall);
 });

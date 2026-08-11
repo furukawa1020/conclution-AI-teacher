@@ -38,6 +38,7 @@ const REQUIRED_ARTIFACTS = Object.freeze([
   "bootstrap.js",
   "firebase-bridge.js",
   "passkey-policy.mjs",
+  "temporal-vad-clock.mjs",
   "pcm-capture-worklet.js",
   "voice-session-policy.mjs",
   "voice-prepare-slo-policy.mjs",
@@ -530,6 +531,7 @@ function validateBrowserResult(result) {
     "zeroOutputCapture",
     "wasmModuleCloned",
     "directWasmGenerationIsolation",
+    "temporalVadClockValidated",
     "preConfirmFrames",
     "wrappedFrames",
     "frameBytes",
@@ -550,6 +552,7 @@ function validateBrowserResult(result) {
     result.zeroOutputCapture !== true ||
     result.wasmModuleCloned !== true ||
     result.directWasmGenerationIsolation !== true ||
+    result.temporalVadClockValidated !== true ||
     result.preConfirmFrames !== 0 ||
     result.wrappedFrames !== 5 ||
     result.frameBytes !== 640 ||
@@ -751,6 +754,7 @@ async function main() {
       zeroOutputCapture: result.zeroOutputCapture,
       directWasmGenerationIsolation:
         result.directWasmGenerationIsolation,
+      temporalVadClockValidated: result.temporalVadClockValidated,
       wrappedFrames: result.wrappedFrames,
       freshGenerationFrames: result.freshGenerationFrames,
       sameContextReuseFrames: result.sameContextReuseFrames,

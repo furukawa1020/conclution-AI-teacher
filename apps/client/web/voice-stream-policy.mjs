@@ -1,4 +1,8 @@
 import { VOICE_SESSION_LIMITS } from "./voice-session-policy.mjs";
+import {
+  advanceTemporalVadClock,
+  createTemporalVadClock,
+} from "./temporal-vad-clock.mjs";
 
 const MEBIBYTE = 1024 * 1024;
 
@@ -1303,10 +1307,12 @@ function clampNoiseFloor(value) {
   return Math.min(0.08, Math.max(0.002, value));
 }
 
-export function createInterruptVadState(startedAt) {
+export function createInterruptVadState(startedAt, sampleClock = null) {
   if (!Number.isFinite(startedAt) || startedAt < 0) {
     throw new TypeError("interrupt_vad_time_invalid");
   }
+  const temporalClock =
+    sampleClock === null ? null : createTemporalVadClock(sampleClock);
   return Object.freeze({
     action: null,
     candidateSilenceMs: 0,
@@ -1317,13 +1323,14 @@ export function createInterruptVadState(startedAt) {
     noiseFloor: 0.004,
     phase: "guard",
     startedAt,
+    ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs: 0,
   });
 }
 
 export function advanceInterruptVad(
   state,
-  { now, outputActive, peak, rms },
+  { clockFrame = null, now, outputActive, peak, rms },
   {
     confirmationAllowed = true,
     confirmationProofSatisfied = false,
@@ -1368,6 +1375,15 @@ export function advanceInterruptVad(
     throw new TypeError("interrupt_vad_state_invalid");
   }
 
+  let temporalClock = state.temporalClock ?? null;
+  let intervalMs = INTERRUPT_VAD_LIMITS.intervalMs;
+  if (temporalClock !== null) {
+    const tick = advanceTemporalVadClock(temporalClock, clockFrame);
+    temporalClock = tick.clock;
+    intervalMs = tick.creditedMs;
+    now = state.startedAt + tick.elapsedMs;
+  }
+
   let {
     candidateSilenceMs,
     candidateStartedAt,
@@ -1403,6 +1419,7 @@ export function advanceInterruptVad(
           ? "guard"
           : "armed",
       startedAt: state.startedAt,
+      ...(temporalClock === null ? {} : { temporalClock }),
       voiceRunMs: 0,
     });
   }
@@ -1427,8 +1444,8 @@ export function advanceInterruptVad(
         action = "start";
       }
       candidateSilenceMs = 0;
-      voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
-      foregroundVoiceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      voiceRunMs += intervalMs;
+      foregroundVoiceMs += intervalMs;
       if (
         phase === "candidate" &&
         voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
@@ -1437,7 +1454,7 @@ export function advanceInterruptVad(
         action = "provisional";
       }
     } else if (["candidate", "provisional"].includes(phase)) {
-      candidateSilenceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      candidateSilenceMs += intervalMs;
       if (
         candidateSilenceMs >= INTERRUPT_VAD_LIMITS.candidateGapMs
       ) {
@@ -1461,6 +1478,7 @@ export function advanceInterruptVad(
       noiseFloor,
       phase,
       startedAt: state.startedAt,
+      ...(temporalClock === null ? {} : { temporalClock }),
       voiceRunMs,
     });
   }
@@ -1511,9 +1529,9 @@ export function advanceInterruptVad(
       action = "start";
     }
     candidateSilenceMs = 0;
-    voiceRunMs += INTERRUPT_VAD_LIMITS.intervalMs;
+    voiceRunMs += intervalMs;
     if (foregroundVoiced) {
-      foregroundVoiceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      foregroundVoiceMs += intervalMs;
     }
     if (
       phase === "candidate" &&
@@ -1523,7 +1541,7 @@ export function advanceInterruptVad(
       action = "provisional";
     }
     const candidateElapsedMs =
-      now - candidateStartedAt + INTERRUPT_VAD_LIMITS.intervalMs;
+      now - candidateStartedAt + intervalMs;
     const voiceDensity = voiceRunMs / candidateElapsedMs;
     const foregroundDensity =
       foregroundVoiceMs / candidateElapsedMs;
@@ -1551,7 +1569,7 @@ export function advanceInterruptVad(
   } else {
     noiseFloor = clampNoiseFloor(noiseFloor * 0.92 + rms * 0.08);
     if (["candidate", "provisional"].includes(phase)) {
-      candidateSilenceMs += INTERRUPT_VAD_LIMITS.intervalMs;
+      candidateSilenceMs += intervalMs;
       if (
         candidateSilenceMs < INTERRUPT_VAD_LIMITS.candidateGapMs
       ) {
@@ -1565,6 +1583,7 @@ export function advanceInterruptVad(
           noiseFloor,
           phase,
           startedAt: state.startedAt,
+          ...(temporalClock === null ? {} : { temporalClock }),
           voiceRunMs,
         });
       }
@@ -1587,6 +1606,7 @@ export function advanceInterruptVad(
     noiseFloor,
     phase,
     startedAt: state.startedAt,
+    ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs,
   });
 }

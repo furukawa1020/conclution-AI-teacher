@@ -348,7 +348,7 @@ function Assert-BrowserAudioGate {
     $resultProperties = @($result.PSObject.Properties.Name | Sort-Object)
     if (
         ($resultProperties -join ",") -cne
-            "directWasmGenerationIsolation,freshGenerationFrames,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,wrappedFrames,zeroOutputCapture" -or
+            "directWasmGenerationIsolation,freshGenerationFrames,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
         $result.status -cne "passed" -or
         $result.provenance -cne "release" -or
         $result.sourceCommit -cne $ExpectedGitCommit -or
@@ -356,6 +356,7 @@ function Assert-BrowserAudioGate {
         [int] $result.sampleRateHz -ne 48000 -or
         [bool] $result.zeroOutputCapture -ne $true -or
         [bool] $result.directWasmGenerationIsolation -ne $true -or
+        [bool] $result.temporalVadClockValidated -ne $true -or
         [int] $result.wrappedFrames -ne 5 -or
         [int] $result.freshGenerationFrames -ne 3 -or
         [int] $result.sameContextReuseFrames -ne 2 -or
@@ -651,6 +652,7 @@ function Assert-HostingArtifact {
         "bootstrap.js",
         "firebase-bridge.js",
         "passkey-policy.mjs",
+        "temporal-vad-clock.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-prepare-slo-policy.mjs",
@@ -723,6 +725,7 @@ function Assert-HostingArtifact {
                 "bootstrap.js",
                 "firebase-bridge.js",
                 "passkey-policy.mjs",
+                "temporal-vad-clock.mjs",
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-prepare-slo-policy.mjs",

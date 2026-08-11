@@ -10,6 +10,7 @@ version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+kotae-audio-core = { path = "../audio_core" }
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

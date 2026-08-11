@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"sync"
@@ -366,6 +367,60 @@ func TestFirestoreCredentialLifecycleEmulator(t *testing.T) {
 		}
 		if _, err := client.Collection(credentialCollection).Doc(preserved.String()).Get(ctx); err != nil {
 			t.Fatalf("preserved direct index %q: %v", preserved, err)
+		}
+	})
+
+	t.Run("concurrent additions at the eight credential limit commit only one", func(t *testing.T) {
+		user := firestoreLifecycleUser("pk_firestore_concurrent_add", 0x79)
+		createdAt := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
+		for index := 0; index < maxCredentials-1; index++ {
+			credential := firestoreLifecycleCredential(
+				fmt.Sprintf("firestore-concurrent-add-seed-%d", index),
+			)
+			if err := store.CreateCredential(
+				ctx, user, credential, createdAt.Add(time.Duration(index)*time.Second),
+			); err != nil {
+				t.Fatalf("seed credential %d: %v", index, err)
+			}
+		}
+		candidates := []webauthn.Credential{
+			firestoreLifecycleCredential("firestore-concurrent-add-a"),
+			firestoreLifecycleCredential("firestore-concurrent-add-b"),
+		}
+		results := make(chan error, len(candidates))
+		start := make(chan struct{})
+		var ready sync.WaitGroup
+		ready.Add(len(candidates))
+		for _, credential := range candidates {
+			credential := credential
+			go func() {
+				ready.Done()
+				<-start
+				results <- store.CreateCredential(
+					ctx, user, credential, createdAt.Add(maxCredentials*time.Second),
+				)
+			}()
+		}
+		ready.Wait()
+		close(start)
+		successCount := 0
+		conflictCount := 0
+		for range candidates {
+			switch err := <-results; {
+			case err == nil:
+				successCount++
+			case errors.Is(err, ErrCredentialConflict):
+				conflictCount++
+			default:
+				t.Fatalf("concurrent add returned unexpected error: %v", err)
+			}
+		}
+		summaries, err := store.ListCredentials(ctx, user.UID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if successCount != 1 || conflictCount != 1 || len(summaries) != maxCredentials {
+			t.Fatalf("success=%d conflict=%d credentials=%d", successCount, conflictCount, len(summaries))
 		}
 	})
 

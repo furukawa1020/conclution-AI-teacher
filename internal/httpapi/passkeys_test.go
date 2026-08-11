@@ -46,13 +46,38 @@ func (v passkeyHTTPVerifier) VerifyApp(context.Context, string) (string, error) 
 }
 
 type recordingPasskeyHTTPService struct {
-	registrationAppID         string
-	authenticationAppID       string
-	registrationBeginCalls    int
-	authenticationBeginCalls  int
-	registrationFinishCalls   int
-	authenticationFinishCalls int
-	finishErr                 error
+	registrationAppID           string
+	authenticationAppID         string
+	registrationBeginCalls      int
+	authenticationBeginCalls    int
+	registrationFinishCalls     int
+	authenticationFinishCalls   int
+	finishErr                   error
+	credentialRegistrationAppID string
+	credentialRegistrationUID   string
+	credentialBeginCalls        int
+	credentialFinishCalls       int
+}
+
+func (s *recordingPasskeyHTTPService) BeginCredentialRegistration(
+	_ context.Context,
+	appID, uid string,
+) (passkey.BeginRegistrationResult, error) {
+	s.credentialRegistrationAppID = appID
+	s.credentialRegistrationUID = uid
+	s.credentialBeginCalls++
+	return passkey.BeginRegistrationResult{CeremonyID: "credential-registration-ceremony"}, s.finishErr
+}
+
+func (s *recordingPasskeyHTTPService) FinishCredentialRegistration(
+	_ context.Context,
+	appID, uid, _ string,
+	_ *http.Request,
+) error {
+	s.credentialRegistrationAppID = appID
+	s.credentialRegistrationUID = uid
+	s.credentialFinishCalls++
+	return s.finishErr
 }
 
 func (s *recordingPasskeyHTTPService) BeginRegistration(
@@ -658,5 +683,195 @@ func TestRecentPasskeyGateWrapsBufferedAndStreamingVoiceRoutes(t *testing.T) {
 		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), "passkey_required") {
 			t.Fatalf("path %s: status=%d body=%s", path, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestPasskeyManagementGateIsAlwaysOnAndUsesImmutablePasskeyTime(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name      string
+		principal identity.Principal
+		want      bool
+	}{
+		{
+			name: "fresh verified passkey principal",
+			principal: identity.Principal{
+				UID: "private-uid", AppID: "firebase-app-id", Provider: "custom",
+				AuthMethod: "passkey-v1", AuthTime: now, PasskeyAt: now.Add(-4 * time.Minute),
+				AccountVerified: true,
+			},
+			want: true,
+		},
+		{
+			name: "ordinary Firebase provider is insufficient",
+			principal: identity.Principal{
+				UID: "private-uid", AppID: "firebase-app-id", Provider: "google.com",
+				AuthMethod: "google.com", AuthTime: now, AccountVerified: true,
+			},
+		},
+		{
+			name: "fresh token cannot refresh stale passkey proof",
+			principal: identity.Principal{
+				UID: "private-uid", AppID: "firebase-app-id", Provider: "custom",
+				AuthMethod: "passkey-v1", AuthTime: now, PasskeyAt: now.Add(-5*time.Minute - time.Second),
+				AccountVerified: true,
+			},
+		},
+		{
+			name: "future proof outside skew",
+			principal: identity.Principal{
+				UID: "private-uid", AppID: "firebase-app-id", Provider: "custom",
+				AuthMethod: "passkey-v1", AuthTime: now, PasskeyAt: now.Add(31 * time.Second),
+				AccountVerified: true,
+			},
+		},
+		{
+			name: "missing verified principal UID",
+			principal: identity.Principal{
+				AppID: "firebase-app-id", Provider: "custom", AuthMethod: "passkey-v1",
+				AuthTime: now, PasskeyAt: now, AccountVerified: true,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := passkeyManagementAuthorized(test.principal, now); got != test.want {
+				t.Fatalf("passkeyManagementAuthorized() = %v; want %v", got, test.want)
+			}
+		})
+	}
+
+	stale := tests[2].principal
+	service := &recordingPasskeyHTTPService{}
+	handler := newPasskeyHTTPHandlerWithVerifier(
+		t,
+		service,
+		&recordingPasskeyQuotaLimiter{},
+		passkeyHTTPVerifier{principal: stale, appID: stale.AppID},
+	)
+	request := passkeyPOST(passkeyCredentialBeginPath, nil)
+	request.Header.Set("Authorization", "Bearer ordinary-firebase-id-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized ||
+		!strings.Contains(response.Body.String(), "passkey_management_reauthentication_required") ||
+		service.credentialBeginCalls != 0 {
+		t.Fatalf("status=%d body=%s calls=%d", response.Code, response.Body.String(), service.credentialBeginCalls)
+	}
+}
+
+func TestPasskeyCredentialRoutesDeriveOnlyVerifiedPrincipalAndReturnNoToken(t *testing.T) {
+	now := time.Now().UTC()
+	principal := identity.Principal{
+		UID:             "private-firebase-uid",
+		AppID:           "firebase-app-id",
+		Provider:        "custom",
+		AuthMethod:      "passkey-v1",
+		AuthTime:        now,
+		PasskeyAt:       now.Add(-time.Minute),
+		AccountVerified: true,
+	}
+	service := &recordingPasskeyHTTPService{}
+	handler := newPasskeyHTTPHandlerWithVerifier(
+		t,
+		service,
+		&recordingPasskeyQuotaLimiter{},
+		passkeyHTTPVerifier{principal: principal, appID: principal.AppID},
+	)
+
+	begin := passkeyPOST(passkeyCredentialBeginPath, nil)
+	begin.Header.Set("Authorization", "Bearer verified-passkey-token")
+	beginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(beginResponse, begin)
+	if beginResponse.Code != http.StatusOK ||
+		service.credentialRegistrationUID != principal.UID ||
+		service.credentialRegistrationAppID != principal.AppID ||
+		service.credentialBeginCalls != 1 {
+		t.Fatalf("status=%d body=%s uid=%q app=%q calls=%d", beginResponse.Code, beginResponse.Body.String(), service.credentialRegistrationUID, service.credentialRegistrationAppID, service.credentialBeginCalls)
+	}
+	if strings.Contains(beginResponse.Body.String(), principal.UID) ||
+		strings.Contains(beginResponse.Body.String(), "token") {
+		t.Fatalf("begin response exposed protected material: %s", beginResponse.Body.String())
+	}
+
+	finish := passkeyPOST(
+		passkeyCredentialFinishPath+"?ceremonyId=opaque-ceremony",
+		strings.NewReader(`{"id":"credential-response"}`),
+	)
+	finish.Header.Set("Authorization", "Bearer verified-passkey-token")
+	finish.Header.Set("Content-Type", "application/json")
+	finishResponse := httptest.NewRecorder()
+	handler.ServeHTTP(finishResponse, finish)
+	if finishResponse.Code != http.StatusNoContent || finishResponse.Body.Len() != 0 ||
+		service.credentialFinishCalls != 1 {
+		t.Fatalf("status=%d body=%s calls=%d", finishResponse.Code, finishResponse.Body.String(), service.credentialFinishCalls)
+	}
+}
+
+func TestPasskeyCredentialRoutesRejectRequestControlledAccountIdentifiers(t *testing.T) {
+	now := time.Now().UTC()
+	principal := identity.Principal{
+		UID: "private-firebase-uid", AppID: "firebase-app-id", Provider: "custom",
+		AuthMethod: "passkey-v1", AuthTime: now, PasskeyAt: now, AccountVerified: true,
+	}
+	service := &recordingPasskeyHTTPService{}
+	handler := newPasskeyHTTPHandlerWithVerifier(
+		t,
+		service,
+		&recordingPasskeyQuotaLimiter{},
+		passkeyHTTPVerifier{principal: principal, appID: principal.AppID},
+	)
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "begin query UID", path: passkeyCredentialBeginPath + "?uid=attacker"},
+		{name: "begin body UID", path: passkeyCredentialBeginPath, body: `{"uid":"attacker"}`},
+		{name: "finish extra query UID", path: passkeyCredentialFinishPath + "?ceremonyId=opaque&uid=attacker", body: `{"id":"credential"}`},
+		{name: "finish body UID", path: passkeyCredentialFinishPath + "?ceremonyId=opaque", body: `{"id":"credential","uid":"attacker"}`},
+		{name: "finish body user handle", path: passkeyCredentialFinishPath + "?ceremonyId=opaque", body: `{"id":"credential","userHandle":"private-handle"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body io.Reader
+			if test.body != "" {
+				body = strings.NewReader(test.body)
+			}
+			request := passkeyPOST(test.path, body)
+			request.Header.Set("Authorization", "Bearer verified-passkey-token")
+			if body != nil {
+				request.Header.Set("Content-Type", "application/json")
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusBadRequest ||
+				!strings.Contains(response.Body.String(), "passkey_credential_registration_failed") ||
+				strings.Contains(response.Body.String(), "attacker") ||
+				strings.Contains(response.Body.String(), principal.UID) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if service.credentialBeginCalls != 0 || service.credentialFinishCalls != 0 {
+		t.Fatalf("request-controlled identifier reached service: begin=%d finish=%d", service.credentialBeginCalls, service.credentialFinishCalls)
+	}
+}
+
+func TestPasskeyManagementMissingCredentialsUseOneFixedProblemCode(t *testing.T) {
+	service := &recordingPasskeyHTTPService{}
+	handler := newPasskeyHTTPHandlerWithVerifier(
+		t,
+		service,
+		&recordingPasskeyQuotaLimiter{},
+		passkeyHTTPVerifier{appID: "firebase-app-id"},
+	)
+	request := passkeyPOST(passkeyCredentialBeginPath, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized ||
+		!strings.Contains(response.Body.String(), "passkey_management_reauthentication_required") ||
+		service.credentialBeginCalls != 0 {
+		t.Fatalf("status=%d body=%s calls=%d", response.Code, response.Body.String(), service.credentialBeginCalls)
 	}
 }

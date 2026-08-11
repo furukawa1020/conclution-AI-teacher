@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -16,12 +19,15 @@ import (
 )
 
 const (
-	passkeyRegistrationBeginPath    = "/api/v1/passkeys/registration:begin"
-	passkeyRegistrationFinishPath   = "/api/v1/passkeys/registration:finish"
-	passkeyAuthenticationBeginPath  = "/api/v1/passkeys/authentication:begin"
-	passkeyAuthenticationFinishPath = "/api/v1/passkeys/authentication:finish"
-	passkeyVoiceAuthorizationAge    = 5 * time.Minute
-	passkeyMaxCredentialBody        = 256 * 1024
+	passkeyRegistrationBeginPath      = "/api/v1/passkeys/registration:begin"
+	passkeyRegistrationFinishPath     = "/api/v1/passkeys/registration:finish"
+	passkeyAuthenticationBeginPath    = "/api/v1/passkeys/authentication:begin"
+	passkeyAuthenticationFinishPath   = "/api/v1/passkeys/authentication:finish"
+	passkeyCredentialBeginPath        = "/api/v1/passkeys/credentials/registration:begin"
+	passkeyCredentialFinishPath       = "/api/v1/passkeys/credentials/registration:finish"
+	passkeyVoiceAuthorizationAge      = 5 * time.Minute
+	passkeyManagementAuthorizationAge = 5 * time.Minute
+	passkeyMaxCredentialBody          = 256 * 1024
 )
 
 type PasskeyService interface {
@@ -29,6 +35,68 @@ type PasskeyService interface {
 	FinishRegistration(context.Context, string, string, *http.Request) (passkey.FinishResult, error)
 	BeginAuthentication(context.Context, string) (passkey.BeginAuthenticationResult, error)
 	FinishAuthentication(context.Context, string, string, *http.Request) (passkey.FinishResult, error)
+	BeginCredentialRegistration(context.Context, string, string) (passkey.BeginRegistrationResult, error)
+	FinishCredentialRegistration(context.Context, string, string, string, *http.Request) error
+}
+
+func (s *Server) beginPasskeyCredentialRegistration(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.passkeys == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, principal.AppID) {
+		return
+	}
+	if !emptyJSONRequest(r) {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return
+	}
+	result, err := s.passkeys.BeginCredentialRegistration(
+		r.Context(),
+		principal.AppID,
+		principal.UID,
+	)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) finishPasskeyCredentialRegistration(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.passkeys == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, principal.AppID) {
+		return
+	}
+	ceremonyID, ok := exactCeremonyID(r)
+	if !ok || !isJSONContentType(r) {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return
+	}
+	if !boundPasskeyCredentialBody(w, r) {
+		return
+	}
+	body, ok := managementCredentialBody(w, r)
+	if !ok {
+		return
+	}
+	defer clear(body)
+	if err := s.passkeys.FinishCredentialRegistration(
+		r.Context(),
+		principal.AppID,
+		principal.UID,
+		ceremonyID,
+		r,
+	); err != nil {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
@@ -107,11 +175,8 @@ func (s *Server) consumePasskeyQuota(w http.ResponseWriter, r *http.Request, app
 		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
 		return false
 	}
-	clientQuotaKey, ok := anonymousPasskeyQuotaKeyFromContext(r.Context())
-	if !ok {
-		writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
-		return false
-	}
+	var clientQuotaKey string
+	var ok bool
 	if principal, authenticated := principalFromContext(r.Context()); authenticated {
 		if principal.AppID != appID {
 			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
@@ -120,6 +185,12 @@ func (s *Server) consumePasskeyQuota(w http.ResponseWriter, r *http.Request, app
 		clientQuotaKey, ok = authenticatedPasskeyQuotaKey(appID, principal.UID)
 		if !ok {
 			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return false
+		}
+	} else {
+		clientQuotaKey, ok = anonymousPasskeyQuotaKeyFromContext(r.Context())
+		if !ok {
+			writeProblem(w, http.StatusServiceUnavailable, "passkey_unavailable", "Passkey authentication is unavailable.")
 			return false
 		}
 	}
@@ -239,6 +310,45 @@ func (s *Server) requireFreshPasskey(next http.Handler) http.Handler {
 	})
 }
 
+// requirePasskeyManagementIdentity is intentionally independent of all voice
+// feature flags. It collapses every missing, invalid, non-passkey, and stale
+// identity into one stable problem code before credential mutation is reached.
+func (s *Server) requirePasskeyManagementIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeaders := r.Header.Values("Authorization")
+		appCheckHeaders := r.Header.Values("X-Firebase-AppCheck")
+		if len(authHeaders) != 1 || len(appCheckHeaders) != 1 || s.verifier == nil {
+			writeProblem(w, http.StatusUnauthorized, "passkey_management_reauthentication_required", "Recent passkey authentication is required for credential management.")
+			return
+		}
+		authFields := strings.Fields(authHeaders[0])
+		appCheckToken := strings.TrimSpace(appCheckHeaders[0])
+		if len(authFields) != 2 || !strings.EqualFold(authFields[0], "Bearer") ||
+			authFields[1] == "" || len(authFields[1]) > 8*1024 ||
+			appCheckToken == "" || len(appCheckToken) > 8*1024 {
+			writeProblem(w, http.StatusUnauthorized, "passkey_management_reauthentication_required", "Recent passkey authentication is required for credential management.")
+			return
+		}
+		principal, err := s.verifier.Verify(r.Context(), authFields[1], appCheckToken)
+		if err != nil || !passkeyManagementAuthorized(principal, time.Now().UTC()) {
+			writeProblem(w, http.StatusUnauthorized, "passkey_management_reauthentication_required", "Recent passkey authentication is required for credential management.")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
+	})
+}
+
+func passkeyManagementAuthorized(principal identity.Principal, now time.Time) bool {
+	if now.IsZero() || strings.TrimSpace(principal.UID) == "" ||
+		strings.TrimSpace(principal.AppID) == "" || !principal.AccountVerified ||
+		principal.Provider != "custom" || principal.AuthMethod != "passkey-v1" ||
+		principal.PasskeyAt.IsZero() {
+		return false
+	}
+	age := now.Sub(principal.PasskeyAt)
+	return age >= -30*time.Second && age <= passkeyManagementAuthorizationAge
+}
+
 func voiceAuthorized(principal identity.Principal, now time.Time) bool {
 	if principal.Provider == "development" && principal.AccountVerified {
 		return true
@@ -279,6 +389,32 @@ func boundPasskeyCredentialBody(w http.ResponseWriter, r *http.Request) bool {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, passkeyMaxCredentialBody)
 	return true
+}
+
+func managementCredentialBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil || len(body) == 0 {
+		clear(body)
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return nil, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		clear(body)
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+		return nil, false
+	}
+	for key := range fields {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "uid", "userid", "userhandle", "accountid", "account":
+			clear(body)
+			writeProblem(w, http.StatusBadRequest, "passkey_credential_registration_failed", "Passkey credential registration failed.")
+			return nil, false
+		}
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return body, true
 }
 
 func appIDFromContext(ctx context.Context) (string, bool) {

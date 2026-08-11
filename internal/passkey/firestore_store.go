@@ -26,13 +26,14 @@ type FirestoreStore struct {
 }
 
 type ceremonyDocument struct {
-	Purpose     string    `firestore:"purpose"`
-	AppIDDigest []byte    `firestore:"appIdDigest"`
-	TargetUID   string    `firestore:"targetUid,omitempty"`
-	UserHandle  []byte    `firestore:"userHandle,omitempty"`
-	SessionJSON []byte    `firestore:"session"`
-	ExpiresAt   time.Time `firestore:"expiresAt"`
-	CreatedAt   time.Time `firestore:"createdAt"`
+	Purpose         string    `firestore:"purpose"`
+	AppIDDigest     []byte    `firestore:"appIdDigest"`
+	PrincipalDigest []byte    `firestore:"principalDigest,omitempty"`
+	TargetUID       string    `firestore:"targetUid,omitempty"`
+	UserHandle      []byte    `firestore:"userHandle,omitempty"`
+	SessionJSON     []byte    `firestore:"session"`
+	ExpiresAt       time.Time `firestore:"expiresAt"`
+	CreatedAt       time.Time `firestore:"createdAt"`
 }
 
 type userDocument struct {
@@ -558,25 +559,27 @@ func (s *FirestoreStore) RevokeCredential(
 
 func ceremonyDocumentFrom(record Ceremony) ceremonyDocument {
 	return ceremonyDocument{
-		Purpose:     record.Purpose,
-		AppIDDigest: append([]byte(nil), record.AppIDDigest...),
-		TargetUID:   record.TargetUID,
-		UserHandle:  append([]byte(nil), record.UserHandle...),
-		SessionJSON: append([]byte(nil), record.SessionJSON...),
-		ExpiresAt:   record.ExpiresAt,
-		CreatedAt:   record.CreatedAt,
+		Purpose:         record.Purpose,
+		AppIDDigest:     append([]byte(nil), record.AppIDDigest...),
+		PrincipalDigest: append([]byte(nil), record.PrincipalDigest...),
+		TargetUID:       record.TargetUID,
+		UserHandle:      append([]byte(nil), record.UserHandle...),
+		SessionJSON:     append([]byte(nil), record.SessionJSON...),
+		ExpiresAt:       record.ExpiresAt,
+		CreatedAt:       record.CreatedAt,
 	}
 }
 
 func (document ceremonyDocument) toCeremony() Ceremony {
 	return Ceremony{
-		Purpose:     document.Purpose,
-		AppIDDigest: append([]byte(nil), document.AppIDDigest...),
-		TargetUID:   document.TargetUID,
-		UserHandle:  append([]byte(nil), document.UserHandle...),
-		SessionJSON: append([]byte(nil), document.SessionJSON...),
-		ExpiresAt:   document.ExpiresAt,
-		CreatedAt:   document.CreatedAt,
+		Purpose:         document.Purpose,
+		AppIDDigest:     append([]byte(nil), document.AppIDDigest...),
+		PrincipalDigest: append([]byte(nil), document.PrincipalDigest...),
+		TargetUID:       document.TargetUID,
+		UserHandle:      append([]byte(nil), document.UserHandle...),
+		SessionJSON:     append([]byte(nil), document.SessionJSON...),
+		ExpiresAt:       document.ExpiresAt,
+		CreatedAt:       document.CreatedAt,
 	}
 }
 

@@ -1765,6 +1765,19 @@ function currentAudioContextFrame(context = audioContext) {
   return Number.isSafeInteger(frame) && frame >= 0 ? frame : null;
 }
 
+function currentTemporalVadClock(context = audioContext) {
+  const startedFrame = currentAudioContextFrame(context);
+  if (
+    startedFrame === null ||
+    !Number.isInteger(context?.sampleRate) ||
+    context.sampleRate < 8_000 ||
+    context.sampleRate > 192_000
+  ) {
+    return null;
+  }
+  return Object.freeze({ sampleRateHz: context.sampleRate, startedFrame });
+}
+
 function recordingHasLivePrimary(recording) {
   return (
     (activeRecording === recording && activeLiveSession !== undefined) ||
@@ -1964,7 +1977,12 @@ function maybeCommitHybridEndpoint(recording, now) {
 function armVad(recording) {
   const pcm = new Float32Array(analyser.fftSize);
   recording.vadPcm = pcm;
-  let vadState = createVadState(recording.startedAt);
+  const initialClock = currentTemporalVadClock();
+  if (initialClock === null) {
+    rejectRecording(recording, "voice_turn_invalid");
+    return;
+  }
+  let vadState = createVadState(recording.startedAt, initialClock);
   let candidateCapture = createCandidateCaptureState();
 
   recording.vadTimer = setInterval(() => {
@@ -1987,25 +2005,35 @@ function armVad(recording) {
     }
     const rms = Math.sqrt(sumSquares / pcm.length);
     const now = performance.now();
-    vadState = advanceVad(
-      vadState,
-      { now, peak, rms },
-      {
-        coachActive: recording.coachActive,
-        nativeAudio: recording.nativeAudio,
-        ...(recording.coachActive
-          ? {
-              endOfTurnSilenceMs:
-                VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
-            }
-          : recording.nativeAudio
+    const clockFrame = currentAudioContextFrame();
+    if (clockFrame === null) {
+      rejectRecording(recording, "voice_turn_invalid");
+      return;
+    }
+    try {
+      vadState = advanceVad(
+        vadState,
+        { clockFrame, now, peak, rms },
+        {
+          coachActive: recording.coachActive,
+          nativeAudio: recording.nativeAudio,
+          ...(recording.coachActive
             ? {
-              endOfTurnSilenceMs:
-                VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
-            }
-            : {}),
-      },
-    );
+                endOfTurnSilenceMs:
+                  VOICE_SESSION_LIMITS.coachEndOfTurnSilenceMs,
+              }
+            : recording.nativeAudio
+              ? {
+                  endOfTurnSilenceMs:
+                    VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+                }
+              : {}),
+        },
+      );
+    } catch {
+      rejectRecording(recording, "voice_turn_invalid");
+      return;
+    }
     recording.firstVoiceAt = vadState.firstVoiceAt;
     recording.continuationEvidence = vadState.continuationEvidence;
     const hadConfirmedSpeech = recording.vadHasSpeech;
@@ -4875,7 +4903,21 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
   let echoCancellationVerified = hasVerifiedEchoCancellation(mediaStream);
   let echoProbe;
   let unverifiedOutputContaminated = false;
+  const createClockedInterruptVadState = (startedAt) => {
+    if (typeof currentTemporalVadClock !== "function") {
+      return createInterruptVadState(startedAt);
+    }
+    const clock = currentTemporalVadClock();
+    if (clock === null) throw new TypeError("temporal_vad_clock_unavailable");
+    return createInterruptVadState(startedAt, clock);
+  };
   let vadState = createInterruptVadState(guardStartedAt);
+  try {
+    vadState = createClockedInterruptVadState(guardStartedAt);
+  } catch {
+    abandonInterruptRecording(recording);
+    return;
+  }
   playback.interruptRecording = recording;
   if (echoCancellationVerified) {
     // Raw provisional PCM is available only when the browser proves AEC.
@@ -4901,6 +4943,11 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       }
       unverifiedOutputContaminated = false;
       vadState = createInterruptVadState(nextAudibleAt);
+      try {
+        vadState = createClockedInterruptVadState(nextAudibleAt);
+      } catch {
+        abandonInterruptRecording(recording);
+      }
     }
   };
 
@@ -4937,7 +4984,12 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
       unverifiedOutputContaminated = false;
       recording.interruptOnsetAt = undefined;
       restorePlaybackGain(playback);
-      vadState = createInterruptVadState(now);
+      try {
+        vadState = createClockedInterruptVadState(now);
+      } catch {
+        abandonInterruptRecording(recording);
+        return;
+      }
       if (
         candidate &&
         !discardCurrentCandidate(recording, "interrupt-probe-timeout")
@@ -4968,22 +5020,33 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
         vadState.voiceRunMs - echoProbe.proofBaselineVoiceMs >=
           INTERRUPT_ECHO_PROBE_LIMITS.postMuteProofMs,
     );
-    vadState = advanceInterruptVad(
-      vadState,
-      {
-        now,
-        outputActive: rawOutputActive && !probeCleanWindow,
-        peak,
-        rms: Math.sqrt(sumSquares / pcm.length),
-      },
-      {
-        confirmationAllowed:
-          echoCancellationVerified ||
-          (!unverifiedOutputContaminated && !rawOutputActive) ||
-          postMuteProofReady,
-        confirmationProofSatisfied: postMuteProofReady,
-      },
-    );
+    const clockFrame = currentAudioContextFrame();
+    if (clockFrame === null) {
+      abandonInterruptRecording(recording);
+      return;
+    }
+    try {
+      vadState = advanceInterruptVad(
+        vadState,
+        {
+          clockFrame,
+          now,
+          outputActive: rawOutputActive && !probeCleanWindow,
+          peak,
+          rms: Math.sqrt(sumSquares / pcm.length),
+        },
+        {
+          confirmationAllowed:
+            echoCancellationVerified ||
+            (!unverifiedOutputContaminated && !rawOutputActive) ||
+            postMuteProofReady,
+          confirmationProofSatisfied: postMuteProofReady,
+        },
+      );
+    } catch {
+      abandonInterruptRecording(recording);
+      return;
+    }
     if (
       !echoCancellationVerified &&
       rawOutputActive &&
@@ -5002,7 +5065,12 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
         recording.interruptOnsetAt = undefined;
         unverifiedOutputContaminated = false;
         restorePlaybackGain(playback);
-        vadState = createInterruptVadState(now);
+        try {
+          vadState = createClockedInterruptVadState(now);
+        } catch {
+          abandonInterruptRecording(recording);
+          return;
+        }
         if (
           !discardCurrentCandidate(recording, "interrupt-probe-unavailable")
         ) {

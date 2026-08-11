@@ -1,3 +1,8 @@
+import {
+  advanceTemporalVadClock,
+  createTemporalVadClock,
+} from "./temporal-vad-clock.mjs";
+
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
@@ -763,7 +768,9 @@ export function advanceCandidateCapture(
   });
 }
 
-export function createVadState(startedAt) {
+export function createVadState(startedAt, sampleClock = null) {
+  const temporalClock =
+    sampleClock === null ? null : createTemporalVadClock(sampleClock);
   return Object.freeze({
     action: null,
     clearVoiceRunMs: 0,
@@ -781,6 +788,7 @@ export function createVadState(startedAt) {
     softVoiceMinRms: null,
     softVoiceRunMs: 0,
     startedAt: finiteTimestamp(startedAt, "vad_started_at"),
+    ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs: 0,
   });
 }
@@ -860,7 +868,7 @@ export function shouldCommitHybridEndpoint({
 
 export function advanceVad(
   previous,
-  { now, peak, rms },
+  { clockFrame = null, now, peak, rms },
   {
     intervalMs = VOICE_SESSION_LIMITS.vadIntervalMs,
     minimumVoiceMs = VOICE_SESSION_LIMITS.minimumVoiceMs,
@@ -911,7 +919,7 @@ export function advanceVad(
   ) {
     throw new TypeError("vad_state_invalid");
   }
-  const timestamp = finiteTimestamp(now, "vad_time");
+  let timestamp = finiteTimestamp(now, "vad_time");
   if (
     timestamp < previous.startedAt ||
     !Number.isFinite(rms) ||
@@ -922,6 +930,15 @@ export function advanceVad(
     throw new TypeError("vad_sample_invalid");
   }
   if (previous.action !== null) return previous;
+
+  let effectiveIntervalMs = intervalMs;
+  let temporalClock = previous.temporalClock ?? null;
+  if (temporalClock !== null) {
+    const tick = advanceTemporalVadClock(temporalClock, clockFrame);
+    temporalClock = tick.clock;
+    effectiveIntervalMs = tick.creditedMs;
+    timestamp = previous.startedAt + tick.elapsedMs;
+  }
 
   let {
     clearVoiceRunMs = previous.voiceRunMs,
@@ -964,7 +981,7 @@ export function advanceVad(
   let hasRecentSoftEnvelope = false;
   if (soundsSoft) {
     softVoiceCandidate = true;
-    softVoiceRunMs += intervalMs;
+    softVoiceRunMs += effectiveIntervalMs;
     softVoiceMinRms =
       softVoiceMinRms === null
         ? rms
@@ -1000,7 +1017,7 @@ export function advanceVad(
 
   if (hasSpeech) {
     if (soundsClear) {
-      clearVoiceRunMs += intervalMs;
+      clearVoiceRunMs += effectiveIntervalMs;
       lastVoiceAt = timestamp;
       softVoiceCandidate = false;
       softVoiceEvidenceAt = null;
@@ -1011,7 +1028,7 @@ export function advanceVad(
     } else if (soundsSoft) {
       clearVoiceRunMs = Math.max(
         0,
-        clearVoiceRunMs - intervalMs * 0.5,
+        clearVoiceRunMs - effectiveIntervalMs * 0.5,
       );
       if (
         !softVoiceConfirmed &&
@@ -1043,7 +1060,7 @@ export function advanceVad(
     } else {
       clearVoiceRunMs = Math.max(
         0,
-        clearVoiceRunMs - intervalMs * 0.5,
+        clearVoiceRunMs - effectiveIntervalMs * 0.5,
       );
       // A confirmed quiet voice often alternates between a relative-SNR peak
       // and a softer vowel/consonant valley. Preserve that recent valley only
@@ -1064,7 +1081,7 @@ export function advanceVad(
       }
       softVoiceRunMs = Math.max(
         0,
-        softVoiceRunMs - intervalMs * 0.5,
+        softVoiceRunMs - effectiveIntervalMs * 0.5,
       );
       if (softVoiceRunMs === 0) {
         softVoiceCandidate = false;
@@ -1077,10 +1094,10 @@ export function advanceVad(
     }
   } else if (soundsClear) {
     if (firstVoiceAt === null) firstVoiceAt = timestamp;
-    clearVoiceRunMs += intervalMs;
+    clearVoiceRunMs += effectiveIntervalMs;
     softVoiceRunMs = Math.max(
       0,
-      softVoiceRunMs - intervalMs * 0.5,
+      softVoiceRunMs - effectiveIntervalMs * 0.5,
     );
     lastVoiceAt = timestamp;
     if (clearVoiceRunMs >= minimumVoiceMs) {
@@ -1096,7 +1113,7 @@ export function advanceVad(
     if (firstVoiceAt === null) firstVoiceAt = timestamp;
     clearVoiceRunMs = Math.max(
       0,
-      clearVoiceRunMs - intervalMs * 0.5,
+      clearVoiceRunMs - effectiveIntervalMs * 0.5,
     );
     lastVoiceAt = timestamp;
     if (
@@ -1130,9 +1147,9 @@ export function advanceVad(
     // isolated noise spike as speech.
     clearVoiceRunMs = Math.max(
       0,
-      clearVoiceRunMs - intervalMs * 0.5,
+      clearVoiceRunMs - effectiveIntervalMs * 0.5,
     );
-    softVoiceRunMs = Math.max(0, softVoiceRunMs - intervalMs);
+    softVoiceRunMs = Math.max(0, softVoiceRunMs - effectiveIntervalMs);
     if (softVoiceRunMs === 0 && clearVoiceRunMs === 0) {
       softVoiceCandidate = false;
       softVoiceEvidenceAt = null;
@@ -1152,7 +1169,7 @@ export function advanceVad(
   const speechSpanMs =
     firstVoiceAt === null || lastVoiceAt === null
       ? 0
-      : lastVoiceAt - firstVoiceAt + intervalMs;
+      : lastVoiceAt - firstVoiceAt + effectiveIntervalMs;
   const shortEndOfTurnSilenceMs = coachActive
     ? coachEndOfTurnSilenceMs
     : endOfTurnSilenceMs;
@@ -1198,6 +1215,7 @@ export function advanceVad(
     softVoiceMinRms,
     softVoiceRunMs,
     startedAt: previous.startedAt,
+    ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs,
   });
 }

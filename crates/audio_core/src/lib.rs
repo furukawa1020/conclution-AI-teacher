@@ -12,6 +12,42 @@ pub const INTERRUPT_FRAME_GUARD_VOICED: u8 = 1 << 0;
 pub const INTERRUPT_FRAME_VOICED: u8 = 1 << 1;
 pub const INTERRUPT_FRAME_FOREGROUND_VOICED: u8 = 1 << 2;
 
+pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TemporalVadTick {
+    pub credited_ms: f64,
+    pub elapsed_ms: f64,
+}
+
+/// Advances VAD time from the audio device's monotonic sample clock.
+///
+/// A delayed JavaScript task may observe a large frame delta, but it must not
+/// manufacture an equally large run of speech evidence from one acoustic
+/// observation. Therefore elapsed time follows the sample clock while evidence
+/// credit is capped at one 40 ms analysis interval. Duplicate and reverse
+/// frames are rejected instead of silently inflating dwell thresholds.
+pub fn advance_temporal_vad_clock(
+    sample_rate_hz: u32,
+    started_frame: u64,
+    previous_frame: u64,
+    current_frame: u64,
+) -> Result<TemporalVadTick, DetectorError> {
+    if !(8_000..=192_000).contains(&sample_rate_hz)
+        || started_frame > previous_frame
+        || current_frame <= previous_frame
+    {
+        return Err(DetectorError::InvalidTemporalVadClock);
+    }
+    let rate = f64::from(sample_rate_hz);
+    let delta_ms = current_frame.saturating_sub(previous_frame) as f64 * 1_000.0 / rate;
+    let elapsed_ms = current_frame.saturating_sub(started_frame) as f64 * 1_000.0 / rate;
+    Ok(TemporalVadTick {
+        credited_ms: delta_ms.min(TEMPORAL_VAD_MAXIMUM_TICK_MS),
+        elapsed_ms,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InterruptFrameLevels {
     pub noise_floor: f64,
@@ -194,6 +230,7 @@ pub enum DetectorError {
     WrongFrameLength { expected: usize, actual: usize },
     NonFiniteSample,
     InvalidInterruptFrameLevels,
+    InvalidTemporalVadClock,
 }
 
 impl fmt::Display for DetectorError {
@@ -209,6 +246,8 @@ impl fmt::Display for DetectorError {
             Self::NonFiniteSample => formatter.write_str("PCM frame contains a non-finite sample"),
             Self::InvalidInterruptFrameLevels => formatter
                 .write_str("interruption frame levels must be finite values from zero to one"),
+            Self::InvalidTemporalVadClock => formatter
+                .write_str("temporal VAD clock must be monotonic and use a supported sample rate"),
         }
     }
 }
@@ -500,6 +539,30 @@ mod tests {
                 candidate_active: false,
             }),
             Err(DetectorError::InvalidInterruptFrameLevels)
+        );
+    }
+
+    #[test]
+    fn temporal_vad_clock_uses_sample_time_and_caps_single_tick_credit() {
+        let tick = advance_temporal_vad_clock(48_000, 1_000, 1_480, 6_280)
+            .expect("monotonic sample clock");
+        assert_eq!(tick.credited_ms, 40.0);
+        assert_eq!(tick.elapsed_ms, 110.0);
+    }
+
+    #[test]
+    fn temporal_vad_clock_rejects_duplicate_reverse_and_invalid_rate() {
+        assert_eq!(
+            advance_temporal_vad_clock(48_000, 1_000, 2_000, 2_000),
+            Err(DetectorError::InvalidTemporalVadClock)
+        );
+        assert_eq!(
+            advance_temporal_vad_clock(48_000, 1_000, 2_000, 1_999),
+            Err(DetectorError::InvalidTemporalVadClock)
+        );
+        assert_eq!(
+            advance_temporal_vad_clock(1, 0, 0, 1),
+            Err(DetectorError::InvalidTemporalVadClock)
         );
     }
 }

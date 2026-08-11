@@ -335,6 +335,7 @@ try {
         "bootstrap.js",
         "firebase-bridge.js",
         "passkey-policy.mjs",
+        "temporal-vad-clock.mjs",
         "voice-session-policy.mjs",
         "voice-prepare-slo-policy.mjs",
         "voice-start-slo-policy.mjs",
@@ -419,6 +420,11 @@ try {
         -Needle "export class PcmRing" `
         -Replacement "class PcmRing" `
         -Boundary "wasm-bindgen PcmRing export"
+    $ringGlue = Replace-LiteralExactlyOnce `
+        -Text $ringGlue `
+        -Needle "export function temporalVadClockSelfTest" `
+        -Replacement "function temporalVadClockSelfTest" `
+        -Boundary "wasm-bindgen temporal VAD fixture export"
     $generatedThrowHandler = ConvertTo-Lf -Text @'
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
@@ -478,7 +484,7 @@ function decodeText(ptr, len) {
         -Replacement "" `
         -Boundary "wasm-bindgen final export"
 
-    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n} from `"/wasm/kotae_pcm_ring.js`";"
+    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  temporalVadClockSelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
     $ringRuntime = Replace-LiteralExactlyOnce `
         -Text $ringRuntime `
         -Needle $runtimeImport `
@@ -566,6 +572,7 @@ function decodeText(ptr, len) {
         "bootstrap.js",
         "firebase-bridge.js",
         "passkey-policy.mjs",
+        "temporal-vad-clock.mjs",
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-prepare-slo-policy.mjs",
@@ -656,6 +663,7 @@ function decodeText(ptr, len) {
                 "bootstrap.js",
                 "firebase-bridge.js",
                 "passkey-policy.mjs",
+                "temporal-vad-clock.mjs",
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-prepare-slo-policy.mjs",

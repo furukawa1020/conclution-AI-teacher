@@ -22,6 +22,40 @@ pub fn classify_interrupt_frame_for_js(
     .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
 }
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = advanceTemporalVadClock)]
+pub fn advance_temporal_vad_clock_for_js(
+    sample_rate_hz: u32,
+    started_frame: f64,
+    previous_frame: f64,
+    current_frame: f64,
+) -> Result<js_sys::Float64Array, wasm_bindgen::JsValue> {
+    const MAXIMUM_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let parse_frame = |value: f64| {
+        if value.is_finite()
+            && (0.0..=MAXIMUM_SAFE_INTEGER).contains(&value)
+            && value.fract() == 0.0
+        {
+            Ok(value as u64)
+        } else {
+            Err(wasm_bindgen::JsValue::from_str(
+                "temporal VAD frame must be a safe integer",
+            ))
+        }
+    };
+    let tick = kotae_audio_core::advance_temporal_vad_clock(
+        sample_rate_hz,
+        parse_frame(started_frame)?,
+        parse_frame(previous_frame)?,
+        parse_frame(current_frame)?,
+    )
+    .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+    let result = js_sys::Float64Array::new_with_length(2);
+    result.set_index(0, tick.credited_ms);
+    result.set_index(1, tick.elapsed_ms);
+    Ok(result)
+}
+
 const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
 const ANSWER_SUPPORT_COPY: &str = "「代わりに答えて」でも代理回答せず、本人のAを一言から守る";

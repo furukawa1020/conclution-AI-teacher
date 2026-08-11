@@ -15,6 +15,8 @@ type memoryCredential struct {
 	UserHandle []byte
 	Credential webauthn.Credential
 	Version    int64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type MemoryStore struct {
@@ -77,8 +79,12 @@ func (s *MemoryStore) CreateCredential(
 	_ context.Context,
 	user *User,
 	credential webauthn.Credential,
-	_ time.Time,
+	now time.Time,
 ) error {
+	if err := validateCredentialCreation(user, credential, now); err != nil {
+		return err
+	}
+	now = now.UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	credentialKey := documentID(credential.ID)
@@ -96,6 +102,8 @@ func (s *MemoryStore) CreateCredential(
 		stored = &User{UID: user.UID, UserHandle: append([]byte(nil), user.UserHandle...)}
 	} else if subtle.ConstantTimeCompare(stored.UserHandle, user.UserHandle) != 1 {
 		return ErrCredentialConflict
+	} else if _, err := s.validateCredentialStateLocked(stored, now); err != nil {
+		return err
 	}
 	if len(stored.Credentials) >= maxCredentials {
 		return ErrCredentialConflict
@@ -107,6 +115,8 @@ func (s *MemoryStore) CreateCredential(
 		UserHandle: append([]byte(nil), user.UserHandle...),
 		Credential: cloneCredential(credential),
 		Version:    1,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	return nil
 }
@@ -138,8 +148,12 @@ func (s *MemoryStore) UpdateCredential(
 	rawID []byte,
 	expectedVersion int64,
 	credential webauthn.Credential,
-	_ time.Time,
+	now time.Time,
 ) error {
+	if err := validateCredentialUpdate(rawID, credential, now); err != nil {
+		return err
+	}
+	now = now.UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := documentID(rawID)
@@ -154,21 +168,139 @@ func (s *MemoryStore) UpdateCredential(
 	if user == nil {
 		return ErrCredentialNotFound
 	}
-	found := false
-	for index := range user.Credentials {
-		if subtle.ConstantTimeCompare(user.Credentials[index].ID, rawID) == 1 {
-			user.Credentials[index] = cloneCredential(credential)
-			found = true
-			break
+	if user.UID != stored.UID ||
+		subtle.ConstantTimeCompare(user.UserHandle, stored.UserHandle) != 1 {
+		return ErrCredentialStateInvalid
+	}
+	references, err := s.validateCredentialStateLocked(user, now)
+	if err != nil {
+		return err
+	}
+	targetIndex := -1
+	targetReference := credentialReference(rawID)
+	for index, reference := range references {
+		if reference == targetReference {
+			targetIndex = index
 		}
 	}
-	if !found {
+	if targetIndex < 0 {
 		return ErrCredentialNotFound
 	}
+	user.Credentials[targetIndex] = cloneCredential(credential)
 	stored.Credential = cloneCredential(credential)
 	stored.Version++
+	stored.UpdatedAt = now
 	s.credentials[key] = stored
 	return nil
+}
+
+func (s *MemoryStore) ListCredentials(
+	_ context.Context,
+	uid string,
+) ([]CredentialSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user := s.users[documentID([]byte(uid))]
+	if user == nil || user.UID != uid {
+		return nil, ErrCredentialNotFound
+	}
+	references, err := s.validateCredentialStateLocked(user, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]CredentialSummary, 0, len(references))
+	for _, reference := range references {
+		stored := s.credentials[reference.String()]
+		summary, summaryErr := newCredentialSummary(reference, stored.CreatedAt, stored.UpdatedAt)
+		if summaryErr != nil {
+			return nil, summaryErr
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, nil
+}
+
+func (s *MemoryStore) RevokeCredential(
+	_ context.Context,
+	uid string,
+	reference CredentialReference,
+	now time.Time,
+) error {
+	parsed, err := ParseCredentialReference(reference.String())
+	if err != nil || parsed != reference {
+		return ErrCredentialReferenceInvalid
+	}
+	if now.IsZero() {
+		return ErrCredentialStateInvalid
+	}
+	now = now.UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user := s.users[documentID([]byte(uid))]
+	if user == nil || user.UID != uid {
+		return ErrCredentialNotFound
+	}
+	references, err := s.validateCredentialStateLocked(user, now)
+	if err != nil {
+		return err
+	}
+	targetIndex := -1
+	for index, candidate := range references {
+		if candidate == parsed {
+			targetIndex = index
+		}
+	}
+	if targetIndex < 0 {
+		return ErrCredentialNotFound
+	}
+	if len(references) == 1 {
+		return ErrLastCredential
+	}
+
+	remaining := make([]webauthn.Credential, 0, len(user.Credentials)-1)
+	for index, credential := range user.Credentials {
+		if index != targetIndex {
+			remaining = append(remaining, cloneCredential(credential))
+		}
+	}
+	user.Credentials = remaining
+	delete(s.credentials, parsed.String())
+	return nil
+}
+
+// validateCredentialStateLocked checks the complete user-to-index relation.
+// The caller must hold s.mu. A non-zero nextUpdate additionally enforces that
+// the store's logical clock never moves behind any current credential.
+func (s *MemoryStore) validateCredentialStateLocked(
+	user *User,
+	nextUpdate time.Time,
+) ([]CredentialReference, error) {
+	if user == nil || user.UID == "" || len(user.UserHandle) == 0 {
+		return nil, ErrCredentialStateInvalid
+	}
+	references, err := credentialReferences(user.Credentials)
+	if err != nil {
+		return nil, err
+	}
+	for index, reference := range references {
+		stored, exists := s.credentials[reference.String()]
+		if !exists || stored.UID != user.UID ||
+			subtle.ConstantTimeCompare(stored.UserHandle, user.UserHandle) != 1 ||
+			subtle.ConstantTimeCompare(stored.Credential.ID, user.Credentials[index].ID) != 1 ||
+			credentialReference(stored.Credential.ID) != reference || stored.Version < 1 {
+			return nil, ErrCredentialStateInvalid
+		}
+		if _, summaryErr := newCredentialSummary(reference, stored.CreatedAt, stored.UpdatedAt); summaryErr != nil {
+			return nil, summaryErr
+		}
+		if !nextUpdate.IsZero() && nextUpdate.Before(stored.UpdatedAt) {
+			return nil, ErrCredentialStateInvalid
+		}
+	}
+	return references, nil
 }
 
 func cloneCeremony(record Ceremony) Ceremony {

@@ -37,12 +37,15 @@ const (
 )
 
 var (
-	ErrCeremonyInvalid     = errors.New("passkey ceremony is invalid")
-	ErrCredentialNotFound  = errors.New("passkey credential was not found")
-	ErrCredentialConflict  = errors.New("passkey credential already exists")
-	ErrAuthentication      = errors.New("passkey authentication failed")
-	ErrRegistration        = errors.New("passkey registration failed")
-	ErrConcurrentAssertion = errors.New("passkey credential changed concurrently")
+	ErrCeremonyInvalid            = errors.New("passkey ceremony is invalid")
+	ErrCredentialNotFound         = errors.New("passkey credential was not found")
+	ErrCredentialConflict         = errors.New("passkey credential already exists")
+	ErrCredentialReferenceInvalid = errors.New("passkey credential reference is invalid")
+	ErrCredentialStateInvalid     = errors.New("passkey credential state is invalid")
+	ErrLastCredential             = errors.New("last passkey credential cannot be revoked")
+	ErrAuthentication             = errors.New("passkey authentication failed")
+	ErrRegistration               = errors.New("passkey registration failed")
+	ErrConcurrentAssertion        = errors.New("passkey credential changed concurrently")
 )
 
 type TokenMinter interface {

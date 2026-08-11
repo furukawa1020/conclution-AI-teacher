@@ -75,6 +75,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\[int\]\s*\$result\.sameContextReuseFrames\s+-ne\s+2/u);
   assert.match(
     deploy,
+    /\[bool\]\s*\$result\.directWasmGenerationIsolation\s+-ne\s+\$true/u,
+  );
+  assert.match(
+    deploy,
     /\[bool\]\s*\$result\.senderDetachGuardPassed\s+-ne\s+\$true/u,
   );
   assert.match(deploy, /\$result\.provenance\s+-cne\s+"release"/u);

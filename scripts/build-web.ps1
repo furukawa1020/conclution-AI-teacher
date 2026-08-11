@@ -425,6 +425,15 @@ try {
         -Needle "export function temporalVadClockSelfTest" `
         -Replacement "function temporalVadClockSelfTest" `
         -Boundary "wasm-bindgen temporal VAD fixture export"
+    $ringGlue = Replace-LiteralExactlyOnce `
+        -Text $ringGlue `
+        -Needle "export function intentionalFastLaneSelfTest" `
+        -Replacement "function intentionalFastLaneSelfTest" `
+        -Boundary "wasm-bindgen intentional fast lane fixture export"
+    $ringGlue = Remove-RegexExactlyOnce `
+        -Text $ringGlue `
+        -Pattern '(?s)\nexport function intentionalFastLaneFrameSelfTest\(\) \{.*?\n\}\n' `
+        -Boundary "wasm-bindgen release-only intentional frame benchmark export"
     $generatedThrowHandler = ConvertTo-Lf -Text @'
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
@@ -484,7 +493,7 @@ function decodeText(ptr, len) {
         -Replacement "" `
         -Boundary "wasm-bindgen final export"
 
-    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  temporalVadClockSelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
+    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  intentionalFastLaneSelfTest,`n  temporalVadClockSelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
     $ringRuntime = Replace-LiteralExactlyOnce `
         -Text $ringRuntime `
         -Needle $runtimeImport `

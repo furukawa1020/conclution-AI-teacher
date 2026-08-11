@@ -5041,6 +5041,9 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
             (!unverifiedOutputContaminated && !rawOutputActive) ||
             postMuteProofReady,
           confirmationProofSatisfied: postMuteProofReady,
+          fastLaneAllowed:
+            echoCancellationVerified &&
+            !unverifiedOutputContaminated,
         },
       );
     } catch {

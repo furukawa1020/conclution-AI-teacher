@@ -14,6 +14,245 @@ pub const INTERRUPT_FRAME_FOREGROUND_VOICED: u8 = 1 << 2;
 
 pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IntentionalInterruptPhase {
+    #[default]
+    Armed = 0,
+    Candidate = 1,
+    Provisional = 2,
+    FastReady = 3,
+    Confirmed = 4,
+    LegacyOnly = 5,
+    Discarded = 6,
+}
+
+impl TryFrom<u8> for IntentionalInterruptPhase {
+    type Error = DetectorError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Armed),
+            1 => Ok(Self::Candidate),
+            2 => Ok(Self::Provisional),
+            3 => Ok(Self::FastReady),
+            4 => Ok(Self::Confirmed),
+            5 => Ok(Self::LegacyOnly),
+            6 => Ok(Self::Discarded),
+            _ => Err(DetectorError::InvalidIntentionalInterruptState),
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IntentionalInterruptSignal {
+    #[default]
+    None = 0,
+    Voice = 1,
+    Foreground = 2,
+    ForegroundChange = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntentionalInterruptState {
+    pub phase: IntentionalInterruptPhase,
+    pub score: i16,
+    pub foreground_ms: u16,
+    pub change_count: u8,
+    pub gap_ms: u8,
+    pub last_bucket: u8,
+    pub last_elapsed_ms: u16,
+}
+
+impl Default for IntentionalInterruptState {
+    fn default() -> Self {
+        Self {
+            phase: IntentionalInterruptPhase::Armed,
+            score: 0,
+            foreground_ms: 0,
+            change_count: 0,
+            gap_ms: 0,
+            last_bucket: 0,
+            last_elapsed_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntentionalInterruptStep {
+    pub state: IntentionalInterruptState,
+    pub signal: IntentionalInterruptSignal,
+    pub fast_ready: bool,
+}
+
+/// Advances a conservative SPRT-shaped intentional-interruption gate.
+///
+/// The state contains clipped fixed-point evidence and finite counters only.
+/// Acoustic levels are consumed for the current transition and are never
+/// retained. Any ambiguous voice, lost AEC proof, invalid state, or gap above
+/// 80 ms permanently delegates this candidate to the existing legacy gate.
+pub fn advance_intentional_interrupt(
+    mut state: IntentionalInterruptState,
+    frame_flags: u8,
+    rms: f64,
+    peak: f64,
+    credited_ms: u8,
+    candidate_elapsed_ms: u16,
+    aec_verified: bool,
+) -> Result<IntentionalInterruptStep, DetectorError> {
+    if !(-24..=32).contains(&state.score)
+        || state.gap_ms > 80
+        || state.foreground_ms > 2_400
+        || state.foreground_ms > candidate_elapsed_ms
+        || state.change_count > 8
+        || state.last_bucket > 4
+        || state.last_elapsed_ms >= candidate_elapsed_ms
+        || frame_flags & !0b111 != 0
+        || !rms.is_finite()
+        || !(0.0..=1.0).contains(&rms)
+        || !peak.is_finite()
+        || !(0.0..=1.0).contains(&peak)
+        || credited_ms == 0
+        || credited_ms > 40
+        || candidate_elapsed_ms == 0
+        || candidate_elapsed_ms > 2_400
+    {
+        return Err(DetectorError::InvalidIntentionalInterruptState);
+    }
+    state.last_elapsed_ms = candidate_elapsed_ms;
+    if matches!(
+        state.phase,
+        IntentionalInterruptPhase::LegacyOnly | IntentionalInterruptPhase::Discarded
+    ) {
+        return Ok(IntentionalInterruptStep {
+            state,
+            signal: IntentionalInterruptSignal::None,
+            fast_ready: false,
+        });
+    }
+    if state.phase == IntentionalInterruptPhase::Confirmed {
+        return Ok(IntentionalInterruptStep {
+            state,
+            signal: IntentionalInterruptSignal::None,
+            fast_ready: false,
+        });
+    }
+    if !aec_verified {
+        state.phase = IntentionalInterruptPhase::LegacyOnly;
+        return Ok(IntentionalInterruptStep {
+            state,
+            signal: IntentionalInterruptSignal::None,
+            fast_ready: false,
+        });
+    }
+    if candidate_elapsed_ms > 520 {
+        state.phase = IntentionalInterruptPhase::LegacyOnly;
+        return Ok(IntentionalInterruptStep {
+            state,
+            signal: IntentionalInterruptSignal::None,
+            fast_ready: false,
+        });
+    }
+
+    let guard_voiced = frame_flags & INTERRUPT_FRAME_GUARD_VOICED != 0;
+    let voiced = frame_flags & INTERRUPT_FRAME_VOICED != 0;
+    // During playback the guard bit is the classifier's strongest finite
+    // threshold. Requiring it here prevents foreground-like residual speaker
+    // leakage from entering the fast lane even when the browser reports AEC.
+    let foreground = guard_voiced && frame_flags & INTERRUPT_FRAME_FOREGROUND_VOICED != 0;
+    let bucket: u8 = if foreground {
+        match (rms, peak) {
+            (r, p) if r >= 0.075 || p >= 0.20 => 4,
+            (r, p) if r >= 0.055 || p >= 0.15 => 3,
+            (r, p) if r >= 0.038 || p >= 0.105 => 2,
+            _ => 1,
+        }
+    } else {
+        0
+    };
+    // A two-bucket jump is a bounded change-point. One-bucket motion is
+    // treated as ordinary foreground so threshold jitter cannot manufacture
+    // the multiple independent changes required by the upper boundary.
+    let changed = foreground && state.last_bucket != 0 && bucket.abs_diff(state.last_bucket) >= 2;
+    let signal = if changed {
+        IntentionalInterruptSignal::ForegroundChange
+    } else if foreground {
+        IntentionalInterruptSignal::Foreground
+    } else if voiced {
+        IntentionalInterruptSignal::Voice
+    } else {
+        IntentionalInterruptSignal::None
+    };
+
+    match signal {
+        IntentionalInterruptSignal::ForegroundChange => {
+            state.score = (state.score + 6).min(32);
+            state.change_count = state.change_count.saturating_add(1).min(8);
+            state.foreground_ms = state.foreground_ms.saturating_add(u16::from(credited_ms));
+            state.gap_ms = 0;
+            state.last_bucket = bucket;
+        }
+        IntentionalInterruptSignal::Foreground => {
+            state.score = (state.score + 2).min(32);
+            state.foreground_ms = state.foreground_ms.saturating_add(u16::from(credited_ms));
+            state.gap_ms = 0;
+            state.last_bucket = bucket;
+        }
+        IntentionalInterruptSignal::Voice => {
+            state.score = (state.score - 6).max(-24);
+            state.phase = IntentionalInterruptPhase::LegacyOnly;
+        }
+        IntentionalInterruptSignal::None => {
+            state.score = (state.score - 5).max(-24);
+            let next_gap = state.gap_ms.saturating_add(credited_ms);
+            if next_gap > 80 || state.score <= -12 {
+                state.phase = IntentionalInterruptPhase::Discarded;
+                state.gap_ms = 80;
+            } else {
+                state.gap_ms = next_gap;
+            }
+        }
+    }
+
+    if state.phase == IntentionalInterruptPhase::Armed && foreground {
+        state.phase = IntentionalInterruptPhase::Candidate;
+    }
+    if state.phase == IntentionalInterruptPhase::Candidate
+        && state.foreground_ms >= 160
+        && state.change_count >= 1
+        && state.score >= 10
+    {
+        state.phase = IntentionalInterruptPhase::Provisional;
+    }
+    let upper_boundary_reached = matches!(
+        state.phase,
+        IntentionalInterruptPhase::Candidate
+            | IntentionalInterruptPhase::Provisional
+            | IntentionalInterruptPhase::FastReady
+    ) && state.foreground_ms >= 320
+        && state.change_count >= 3
+        && state.score >= 24
+        && state.gap_ms <= 80;
+    if upper_boundary_reached {
+        state.phase = IntentionalInterruptPhase::FastReady;
+    }
+    let fast_ready = state.phase == IntentionalInterruptPhase::FastReady
+        && (400..=520).contains(&candidate_elapsed_ms)
+        && state.foreground_ms >= 320
+        && state.change_count >= 3
+        && state.score >= 24
+        && state.gap_ms <= 80;
+    if fast_ready {
+        state.phase = IntentionalInterruptPhase::Confirmed;
+    }
+    Ok(IntentionalInterruptStep {
+        state,
+        signal,
+        fast_ready,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TemporalVadTick {
     pub credited_ms: f64,
@@ -231,6 +470,7 @@ pub enum DetectorError {
     NonFiniteSample,
     InvalidInterruptFrameLevels,
     InvalidTemporalVadClock,
+    InvalidIntentionalInterruptState,
 }
 
 impl fmt::Display for DetectorError {
@@ -248,6 +488,9 @@ impl fmt::Display for DetectorError {
                 .write_str("interruption frame levels must be finite values from zero to one"),
             Self::InvalidTemporalVadClock => formatter
                 .write_str("temporal VAD clock must be monotonic and use a supported sample rate"),
+            Self::InvalidIntentionalInterruptState => {
+                formatter.write_str("intentional interruption state must be finite and bounded")
+            }
         }
     }
 }
@@ -564,5 +807,230 @@ mod tests {
             advance_temporal_vad_clock(1, 0, 0, 1),
             Err(DetectorError::InvalidTemporalVadClock)
         );
+    }
+
+    fn advance_fast_trace(
+        trace: &[(u8, f64, f64, bool)],
+    ) -> (IntentionalInterruptState, Option<u16>) {
+        let mut state = IntentionalInterruptState::default();
+        let mut decision = None;
+        for (index, &(flags, rms, peak, aec)) in trace.iter().enumerate() {
+            let elapsed = ((index + 1) * 40) as u16;
+            let step = advance_intentional_interrupt(state, flags, rms, peak, 40, elapsed, aec)
+                .expect("bounded synthetic state");
+            state = step.state;
+            if step.fast_ready {
+                decision.get_or_insert(elapsed);
+            }
+        }
+        (state, decision)
+    }
+
+    fn intentional_foreground_flags() -> u8 {
+        INTERRUPT_FRAME_GUARD_VOICED | INTERRUPT_FRAME_VOICED | INTERRUPT_FRAME_FOREGROUND_VOICED
+    }
+
+    #[test]
+    fn intentional_change_trace_is_ready_at_four_hundred_ms() {
+        let trace: Vec<_> = (0..10)
+            .map(|index| {
+                let (rms, peak) = if index % 2 == 0 {
+                    (0.045, 0.12)
+                } else {
+                    (0.08, 0.21)
+                };
+                (intentional_foreground_flags(), rms, peak, true)
+            })
+            .collect();
+        let (state, decision) = advance_fast_trace(&trace);
+        assert_eq!(decision, Some(400));
+        assert_eq!(state.phase, IntentionalInterruptPhase::Confirmed);
+        assert!(state.foreground_ms >= 320);
+        assert!(state.change_count >= 3);
+    }
+
+    #[test]
+    fn mutter_quiet_constant_and_aec_loss_never_fast_confirm() {
+        let quiet = vec![(INTERRUPT_FRAME_VOICED, 0.02, 0.05, true); 15];
+        assert_eq!(advance_fast_trace(&quiet).1, None);
+        let constant = vec![(intentional_foreground_flags(), 0.06, 0.16, true,); 17];
+        assert_eq!(advance_fast_trace(&constant).1, None);
+        let mut lost_aec: Vec<_> = (0..13)
+            .map(|index| {
+                (
+                    intentional_foreground_flags(),
+                    if index % 2 == 0 { 0.045 } else { 0.08 },
+                    if index % 2 == 0 { 0.12 } else { 0.21 },
+                    index < 7,
+                )
+            })
+            .collect();
+        assert_eq!(advance_fast_trace(&lost_aec).1, None);
+        lost_aec.clear();
+    }
+
+    #[test]
+    fn constrained_h0_has_zero_fast_accepts_in_one_hundred_thousand_traces() {
+        let mut false_accepts = 0_u32;
+        for trace_id in 0..100_000_u32 {
+            let mut trace = Vec::with_capacity(18);
+            match trace_id % 6 {
+                0 => {
+                    // Cough/impulse: at most three strong, changing frames.
+                    for index in 0..18 {
+                        let foreground = index < 1 + (trace_id % 3) as usize;
+                        trace.push(if foreground {
+                            (
+                                intentional_foreground_flags(),
+                                if index % 2 == 0 { 0.045 } else { 0.08 },
+                                if index % 2 == 0 { 0.12 } else { 0.21 },
+                                true,
+                            )
+                        } else {
+                            (0, 0.003, 0.006, true)
+                        });
+                    }
+                }
+                1 => trace.resize(18, (intentional_foreground_flags(), 0.06, 0.16, true)),
+                // Quiet acknowledgement/mutter.
+                2 => trace.resize(18, (INTERRUPT_FRAME_VOICED, 0.02, 0.05, true)),
+                3 => {
+                    // Sparse foreground with gaps beyond hysteresis.
+                    for index in 0..18 {
+                        trace.push(if index % 5 < 2 {
+                            (
+                                intentional_foreground_flags(),
+                                if index % 2 == 0 { 0.045 } else { 0.08 },
+                                if index % 2 == 0 { 0.12 } else { 0.21 },
+                                true,
+                            )
+                        } else {
+                            (0, 0.003, 0.006, true)
+                        });
+                    }
+                }
+                // Playback leakage: it can resemble foreground but does not
+                // cross the classifier's strongest guard threshold.
+                4 => trace.resize(
+                    18,
+                    (
+                        INTERRUPT_FRAME_VOICED | INTERRUPT_FRAME_FOREGROUND_VOICED,
+                        0.04,
+                        0.10,
+                        true,
+                    ),
+                ),
+                _ => trace.resize(18, (intentional_foreground_flags(), 0.08, 0.21, false)),
+            }
+            false_accepts += u32::from(advance_fast_trace(&trace).1.is_some());
+        }
+        assert_eq!(false_accepts, 0);
+        let one_sided_95_upper = 1.0_f64 - 0.05_f64.powf(1.0 / 100_000.0);
+        assert!(one_sided_95_upper < 0.005);
+    }
+
+    #[test]
+    fn intentional_synthetic_decision_p95_is_at_most_five_hundred_twenty_ms() {
+        let mut decisions = Vec::with_capacity(1_000);
+        for trace_id in 0..1_000_u16 {
+            let trace: Vec<_> = (0..13)
+                .map(|index| {
+                    if trace_id % 4 == 0 && index == 5 {
+                        return (0, 0.003, 0.006, true);
+                    }
+                    (
+                        intentional_foreground_flags(),
+                        if index % 2 == 0 { 0.045 } else { 0.08 },
+                        if index % 2 == 0 { 0.12 } else { 0.21 },
+                        true,
+                    )
+                })
+                .collect();
+            decisions.push(advance_fast_trace(&trace).1.expect("high-confidence trace"));
+        }
+        decisions.sort_unstable();
+        let p95 = decisions[949];
+        assert!(p95 <= 520);
+        assert!(720_u16.saturating_sub(p95) >= 200);
+    }
+
+    #[test]
+    fn duplicate_reverse_and_invalid_phase_fail_closed_without_evidence() {
+        let initial = IntentionalInterruptState::default();
+        let first = advance_intentional_interrupt(
+            initial,
+            intentional_foreground_flags(),
+            0.045,
+            0.12,
+            40,
+            40,
+            true,
+        )
+        .expect("first monotonic tick");
+        assert_eq!(
+            advance_intentional_interrupt(
+                first.state,
+                intentional_foreground_flags(),
+                0.08,
+                0.21,
+                40,
+                40,
+                true,
+            ),
+            Err(DetectorError::InvalidIntentionalInterruptState)
+        );
+        assert_eq!(
+            advance_intentional_interrupt(
+                first.state,
+                intentional_foreground_flags(),
+                0.08,
+                0.21,
+                40,
+                20,
+                true,
+            ),
+            Err(DetectorError::InvalidIntentionalInterruptState)
+        );
+        assert_eq!(
+            IntentionalInterruptPhase::try_from(7),
+            Err(DetectorError::InvalidIntentionalInterruptState)
+        );
+    }
+
+    #[test]
+    fn fast_ready_property_implies_all_safety_predicates() {
+        let mut seed = 0x5eed_u64;
+        for _ in 0..10_000 {
+            let mut state = IntentionalInterruptState::default();
+            for frame in 1..=13_u16 {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let aec = seed & 0x1f != 0;
+                let foreground = seed & 3 != 0;
+                let voiced = foreground || seed & 4 != 0;
+                let flags = (u8::from(voiced) * INTERRUPT_FRAME_VOICED)
+                    | (u8::from(foreground) * INTERRUPT_FRAME_GUARD_VOICED)
+                    | (u8::from(foreground) * INTERRUPT_FRAME_FOREGROUND_VOICED);
+                let rms = match (seed >> 8) & 3 {
+                    0 => 0.03,
+                    1 => 0.045,
+                    2 => 0.06,
+                    _ => 0.08,
+                };
+                let peak = rms * 2.5;
+                let step =
+                    advance_intentional_interrupt(state, flags, rms, peak, 40, frame * 40, aec)
+                        .expect("generated input is bounded");
+                state = step.state;
+                if step.fast_ready {
+                    assert!(aec);
+                    assert!((400..=520).contains(&(frame * 40)));
+                    assert!(state.foreground_ms >= 320);
+                    assert!(state.change_count >= 3);
+                    assert!(state.score >= 24);
+                    assert!(state.gap_ms <= 80);
+                    assert_eq!(state.phase, IntentionalInterruptPhase::Confirmed);
+                }
+            }
+        }
     }
 }

@@ -108,6 +108,7 @@ const INTERRUPT_FRAME_GUARD_VOICED = 1 << 0;
 const INTERRUPT_FRAME_VOICED = 1 << 1;
 const INTERRUPT_FRAME_FOREGROUND_VOICED = 1 << 2;
 let interruptFrameClassifier = null;
+let intentionalInterruptAdvancer = null;
 
 export function installInterruptFrameClassifier(classifier) {
   if (
@@ -117,6 +118,109 @@ export function installInterruptFrameClassifier(classifier) {
     throw new TypeError("interrupt_vad_classifier_install_invalid");
   }
   interruptFrameClassifier = classifier;
+}
+
+export function installIntentionalInterruptAdvancer(advancer) {
+  if (
+    typeof advancer !== "function" ||
+    intentionalInterruptAdvancer !== null
+  ) {
+    throw new TypeError("intentional_interrupt_advancer_install_invalid");
+  }
+  intentionalInterruptAdvancer = advancer;
+}
+
+function createIntentionalInterruptState() {
+  return Object.freeze({
+    changeCount: 0,
+    foregroundMs: 0,
+    gapMs: 0,
+    lastBucket: 0,
+    lastElapsedMs: 0,
+    phase: 0,
+    score: 0,
+  });
+}
+
+function advanceIntentionalInterrupt(
+  state,
+  { aecVerified, candidateElapsedMs, creditedMs, frameFlags, peak, rms },
+) {
+  if (
+    typeof intentionalInterruptAdvancer !== "function" ||
+    !isPlainRecord(state) ||
+    ![0, 1, 2, 3, 4, 5, 6].includes(state.phase) ||
+    !Number.isSafeInteger(state.score) ||
+    state.score < -24 ||
+    state.score > 32 ||
+    !Number.isSafeInteger(state.foregroundMs) ||
+    state.foregroundMs < 0 ||
+    state.foregroundMs > 2_400 ||
+    !Number.isSafeInteger(state.changeCount) ||
+    state.changeCount < 0 ||
+    state.changeCount > 8 ||
+    !Number.isSafeInteger(state.gapMs) ||
+    state.gapMs < 0 ||
+    state.gapMs > 80 ||
+    !Number.isSafeInteger(state.lastBucket) ||
+    state.lastBucket < 0 ||
+    state.lastBucket > 4 ||
+    !Number.isSafeInteger(state.lastElapsedMs) ||
+    state.lastElapsedMs < 0 ||
+    state.lastElapsedMs > 2_400
+  ) {
+    throw new TypeError("intentional_interrupt_advancer_unavailable");
+  }
+  const result = intentionalInterruptAdvancer(
+    state.phase,
+    state.score,
+    state.foregroundMs,
+    state.changeCount,
+    state.gapMs,
+    state.lastBucket,
+    state.lastElapsedMs,
+    frameFlags,
+    rms,
+    peak,
+    Math.max(1, Math.floor(creditedMs)),
+    Math.max(0, Math.min(2_400, Math.floor(candidateElapsedMs))),
+    aecVerified,
+  );
+  if (
+    !(result instanceof Float64Array) ||
+    result.length !== 9 ||
+    !result.every(Number.isSafeInteger) ||
+    ![0, 1, 2, 3, 4, 5, 6].includes(result[0]) ||
+    result[1] < -24 ||
+    result[1] > 32 ||
+    result[2] < 0 ||
+    result[2] > 2_400 ||
+    result[3] < 0 ||
+    result[3] > 8 ||
+    result[4] < 0 ||
+    result[4] > 80 ||
+    result[5] < 0 ||
+    result[5] > 4 ||
+    result[6] < 0 ||
+    result[6] > 2_400 ||
+    ![0, 1, 2, 3].includes(result[7]) ||
+    ![0, 1].includes(result[8])
+  ) {
+    throw new TypeError("intentional_interrupt_advancer_result_invalid");
+  }
+  return Object.freeze({
+    fastReady: result[8] === 1,
+    signal: result[7],
+    state: Object.freeze({
+      changeCount: result[3],
+      foregroundMs: result[2],
+      gapMs: result[4],
+      lastBucket: result[5],
+      lastElapsedMs: result[6],
+      phase: result[0],
+      score: result[1],
+    }),
+  });
 }
 
 function classifyInterruptFrame(levels) {
@@ -1313,6 +1417,8 @@ export function createInterruptVadState(startedAt, sampleClock = null) {
   }
   const temporalClock =
     sampleClock === null ? null : createTemporalVadClock(sampleClock);
+  const intentionalFastLane =
+    temporalClock === null ? null : createIntentionalInterruptState();
   return Object.freeze({
     action: null,
     candidateSilenceMs: 0,
@@ -1323,6 +1429,7 @@ export function createInterruptVadState(startedAt, sampleClock = null) {
     noiseFloor: 0.004,
     phase: "guard",
     startedAt,
+    ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
     ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs: 0,
   });
@@ -1334,6 +1441,7 @@ export function advanceInterruptVad(
   {
     confirmationAllowed = true,
     confirmationProofSatisfied = false,
+    fastLaneAllowed = false,
   } = {},
 ) {
   const finiteOrNull = (value) =>
@@ -1362,6 +1470,7 @@ export function advanceInterruptVad(
     typeof outputActive !== "boolean" ||
     typeof confirmationAllowed !== "boolean" ||
     typeof confirmationProofSatisfied !== "boolean" ||
+    typeof fastLaneAllowed !== "boolean" ||
     !boundedLevel(peak) ||
     !boundedLevel(rms) ||
     ![
@@ -1376,6 +1485,7 @@ export function advanceInterruptVad(
   }
 
   let temporalClock = state.temporalClock ?? null;
+  let intentionalFastLane = state.intentionalFastLane ?? null;
   let intervalMs = INTERRUPT_VAD_LIMITS.intervalMs;
   if (temporalClock !== null) {
     const tick = advanceTemporalVadClock(temporalClock, clockFrame);
@@ -1395,6 +1505,21 @@ export function advanceInterruptVad(
     voiceRunMs,
   } = state;
   let action = null;
+  const advanceFastEvidence = (frameFlags) => {
+    if (intentionalFastLane === null || candidateStartedAt === null) {
+      return false;
+    }
+    const step = advanceIntentionalInterrupt(intentionalFastLane, {
+      aecVerified: fastLaneAllowed,
+      candidateElapsedMs: now - candidateStartedAt + intervalMs,
+      creditedMs: intervalMs,
+      frameFlags,
+      peak,
+      rms,
+    });
+    intentionalFastLane = step.state;
+    return step.fastReady && fastLaneAllowed && confirmationAllowed;
+  };
 
   // The MediaRecorder watchdog and this deterministic VAD boundary share the
   // same candidate onset. Whichever browser task runs first after a stalled
@@ -1410,15 +1535,16 @@ export function advanceInterruptVad(
       action: "discard",
       candidateSilenceMs: 0,
       candidateStartedAt: null,
-      firstVoiceAt: null,
+      firstVoiceAt,
       foregroundVoiceMs: 0,
-      lastVoiceAt: null,
+      lastVoiceAt,
       noiseFloor,
       phase:
         now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs
           ? "guard"
           : "armed",
       startedAt: state.startedAt,
+      ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
       ...(temporalClock === null ? {} : { temporalClock }),
       voiceRunMs: 0,
     });
@@ -1442,10 +1568,19 @@ export function advanceInterruptVad(
         foregroundVoiceMs = 0;
         voiceRunMs = 0;
         action = "start";
+        if (intentionalFastLane !== null) {
+          intentionalFastLane = createIntentionalInterruptState();
+        }
       }
       candidateSilenceMs = 0;
       voiceRunMs += intervalMs;
       foregroundVoiceMs += intervalMs;
+      if (advanceFastEvidence(frameFlags)) {
+        phase = "confirmed";
+        firstVoiceAt = candidateStartedAt;
+        lastVoiceAt = now;
+        action = "confirm";
+      }
       if (
         phase === "candidate" &&
         voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
@@ -1455,6 +1590,7 @@ export function advanceInterruptVad(
       }
     } else if (["candidate", "provisional"].includes(phase)) {
       candidateSilenceMs += intervalMs;
+      advanceFastEvidence(frameFlags);
       if (
         candidateSilenceMs >= INTERRUPT_VAD_LIMITS.candidateGapMs
       ) {
@@ -1472,12 +1608,13 @@ export function advanceInterruptVad(
       action,
       candidateSilenceMs,
       candidateStartedAt,
-      firstVoiceAt: null,
+      firstVoiceAt,
       foregroundVoiceMs,
-      lastVoiceAt: null,
+      lastVoiceAt,
       noiseFloor,
       phase,
       startedAt: state.startedAt,
+      ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
       ...(temporalClock === null ? {} : { temporalClock }),
       voiceRunMs,
     });
@@ -1527,12 +1664,16 @@ export function advanceInterruptVad(
       foregroundVoiceMs = 0;
       voiceRunMs = 0;
       action = "start";
+      if (intentionalFastLane !== null) {
+        intentionalFastLane = createIntentionalInterruptState();
+      }
     }
     candidateSilenceMs = 0;
     voiceRunMs += intervalMs;
     if (foregroundVoiced) {
       foregroundVoiceMs += intervalMs;
     }
+    const fastConfirmed = advanceFastEvidence(frameFlags);
     if (
       phase === "candidate" &&
       voiceRunMs >= INTERRUPT_VAD_LIMITS.provisionalMs
@@ -1554,7 +1695,12 @@ export function advanceInterruptVad(
     const externalProofConfirmed =
       confirmationProofSatisfied &&
       voiceRunMs >= INTERRUPT_VAD_LIMITS.confirmationMs;
-    if (
+    if (fastConfirmed) {
+      phase = "confirmed";
+      firstVoiceAt = candidateStartedAt;
+      lastVoiceAt = now;
+      action = "confirm";
+    } else if (
       confirmationAllowed &&
       (foregroundConfirmed ||
         quietConfirmed ||
@@ -1570,6 +1716,7 @@ export function advanceInterruptVad(
     noiseFloor = clampNoiseFloor(noiseFloor * 0.92 + rms * 0.08);
     if (["candidate", "provisional"].includes(phase)) {
       candidateSilenceMs += intervalMs;
+      advanceFastEvidence(frameFlags);
       if (
         candidateSilenceMs < INTERRUPT_VAD_LIMITS.candidateGapMs
       ) {
@@ -1583,6 +1730,7 @@ export function advanceInterruptVad(
           noiseFloor,
           phase,
           startedAt: state.startedAt,
+          ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
           ...(temporalClock === null ? {} : { temporalClock }),
           voiceRunMs,
         });
@@ -1606,6 +1754,7 @@ export function advanceInterruptVad(
     noiseFloor,
     phase,
     startedAt: state.startedAt,
+    ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
     ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs,
   });

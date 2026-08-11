@@ -63,6 +63,40 @@ function maximumAbsolutePcm16(buffer) {
   return maximum;
 }
 
+function validateIntentionalFastLane(pcmRingModule) {
+  currentPhase = "intentional_fast_lane";
+  const imports = Object.create(null);
+  for (const descriptor of WebAssembly.Module.imports(pcmRingModule)) {
+    invariant(descriptor.kind === "function", "pcm_ring_import_kind_invalid");
+    imports[descriptor.module] ??= Object.create(null);
+    imports[descriptor.module][descriptor.name] = () => {
+      throw new FixtureFailure("pcm_ring_unexpected_import_call");
+    };
+  }
+  const instance = new WebAssembly.Instance(pcmRingModule, imports);
+  const advance = instance.exports.intentionalFastLaneFrameSelfTest;
+  invariant(
+    typeof advance === "function",
+    "intentional_fast_lane_export_missing",
+  );
+  for (let warmup = 0; warmup < 16; warmup += 1) {
+    invariant(advance() === 1, "intentional_fast_lane_warmup_failed");
+  }
+  const durations = [];
+  for (let sample = 0; sample < 512; sample += 1) {
+    const startedAt = performance.now();
+    const result = advance();
+    durations.push(performance.now() - startedAt);
+    invariant(result === 1, "intentional_frame_self_test_failed");
+  }
+  durations.sort((left, right) => left - right);
+  invariant(
+    durations[Math.floor(durations.length * 0.95)] <= 0.2,
+    "intentional_wasm_p95_exceeded",
+  );
+  return true;
+}
+
 function createCollector(node, generation) {
   const state = {
     frames: [],
@@ -452,6 +486,8 @@ async function run() {
     pcmRingModule instanceof WebAssembly.Module,
     "pcm_ring_wasm_compile_failed",
   );
+  const intentionalFastLaneValidated =
+    validateIntentionalFastLane(pcmRingModule);
 
   currentPhase = "wrapped";
   const wrapState = await runWrappedRingScenario(pcmRingModule);
@@ -477,6 +513,7 @@ async function run() {
     zeroOutputCapture: true,
     wasmModuleCloned: true,
     directWasmGenerationIsolation: true,
+    intentionalFastLaneValidated,
     temporalVadClockValidated: true,
     preConfirmFrames: 0,
     wrappedFrames: wrapState.frames.length,

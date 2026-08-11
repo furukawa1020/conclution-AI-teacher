@@ -56,6 +56,56 @@ pub fn advance_temporal_vad_clock_for_js(
     Ok(result)
 }
 
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = advanceIntentionalInterrupt)]
+pub fn advance_intentional_interrupt_for_js(
+    phase: u8,
+    score: i16,
+    foreground_ms: u16,
+    change_count: u8,
+    gap_ms: u8,
+    last_bucket: u8,
+    last_elapsed_ms: u16,
+    frame_flags: u8,
+    rms: f64,
+    peak: f64,
+    credited_ms: u8,
+    candidate_elapsed_ms: u16,
+    aec_verified: bool,
+) -> Result<js_sys::Float64Array, wasm_bindgen::JsValue> {
+    let step = kotae_audio_core::advance_intentional_interrupt(
+        kotae_audio_core::IntentionalInterruptState {
+            phase: kotae_audio_core::IntentionalInterruptPhase::try_from(phase)
+                .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?,
+            score,
+            foreground_ms,
+            change_count,
+            gap_ms,
+            last_bucket,
+            last_elapsed_ms,
+        },
+        frame_flags,
+        rms,
+        peak,
+        credited_ms,
+        candidate_elapsed_ms,
+        aec_verified,
+    )
+    .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+    let result = js_sys::Float64Array::new_with_length(9);
+    result.set_index(0, f64::from(step.state.phase as u8));
+    result.set_index(1, f64::from(step.state.score));
+    result.set_index(2, f64::from(step.state.foreground_ms));
+    result.set_index(3, f64::from(step.state.change_count));
+    result.set_index(4, f64::from(step.state.gap_ms));
+    result.set_index(5, f64::from(step.state.last_bucket));
+    result.set_index(6, f64::from(step.state.last_elapsed_ms));
+    result.set_index(7, f64::from(step.signal as u8));
+    result.set_index(8, f64::from(step.fast_ready));
+    Ok(result)
+}
+
 const PRODUCT_PROMISE_COPY: &str = "AIが話すより、あなたが話せるために";
 const ORDINARY_CHAT_COPY: &str = "「こんにちは」だけで、次の一言を一緒に見つける";
 const ANSWER_SUPPORT_COPY: &str = "「代わりに答えて」でも代理回答せず、本人のAを一言から守る";

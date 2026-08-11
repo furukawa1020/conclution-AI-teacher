@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { advanceTemporalVadClock, createTemporalVadClock, installTemporalVadClockAdvancer } from "../web/temporal-vad-clock.mjs";
 import { advanceVad, createVadState } from "../web/voice-session-policy.mjs";
-import { advanceInterruptVad, createInterruptVadState, installInterruptFrameClassifier } from "../web/voice-stream-policy.mjs";
+import { advanceInterruptVad, createInterruptVadState, installIntentionalInterruptAdvancer, installInterruptFrameClassifier } from "../web/voice-stream-policy.mjs";
 
 function rustClockOracle(rate, started, previous, current) {
   if (rate < 8_000 || rate > 192_000 || started > previous || current <= previous) {
@@ -17,6 +17,10 @@ function rustClockOracle(rate, started, previous, current) {
 
 installTemporalVadClockAdvancer(rustClockOracle);
 installInterruptFrameClassifier(() => 0b111);
+installIntentionalInterruptAdvancer((phase, score, foregroundMs, changeCount, gapMs, lastBucket, _lastElapsedMs, _flags, _rms, _peak, creditedMs, elapsedMs, aecVerified) =>
+  new Float64Array(aecVerified
+    ? [phase, score, foregroundMs + creditedMs, changeCount, gapMs, lastBucket, elapsedMs, 2, 0]
+    : [5, score, foregroundMs, changeCount, gapMs, lastBucket, elapsedMs, 0, 0]));
 
 test("sample clock rejects duplicate and reverse ticks", () => {
   const clock = createTemporalVadClock({ sampleRateHz: 48_000, startedFrame: 1_000 });

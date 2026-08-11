@@ -529,6 +529,7 @@ function validateBrowserResult(result) {
     "sampleRateHz",
     "zeroOutputCapture",
     "wasmModuleCloned",
+    "directWasmGenerationIsolation",
     "preConfirmFrames",
     "wrappedFrames",
     "frameBytes",
@@ -548,6 +549,7 @@ function validateBrowserResult(result) {
     result.sampleRateHz !== 48_000 ||
     result.zeroOutputCapture !== true ||
     result.wasmModuleCloned !== true ||
+    result.directWasmGenerationIsolation !== true ||
     result.preConfirmFrames !== 0 ||
     result.wrappedFrames !== 5 ||
     result.frameBytes !== 640 ||
@@ -747,6 +749,8 @@ async function main() {
       manifestSha256: provenance.manifestSha256,
       sampleRateHz: result.sampleRateHz,
       zeroOutputCapture: result.zeroOutputCapture,
+      directWasmGenerationIsolation:
+        result.directWasmGenerationIsolation,
       wrappedFrames: result.wrappedFrames,
       freshGenerationFrames: result.freshGenerationFrames,
       sameContextReuseFrames: result.sameContextReuseFrames,

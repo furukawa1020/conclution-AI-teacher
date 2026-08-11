@@ -35,6 +35,8 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(rust, /const MAXIMUM_CAPACITY: usize = 200/u);
   assert.match(rust, /pcm: \[u8; FRAME_BYTES\]/u);
   assert.match(rust, /slots: Vec<Slot>/u);
+  assert.match(rust, /generation: u64/u);
+  assert.match(rust, /generation != self\.generation/u);
   assert.match(rust, /inner: Option<PcmRing>/u);
   assert.match(rust, /self\.slots\.iter_mut\(\)\.for_each\(Slot::wipe\)/u);
   assert.match(rust, /context_frame <= previous/u);
@@ -47,6 +49,9 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(runtime, /const MAXIMUM_CAPACITY = 200/u);
   assert.match(runtime, /capacity > MAXIMUM_CAPACITY/u);
   assert.match(runtime, /export function createPcmRing/u);
+  assert.match(runtime, /verifyGenerationIsolation\(ring, generation\)/u);
+  assert.match(runtime, /ring\.push\(staleGeneration, 0, probe\)/u);
+  assert.match(runtime, /ring\.clear\(generation\)/u);
 
   assert.match(
     worklet,
@@ -117,6 +122,7 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(browserRunner, /\["\/PID", String\(processId\), "\/T", "\/F"\]/u);
   assert.match(browserRunner, /child\.signalCode !== null/u);
   assert.match(browserRunner, /sameContextReuseFrames/u);
+  assert.match(browserRunner, /directWasmGenerationIsolation/u);
   assert.match(browserRunner, /if \(primaryError !== undefined\)/u);
   assert.match(browserRunner, /process\.stdout\.write\(`\$\{passedOutput\}\\n`\)/u);
   assert.match(build, /--package kotae-pcm-ring/u);

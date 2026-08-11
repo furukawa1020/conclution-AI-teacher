@@ -19,10 +19,14 @@ const workletSource = publishedWorkletSource.slice(runtimeImport.length + 1);
 const TEST_PCM_RING_MODULE = Object.freeze({ test: true });
 
 class TestPcmRing {
-  constructor(capacity, overwriteOldest) {
+  constructor(generation, capacity, overwriteOldest) {
+    if (!Number.isSafeInteger(generation) || generation <= 0) {
+      throw new Error("invalid_generation");
+    }
     if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > 200) {
       throw new Error("invalid_capacity");
     }
+    this.ownerGeneration = generation;
     this.slots = new Array(capacity).fill(null);
     this.head = 0;
     this.lastContextFrame = undefined;
@@ -35,7 +39,17 @@ class TestPcmRing {
     return this.slots.length;
   }
 
-  clear() {
+  generation() {
+    return this.ownerGeneration;
+  }
+
+  clear(generation) {
+    if (generation !== this.ownerGeneration) return false;
+    this.wipeAll();
+    return true;
+  }
+
+  wipeAll() {
     for (let index = 0; index < this.slots.length; index += 1) {
       const entry = this.slots[index];
       if (entry) new Uint8Array(entry.pcm).fill(0);
@@ -46,17 +60,18 @@ class TestPcmRing {
     this.size = 0;
   }
 
-  count() {
-    return this.size;
+  count(generation) {
+    return generation === this.ownerGeneration ? this.size : -1;
   }
 
   free() {
-    this.clear();
+    this.wipeAll();
     this.freed = true;
   }
 
-  push(contextFrame, pcm) {
+  push(generation, contextFrame, pcm) {
     if (
+      generation !== this.ownerGeneration ||
       !Number.isSafeInteger(contextFrame) ||
       contextFrame < 0 ||
       !(pcm instanceof Uint8Array) ||
@@ -87,8 +102,12 @@ class TestPcmRing {
     return 1;
   }
 
-  shiftInto(destination) {
-    if (!(destination instanceof Uint8Array) || destination.byteLength !== 640) {
+  shiftInto(generation, destination) {
+    if (
+      generation !== this.ownerGeneration ||
+      !(destination instanceof Uint8Array) ||
+      destination.byteLength !== 640
+    ) {
       return -2;
     }
     if (this.size === 0) return -1;
@@ -146,11 +165,15 @@ function createHarness(config = {}) {
     Object,
     Reflect,
     Set,
-    createPcmRing(module, capacity, overwriteOldest) {
+    createPcmRing(module, ringGeneration, capacity, overwriteOldest) {
       if (module !== TEST_PCM_RING_MODULE) {
         throw new Error("invalid_pcm_ring_module");
       }
-      const ring = new TestPcmRing(capacity, overwriteOldest);
+      const ring = new TestPcmRing(
+        ringGeneration,
+        capacity,
+        overwriteOldest,
+      );
       if (ringIndex === 0 && config.preConfirmCountFault === true) {
         ring.count = () => {
           throw new Error("wasm_trap");
@@ -233,7 +256,11 @@ function renderInQuanta(harness, sampleCount, value = 0.25) {
 
 function preConfirmEntries(processor) {
   const entries = [];
-  for (let offset = 0; offset < processor.preConfirmRing.count(); offset += 1) {
+  for (
+    let offset = 0;
+    offset < processor.preConfirmRing.count(processor.generation);
+    offset += 1
+  ) {
     const index =
       (processor.preConfirmRing.head + offset) %
       processor.maximumPreConfirmFrames;
@@ -244,7 +271,11 @@ function preConfirmEntries(processor) {
 
 function confirmedEntries(processor) {
   const entries = [];
-  for (let offset = 0; offset < processor.confirmedQueue.count(); offset += 1) {
+  for (
+    let offset = 0;
+    offset < processor.confirmedQueue.count(processor.generation);
+    offset += 1
+  ) {
     const index =
       (processor.confirmedQueue.head + offset) %
       processor.maximumQueuedFrames;
@@ -318,7 +349,7 @@ test("one thousand pre-confirm frames post no PCM and stay in a zeroizing fixed 
 
   assert.equal(harness.frameMessages().length, 0);
   assert.equal(harness.output.length, 0);
-  assert.equal(harness.processor.preConfirmRing.count(), 75);
+  assert.equal(harness.processor.preConfirmRing.count(harness.generation), 75);
   assert.equal(harness.processor.preConfirmRing.capacity(), 75);
   assert.equal(isZero(firstPcm), true, "evicted PCM was not zeroized");
 
@@ -345,7 +376,7 @@ test("finite quiet-candidate ring preserves 300 ms pre-roll through the latest v
     harness.renderFrame((frame % 8 + 1) / 10);
   }
 
-  assert.equal(harness.processor.preConfirmRing.count(), 75);
+  assert.equal(harness.processor.preConfirmRing.count(harness.generation), 75);
   assert.equal(isZero(evicted), true);
   harness.control({
     type: "confirm",
@@ -388,7 +419,7 @@ test("confirm releases only the bounded lead-in in exact FIFO and credit order",
   });
   assert.equal(harness.processor.state, "confirmed");
   assert.equal(harness.frameMessages().length, 1);
-  assert.equal(harness.processor.confirmedQueue.count(), 2);
+  assert.equal(harness.processor.confirmedQueue.count(harness.generation), 2);
 
   harness.control({
     type: "credit",
@@ -403,7 +434,7 @@ test("confirm releases only the bounded lead-in in exact FIFO and credit order",
     frames: 1,
   });
   harness.renderFrame(0.4);
-  assert.equal(harness.processor.confirmedQueue.count(), 1);
+  assert.equal(harness.processor.confirmedQueue.count(harness.generation), 1);
   harness.control({
     type: "credit",
     version: 1,
@@ -608,7 +639,7 @@ test("credit starvation overflows once, zeroizes the FIFO, and stops", () => {
   harness.renderFrame(0.3);
   const queued = confirmedEntries(harness.processor)
     .map(({ pcm }) => pcm);
-  assert.equal(harness.processor.confirmedQueue.count(), 2);
+  assert.equal(harness.processor.confirmedQueue.count(harness.generation), 2);
   harness.renderFrame(0.4);
 
   assert.equal(harness.processor.state, "stopped");
@@ -657,7 +688,7 @@ test("seal zeroizes partial audio and posts sealed only after credited FIFO drai
     initialCredit: 1,
   });
   assert.equal(harness.frameMessages().length, 1);
-  assert.equal(harness.processor.confirmedQueue.count(), 1);
+  assert.equal(harness.processor.confirmedQueue.count(harness.generation), 1);
 
   harness.render(481, 0.3);
   const partial = harness.processor.frame;
@@ -679,7 +710,7 @@ test("seal zeroizes partial audio and posts sealed only after credited FIFO drai
   );
 
   assert.equal(harness.renderFrame(0.8), true);
-  assert.equal(harness.processor.confirmedQueue.count(), 1);
+  assert.equal(harness.processor.confirmedQueue.count(harness.generation), 1);
   harness.control({
     type: "credit",
     version: 1,

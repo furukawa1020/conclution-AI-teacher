@@ -476,6 +476,7 @@ async function run() {
     sampleRateHz: SAMPLE_RATE_HZ,
     zeroOutputCapture: true,
     wasmModuleCloned: true,
+    directWasmGenerationIsolation: true,
     preConfirmFrames: 0,
     wrappedFrames: wrapState.frames.length,
     frameBytes: FRAME_BYTES,

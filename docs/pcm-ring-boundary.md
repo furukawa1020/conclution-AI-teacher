@@ -34,3 +34,9 @@ node scripts/test-browser-audio.mjs --dist dist/web
 release時はcleanな`origin/main`の40桁commitを`build-web.ps1 -ExpectedGitCommit`とbrowser gateの両方へ渡します。deploy processが保持するmanifestそのもののSHA-256と、Chromeが実際に読み取って検証したmanifestのSHA-256も一致しなければ配信しません。これにより並行buildで`dist/web`が差し替わっても、検証したartifactと異なるsnapshotをuploadできません。Chrome不在、processor error、console error、timeout、cleanup失敗はskipせず失敗です。
 
 この境界はPCM ringの所有権だけを移します。720 ms / 1,200 msの割込み確認、通常VAD、長い独話と自然な間の時系列FSMは挙動を変えず、Issue #50で単調なAudioContext sample clockへ束縛したRust engineへ移します。Issue #50が完了するまで親Issue #18は閉じません。
+
+## generation capability
+
+各ringは正のJavaScript safe integerであるcapture generationをRust constructorで一度だけ束縛します。`push`、`count`、`shiftInto`、`clear`は同じgenerationを毎回提示した場合だけPCM所有状態へアクセスできます。stale generationは既存slotを読まず、追加・削除・clearを行わず、JS fallbackへ切り替えずfail-closedになります。
+
+AudioWorklet用runtimeはring作成直後、異なるgenerationを使ったdirect-Wasmの`push`、`count`、`shiftInto`、`clear`がすべて無変異で拒否されることを確認します。probeとdestinationは確認後にzeroizeします。この自己検査を通らないWasm ABIではcapture processorを開始しません。実Chrome fixtureは全processor生成でこの自己検査を通過したことを必須結果として検証します。

@@ -277,6 +277,80 @@ func TestIdentityHeadersAreStrictlyParsed(t *testing.T) {
 	}
 }
 
+func TestGuestPrincipalCannotCrossAccountOrEvaluationBoundary(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler := NewWithVoice(
+		logger,
+		fakeVerifier{principal: identity.Principal{
+			UID:        "guest-uid",
+			AppID:      "app-123",
+			Provider:   "anonymous",
+			AuthMethod: "guest-v1",
+			AuthTime:   time.Now().UTC(),
+		}},
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		2*time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:          &fakeVoiceService{},
+			RateLimiter:      &fakeLimiter{},
+			AppRateLimiter:   &fakeLimiter{},
+			RequestTimeout:   2 * time.Second,
+			MaxRequestBytes:  13 * 1024 * 1024,
+			GuestModeEnabled: true,
+		},
+	)
+
+	for _, endpoint := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/api/v1/me"},
+		{method: http.MethodPost, path: "/api/v1/evaluations", body: `{}`},
+	} {
+		request := authenticatedRequest(endpoint.method, endpoint.path, endpoint.body)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s status = %d; want 401", endpoint.method, endpoint.path, response.Code)
+		}
+	}
+}
+
+func TestGuestVoiceQuotaUsesOnlyTheDedicatedScope(t *testing.T) {
+	t.Parallel()
+	accountUID := &fakeLimiter{}
+	accountApp := &fakeLimiter{}
+	guestUID := &fakeLimiter{wantKey: "guest-uid"}
+	guestApp := &fakeLimiter{wantKey: "app:app-123"}
+	server := &Server{voice: VoiceOptions{
+		RateLimiter:         accountUID,
+		AppRateLimiter:      accountApp,
+		GuestRateLimiter:    guestUID,
+		GuestAppRateLimiter: guestApp,
+	}, logger: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	principal := identity.Principal{
+		UID:        "guest-uid",
+		AppID:      "app-123",
+		Provider:   "anonymous",
+		AuthMethod: "guest-v1",
+	}
+	response := httptest.NewRecorder()
+	if !server.consumeVoiceQuota(response, context.Background(), principal, time.Now().UTC()) {
+		t.Fatalf("guest quota failed with status %d", response.Code)
+	}
+	if guestUID.calls != 1 || guestApp.calls != 1 {
+		t.Fatalf("guest quota calls = uid:%d app:%d", guestUID.calls, guestApp.calls)
+	}
+	if accountUID.calls != 0 || accountApp.calls != 0 {
+		t.Fatalf("account quota was consumed by guest = uid:%d app:%d", accountUID.calls, accountApp.calls)
+	}
+}
+
 func TestEvaluationRequiresJSONAndRejectsAmbiguousBodies(t *testing.T) {
 	t.Parallel()
 

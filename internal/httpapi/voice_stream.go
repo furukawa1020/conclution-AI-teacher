@@ -52,6 +52,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	input.GuestExperience = principal.IsGuest()
 	defer clearVoiceInput(&input)
 
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")

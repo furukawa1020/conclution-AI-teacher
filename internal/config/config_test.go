@@ -18,6 +18,10 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_VOICE_RATE_LIMIT_PER_DAY", "")
 	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_MINUTE", "")
 	t.Setenv("KOTAE_VOICE_APP_RATE_LIMIT_PER_DAY", "")
+	t.Setenv("KOTAE_GUEST_VOICE_RATE_LIMIT_PER_MINUTE", "")
+	t.Setenv("KOTAE_GUEST_VOICE_RATE_LIMIT_PER_DAY", "")
+	t.Setenv("KOTAE_GUEST_VOICE_APP_RATE_LIMIT_PER_MINUTE", "")
+	t.Setenv("KOTAE_GUEST_VOICE_APP_RATE_LIMIT_PER_DAY", "")
 	unsetTestEnvironment(t, "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_MINUTE")
 	unsetTestEnvironment(t, "KOTAE_PASSKEY_APP_RATE_LIMIT_PER_DAY")
 	unsetTestEnvironment(t, "KOTAE_RETRIEVAL_BELIEF_WRITES")
@@ -28,6 +32,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_PASSKEY_RP_ID", "")
 	t.Setenv("KOTAE_PASSKEY_ORIGIN", "")
 	t.Setenv("KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE", "")
+	t.Setenv("KOTAE_GUEST_MODE_ENABLED", "")
 	t.Setenv("KOTAE_MAX_VOICE_BYTES", "")
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
@@ -82,6 +87,12 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}) {
 		t.Fatalf("voice app rate limits = %+v", cfg.VoiceAppRateLimits)
 	}
+	if cfg.GuestVoiceRateLimits != (guard.Limits{PerMinute: 4, PerDay: 16}) {
+		t.Fatalf("guest voice rate limits = %+v", cfg.GuestVoiceRateLimits)
+	}
+	if cfg.GuestVoiceAppRateLimits != (guard.Limits{PerMinute: 20, PerDay: 200}) {
+		t.Fatalf("guest voice app rate limits = %+v", cfg.GuestVoiceAppRateLimits)
+	}
 	if cfg.PasskeyClientRateLimits != (guard.Limits{PerMinute: 10, PerDay: 100}) {
 		t.Fatalf("passkey client rate limits = %+v", cfg.PasskeyClientRateLimits)
 	}
@@ -96,6 +107,9 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.RequireRecentPasskeyForVoice {
 		t.Fatal("insecure development must default the recent-passkey voice gate off")
+	}
+	if cfg.GuestModeEnabled {
+		t.Fatal("guest mode must default off")
 	}
 	if cfg.MaxVoiceBytes != 13*1024*1024 {
 		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)

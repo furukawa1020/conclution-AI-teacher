@@ -59,6 +59,8 @@ func main() {
 	var rateLimiter guard.Limiter
 	var voiceRateLimiter guard.Limiter
 	var voiceAppRateLimiter guard.Limiter
+	var guestVoiceRateLimiter guard.Limiter
+	var guestVoiceAppRateLimiter guard.Limiter
 	var voiceLiveLeaseManager guard.VoiceLiveLeaseManager
 	voiceLiveHandshakeGate := httpapi.NewVoiceLiveHandshakeGate(
 		httpapi.DefaultVoiceLiveHandshakeLimit,
@@ -233,6 +235,16 @@ func main() {
 			logger.Error("initialize voice app rate limiter", "error", err)
 			os.Exit(1)
 		}
+		guestVoiceRateLimiter, err = guard.NewFirestoreLimiterForScope(firestoreClient, cfg.GuestVoiceRateLimits, "guest-voice")
+		if err != nil {
+			logger.Error("initialize guest voice rate limiter", "error", err)
+			os.Exit(1)
+		}
+		guestVoiceAppRateLimiter, err = guard.NewFirestoreLimiterForScope(firestoreClient, cfg.GuestVoiceAppRateLimits, "guest-voice")
+		if err != nil {
+			logger.Error("initialize guest voice app rate limiter", "error", err)
+			os.Exit(1)
+		}
 		voiceLiveLeaseManager, err = guard.NewFirestoreVoiceLiveLeaseManager(
 			firestoreClient,
 		)
@@ -373,12 +385,15 @@ func main() {
 			NativeLiveService:    nativeLiveService,
 			RateLimiter:          voiceRateLimiter,
 			AppRateLimiter:       voiceAppRateLimiter,
+			GuestRateLimiter:     guestVoiceRateLimiter,
+			GuestAppRateLimiter:  guestVoiceAppRateLimiter,
 			LiveLeaseManager:     voiceLiveLeaseManager,
 			LiveHandshakeGate:    voiceLiveHandshakeGate,
 			CoachStateValidator:  coachStateValidator,
 			RequestTimeout:       cfg.VoiceTimeout,
 			MaxRequestBytes:      cfg.MaxVoiceBytes,
 			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,
+			GuestModeEnabled:     cfg.GuestModeEnabled,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,

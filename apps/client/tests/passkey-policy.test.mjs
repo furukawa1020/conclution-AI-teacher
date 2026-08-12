@@ -545,8 +545,6 @@ test("replacement passkey flows preserve the old Firebase session until proof su
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
-  assert.doesNotMatch(bridge, /\bsignOut\b/u);
-
   const explicitStart = bridge.indexOf("async function registerPasskeyAccount(");
   const secureStart = bridge.indexOf(
     "async function secureCredentials(",
@@ -555,6 +553,8 @@ test("replacement passkey flows preserve the old Firebase session until proof su
   const statusStart = bridge.indexOf("async function getStatus(", secureStart);
   const explicitRegistration = bridge.slice(explicitStart, secureStart);
   const secureCredentials = bridge.slice(secureStart, statusStart);
+  assert.doesNotMatch(explicitRegistration, /\bsignOut\b/u);
+  assert.doesNotMatch(secureCredentials, /\bsignOut\b/u);
 
   const explicitCurrentUser = explicitRegistration.indexOf(
     "user = currentAccountUser(auth);",

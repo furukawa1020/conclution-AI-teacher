@@ -1737,6 +1737,7 @@ func conversationTurn(
 		Foreground:    input.Foreground,
 		ExtendedSpeech: !speculative &&
 			utf8.RuneCountInString(transcript) >= extendedSpeechMinRunes,
+		GuestExperience:  input.GuestExperience,
 		Speculative:      speculative,
 		InputOrigin:      inputOrigin,
 		ResearchDisabled: input.StrictCloudMinimization,

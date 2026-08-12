@@ -693,7 +693,7 @@ test("bridge cancellation releases ownership before rejecting the recording", as
   );
 });
 
-test("bridge requires a fresh passkey and never creates anonymous or popup identity", async () => {
+test("bridge keeps anonymous identity inside the explicit guest function and never uses popup identity", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -713,7 +713,11 @@ test("bridge requires a fresh passkey and never creates anonymous or popup ident
   const initializeAuthAt = initializeUser.indexOf("initializeAuth(app");
   assert.ok(appCheckAt >= 0);
   assert.ok(initializeAuthAt > appCheckAt);
-  assert.doesNotMatch(bridge, /signInAnonymously/u);
+  const guestStart = bridge.indexOf("async function startGuestMode()");
+  const guestEnd = bridge.indexOf("async function getStatus()", guestStart);
+  assert.ok(guestStart >= 0 && guestEnd > guestStart);
+  assert.match(bridge.slice(guestStart, guestEnd), /signInAnonymously/u);
+  assert.doesNotMatch(initializeUser, /signInAnonymously/u);
   assert.doesNotMatch(bridge, /signInWithPopup|GoogleAuthProvider/u);
   assert.match(bridge, /!user\.isAnonymous/u);
   assert.match(
@@ -2557,8 +2561,8 @@ test("finite lifecycle stops pause Rust while preserving opaque session state", 
   assert.equal(
     sessionLifecycleClient.match(/voice_state\.set\(VoiceState::Ready\)/gu)
       ?.length,
-    1,
-    "outside completed account setup, Ready must remain explicit End only",
+    2,
+    "outside account and explicit guest setup, Ready must remain explicit End only",
   );
 });
 

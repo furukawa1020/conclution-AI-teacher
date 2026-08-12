@@ -123,6 +123,12 @@ func (v *FirebaseVerifier) Verify(ctx context.Context, idToken, appCheckToken st
 		return Principal{}, ErrUnauthenticated
 	}
 	provider := strings.TrimSpace(authToken.Firebase.SignInProvider)
+	if provider == "anonymous" {
+		if strings.TrimSpace(authToken.UID) == "" {
+			return Principal{}, ErrUnauthenticated
+		}
+		return Principal{UID: authToken.UID, AppID: appToken.AppID, Provider: provider, AuthMethod: "guest-v1", AuthTime: time.Unix(authToken.AuthTime, 0).UTC()}, nil
+	}
 	if !verifiedAccountToken(authToken, provider) {
 		// Anonymous Auth proves only possession of a temporary Firebase session.
 		// It must never be promoted to an assertion about the account holder.
@@ -150,6 +156,13 @@ func (v *FirebaseVerifier) Verify(ctx context.Context, idToken, appCheckToken st
 		AccountVerified: true,
 		Roles:           extractRoles(authToken.Claims),
 	}, nil
+}
+
+// IsGuest identifies the unverified, App Check-bound anonymous identity that
+// may cross only the dedicated voice guest boundary.
+func (p Principal) IsGuest() bool {
+	return p.Provider == "anonymous" && p.AuthMethod == "guest-v1" &&
+		!p.AccountVerified && strings.TrimSpace(p.UID) != "" && strings.TrimSpace(p.AppID) != ""
 }
 
 func verifiedPasskeyTimestamp(token *auth.Token, authMethod string) (time.Time, bool) {

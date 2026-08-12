@@ -531,6 +531,7 @@ function validateBrowserResult(result) {
     "zeroOutputCapture",
     "wasmModuleCloned",
     "directWasmGenerationIsolation",
+    "intentionalFastLaneValidated",
     "temporalVadClockValidated",
     "preConfirmFrames",
     "wrappedFrames",
@@ -552,6 +553,7 @@ function validateBrowserResult(result) {
     result.zeroOutputCapture !== true ||
     result.wasmModuleCloned !== true ||
     result.directWasmGenerationIsolation !== true ||
+    result.intentionalFastLaneValidated !== true ||
     result.temporalVadClockValidated !== true ||
     result.preConfirmFrames !== 0 ||
     result.wrappedFrames !== 5 ||
@@ -754,6 +756,7 @@ async function main() {
       zeroOutputCapture: result.zeroOutputCapture,
       directWasmGenerationIsolation:
         result.directWasmGenerationIsolation,
+      intentionalFastLaneValidated: result.intentionalFastLaneValidated,
       temporalVadClockValidated: result.temporalVadClockValidated,
       wrappedFrames: result.wrappedFrames,
       freshGenerationFrames: result.freshGenerationFrames,

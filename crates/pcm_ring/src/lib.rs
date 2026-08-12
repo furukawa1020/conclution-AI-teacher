@@ -209,6 +209,102 @@ mod wasm_boundary {
             && kotae_audio_core::advance_temporal_vad_clock(48_000, 1_000, 6_280, 6_279).is_err()
     }
 
+    #[wasm_bindgen(js_name = intentionalFastLaneSelfTest)]
+    pub fn intentional_fast_lane_self_test() -> bool {
+        use kotae_audio_core::{
+            INTERRUPT_FRAME_FOREGROUND_VOICED, INTERRUPT_FRAME_GUARD_VOICED,
+            INTERRUPT_FRAME_VOICED, IntentionalInterruptPhase, IntentionalInterruptState,
+            advance_intentional_interrupt,
+        };
+        let foreground = INTERRUPT_FRAME_GUARD_VOICED
+            | INTERRUPT_FRAME_VOICED
+            | INTERRUPT_FRAME_FOREGROUND_VOICED;
+        let mut intentional = IntentionalInterruptState::default();
+        let mut decided_at = None;
+        for frame in 1..=13_u16 {
+            let (rms, peak) = if frame % 2 == 0 {
+                (0.08, 0.21)
+            } else {
+                (0.045, 0.12)
+            };
+            let Ok(step) = advance_intentional_interrupt(
+                intentional,
+                foreground,
+                rms,
+                peak,
+                40,
+                frame * 40,
+                true,
+            ) else {
+                return false;
+            };
+            intentional = step.state;
+            if step.fast_ready {
+                decided_at.get_or_insert(frame * 40);
+            }
+        }
+        let mut constant = IntentionalInterruptState::default();
+        let mut constant_ready = false;
+        for frame in 1..=17_u16 {
+            let Ok(step) = advance_intentional_interrupt(
+                constant,
+                foreground,
+                0.06,
+                0.16,
+                40,
+                frame * 40,
+                true,
+            ) else {
+                return false;
+            };
+            constant = step.state;
+            constant_ready |= step.fast_ready;
+        }
+        let Ok(lost) = advance_intentional_interrupt(
+            IntentionalInterruptState::default(),
+            foreground,
+            0.08,
+            0.21,
+            40,
+            40,
+            false,
+        ) else {
+            return false;
+        };
+        decided_at == Some(400)
+            && !constant_ready
+            && lost.state.phase == IntentionalInterruptPhase::LegacyOnly
+            && !lost.fast_ready
+    }
+
+    #[wasm_bindgen(js_name = intentionalFastLaneFrameSelfTest)]
+    pub fn intentional_fast_lane_frame_self_test() -> bool {
+        use kotae_audio_core::{
+            INTERRUPT_FRAME_FOREGROUND_VOICED, INTERRUPT_FRAME_GUARD_VOICED,
+            INTERRUPT_FRAME_VOICED, IntentionalInterruptPhase, IntentionalInterruptState,
+            advance_intentional_interrupt,
+        };
+        let state = IntentionalInterruptState {
+            phase: IntentionalInterruptPhase::FastReady,
+            score: 32,
+            foreground_ms: 360,
+            change_count: 8,
+            gap_ms: 0,
+            last_bucket: 2,
+            last_elapsed_ms: 360,
+        };
+        let flags = INTERRUPT_FRAME_GUARD_VOICED
+            | INTERRUPT_FRAME_VOICED
+            | INTERRUPT_FRAME_FOREGROUND_VOICED;
+        let Ok(step) = advance_intentional_interrupt(state, flags, 0.08, 0.21, 40, 400, true)
+        else {
+            return false;
+        };
+        step.fast_ready
+            && step.state.phase == IntentionalInterruptPhase::Confirmed
+            && step.state.last_elapsed_ms == 400
+    }
+
     #[wasm_bindgen(js_name = PcmRing)]
     pub struct WasmPcmRing {
         inner: Option<PcmRing>,

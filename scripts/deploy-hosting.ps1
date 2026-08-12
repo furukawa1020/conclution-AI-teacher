@@ -348,7 +348,7 @@ function Assert-BrowserAudioGate {
     $resultProperties = @($result.PSObject.Properties.Name | Sort-Object)
     if (
         ($resultProperties -join ",") -cne
-            "directWasmGenerationIsolation,freshGenerationFrames,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
+            "directWasmGenerationIsolation,freshGenerationFrames,intentionalFastLaneValidated,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
         $result.status -cne "passed" -or
         $result.provenance -cne "release" -or
         $result.sourceCommit -cne $ExpectedGitCommit -or
@@ -356,6 +356,7 @@ function Assert-BrowserAudioGate {
         [int] $result.sampleRateHz -ne 48000 -or
         [bool] $result.zeroOutputCapture -ne $true -or
         [bool] $result.directWasmGenerationIsolation -ne $true -or
+        [bool] $result.intentionalFastLaneValidated -ne $true -or
         [bool] $result.temporalVadClockValidated -ne $true -or
         [int] $result.wrappedFrames -ne 5 -or
         [int] $result.freshGenerationFrames -ne 3 -or

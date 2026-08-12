@@ -218,10 +218,72 @@ async function validateArtifacts(
     } catch {
       fail("browser_audio_release_manifest_invalid");
     }
+    const toolchain = manifest?.toolchain;
+    const reviewedWasmBindgen = {
+      "windows-x86_64": {
+        archiveName: "wasm-bindgen-0.2.126-x86_64-pc-windows-msvc.tar.gz",
+        archiveSha256:
+          "5a3773c7e69cfb2d865e235e9210de184c8c3af1787720646ec1a8bbe09c6179",
+        executableSha256:
+          "2d5de73be088f1b53764fb298fe24f9fd44f438fa02e5d208159780b20e858ed",
+        hosts: new Set([
+          "x86_64-pc-windows-msvc",
+          "x86_64-pc-windows-gnu",
+        ]),
+      },
+      "linux-x86_64": {
+        archiveName: "wasm-bindgen-0.2.126-x86_64-unknown-linux-musl.tar.gz",
+        archiveSha256:
+          "064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d",
+        executableSha256:
+          "d8d94635b40d1d8a93562fc7ced6093488252600dba39ce1dbab410b89157d8b",
+        hosts: new Set([
+          "x86_64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+        ]),
+      },
+    }[toolchain?.platform];
     if (
-      !exactObjectKeys(manifest, ["schemaVersion", "sourceCommit", "artifacts"]) ||
-      manifest.schemaVersion !== 1 ||
+      !exactObjectKeys(manifest, [
+        "schemaVersion",
+        "sourceCommit",
+        "toolchain",
+        "artifacts",
+      ]) ||
+      manifest.schemaVersion !== 2 ||
       !/^[0-9a-f]{40}$/u.test(manifest.sourceCommit) ||
+      !exactObjectKeys(toolchain, [
+        "platform",
+        "rustToolchain",
+        "rustcCommit",
+        "cargoCommit",
+        "rustHost",
+        "rustTarget",
+        "rustChannelManifestSource",
+        "rustChannelManifestSha256",
+        "wasmBindgenVersion",
+        "wasmBindgenArchiveName",
+        "wasmBindgenArchiveSha256",
+        "wasmBindgenExecutableSha256",
+        "wasmBindgenSource",
+      ]) ||
+      !reviewedWasmBindgen ||
+      toolchain.rustToolchain !== "1.93.0" ||
+      toolchain.rustcCommit !== "254b59607d4417e9dffbc307138ae5c86280fe4c" ||
+      toolchain.cargoCommit !== "083ac5135f967fd9dc906ab057a2315861c7a80d" ||
+      !reviewedWasmBindgen.hosts.has(toolchain.rustHost) ||
+      toolchain.rustTarget !== "wasm32-unknown-unknown" ||
+      toolchain.rustChannelManifestSource !==
+        "https://static.rust-lang.org/dist/channel-rust-1.93.0.toml" ||
+      toolchain.rustChannelManifestSha256 !==
+        "beb6ba4e41c84e9c11c80e6804a007497d0c8ba0810cd403fabc8f4a9c45b1f8" ||
+      toolchain.wasmBindgenVersion !== "0.2.126" ||
+      toolchain.wasmBindgenArchiveName !== reviewedWasmBindgen.archiveName ||
+      toolchain.wasmBindgenArchiveSha256 !== reviewedWasmBindgen.archiveSha256 ||
+      toolchain.wasmBindgenExecutableSha256 !==
+        reviewedWasmBindgen.executableSha256 ||
+      toolchain.wasmBindgenSource !==
+        `https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.126/${reviewedWasmBindgen.archiveName}` ||
       !Array.isArray(manifest.artifacts)
     ) {
       fail("browser_audio_release_manifest_invalid");

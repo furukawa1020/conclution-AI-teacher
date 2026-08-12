@@ -192,6 +192,19 @@ function Select-CanonicalApplicationPath {
     return Assert-CanonicalLeafPath -Path $selectedPath -Boundary $Boundary
 }
 
+function Get-CanonicalGitCommand {
+    [CmdletBinding()]
+    param()
+
+    $gitCandidates = @(
+        Get-Command "git" -CommandType Application -All -ErrorAction Stop
+    )
+    $gitPath = Select-CanonicalApplicationPath `
+        -CandidatePaths @($gitCandidates | ForEach-Object { $_.Source }) `
+        -Boundary "Git release command"
+    return Get-Command $gitPath -CommandType Application -ErrorAction Stop
+}
+
 function Get-ReleaseToolchainConfiguration {
     [CmdletBinding()]
     param(

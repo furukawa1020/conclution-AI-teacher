@@ -201,7 +201,7 @@ try {
 $releaseGit = $null
 if (-not [string]::IsNullOrWhiteSpace($ExpectedGitCommit)) {
     $ExpectedGitCommit = $ExpectedGitCommit.ToLowerInvariant()
-    $releaseGit = Get-Command "git" -CommandType Application -ErrorAction Stop
+    $releaseGit = Get-CanonicalGitCommand
     $repositoryRoot = Invoke-ReleaseGitText `
         -GitCommand $releaseGit `
         -CommandArguments @("rev-parse", "--show-toplevel") `

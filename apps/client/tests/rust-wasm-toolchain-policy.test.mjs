@@ -89,6 +89,11 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
 
   assert.match(policy, /function Assert-CanonicalLeafPath/u);
   assert.match(policy, /function Select-CanonicalApplicationPath/u);
+  assert.match(policy, /function Get-CanonicalGitCommand/u);
+  assert.match(
+    policy,
+    /Get-Command "git" -CommandType Application -All/u,
+  );
   assert.match(policy, /FileAttributes\]::ReparsePoint/u);
   assert.match(policy, /LinkType/u);
   assert.match(policy, /function Assert-ReleaseToolchain/u);
@@ -125,8 +130,10 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
   const buildIndex = build.indexOf('" build `');
   assert.ok(preflightIndex >= 0 && buildIndex > preflightIndex);
   assert.match(build, /schemaVersion = 2/u);
+  assert.match(build, /\$releaseGit = Get-CanonicalGitCommand/u);
   assert.match(build, /toolchain = \$releaseToolchain/u);
   assert.match(deploy, /Assert-ReleaseToolchainProvenance/u);
+  assert.match(deploy, /\$git = Get-CanonicalGitCommand/u);
   assert.match(
     deploy,
     /artifacts,schemaVersion,sourceCommit,toolchain/u,

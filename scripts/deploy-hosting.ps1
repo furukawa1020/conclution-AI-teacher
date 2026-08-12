@@ -147,7 +147,7 @@ function Invoke-ReleaseGitText {
 }
 
 function Assert-HostingReleaseSource {
-    $git = Get-Command "git" -CommandType Application -ErrorAction Stop
+    $git = Get-CanonicalGitCommand
     $repositoryRoot = Invoke-ReleaseGitText `
         -GitCommand $git `
         -CommandArguments @("rev-parse", "--show-toplevel") `

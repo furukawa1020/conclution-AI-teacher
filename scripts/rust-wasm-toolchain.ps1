@@ -482,31 +482,43 @@ function Assert-ReleaseToolchain {
 
     $workspace = [System.IO.Path]::GetFullPath($WorkspaceRoot)
     Assert-RustToolchainFile -WorkspaceRoot $workspace
-    $cargoCommand = Get-Command $CargoPath -CommandType Application -ErrorAction Stop
-    $rustcCommand = Get-Command "rustc" -CommandType Application -ErrorAction Stop
-    $cargoPath = [System.IO.Path]::GetFullPath($cargoCommand.Source)
-    $rustcPath = [System.IO.Path]::GetFullPath($rustcCommand.Source)
+    # PATH normally exposes rustup proxies. On Unix those proxies may be
+    # symlinks by design, so they are not the reviewed release binaries. Ask
+    # rustup for the exact pinned-toolchain executables, then apply the strict
+    # canonical-path boundary to those leaf binaries instead.
+    $rustupCommand = Get-Command "rustup" -CommandType Application -ErrorAction Stop
+    $toolchainName = [string] $Configuration.rust.toolchain
+    $cargoPathLines = @(& $rustupCommand.Source which --toolchain $toolchainName cargo 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $cargoPathLines.Count -ne 1) {
+        throw "rustup did not resolve one Cargo executable for the reviewed toolchain."
+    }
+    $rustcPathLines = @(& $rustupCommand.Source which --toolchain $toolchainName rustc 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $rustcPathLines.Count -ne 1) {
+        throw "rustup did not resolve one rustc executable for the reviewed toolchain."
+    }
+    $cargoPath = [System.IO.Path]::GetFullPath($cargoPathLines[0].Trim())
+    $rustcPath = [System.IO.Path]::GetFullPath($rustcPathLines[0].Trim())
     $null = Assert-CanonicalLeafPath -Path $cargoPath -Boundary "Cargo executable"
     $null = Assert-CanonicalLeafPath -Path $rustcPath -Boundary "rustc executable"
+    $cargoCommand = Get-Command $cargoPath -CommandType Application -ErrorAction Stop
+    $rustcCommand = Get-Command $rustcPath -CommandType Application -ErrorAction Stop
     $wasmBindgen = Assert-WasmBindgenExecutable `
         -WasmBindgenPath $WasmBindgenPath `
         -Configuration $Configuration
 
-    $toolchainArgument = "+$($Configuration.rust.toolchain)"
     Push-Location $workspace
     try {
         $rustcText = Invoke-ToolIdentityText `
             -Command $rustcCommand `
-            -Arguments @($toolchainArgument, "--version", "--verbose") `
+            -Arguments @("--version", "--verbose") `
             -Boundary "rustc"
         $cargoText = Invoke-ToolIdentityText `
             -Command $cargoCommand `
-            -Arguments @($toolchainArgument, "--version", "--verbose") `
+            -Arguments @("--version", "--verbose") `
             -Boundary "Cargo"
         $targetLibdirText = Invoke-ToolIdentityText `
             -Command $rustcCommand `
             -Arguments @(
-                $toolchainArgument,
                 "--print",
                 "target-libdir",
                 "--target",

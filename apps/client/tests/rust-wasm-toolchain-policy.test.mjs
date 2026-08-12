@@ -94,7 +94,18 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
   assert.match(policy, /function Assert-ReleaseToolchain/u);
   assert.match(policy, /function Assert-ReleaseToolchainProvenance/u);
   assert.match(policy, /Get-FileHash -Algorithm SHA256/u);
-  assert.match(policy, /\+\$\(\$Configuration\.rust\.toolchain\)/u);
+  assert.match(
+    policy,
+    /rustupCommand\.Source\s+which\s+--toolchain\s+\$toolchainName\s+cargo/u,
+  );
+  assert.match(
+    policy,
+    /rustupCommand\.Source\s+which\s+--toolchain\s+\$toolchainName\s+rustc/u,
+  );
+  assert.doesNotMatch(
+    policy,
+    /\$toolchainArgument\s*=\s*"\+\$\(\$Configuration\.rust\.toolchain\)"/u,
+  );
   assert.match(installer, /archive SHA-256 does not match/u);
   assert.match(installer, /archive contains an unexpected path/u);
   assert.match(installer, /Get-Command[\s\S]+-All/u);

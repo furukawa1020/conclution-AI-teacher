@@ -14,7 +14,6 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
     build,
     deploy,
     browserGate,
-    workflow,
     documentation,
   ] = await Promise.all([
     readFile(new URL("config/release-toolchain.json", root), "utf8"),
@@ -28,10 +27,6 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
     readFile(new URL("scripts/build-web.ps1", root), "utf8"),
     readFile(new URL("scripts/deploy-hosting.ps1", root), "utf8"),
     readFile(new URL("scripts/test-browser-audio.mjs", root), "utf8"),
-    readFile(
-      new URL(".github/workflows/rust-wasm-release-toolchain.yml", root),
-      "utf8",
-    ),
     readFile(new URL("docs/rust-wasm-release-toolchain.md", root), "utf8"),
   ]);
 
@@ -141,24 +136,6 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
   assert.match(browserGate, /manifest\.schemaVersion !== 2/u);
   assert.match(browserGate, /wasmBindgenExecutableSha256/u);
 
-  assert.match(workflow, /windows-latest/u);
-  assert.match(workflow, /ubuntu-latest/u);
-  assert.equal(
-    (
-      workflow.match(
-        /actions\/checkout@11d5960a326750d5838078e36cf38b85af677262/gu,
-      ) ?? []
-    ).length,
-    2,
-  );
-  assert.doesNotMatch(workflow, /uses:\s+[^\s@]+@v\d+/u);
-  assert.equal(
-    (workflow.match(/\.\/scripts\/install-release-wasm-bindgen\.ps1/gu) ?? [])
-      .length,
-    2,
-  );
-  assert.match(workflow, /\.\/scripts\/test-rust-wasm-toolchain\.ps1/u);
-  assert.match(workflow, /\.\/scripts\/build-web\.ps1/u);
   assert.match(documentation, /local absolute path/u);
 
   for (const committedText of [
@@ -167,7 +144,6 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
     policy,
     installer,
     fixture,
-    workflow,
     documentation,
   ]) {
     assert.doesNotMatch(committedText, /C:\\Users\\/u);

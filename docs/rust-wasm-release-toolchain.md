@@ -18,6 +18,6 @@ powershell -ExecutionPolicy Bypass -File scripts/build-web.ps1 `
   -ExpectedGitCommit (git rev-parse HEAD)
 ```
 
-CIも同じinstaller、policy fixture、`build-web.ps1`を呼び、別実装のversion checkを持ちません。release manifest schema v2には公開可能なversion、commit、platform、archive/executable digest、公式取得元だけを記録します。実行ファイルのlocal absolute path、環境変数、archiveや実行ファイルの内容は記録しません。Hosting preflightはこのtoolchain identityもexact matchで再検証します。
+release前のローカル検証も同じinstaller、policy fixture、`build-web.ps1`を呼び、別実装のversion checkを持ちません。release manifest schema v2には公開可能なversion、commit、platform、archive/executable digest、公式取得元だけを記録します。実行ファイルのlocal absolute path、環境変数、archiveや実行ファイルの内容は記録しません。Hosting preflightはこのtoolchain identityもexact matchで再検証します。
 
 固定値は、公式Rust channel manifestと公式wasm-bindgen GitHub release assetを2026-08-12に取得し、公開checksum/API digestと取得byte列を照合してreviewした値です。

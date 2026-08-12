@@ -118,6 +118,80 @@ function Assert-CanonicalLeafPath {
     return $fullPath
 }
 
+function Select-CanonicalApplicationPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]] $CandidatePaths,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]] $PreferredPaths = @(),
+
+        [Parameter(Mandatory)]
+        [string] $Boundary
+    )
+
+    $comparison = Get-PathStringComparison
+    $canonicalCandidates = @()
+    foreach ($candidatePath in @($CandidatePaths)) {
+        if (
+            [string]::IsNullOrWhiteSpace($candidatePath) -or
+            -not [System.IO.Path]::IsPathRooted($candidatePath)
+        ) {
+            throw "$Boundary returned an invalid application path."
+        }
+        $canonicalCandidate = [System.IO.Path]::GetFullPath($candidatePath)
+        $duplicate = $false
+        foreach ($existingPath in $canonicalCandidates) {
+            if ([string]::Equals($canonicalCandidate, $existingPath, $comparison)) {
+                $duplicate = $true
+                break
+            }
+        }
+        if (-not $duplicate) {
+            $canonicalCandidates += $canonicalCandidate
+        }
+    }
+    if ($canonicalCandidates.Count -eq 0) {
+        throw "$Boundary is not installed."
+    }
+
+    $selectedPath = $null
+    foreach ($preferredPath in @($PreferredPaths)) {
+        if ([string]::IsNullOrWhiteSpace($preferredPath)) {
+            continue
+        }
+        if (-not [System.IO.Path]::IsPathRooted($preferredPath)) {
+            throw "$Boundary preferred path must be absolute."
+        }
+        $canonicalPreferred = [System.IO.Path]::GetFullPath($preferredPath)
+        foreach ($candidatePath in $canonicalCandidates) {
+            if ([string]::Equals($canonicalPreferred, $candidatePath, $comparison)) {
+                $selectedPath = $candidatePath
+                break
+            }
+        }
+        if ($null -ne $selectedPath) {
+            break
+        }
+    }
+
+    if ($null -eq $selectedPath) {
+        foreach ($candidatePath in $canonicalCandidates) {
+            if (
+                $null -eq $selectedPath -or
+                [string]::Compare($candidatePath, $selectedPath, $comparison) -lt 0
+            ) {
+                $selectedPath = $candidatePath
+            }
+        }
+    }
+    return Assert-CanonicalLeafPath -Path $selectedPath -Boundary $Boundary
+}
+
 function Get-ReleaseToolchainConfiguration {
     [CmdletBinding()]
     param(

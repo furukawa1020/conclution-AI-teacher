@@ -48,19 +48,34 @@ $extractRoot = Join-Path $stagingRoot "extract"
 New-Item -ItemType Directory -Path $extractRoot | Out-Null
 
 try {
-    $curl = Get-Command `
-        "curl.exe" `
-        -CommandType Application `
-        -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($null -eq $curl) {
-        $curl = Get-Command `
-            "curl" `
-            -CommandType Application `
-            -ErrorAction Stop |
-            Select-Object -First 1
+    $curlName = if ($platformKey -ceq "windows-x86_64") {
+        "curl.exe"
+    } else {
+        "curl"
     }
-    & $curl.Source `
+    $curlCandidates = @(
+        Get-Command `
+            $curlName `
+            -All `
+            -CommandType Application `
+            -ErrorAction SilentlyContinue
+    )
+    $curlPreferredPaths = if ($platformKey -ceq "windows-x86_64") {
+        if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+            @()
+        } else {
+            @([System.IO.Path]::GetFullPath(
+                (Join-Path (Join-Path $env:SystemRoot "System32") "curl.exe")
+            ))
+        }
+    } else {
+        @("/usr/bin/curl")
+    }
+    $curlPath = Select-CanonicalApplicationPath `
+        -CandidatePaths @($curlCandidates | ForEach-Object { $_.Source }) `
+        -PreferredPaths $curlPreferredPaths `
+        -Boundary "curl downloader"
+    & $curlPath `
         --fail `
         --location `
         --silent `
@@ -78,12 +93,29 @@ try {
         throw "wasm-bindgen release archive SHA-256 does not match the reviewed asset."
     }
 
-    $tar = Get-Command `
-        "tar" `
-        -CommandType Application `
-        -ErrorAction Stop |
-        Select-Object -First 1
-    $archiveEntries = @(& $tar.Source -tzf $archivePath)
+    $tarCandidates = @(
+        Get-Command `
+            "tar" `
+            -All `
+            -CommandType Application `
+            -ErrorAction SilentlyContinue
+    )
+    $tarPreferredPaths = if ($platformKey -ceq "windows-x86_64") {
+        if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+            @()
+        } else {
+            @([System.IO.Path]::GetFullPath(
+                (Join-Path (Join-Path $env:SystemRoot "System32") "tar.exe")
+            ))
+        }
+    } else {
+        @("/usr/bin/tar")
+    }
+    $tarPath = Select-CanonicalApplicationPath `
+        -CandidatePaths @($tarCandidates | ForEach-Object { $_.Source }) `
+        -PreferredPaths $tarPreferredPaths `
+        -Boundary "tar extractor"
+    $archiveEntries = @(& $tarPath -tzf $archivePath)
     if ($LASTEXITCODE -ne 0 -or $archiveEntries.Count -ne 7) {
         throw "wasm-bindgen release archive shape is outside the reviewed boundary."
     }
@@ -106,7 +138,7 @@ try {
         throw "wasm-bindgen release archive contains an unexpected path."
     }
 
-    & $tar.Source -xzf $archivePath -C $extractRoot
+    & $tarPath -xzf $archivePath -C $extractRoot
     if ($LASTEXITCODE -ne 0) {
         throw "wasm-bindgen release archive extraction failed."
     }

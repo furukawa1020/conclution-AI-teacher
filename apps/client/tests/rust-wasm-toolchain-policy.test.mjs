@@ -88,6 +88,7 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
   assert.match(rustToolchain, /targets = \["wasm32-unknown-unknown"\]/u);
 
   assert.match(policy, /function Assert-CanonicalLeafPath/u);
+  assert.match(policy, /function Select-CanonicalApplicationPath/u);
   assert.match(policy, /FileAttributes\]::ReparsePoint/u);
   assert.match(policy, /LinkType/u);
   assert.match(policy, /function Assert-ReleaseToolchain/u);
@@ -96,9 +97,15 @@ test("release toolchain fixes reviewed Rust and wasm-bindgen identities", async 
   assert.match(policy, /\+\$\(\$Configuration\.rust\.toolchain\)/u);
   assert.match(installer, /archive SHA-256 does not match/u);
   assert.match(installer, /archive contains an unexpected path/u);
-  assert.ok(
-    (installer.match(/Select-Object -First 1/gu) ?? []).length >= 3,
+  assert.match(installer, /Get-Command[\s\S]+-All/u);
+  assert.equal(
+    (installer.match(/Select-CanonicalApplicationPath/gu) ?? []).length,
+    2,
   );
+  assert.match(installer, /\/usr\/bin\/curl/u);
+  assert.match(installer, /\/usr\/bin\/tar/u);
+  assert.match(fixture, /zero application candidates/u);
+  assert.match(fixture, /selected application link ancestor/u);
   assert.match(fixture, /ItemType Junction/u);
   assert.match(fixture, /ItemType SymbolicLink/u);
   assert.match(fixture, /symlink or reparse ancestor/u);

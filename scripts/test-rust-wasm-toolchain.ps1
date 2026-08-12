@@ -101,6 +101,26 @@ try {
     if ($actualCanonical -cne $canonicalLeaf) {
         throw "Canonical path fixture changed unexpectedly."
     }
+    $fallbackLeaf = Join-Path $realRoot "z-fixture.bin"
+    [System.IO.File]::WriteAllBytes($fallbackLeaf, [byte[]] @(5, 6, 7, 8))
+    $selectedPreferred = Select-CanonicalApplicationPath `
+        -CandidatePaths @($fallbackLeaf, $canonicalLeaf, $fallbackLeaf) `
+        -PreferredPaths @($canonicalLeaf) `
+        -Boundary "Preferred application fixture"
+    if ($selectedPreferred -cne $canonicalLeaf) {
+        throw "Preferred application path was not selected deterministically."
+    }
+    $selectedFallback = Select-CanonicalApplicationPath `
+        -CandidatePaths @($fallbackLeaf, $canonicalLeaf, $fallbackLeaf) `
+        -Boundary "Fallback application fixture"
+    if ($selectedFallback -cne $canonicalLeaf) {
+        throw "Application fallback ordering is not deterministic."
+    }
+    Assert-Rejected -Case "zero application candidates" -Operation {
+        Select-CanonicalApplicationPath `
+            -CandidatePaths @() `
+            -Boundary "Missing application fixture"
+    }
     Assert-Rejected -Case "relative path" -Operation {
         Assert-CanonicalLeafPath `
             -Path ".\fixture.bin" `
@@ -128,6 +148,17 @@ try {
         Assert-CanonicalLeafPath `
             -Path ([System.IO.Path]::GetFullPath((Join-Path $linkRoot "fixture.bin"))) `
             -Boundary "Linked path fixture"
+    }
+    Assert-Rejected -Case "selected application link ancestor" -Operation {
+        Select-CanonicalApplicationPath `
+            -CandidatePaths @(
+                [System.IO.Path]::GetFullPath((Join-Path $linkRoot "fixture.bin")),
+                $canonicalLeaf
+            ) `
+            -PreferredPaths @(
+                [System.IO.Path]::GetFullPath((Join-Path $linkRoot "fixture.bin"))
+            ) `
+            -Boundary "Linked application fixture"
     }
 } finally {
     if (Test-Path -LiteralPath $linkRoot) {

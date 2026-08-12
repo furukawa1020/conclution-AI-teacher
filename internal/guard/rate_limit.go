@@ -26,6 +26,7 @@ const (
 	MaxPasskeyAppCircuitBreakerPerDay    = 20_000
 	evaluationRateLimitCollection        = "evaluationRateLimits"
 	voiceRateLimitCollection             = "voiceRateLimits"
+	guestVoiceRateLimitCollection        = "guestVoiceRateLimits"
 	passkeyClientRateLimitCollection     = "passkeyClientRateLimits"
 	passkeyAppRateLimitCollection        = "passkeyAppRateLimits"
 	rateLimitTTLField                    = "expiresAt"
@@ -151,6 +152,8 @@ func NewFirestoreLimiterForScope(
 		collection = evaluationRateLimitCollection
 	case "voice":
 		collection = voiceRateLimitCollection
+	case "guest-voice":
+		collection = guestVoiceRateLimitCollection
 	default:
 		return nil, errors.New("unsupported rate-limit scope")
 	}

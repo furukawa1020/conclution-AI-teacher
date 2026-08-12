@@ -326,6 +326,7 @@ barge-in候補は開始済みsessionの端末内VAD、bounded MediaRecorder、�
 | `evaluations` | 従来評価APIの本文を含まない評価メタデータ | `expiresAt`、30日 |
 | `evaluationRateLimits` | 従来評価APIのrate counter | `expiresAt`、48時間 |
 | `voiceRateLimits` | 音声APIのrate counter | `expiresAt`、48時間 |
+| `guestVoiceRateLimits` | 保存しないゲスト音声専用のUID・App ID rate counter。通常アカウント枠とは分離 | `expiresAt`、48時間 |
 | `passkeyClientRateLimits` | Passkeyの登録・認証それぞれのbegin/finish、計4 ceremony APIで共有するclient単位rate counter | `expiresAt`、48時間 |
 | `passkeyAppRateLimits` | 計4 ceremony APIで共有するFirebase App単位サーキットブレーカー | `expiresAt`、48時間 |
 | `passkey_ceremonies_v1` | App ID・purpose・challengeへ束縛した単回ceremony | `expiresAt`、5分 |

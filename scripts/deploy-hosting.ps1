@@ -57,6 +57,7 @@ $requiredTtlCollectionGroups = @(
     "evaluations",
     "evaluationRateLimits",
     "voiceRateLimits",
+    "guestVoiceRateLimits",
     "voiceLiveLeases",
     "passkey_ceremonies_v1",
     "passkeyClientRateLimits",

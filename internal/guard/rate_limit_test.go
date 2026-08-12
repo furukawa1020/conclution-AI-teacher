@@ -169,8 +169,9 @@ func TestFirestoreLimiterScopesUseDedicatedCollections(t *testing.T) {
 	client := &firestore.Client{}
 	limits := Limits{PerMinute: 5, PerDay: 40}
 	for scope, wantCollection := range map[string]string{
-		"evaluation": evaluationRateLimitCollection,
-		"voice":      voiceRateLimitCollection,
+		"evaluation":  evaluationRateLimitCollection,
+		"voice":       voiceRateLimitCollection,
+		"guest-voice": guestVoiceRateLimitCollection,
 	} {
 		limiter, err := NewFirestoreLimiterForScope(client, limits, scope)
 		if err != nil {

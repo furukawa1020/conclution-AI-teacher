@@ -515,7 +515,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if s.voice.RequireRecentPasskey && !voiceAuthorized(principal, time.Now().UTC()) {
+	if (principal.IsGuest() && !s.voice.GuestModeEnabled) ||
+		(s.voice.RequireRecentPasskey && !voiceAccessAuthorized(principal, time.Now().UTC(), s.voice.GuestModeEnabled)) {
 		finishVoiceLiveWithError(
 			liveCtx,
 			conn,
@@ -634,6 +635,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		RequestID:               requestIDFromContext(liveCtx),
 		TurnMode:                start.TurnMode,
 		StrictCloudMinimization: start.StrictCloudMinimization,
+		GuestExperience:         principal.IsGuest(),
 		NativeAudio:             start.NativeAudio,
 		Ambient: start.TurnMode == VoiceTurnAmbient ||
 			start.TurnMode == VoiceTurnForeground,
@@ -1590,13 +1592,17 @@ func (s *Server) consumeVoiceLiveQuota(
 	principal identity.Principal,
 	at time.Time,
 ) string {
+	uidLimiter, appLimiter, uidScope, appScope := s.voiceQuotaLimiters(principal)
+	if uidLimiter == nil || appLimiter == nil {
+		return voiceLiveCodeAPIUnavailable
+	}
 	checks := []struct {
 		limiter guard.Limiter
 		key     string
 		scope   string
 	}{
-		{s.voice.RateLimiter, principal.UID, "uid"},
-		{s.voice.AppRateLimiter, "app:" + principal.AppID, "app"},
+		{uidLimiter, principal.UID, uidScope},
+		{appLimiter, "app:" + principal.AppID, appScope},
 	}
 	errs := make([]error, len(checks))
 	var group sync.WaitGroup

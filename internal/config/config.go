@@ -63,11 +63,14 @@ type Config struct {
 	RateLimits                   guard.Limits
 	VoiceRateLimits              guard.Limits
 	VoiceAppRateLimits           guard.Limits
+	GuestVoiceRateLimits         guard.Limits
+	GuestVoiceAppRateLimits      guard.Limits
 	PasskeyClientRateLimits      guard.Limits
 	PasskeyAppCircuitBreaker     guard.Limits
 	PasskeyRPID                  string
 	PasskeyOrigin                string
 	RequireRecentPasskeyForVoice bool
+	GuestModeEnabled             bool
 	AllowInsecureDev             bool
 }
 
@@ -126,6 +129,22 @@ func Load() (Config, error) {
 		guard.MinPerDay,
 		guard.MaxPerDay,
 	)
+	if err != nil {
+		return Config{}, err
+	}
+	guestVoicePerMinute, err := envBoundedInt("KOTAE_GUEST_VOICE_RATE_LIMIT_PER_MINUTE", 4, guard.MinPerMinute, guard.MaxPerMinute)
+	if err != nil {
+		return Config{}, err
+	}
+	guestVoicePerDay, err := envBoundedInt("KOTAE_GUEST_VOICE_RATE_LIMIT_PER_DAY", 16, guard.MinPerDay, guard.MaxPerDay)
+	if err != nil {
+		return Config{}, err
+	}
+	guestVoiceAppPerMinute, err := envBoundedInt("KOTAE_GUEST_VOICE_APP_RATE_LIMIT_PER_MINUTE", 20, guard.MinPerMinute, guard.MaxPerMinute)
+	if err != nil {
+		return Config{}, err
+	}
+	guestVoiceAppPerDay, err := envBoundedInt("KOTAE_GUEST_VOICE_APP_RATE_LIMIT_PER_DAY", 200, guard.MinPerDay, guard.MaxPerDay)
 	if err != nil {
 		return Config{}, err
 	}
@@ -241,6 +260,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	guestModeEnabled, err := envStrictBool("KOTAE_GUEST_MODE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:                      envOr("KOTAE_ENV", "production"),
 		Port:                        envOr("PORT", defaultPort),
@@ -276,6 +299,11 @@ func Load() (Config, error) {
 			PerMinute: voiceAppPerMinute,
 			PerDay:    voiceAppPerDay,
 		},
+		GuestVoiceRateLimits: guard.Limits{PerMinute: guestVoicePerMinute, PerDay: guestVoicePerDay},
+		GuestVoiceAppRateLimits: guard.Limits{
+			PerMinute: guestVoiceAppPerMinute,
+			PerDay:    guestVoiceAppPerDay,
+		},
 		PasskeyClientRateLimits: guard.Limits{
 			PerMinute: passkeyClientPerMinute,
 			PerDay:    passkeyClientPerDay,
@@ -287,6 +315,7 @@ func Load() (Config, error) {
 		PasskeyRPID:                  envOr("KOTAE_PASSKEY_RP_ID", defaultPasskeyRPID),
 		PasskeyOrigin:                envOr("KOTAE_PASSKEY_ORIGIN", defaultPasskeyOrigin),
 		RequireRecentPasskeyForVoice: requireRecentPasskey,
+		GuestModeEnabled:             guestModeEnabled,
 		AllowInsecureDev:             allowInsecureDev,
 	}
 
@@ -399,6 +428,12 @@ func Load() (Config, error) {
 	}
 	if err := cfg.VoiceAppRateLimits.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid voice app rate limits: %w", err)
+	}
+	if err := cfg.GuestVoiceRateLimits.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid guest voice rate limits: %w", err)
+	}
+	if err := cfg.GuestVoiceAppRateLimits.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid guest voice app rate limits: %w", err)
 	}
 	if err := cfg.PasskeyClientRateLimits.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid passkey client rate limits: %w", err)

@@ -686,6 +686,20 @@ func TestRecentPasskeyGateWrapsBufferedAndStreamingVoiceRoutes(t *testing.T) {
 	}
 }
 
+func TestGuestVoiceAccessIsExplicitAndNeverPasskeyManagement(t *testing.T) {
+	now := time.Now().UTC()
+	guest := identity.Principal{UID: "guest-uid", AppID: "firebase-app-id", Provider: "anonymous", AuthMethod: "guest-v1", AuthTime: now}
+	if voiceAccessAuthorized(guest, now, false) {
+		t.Fatal("disabled guest mode authorized a guest")
+	}
+	if !voiceAccessAuthorized(guest, now, true) {
+		t.Fatal("enabled guest mode rejected an exact guest principal")
+	}
+	if passkeyManagementAuthorized(guest, now) {
+		t.Fatal("guest crossed the passkey management boundary")
+	}
+}
+
 func TestPasskeyManagementGateIsAlwaysOnAndUsesImmutablePasskeyTime(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {

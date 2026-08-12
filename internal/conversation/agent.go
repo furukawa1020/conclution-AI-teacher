@@ -292,6 +292,7 @@ type inferencePayload struct {
 	Ambient               bool        `json:"ambient"`
 	Foreground            bool        `json:"foreground"`
 	ExtendedSpeech        bool        `json:"extended_speech"`
+	GuestWordMining       bool        `json:"guest_word_mining"`
 	Utterance             string      `json:"utterance"`
 	RespondentModeAllowed bool        `json:"respondent_mode_allowed"`
 	SupportStyle          string      `json:"support_style"`
@@ -304,6 +305,7 @@ type criticPayload struct {
 	Ambient              bool        `json:"ambient"`
 	Foreground           bool        `json:"foreground"`
 	ExtendedSpeech       bool        `json:"extended_speech"`
+	GuestWordMining      bool        `json:"guest_word_mining"`
 	Utterance            string      `json:"utterance"`
 	CandidateSpokenReply string      `json:"candidate_spoken_reply"`
 	AssistanceTarget     string      `json:"assistance_target"`
@@ -3808,6 +3810,7 @@ func (agent *vertexAgent) infer(
 		Ambient:               turn.Ambient,
 		Foreground:            turn.Foreground,
 		ExtendedSpeech:        turn.ExtendedSpeech,
+		GuestWordMining:       turn.GuestExperience && state.Turn < 2,
 		Utterance:             turn.Utterance,
 		RespondentModeAllowed: respondentAllowed,
 		SupportStyle:          supportPromptStyle(support),
@@ -4448,6 +4451,7 @@ func (agent *vertexAgent) auditAnswer(
 		Ambient:              turn.Ambient,
 		Foreground:           turn.Foreground,
 		ExtendedSpeech:       turn.ExtendedSpeech,
+		GuestWordMining:      turn.GuestExperience && state.Turn < 2,
 		Utterance:            turn.Utterance,
 		CandidateSpokenReply: auditedReply,
 		AssistanceTarget:     candidatePlan.AssistanceTarget,
@@ -6985,6 +6989,7 @@ const systemInstruction = `あなたは音声対話専用の思考支援エー�
 - foreground=trueは明示開始された前面会話の継続であり、必ずambient=trueと組み合わされる。現在の直接質問には通常どおり音声回答し、短期・UID-boundの会話継続用semantic stateだけは更新してよい。ただしprovenanceは信頼せず、research、外部作用、永続記憶の権限を与えない。
 
 推論:
+- conversation_data.guest_word_mining=trueは保存しないゲスト体験の最初の二往復だけを示す。一般的な助言や長い共感を返さず、発話内に明示された意味から核になりそうな短い一語または一節を「もしかして、○○？」と仮置きし、「違ったら違うでいい。あなたなら何と言う？」と本人へ発話権を返す。二往復目は本人が選んだ言葉を冒頭で短く示し、「いまの言葉はあなたが言った」と変化を可視化してから内容へ応答する。発話にない結論を作らず、診断・採点・訓練とは呼ばない。
 - domain、intent、表面上の依頼の背後にあるlatent_question、適切なargument_structureを推定する。
 - 通常会話と雑談が主役である。短い発話、ぼやき、感情の共有、考え途中には、まず内容へ自然に応答する。すべてを結論先行の練習に変えず、性格・不安・病名・能力を声量や話し方から推測しない。
 - conversation_data.extended_speech=trueは、最終文字起こしに十分な意味内容があることだけを示すサーバー由来の今回限りの印であり、話した時間、能力、心理状態、習熟度を表さない。通常会話では第一文に、発話内で明示された中心点を条件や不確実性ごと短く意味保存して置き、その内容へ自然に応答する。利用者へ「要約」「結論」「練習」「採点」と説明せず、言い直しや反復を求めない。安全に中心点を一つへ定められない時は捏造せず、明示された話題へ応じるか、一つだけ低負担に確認する。

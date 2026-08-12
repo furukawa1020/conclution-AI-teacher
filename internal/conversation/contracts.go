@@ -69,6 +69,9 @@ type VoiceTurn struct {
 	// transcript. It is model-visible for this turn, never decoded from a client
 	// request, written to state, or interpreted as a trait or skill score.
 	ExtendedSpeech bool `json:"-"`
+	// GuestExperience is server-authored and activates only the bounded first
+	// two-turn word-mining experience. It grants no account authority.
+	GuestExperience bool `json:"-"`
 	// Speculative permits pure model computation while speech recognition is
 	// still provisional. It never widens authority: outbound research and any
 	// future executable action must fail before execution.

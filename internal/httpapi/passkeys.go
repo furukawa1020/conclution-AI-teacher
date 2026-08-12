@@ -302,7 +302,7 @@ func (s *Server) requireFreshPasskey(next http.Handler) http.Handler {
 			return
 		}
 		principal, ok := principalFromContext(r.Context())
-		if !ok || !voiceAuthorized(principal, time.Now().UTC()) {
+		if !ok || !voiceAccessAuthorized(principal, time.Now().UTC(), s.voice.GuestModeEnabled) {
 			writeProblem(w, http.StatusUnauthorized, "passkey_required", "Recent passkey authentication is required for voice.")
 			return
 		}
@@ -358,6 +358,10 @@ func voiceAuthorized(principal identity.Principal, now time.Time) bool {
 	}
 	age := now.Sub(principal.PasskeyAt)
 	return age >= -30*time.Second && age <= passkeyVoiceAuthorizationAge
+}
+
+func voiceAccessAuthorized(principal identity.Principal, now time.Time, guestModeEnabled bool) bool {
+	return (guestModeEnabled && principal.IsGuest()) || voiceAuthorized(principal, now)
 }
 
 func exactCeremonyID(r *http.Request) (string, bool) {

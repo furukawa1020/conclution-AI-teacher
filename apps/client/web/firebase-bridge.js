@@ -3,8 +3,12 @@ import {
   browserSessionPersistence,
   getIdToken,
   getIdTokenResult,
+  inMemoryPersistence,
   initializeAuth,
+  setPersistence,
+  signInAnonymously,
   signInWithCustomToken,
+  signOut,
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 import {
   getToken as getAppCheckToken,
@@ -682,6 +686,7 @@ async function initializeFirebaseAuth() {
 }
 
 const firebaseAuth = createRetryableInitializer(initializeFirebaseAuth);
+let guestModeActive = false;
 
 function verifiedAccountUser(user) {
   return Boolean(
@@ -1057,6 +1062,16 @@ async function secureCredentials(interactive = false) {
     const { appCheck } = await appServices();
     const { auth } = await firebaseAuth();
     const appCheckResult = await getAppCheckToken(appCheck, false);
+    if (guestModeActive) {
+      const guest = auth.currentUser;
+      if (!guest || guest.isAnonymous !== true || typeof guest.uid !== "string") {
+        fail("guest_session_expired");
+      }
+      return Object.freeze({
+        appCheckToken: appCheckResult.token,
+        idToken: await getIdToken(guest, false),
+      });
+    }
     const registrationRecoveryPending =
       passkeyRegistrationRecovery.isPending();
     let user;
@@ -1151,6 +1166,31 @@ async function secureCredentials(interactive = false) {
   }
 }
 
+async function startGuestMode() {
+  if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
+    fail("guest_start_failed");
+  }
+  const { appCheck } = await appServices();
+  const { auth } = await firebaseAuth();
+  await getAppCheckToken(appCheck, false);
+  if (auth.currentUser && auth.currentUser.isAnonymous !== true) {
+    fail("guest_start_failed");
+  }
+  // A guest identity is a page-lifetime capability, not an account session.
+  // Switching persistence before minting it also covers crashes where the
+  // best-effort `pagehide` cleanup cannot run.
+  await setPersistence(auth, inMemoryPersistence);
+  const signedIn = auth.currentUser
+    ? { user: auth.currentUser }
+    : await signInAnonymously(auth);
+  if (!signedIn.user || signedIn.user.isAnonymous !== true) {
+    fail("guest_start_failed");
+  }
+  guestModeActive = true;
+  verifiedAccountUid = undefined;
+  return Object.freeze({ state: "guest-ready" });
+}
+
 function primeVoiceTransportConnection() {
   if (voiceTransportPrimed) return;
   voiceTransportPrimed = true;
@@ -1179,6 +1219,10 @@ async function getStatus() {
     return Object.freeze({ state: "configuration-required" });
   }
   try {
+    if (guestModeActive) {
+      await secureCredentials();
+      return Object.freeze({ state: "guest-ready" });
+    }
     const { appCheckToken, idToken } = await secureCredentials();
     if (passkeyRegistrationRecovery.isPending()) {
       return Object.freeze({
@@ -6308,6 +6352,10 @@ globalThis.addEventListener("pagehide", () => {
   ) {
     stopSession("pagehide");
   }
+  if (guestModeActive && authInstance?.currentUser?.isAnonymous === true) {
+    guestModeActive = false;
+    void signOut(authInstance).catch(() => {});
+  }
 });
 
 const publicBridge = Object.freeze({
@@ -6317,6 +6365,7 @@ const publicBridge = Object.freeze({
   finishTurn,
   getStatus,
   registerPasskeyAccount,
+  startGuestMode,
   stopSession,
   waitForTurnEnd,
 });

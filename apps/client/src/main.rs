@@ -120,6 +120,9 @@ const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
 const NATIVE_RESPONDENT_COACH_ROUTE: &str = "native-respondent-coach";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
+const GUEST_MODE_ACTION: &str = "パスキーなしで、今すぐ試す";
+const GUEST_MODE_PROMISE: &str =
+    "保存しません。最初の二往復で、まとまらない話から『あなたのひとこと』を一緒に掘り当てます。ページを閉じると戻れません。";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
 const PASSKEY_REQUIRED_COPY: &str =
@@ -804,6 +807,7 @@ impl VoiceState {
 enum CloudState {
     Connecting,
     Ready,
+    GuestReady,
     IdentityRequired,
     PasskeyRequired,
     PasskeyRegistrationRecoveryRequired,
@@ -816,6 +820,7 @@ impl CloudState {
         match self {
             Self::Connecting => "SECURE LINK / …",
             Self::Ready => "SECURE LINK / READY",
+            Self::GuestReady => "GUEST / EPHEMERAL",
             Self::IdentityRequired => "ACCOUNT / REQUIRED",
             Self::PasskeyRequired => "PASSKEY / REQUIRED",
             Self::PasskeyRegistrationRecoveryRequired => "PASSKEY / RECOVERY",
@@ -831,7 +836,7 @@ impl CloudState {
             | Self::PasskeyRequired
             | Self::PasskeyRegistrationRecoveryRequired
             | Self::ConfigurationRequired => "cloud-pill is-pending",
-            Self::Ready => "cloud-pill is-ready",
+            Self::Ready | Self::GuestReady => "cloud-pill is-ready",
             Self::Unavailable => "cloud-pill is-offline",
         }
     }
@@ -1154,6 +1159,9 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = registerPasskeyAccount)]
         async fn register_passkey_account_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = startGuestMode)]
+        async fn start_guest_mode_js() -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = beginTurn)]
         async fn begin_turn_js(
             session_state: &str,
@@ -1188,6 +1196,7 @@ mod cloud {
         };
         match status.state.as_str() {
             "ready" => CloudState::Ready,
+            "guest-ready" => CloudState::GuestReady,
             "identity-required" => CloudState::IdentityRequired,
             "passkey-required" => CloudState::PasskeyRequired,
             "passkey-registration-recovery-required" => {
@@ -1203,6 +1212,10 @@ mod cloud {
             .await
             .map(|_| ())
             .map_err(user_message)
+    }
+
+    pub async fn start_guest_mode() -> Result<(), &'static str> {
+        start_guest_mode_js().await.map(|_| ()).map_err(user_message)
     }
 
     pub async fn begin_turn(
@@ -2014,6 +2027,8 @@ mod cloud {
                 "声を待っています　言い直そうとせず　続きや別のひと言をそのままどうぞ"
             }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
+            Some("guest_start_failed") => "ゲストを開始できませんでした　このタブを開き直してもう一度ためしてみて",
+            Some("guest_session_expired") => "保存しないゲスト体験は終了しました　もう一度すぐ始められます",
             Some("account_boundary_changed") => ACCOUNT_BOUNDARY_CHANGED_COPY,
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
@@ -2164,6 +2179,10 @@ mod cloud {
     }
 
     pub async fn register_passkey_account() -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn start_guest_mode() -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -4060,7 +4079,54 @@ fn App() -> Element {
                                 div {
                                     class: "passkey-entry__actions",
                                     role: "group",
-                                    aria_label: "パスキー接続を選ぶ",
+                                    aria_label: "ゲストまたはパスキー接続を選ぶ",
+                                    button {
+                                        id: "guest-mode-action",
+                                        class: "control-button is-active",
+                                        r#type: "button",
+                                        aria_describedby: "guest-mode-promise",
+                                        disabled: passkey_setup_is_busy || passkey_registration_recovery_required,
+                                        onclick: move |_| {
+                                            if *passkey_setup_busy.peek() || passkey_registration_recovery_required {
+                                                return;
+                                            }
+                                            passkey_setup_busy.set(true);
+                                            passkey_setup_feedback.set(None);
+                                            spawn(async move {
+                                                match cloud::start_guest_mode().await {
+                                                    Ok(()) => {
+                                                        passkey_setup_busy.set(false);
+                                                        session_state.set(String::new());
+                                                        detected_domain.set(String::new());
+                                                        route.set("guest-word-mining".to_string());
+                                                        coach_state.set(CoachState::NONE);
+                                                        needs_paper.set(false);
+                                                        research_status.set(ResearchStatus::None);
+                                                        research_records.set(Vec::new());
+                                                        document_info.set(None);
+                                                        document_error.set(None);
+                                                        caption.set(Some("まとまっていなくて大丈夫。いま引っかかっていることを、そのまま声にしてください。".to_string()));
+                                                        turn_notice.set(TurnNotice::Clear);
+                                                        cloud_status.restart();
+                                                        voice_state.set(VoiceState::Ready);
+                                                        start_or_resume(
+                                                            voice_state, generation, session_state,
+                                                            detected_domain, route, coach_state,
+                                                            needs_paper, research_status, research_records,
+                                                            document_info, caption, turn_notice,
+                                                            strict_cloud_minimization,
+                                                        );
+                                                    }
+                                                    Err(message) => {
+                                                        passkey_setup_busy.set(false);
+                                                        passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message)));
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        span { aria_hidden: "true", "◎" }
+                                        {GUEST_MODE_ACTION}
+                                    }
                                     button {
                                         id: "new-passkey-account-action",
                                         class: "control-button is-active",
@@ -4144,6 +4210,11 @@ fn App() -> Element {
                                         span { aria_hidden: "true", "↻" }
                                         {RETURNING_PASSKEY_ACTION}
                                     }
+                                }
+                                p {
+                                    id: "guest-mode-promise",
+                                    class: "passkey-entry__warning",
+                                    {GUEST_MODE_PROMISE}
                                 }
                                 p {
                                     id: "new-passkey-account-warning",

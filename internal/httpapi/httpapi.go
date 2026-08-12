@@ -81,6 +81,7 @@ type VoiceTurnInput struct {
 	STTLocale               string
 	SchemaVersion           int
 	StrictCloudMinimization bool
+	GuestExperience         bool
 	// NativeAudio is an authenticated, client-selected live-only fast lane.
 	// It is mutually exclusive with strict cloud minimization and is never
 	// inferred for buffered HTTP turns.
@@ -364,12 +365,15 @@ type VoiceOptions struct {
 	NativeLiveService    VoiceTurnLiveService
 	RateLimiter          guard.Limiter
 	AppRateLimiter       guard.Limiter
+	GuestRateLimiter     guard.Limiter
+	GuestAppRateLimiter  guard.Limiter
 	LiveLeaseManager     guard.VoiceLiveLeaseManager
 	LiveHandshakeGate    *VoiceLiveHandshakeGate
 	CoachStateValidator  VoiceRespondentCheckpointValidator
 	RequestTimeout       time.Duration
 	MaxRequestBytes      int64
 	RequireRecentPasskey bool
+	GuestModeEnabled     bool
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -491,10 +495,10 @@ func NewWithVoiceAndPasskeys(
 	mux.HandleFunc("GET /health", server.health)
 	mux.Handle("GET /api/v1/me", server.requireIdentity(http.HandlerFunc(server.me)))
 	mux.Handle("POST /api/v1/evaluations", server.requireIdentity(http.HandlerFunc(server.evaluate)))
-	mux.Handle("POST /api/v1/voice/turns", server.requireIdentity(server.requireFreshPasskey(http.HandlerFunc(server.voiceTurn))))
+	mux.Handle("POST /api/v1/voice/turns", server.requireVoiceIdentity(server.requireFreshPasskey(http.HandlerFunc(server.voiceTurn))))
 	mux.Handle(
 		"POST "+voiceStreamPath,
-		server.requireIdentity(server.requireFreshPasskey(http.HandlerFunc(server.voiceTurnStream))),
+		server.requireVoiceIdentity(server.requireFreshPasskey(http.HandlerFunc(server.voiceTurnStream))),
 	)
 	mux.HandleFunc("OPTIONS "+voiceStreamPath, server.voiceStreamPreflight)
 	mux.HandleFunc("GET "+voiceLivePath, server.voiceLive)
@@ -581,6 +585,7 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_voice_turn", "The voice turn could not be accepted.")
 		return
 	}
+	input.GuestExperience = principal.IsGuest()
 	// RequestID is minted by the server middleware and never accepted from the
 	// client JSON. Downstream capability leases bind privileged actions to this
 	// exact authenticated request.
@@ -664,13 +669,18 @@ func (s *Server) consumeVoiceQuota(
 	principal identity.Principal,
 	at time.Time,
 ) bool {
+	uidLimiter, appLimiter, uidScope, appScope := s.voiceQuotaLimiters(principal)
+	if uidLimiter == nil || appLimiter == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
+		return false
+	}
 	quotaChecks := []struct {
 		limiter guard.Limiter
 		key     string
 		scope   string
 	}{
-		{limiter: s.voice.RateLimiter, key: principal.UID, scope: "uid"},
-		{limiter: s.voice.AppRateLimiter, key: "app:" + principal.AppID, scope: "app"},
+		{limiter: uidLimiter, key: principal.UID, scope: uidScope},
+		{limiter: appLimiter, key: "app:" + principal.AppID, scope: appScope},
 	}
 	quotaErrors := make([]error, len(quotaChecks))
 	var quotaGroup sync.WaitGroup
@@ -703,6 +713,13 @@ func (s *Server) consumeVoiceQuota(
 		}
 	}
 	return true
+}
+
+func (s *Server) voiceQuotaLimiters(principal identity.Principal) (guard.Limiter, guard.Limiter, string, string) {
+	if principal.IsGuest() {
+		return s.voice.GuestRateLimiter, s.voice.GuestAppRateLimiter, "guest_uid", "guest_app"
+	}
+	return s.voice.RateLimiter, s.voice.AppRateLimiter, "uid", "app"
 }
 
 func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
@@ -1237,7 +1254,32 @@ func (s *Server) requireIdentity(next http.Handler) http.Handler {
 			authFields[1],
 			appCheckHeader,
 		)
-		if err != nil {
+		if err != nil || principal.IsGuest() {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
+	})
+}
+
+func (s *Server) requireVoiceIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeaders := r.Header.Values("Authorization")
+		appCheckHeaders := r.Header.Values("X-Firebase-AppCheck")
+		if len(authHeaders) != 1 || len(appCheckHeaders) != 1 || s.verifier == nil {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
+			return
+		}
+		authFields := strings.Fields(authHeaders[0])
+		appCheckToken := strings.TrimSpace(appCheckHeaders[0])
+		if len(authFields) != 2 || !strings.EqualFold(authFields[0], "Bearer") ||
+			authFields[1] == "" || len(authFields[1]) > 8*1024 ||
+			appCheckToken == "" || len(appCheckToken) > 8*1024 {
+			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication is required.")
+			return
+		}
+		principal, err := s.verifier.Verify(r.Context(), authFields[1], appCheckToken)
+		if err != nil || (principal.IsGuest() && !s.voice.GuestModeEnabled) {
 			writeProblem(w, http.StatusUnauthorized, "unauthenticated", "Authentication or app attestation failed.")
 			return
 		}

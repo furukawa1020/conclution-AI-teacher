@@ -524,6 +524,7 @@ function Assert-PromotedBackendBoundary {
         "KOTAE_PASSKEY_RP_ID" = $expectedDefaultUrl.Replace("https://", "")
         "KOTAE_PASSKEY_ORIGIN" = $expectedDefaultUrl
         "KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE" = "true"
+        "KOTAE_GUEST_MODE_ENABLED" = "true"
     }
     foreach ($name in $requiredEnvironment.Keys) {
         if (

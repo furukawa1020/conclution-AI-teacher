@@ -146,13 +146,6 @@ func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
 		token *auth.Token
 	}{
 		{
-			name: "anonymous Firebase session",
-			token: &auth.Token{
-				UID:      "temporary-user",
-				Firebase: auth.FirebaseInfo{SignInProvider: "anonymous"},
-			},
-		},
-		{
 			name: "Google account without verified ownership claim",
 			token: &auth.Token{
 				UID:      "google-user",
@@ -203,6 +196,26 @@ func TestFirebaseVerifierRejectsTemporaryOrUnverifiedAccounts(t *testing.T) {
 				t.Fatalf("principal = %+v; want empty", principal)
 			}
 		})
+	}
+}
+
+func TestFirebaseVerifierReturnsContentFreeGuestPrincipal(t *testing.T) {
+	t.Parallel()
+	verifier := testFirebaseVerifier(
+		authTokenVerifierFunc(func(context.Context, string) (*auth.Token, error) {
+			return &auth.Token{UID: "temporary-user", AuthTime: 1_700_000_000, Firebase: auth.FirebaseInfo{SignInProvider: "anonymous"}}, nil
+		}),
+		appCheckTokenVerifierFunc(func(context.Context, string) (*appcheck.DecodedAppCheckToken, error) {
+			return &appcheck.DecodedAppCheckToken{AppID: "app-123"}, nil
+		}),
+	)
+	principal, err := verifier.Verify(context.Background(), "id-token", "app-check-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !principal.IsGuest() || principal.AccountVerified || principal.Provider != "anonymous" ||
+		principal.AuthMethod != "guest-v1" || len(principal.Roles) != 0 {
+		t.Fatalf("principal = %+v", principal)
 	}
 }
 

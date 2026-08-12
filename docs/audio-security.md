@@ -52,6 +52,7 @@ Cloud Run kotae-api（asia-northeast1）
 | Passkey credential | authenticator、Cloud Run、Firestore | SHA-256由来document ID、仮名user handle、public credential、sign counter等。秘密鍵はなし | 仮名アカウント。ceremonyは5分・単回利用 |
 | 長期測定 | 明示参加した端末のlocalStorage | 端末内のみ | 有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema version。会話本文・音声・Firebase UID・自由文・時刻は含めず、168日期限を次回アクセス時にprune。全削除後は回答復活防止用の固定markerだけを残す |
 | 音声レート制限 | Firestore | 48時間TTL | UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻 |
+| ゲスト音声レート制限 | Firestoreの専用collection | 48時間TTL | 匿名UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻。通常アカウント枠とは共有しない |
 | Passkeyレート制限 | Firestore | 48時間TTL | App Check tokenまたは仮名UID由来のclient digestと、App ID由来の高位circuit-breaker digest、回数・時刻。raw token、UID、IPは保存しない |
 | live接続lease | Firestore | 最長7分TTL | SHA-256化UID、ランダム所有者、期限だけ。同じ仮名アカウントのlive接続を1本へ制限し、音声・文字起こし・raw UIDは保存しない |
 

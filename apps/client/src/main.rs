@@ -911,6 +911,14 @@ struct BridgeStatus {
     state: String,
 }
 
+#[derive(Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyCredentialSummary {
+    reference: String,
+    created_at: String,
+    last_used_at: String,
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -958,8 +966,8 @@ mod cloud {
         FinishTurnError, PASSKEY_ACCOUNT_EXISTS_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
         PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
-        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeySetupFeedback, ResearchRecord,
-        ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
+        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyCredentialSummary,
+        PasskeySetupFeedback, ResearchRecord, ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
         VoiceTurnMode, VoiceTurnResult, WaitTurnError, coach_action_from_checkpoint,
         coach_phase_from_checkpoint, confirmed_voice_input_state, interrupted_voice_state,
         interruption_ready_voice_state, recoverable_finish_turn_code, recoverable_wait_turn_code,
@@ -1162,6 +1170,12 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = startGuestMode)]
         async fn start_guest_mode_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = listPasskeyCredentials)]
+        async fn list_passkey_credentials_js() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = revokePasskeyCredential)]
+        async fn revoke_passkey_credential_js(reference: &str) -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = beginTurn)]
         async fn begin_turn_js(
             session_state: &str,
@@ -1216,6 +1230,15 @@ mod cloud {
 
     pub async fn start_guest_mode() -> Result<(), &'static str> {
         start_guest_mode_js().await.map(|_| ()).map_err(user_message)
+    }
+
+    pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
+        let value = list_passkey_credentials_js().await.map_err(user_message)?;
+        serde_wasm_bindgen::from_value(value).map_err(|_| "パスキー一覧を安全に確認できませんでした")
+    }
+
+    pub async fn revoke_passkey_credential(reference: &str) -> Result<(), &'static str> {
+        revoke_passkey_credential_js(reference).await.map(|_| ()).map_err(user_message)
     }
 
     pub async fn begin_turn(
@@ -2029,6 +2052,8 @@ mod cloud {
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
             Some("guest_start_failed") => "ゲストを開始できませんでした　このタブを開き直してもう一度ためしてみて",
             Some("guest_session_expired") => "保存しないゲスト体験は終了しました　もう一度すぐ始められます",
+            Some("passkey_last_credential") => "最後のパスキーは失効できません　先に別のパスキーを追加してください",
+            Some("passkey_credential_management_failed") => "パスキー管理を安全に完了できませんでした　もう一度本人確認してください",
             Some("account_boundary_changed") => ACCOUNT_BOUNDARY_CHANGED_COPY,
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
@@ -2165,8 +2190,8 @@ const fn cloud_state_for_display(
 #[cfg(not(target_arch = "wasm32"))]
 mod cloud {
     use super::{
-        CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeySetupFeedback,
-        ResearchRecord, ResearchStatus, VoicePrepareLatency, VoiceReceipt, VoiceStartLatency,
+        CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeyCredentialSummary,
+        PasskeySetupFeedback, ResearchRecord, ResearchStatus, VoicePrepareLatency, VoiceReceipt, VoiceStartLatency,
         VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
@@ -2183,6 +2208,14 @@ mod cloud {
     }
 
     pub async fn start_guest_mode() -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn revoke_passkey_credential(_reference: &str) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -3711,6 +3744,10 @@ fn App() -> Element {
     let cloud_status_refresh = use_signal(|| 0_u64);
     let mut passkey_setup_busy = use_signal(|| false);
     let mut passkey_setup_feedback = use_signal(|| None::<PasskeySetupFeedback>);
+    let mut passkey_credentials = use_signal(Vec::<PasskeyCredentialSummary>::new);
+    let mut passkey_management_open = use_signal(|| false);
+    let mut passkey_management_busy = use_signal(|| false);
+    let mut passkey_revoke_confirmation = use_signal(|| None::<String>);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
     let _account_access_refresh_listener =
@@ -4534,6 +4571,88 @@ fn App() -> Element {
                     }
 
                     LongitudinalPanel {}
+
+                    if matches!(effective_cloud_state, CloudState::Ready) && state_snapshot == VoiceState::Ready {
+                        details {
+                            class: "privacy-fold",
+                            open: *passkey_management_open.read(),
+                            ontoggle: move |_| passkey_management_open.toggle(),
+                            summary {
+                                span { class: "utility-index", "02" }
+                                span {
+                                    strong { "パスキー管理" }
+                                    small { "本人確認後だけ一覧・失効" }
+                                }
+                                i { aria_hidden: "true" }
+                            }
+                            div { class: "privacy-fold__body",
+                                p { "端末名やcredential IDは表示しません。登録時刻と最終利用時刻だけを確認できます。最後の1件はアカウントへ戻れなくなるため失効できません。" }
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    disabled: *passkey_management_busy.read(),
+                                    onclick: move |_| {
+                                        if *passkey_management_busy.peek() { return; }
+                                        passkey_management_busy.set(true);
+                                        spawn(async move {
+                                            match cloud::list_passkey_credentials().await {
+                                                Ok(items) => passkey_credentials.set(items),
+                                                Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                            }
+                                            passkey_management_busy.set(false);
+                                        });
+                                    },
+                                    "パスキー一覧を本人確認して開く"
+                                }
+                                for credential in passkey_credentials.read().iter() {
+                                    div { class: "research-card",
+                                        p { "登録: {credential.created_at}" }
+                                        p { "最終利用: {credential.last_used_at}" }
+                                        button {
+                                            class: "control-button",
+                                            r#type: "button",
+                                            disabled: *passkey_management_busy.read(),
+                                            onclick: {
+                                                let reference = credential.reference.clone();
+                                                move |_| {
+                                                    passkey_revoke_confirmation.set(Some(reference.clone()));
+                                                }
+                                            },
+                                            "このパスキーの失効を確認する"
+                                        }
+                                        if passkey_revoke_confirmation.read().as_deref() == Some(credential.reference.as_str()) {
+                                            p { role: "alert", "このパスキーでは以後戻れません。本当に失効しますか？" }
+                                            button {
+                                                class: "control-button",
+                                                r#type: "button",
+                                                disabled: *passkey_management_busy.read(),
+                                                onclick: {
+                                                    let reference = credential.reference.clone();
+                                                    move |_| {
+                                                        passkey_management_busy.set(true);
+                                                        let target = reference.clone();
+                                                        spawn(async move {
+                                                            match cloud::revoke_passkey_credential(&target).await {
+                                                                Ok(()) => {
+                                                                    passkey_credentials.write().retain(|item| item.reference != target);
+                                                                    passkey_revoke_confirmation.set(None);
+                                                                    passkey_setup_feedback.set(Some(PasskeySetupFeedback::Success("パスキーを失効しました")));
+                                                                }
+                                                                Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                                            }
+                                                            passkey_management_busy.set(false);
+                                                        });
+                                                    }
+                                                },
+                                                "失効する"
+                                            }
+                                            button { class: "control-button", r#type: "button", onclick: move |_| passkey_revoke_confirmation.set(None), "やめる" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     details { class: "privacy-fold",
                         summary {

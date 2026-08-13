@@ -345,6 +345,25 @@ func (s *Service) FinishCredentialRegistration(
 	return nil
 }
 
+// ListCredentials exposes only the minimal, non-credential management view
+// after the HTTP layer has established a recent principal-bound passkey proof.
+func (s *Service) ListCredentials(ctx context.Context, principalUID string) ([]CredentialSummary, error) {
+	principalUID = strings.TrimSpace(principalUID)
+	if principalUID == "" {
+		return nil, ErrCredentialStateInvalid
+	}
+	return s.store.ListCredentials(ctx, principalUID)
+}
+
+// RevokeCredential delegates the atomic last-credential invariant to Store.
+func (s *Service) RevokeCredential(ctx context.Context, principalUID string, reference CredentialReference) error {
+	principalUID = strings.TrimSpace(principalUID)
+	if principalUID == "" {
+		return ErrCredentialNotFound
+	}
+	return s.store.RevokeCredential(ctx, principalUID, reference, s.now().UTC())
+}
+
 // credentialRegistrationUser keeps the protocol-required opaque user handle
 // while preventing the raw Firebase UID from entering WebAuthn options.
 type credentialRegistrationUser struct {

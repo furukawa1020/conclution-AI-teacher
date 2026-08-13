@@ -138,6 +138,7 @@ type VoiceTurnResult struct {
 	CoachAction           string
 	AnswerProof           string
 	AnswerTransitionProof string
+	GuestAFirstOutcome    string
 	ResearchStatus        string
 	PrivacyStatus         string
 	ResearchRecords       []ResearchRecord
@@ -645,11 +646,12 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		"answerTransitionProof": normalizedAnswerTransitionProof(
 			result.AnswerTransitionProof,
 		),
-		"researchStatus":  result.ResearchStatus,
-		"researchRecords": result.ResearchRecords,
-		"privacyStatus":   result.PrivacyStatus,
-		"route":           result.Route,
-		"needsPaper":      result.NeedsPaper,
+		"guestAFirstOutcome": normalizedGuestAFirstOutcome(result.GuestAFirstOutcome),
+		"researchStatus":     result.ResearchStatus,
+		"researchRecords":    result.ResearchRecords,
+		"privacyStatus":      result.PrivacyStatus,
+		"route":              result.Route,
+		"needsPaper":         result.NeedsPaper,
 	}); err != nil {
 		s.logger.WarnContext(ctx, "voice response write failed",
 			"request_id", requestIDFromContext(ctx),
@@ -806,6 +808,7 @@ func validateVoiceResult(result VoiceTurnResult) error {
 	answerTransitionProof := normalizedAnswerTransitionProof(
 		result.AnswerTransitionProof,
 	)
+	guestAFirstOutcome := normalizedGuestAFirstOutcome(result.GuestAFirstOutcome)
 	if result.PrivacyStatus == "blocked" {
 		if len(result.Audio) != 0 || result.AudioMIMEType != "" ||
 			result.StateToken != "" || result.Caption != "" ||
@@ -857,6 +860,7 @@ func validateVoiceResult(result VoiceTurnResult) error {
 			result.CoachPhase,
 			result.CoachAction,
 		) ||
+		!validGuestAFirstOutcome(guestAFirstOutcome, answerProof, answerTransitionProof) ||
 		(result.ResearchStatus != "none" &&
 			result.ResearchStatus != "needs_primary_evidence" &&
 			result.ResearchStatus != "unavailable") ||
@@ -915,6 +919,26 @@ func normalizedAnswerTransitionProof(value string) string {
 	return value
 }
 
+func normalizedGuestAFirstOutcome(value string) string {
+	if value == "" {
+		return "no_verified_change"
+	}
+	return value
+}
+
+func validGuestAFirstOutcome(outcome, answerProof, transitionProof string) bool {
+	switch outcome {
+	case "no_verified_change":
+		return true
+	case "changed_to_answer_first":
+		return transitionProof == "question_bound_input_clause_later_to_first"
+	case "stayed_answer_first":
+		return transitionProof == "none" && answerProof == "question_bound_input_answer_first"
+	default:
+		return false
+	}
+}
+
 func validAnswerTransitionProofMetadata(
 	proof string,
 	answerProof string,
@@ -970,6 +994,21 @@ func validateVoiceResultMode(
 	input VoiceTurnInput,
 	result VoiceTurnResult,
 ) error {
+	guestOutcome := normalizedGuestAFirstOutcome(result.GuestAFirstOutcome)
+	if input.GuestExperience {
+		expected := "no_verified_change"
+		switch {
+		case normalizedAnswerTransitionProof(result.AnswerTransitionProof) == "question_bound_input_clause_later_to_first":
+			expected = "changed_to_answer_first"
+		case normalizedAnswerProof(result.AnswerProof) == "question_bound_input_answer_first":
+			expected = "stayed_answer_first"
+		}
+		if guestOutcome != expected {
+			return errors.New("guest A-first outcome does not match its proofs")
+		}
+	} else if guestOutcome != "no_verified_change" {
+		return errors.New("guest A-first outcome escaped guest mode")
+	}
 	if normalizedAnswerProof(result.AnswerProof) != "none" &&
 		(input.StrictCloudMinimization || input.Document != nil) {
 		return errors.New("answer proof is unavailable for this request mode")

@@ -743,6 +743,7 @@ func TestAnswerTransitionProofRequiresOrdinaryQBAAndSilentTerminalTurn(t *testin
 		CoachAction:           "complete",
 		AnswerProof:           "question_bound_input_answer_first",
 		AnswerTransitionProof: "question_bound_input_clause_later_to_first",
+		GuestAFirstOutcome:    "no_verified_change",
 		ResearchStatus:        "none",
 		ResearchRecords:       []ResearchRecord{},
 		Route:                 "respondent-complete-fast",
@@ -794,6 +795,45 @@ func TestAnswerTransitionProofRequiresOrdinaryQBAAndSilentTerminalTurn(t *testin
 	}
 	if got := normalizedAnswerTransitionProof(""); got != "none" {
 		t.Fatalf("empty transition proof = %q", got)
+	}
+}
+
+func TestGuestAFirstOutcomeIsExactFiniteAndProofBound(t *testing.T) {
+	t.Parallel()
+	input := VoiceTurnInput{GuestExperience: true}
+	base := VoiceTurnResult{
+		StateToken: "opaque-state", DetectedDomain: "daily",
+		AssistanceTarget: "respondent", RespondentStage: "restructure",
+		CoachPhase: "complete", CoachAction: "complete",
+		AnswerProof:    "question_bound_input_answer_first",
+		ResearchStatus: "none", ResearchRecords: []ResearchRecord{},
+		Route: "respondent-complete-fast", GuestAFirstOutcome: "stayed_answer_first",
+	}
+	if err := validateVoiceResultForInput(input, base); err != nil {
+		t.Fatalf("stayed A-first rejected: %v", err)
+	}
+	changed := base
+	changed.AnswerTransitionProof = "question_bound_input_clause_later_to_first"
+	changed.GuestAFirstOutcome = "changed_to_answer_first"
+	if err := validateVoiceResultForInput(input, changed); err != nil {
+		t.Fatalf("changed A-first rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*VoiceTurnResult){
+		"transition without changed": func(result *VoiceTurnResult) { result.GuestAFirstOutcome = "stayed_answer_first" },
+		"changed without transition": func(result *VoiceTurnResult) { result.AnswerTransitionProof = "none" },
+		"unknown":                    func(result *VoiceTurnResult) { result.GuestAFirstOutcome = "improved" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := changed
+			mutate(&candidate)
+			if err := validateVoiceResultForInput(input, candidate); err == nil {
+				t.Fatal("false guest improvement accepted")
+			}
+		})
+	}
+	ordinary := changed
+	if err := validateVoiceResultForInput(VoiceTurnInput{}, ordinary); err == nil {
+		t.Fatal("guest outcome escaped ordinary mode")
 	}
 }
 

@@ -161,6 +161,7 @@ type voiceLiveFinalResult struct {
 	CoachAction           string           `json:"coachAction"`
 	AnswerProof           string           `json:"answerProof"`
 	AnswerTransitionProof string           `json:"answerTransitionProof"`
+	GuestAFirstOutcome    string           `json:"guestAFirstOutcome"`
 	ResearchStatus        string           `json:"researchStatus"`
 	ResearchRecords       []ResearchRecord `json:"researchRecords"`
 	PrivacyStatus         string           `json:"privacyStatus"`
@@ -1381,11 +1382,12 @@ outcomeReady:
 		AnswerTransitionProof: normalizedAnswerTransitionProof(
 			outcome.result.AnswerTransitionProof,
 		),
-		ResearchStatus:  outcome.result.ResearchStatus,
-		ResearchRecords: outcome.result.ResearchRecords,
-		PrivacyStatus:   outcome.result.PrivacyStatus,
-		Route:           outcome.result.Route,
-		NeedsPaper:      outcome.result.NeedsPaper,
+		GuestAFirstOutcome: normalizedGuestAFirstOutcome(outcome.result.GuestAFirstOutcome),
+		ResearchStatus:     outcome.result.ResearchStatus,
+		ResearchRecords:    outcome.result.ResearchRecords,
+		PrivacyStatus:      outcome.result.PrivacyStatus,
+		Route:              outcome.result.Route,
+		NeedsPaper:         outcome.result.NeedsPaper,
 	}
 	if spoke {
 		finalResult.AudioMIMEType = "audio/L16"

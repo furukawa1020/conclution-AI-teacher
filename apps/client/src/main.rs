@@ -528,6 +528,15 @@ enum AnswerTransitionProof {
     QuestionBoundInputClauseLaterToFirst,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GuestAFirstOutcome {
+    #[default]
+    NoVerifiedChange,
+    ChangedToAnswerFirst,
+    StayedAnswerFirst,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CoachState {
     phase: CoachPhase,
@@ -603,6 +612,16 @@ impl CoachState {
 
     const fn shows_answer_ownership_receipt(self) -> bool {
         self.yielded_after_owned_answer()
+    }
+
+    const fn guest_a_first_outcome(self) -> GuestAFirstOutcome {
+        if self.proved_later_to_first_transition() {
+            GuestAFirstOutcome::ChangedToAnswerFirst
+        } else if self.yielded_after_owned_answer() {
+            GuestAFirstOutcome::StayedAnswerFirst
+        } else {
+            GuestAFirstOutcome::NoVerifiedChange
+        }
     }
 
     const fn proved_later_to_first_transition(self) -> bool {
@@ -886,6 +905,8 @@ struct VoiceTurnResult {
     answer_proof: AnswerProof,
     #[serde(default)]
     answer_transition_proof: AnswerTransitionProof,
+    #[serde(default)]
+    guest_a_first_outcome: GuestAFirstOutcome,
     route: String,
     needs_paper: bool,
     research_status: ResearchStatus,
@@ -2905,6 +2926,28 @@ fn submit_turn(
         } else {
             result.answer_transition_proof
         };
+        let guest_outcome_is_proven = match result.guest_a_first_outcome {
+            GuestAFirstOutcome::NoVerifiedChange => true,
+            GuestAFirstOutcome::ChangedToAnswerFirst => {
+                !result.interrupted
+                    && matches!(
+                        answer_transition_proof,
+                        AnswerTransitionProof::QuestionBoundInputClauseLaterToFirst
+                    )
+            }
+            GuestAFirstOutcome::StayedAnswerFirst => {
+                !result.interrupted
+                    && matches!(answer_transition_proof, AnswerTransitionProof::None)
+                    && matches!(answer_proof, AnswerProof::QuestionBoundInputAnswerFirst)
+            }
+        };
+        if !guest_outcome_is_proven {
+            cloud::stop_session();
+            voice_state.set(VoiceState::Error(
+                "回答位置の確認を安全に受け取れませんでした",
+            ));
+            return;
+        }
         coach_state.set(CoachState::from_authoritative_result(
             result.coach_phase,
             result.coach_action,
@@ -3788,6 +3831,7 @@ fn App() -> Element {
     let mut session_state = use_signal(String::new);
     let mut detected_domain = use_signal(String::new);
     let mut route = use_signal(String::new);
+    let mut guest_sprint_active = use_signal(|| false);
     let mut coach_state = use_signal(|| CoachState::NONE);
     let mut needs_paper = use_signal(|| false);
     let mut research_status = use_signal(|| ResearchStatus::None);
@@ -4193,7 +4237,8 @@ fn App() -> Element {
                                                         passkey_setup_busy.set(false);
                                                         session_state.set(String::new());
                                                         detected_domain.set(String::new());
-                                                        route.set("guest-word-mining".to_string());
+                                                         route.set("guest-word-mining".to_string());
+                                                         guest_sprint_active.set(true);
                                                         coach_state.set(CoachState::NONE);
                                                         needs_paper.set(false);
                                                         research_status.set(ResearchStatus::None);
@@ -4326,7 +4371,7 @@ fn App() -> Element {
                     }
 
                     if !passkey_gate_visible {
-                    if route.read().as_str() == "guest-word-mining" {
+                    if *guest_sprint_active.read() {
                         section {
                             class: "guest-a-first-sprint",
                             aria_label: "30秒A-firstスプリント",
@@ -4334,6 +4379,19 @@ fn App() -> Element {
                             h2 { {GUEST_SPRINT_QUESTION} }
                             p { {GUEST_SPRINT_INSTRUCTION} }
                             p { role: "status", aria_live: "polite", "KOTAEはあなたより先にAを言いません" }
+                            match coach_snapshot.guest_a_first_outcome() {
+                                GuestAFirstOutcome::ChangedToAnswerFirst => rsx! {
+                                    strong { "同じAが、後ろから一言目へ移りました" }
+                                    p { "AIは答えを足していません。今回の二回だけの確認です。" }
+                                },
+                                GuestAFirstOutcome::StayedAnswerFirst => rsx! {
+                                    strong { "最初から、あなたのAが一言目でした" }
+                                    p { "AIは答えを足していません。上達や能力の判定ではありません。" }
+                                },
+                                GuestAFirstOutcome::NoVerifiedChange => rsx! {
+                                    p { "まだ変化は確認していません。確認できない時は決めつけません。" }
+                                },
+                            }
                         }
                     }
                     p { class: "quiet-voice-guide", {QUIET_VOICE_COPY} }

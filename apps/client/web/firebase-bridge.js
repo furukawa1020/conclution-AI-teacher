@@ -2631,8 +2631,19 @@ function hasValidAnswerTransitionProofMetadata(
   );
 }
 
+function hasValidGuestAFirstOutcome(outcome, answerProof, transitionProof) {
+  if (outcome === "no_verified_change") return true;
+  if (outcome === "changed_to_answer_first") {
+    return transitionProof === "question_bound_input_clause_later_to_first";
+  }
+  return outcome === "stayed_answer_first" &&
+    transitionProof === "none" &&
+    answerProof === "question_bound_input_answer_first";
+}
+
 const VOICE_RESPONSE_REQUIRED_KEYS = Object.freeze([
   "answerProof",
+  "guestAFirstOutcome",
   "assistanceTarget",
   "audioBase64",
   "audioMimeType",
@@ -2711,6 +2722,13 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     payload.answerTransitionProof === undefined
       ? "none"
       : payload.answerTransitionProof;
+  const guestAFirstOutcome = payload.guestAFirstOutcome;
+  const expectedGuestAFirstOutcome = answerTransitionProof ===
+    "question_bound_input_clause_later_to_first"
+    ? "changed_to_answer_first"
+    : answerProof === "question_bound_input_answer_first"
+      ? "stayed_answer_first"
+      : "no_verified_change";
   if (
     !isBase64(payload.audioBase64) ||
     payload.audioBase64.length > RESPONSE_AUDIO_MAX_BASE64_CHARS ||
@@ -2749,6 +2767,9 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
       payload.coachPhase,
       payload.coachAction,
     ) ||
+    !hasValidGuestAFirstOutcome(guestAFirstOutcome, answerProof, answerTransitionProof) ||
+    (guestModeActive && guestAFirstOutcome !== expectedGuestAFirstOutcome) ||
+    (!guestModeActive && guestAFirstOutcome !== "no_verified_change") ||
     (expectedStrictCloudMinimization && answerProof !== "none") ||
     (expectedStrictCloudMinimization && answerTransitionProof !== "none") ||
     (answerTransitionProof !== "none" &&
@@ -2814,6 +2835,7 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
     coachAction: payload.coachAction,
     answerProof,
     answerTransitionProof,
+    guestAFirstOutcome,
     needsPaper: payload.needsPaper,
     privacyStatus: payload.privacyStatus,
     researchStatus: research.status,

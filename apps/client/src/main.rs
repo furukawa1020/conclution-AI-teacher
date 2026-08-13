@@ -23,6 +23,27 @@ pub fn classify_interrupt_frame_for_js(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = classifyOnsetFrame)]
+pub fn classify_onset_frame_for_js(
+    noise_floor: f64,
+    peak: f64,
+    rms: f64,
+    has_speech: bool,
+    soft_candidate: bool,
+    bootstrap_eligible: bool,
+) -> Result<u8, wasm_bindgen::JsValue> {
+    kotae_audio_core::classify_onset_frame(
+        noise_floor,
+        peak,
+        rms,
+        has_speech,
+        soft_candidate,
+        bootstrap_eligible,
+    )
+    .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = advanceTemporalVadClock)]
 pub fn advance_temporal_vad_clock_for_js(
     sample_rate_hz: u32,
@@ -121,8 +142,9 @@ const NATIVE_RESPONDENT_COACH_ROUTE: &str = "native-respondent-coach";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
 const GUEST_MODE_ACTION: &str = "パスキーなしで、今すぐ試す";
-const GUEST_MODE_PROMISE: &str =
-    "保存しません。最初の二往復で、まとまらない話から『あなたのひとこと』を一緒に掘り当てます。ページを閉じると戻れません。";
+const GUEST_MODE_PROMISE: &str = "保存しません。最初の二往復で、まとまらない話から『あなたのひとこと』を一緒に掘り当てます。ページを閉じると戻れません。";
+const QUIET_VOICE_COPY: &str =
+    "叫ばなくて大丈夫。小声や、ぼそっとした『うん』『いや』もそのまま話してみてください。";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
     "この登録は既存の仮名アカウントとは別のアカウントを作ります。認証失敗から自動登録はしません。";
 const PASSKEY_REQUIRED_COPY: &str =
@@ -967,14 +989,14 @@ mod cloud {
         PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
         PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyCredentialSummary,
-        PasskeySetupFeedback, ResearchRecord, ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState,
-        VoiceTurnMode, VoiceTurnResult, WaitTurnError, coach_action_from_checkpoint,
-        coach_phase_from_checkpoint, confirmed_voice_input_state, interrupted_voice_state,
-        interruption_ready_voice_state, recoverable_finish_turn_code, recoverable_wait_turn_code,
-        session_stop_pauses, valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
-        valid_legacy_voice_start_latency_clear, valid_voice_pause_metadata,
-        valid_voice_prepare_slo_clear, valid_voice_receipt_metadata, validated_voice_prepare_slo,
-        validated_voice_start_slo,
+        PasskeySetupFeedback, ResearchRecord, ResearchStatus, STRICT_PRIVACY_BLOCKED_COPY, TurnEnd,
+        VoiceReceipt, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
+        coach_action_from_checkpoint, coach_phase_from_checkpoint, confirmed_voice_input_state,
+        interrupted_voice_state, interruption_ready_voice_state, recoverable_finish_turn_code,
+        recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
+        valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
+        valid_voice_pause_metadata, valid_voice_prepare_slo_clear, valid_voice_receipt_metadata,
+        validated_voice_prepare_slo, validated_voice_start_slo,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -1229,16 +1251,23 @@ mod cloud {
     }
 
     pub async fn start_guest_mode() -> Result<(), &'static str> {
-        start_guest_mode_js().await.map(|_| ()).map_err(user_message)
+        start_guest_mode_js()
+            .await
+            .map(|_| ())
+            .map_err(user_message)
     }
 
     pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
         let value = list_passkey_credentials_js().await.map_err(user_message)?;
-        serde_wasm_bindgen::from_value(value).map_err(|_| "パスキー一覧を安全に確認できませんでした")
+        serde_wasm_bindgen::from_value(value)
+            .map_err(|_| "パスキー一覧を安全に確認できませんでした")
     }
 
     pub async fn revoke_passkey_credential(reference: &str) -> Result<(), &'static str> {
-        revoke_passkey_credential_js(reference).await.map(|_| ()).map_err(user_message)
+        revoke_passkey_credential_js(reference)
+            .await
+            .map(|_| ())
+            .map_err(user_message)
     }
 
     pub async fn begin_turn(
@@ -2050,10 +2079,18 @@ mod cloud {
                 "声を待っています　言い直そうとせず　続きや別のひと言をそのままどうぞ"
             }
             Some("authentication_failed") => "安全な接続を確認できない　もう一度ためしてみて",
-            Some("guest_start_failed") => "ゲストを開始できませんでした　このタブを開き直してもう一度ためしてみて",
-            Some("guest_session_expired") => "保存しないゲスト体験は終了しました　もう一度すぐ始められます",
-            Some("passkey_last_credential") => "最後のパスキーは失効できません　先に別のパスキーを追加してください",
-            Some("passkey_credential_management_failed") => "パスキー管理を安全に完了できませんでした　もう一度本人確認してください",
+            Some("guest_start_failed") => {
+                "ゲストを開始できませんでした　このタブを開き直してもう一度ためしてみて"
+            }
+            Some("guest_session_expired") => {
+                "保存しないゲスト体験は終了しました　もう一度すぐ始められます"
+            }
+            Some("passkey_last_credential") => {
+                "最後のパスキーは失効できません　先に別のパスキーを追加してください"
+            }
+            Some("passkey_credential_management_failed") => {
+                "パスキー管理を安全に完了できませんでした　もう一度本人確認してください"
+            }
             Some("account_boundary_changed") => ACCOUNT_BOUNDARY_CHANGED_COPY,
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
@@ -2191,8 +2228,8 @@ const fn cloud_state_for_display(
 mod cloud {
     use super::{
         CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeyCredentialSummary,
-        PasskeySetupFeedback, ResearchRecord, ResearchStatus, VoicePrepareLatency, VoiceReceipt, VoiceStartLatency,
-        VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
+        PasskeySetupFeedback, ResearchRecord, ResearchStatus, VoicePrepareLatency, VoiceReceipt,
+        VoiceStartLatency, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -4268,6 +4305,7 @@ fn App() -> Element {
                     }
 
                     if !passkey_gate_visible {
+                    p { class: "quiet-voice-guide", {QUIET_VOICE_COPY} }
                     section {
                         class: if state_snapshot.session_active() {
                             "capability-strip is-collapsed"

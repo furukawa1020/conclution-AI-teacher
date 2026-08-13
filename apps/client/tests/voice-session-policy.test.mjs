@@ -22,6 +22,7 @@ import {
   createTurnGate,
   createVadState,
   initializeWithCleanup,
+  installOnsetFrameClassifier,
   isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
@@ -91,6 +92,19 @@ installInterruptFrameClassifier(
       (Number(voiced) << 1) |
       (Number(foregroundVoiced) << 2)
     );
+  },
+);
+
+installOnsetFrameClassifier(
+  (noiseFloor, peak, rms, hasSpeech, softCandidate, bootstrapEligible) => {
+    const threshold = hasSpeech
+      ? Math.max(0.009, noiseFloor * 1.7)
+      : Math.max(0.014, noiseFloor * 2.8);
+    const clear = rms >= threshold && peak >= threshold * (hasSpeech ? 1.35 : 1.8);
+    const soft = !clear && rms > 0 && peak >= rms * 1.6 &&
+      (rms >= noiseFloor * 1.45 ||
+        (!hasSpeech && (bootstrapEligible || softCandidate) && rms >= 0.0025));
+    return Number(clear) | (Number(soft) << 1);
   },
 );
 
@@ -3322,6 +3336,7 @@ test("late quiet confirmation preserves its full finite candidate and 300 ms lea
     if (candidateState.action === "start") {
       candidateStartedAt = candidateState.candidateStartedAt;
     }
+    if (candidateState.action === "confirm") break;
   }
   assert.equal(candidateStartedAt, 440);
   assert.equal(candidateState.action, "confirm");
@@ -7268,7 +7283,7 @@ test("cold-start bootstrap rejects stationary room sound and does not immediatel
 });
 
 test("sustained dynamic quiet speech gets a longer candidate and thinking pause", () => {
-  assert.equal(VOICE_SESSION_LIMITS.softVoiceMinimumMs, 600);
+  assert.equal(VOICE_SESSION_LIMITS.softVoiceMinimumMs, 240);
   assert.equal(VOICE_SESSION_LIMITS.softVoiceEndOfTurnSilenceMs, 3_000);
   assert.ok(
     VOICE_SESSION_LIMITS.softCandidateCaptureLimitMs >
@@ -7306,6 +7321,7 @@ test("sustained dynamic quiet speech gets a longer candidate and thinking pause"
       now,
     );
     if (
+      !vadState.hasSpeech &&
       now - candidateState.candidateStartedAt ===
       VOICE_SESSION_LIMITS.candidateCaptureLimitMs
     ) {

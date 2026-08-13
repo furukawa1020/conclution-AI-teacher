@@ -11,6 +11,8 @@ const SILENCE_DBFS: f32 = -120.0;
 pub const INTERRUPT_FRAME_GUARD_VOICED: u8 = 1 << 0;
 pub const INTERRUPT_FRAME_VOICED: u8 = 1 << 1;
 pub const INTERRUPT_FRAME_FOREGROUND_VOICED: u8 = 1 << 2;
+pub const ONSET_FRAME_CLEAR: u8 = 1 << 0;
+pub const ONSET_FRAME_SOFT: u8 = 1 << 1;
 
 pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
 
@@ -368,6 +370,38 @@ pub fn classify_interrupt_frame(levels: InterruptFrameLevels) -> Result<u8, Dete
         } else {
             0
         }))
+}
+
+/// Classifies a normal-turn onset from bounded level features only.
+/// PCM and the learned floor remain owned by the caller and are not retained.
+pub fn classify_onset_frame(
+    noise_floor: f64,
+    peak: f64,
+    rms: f64,
+    has_speech: bool,
+    soft_candidate: bool,
+    bootstrap_eligible: bool,
+) -> Result<u8, DetectorError> {
+    if !noise_floor.is_finite()
+        || !(0.0..=1.0).contains(&noise_floor)
+        || !peak.is_finite()
+        || !(0.0..=1.0).contains(&peak)
+        || !rms.is_finite()
+        || !(0.0..=1.0).contains(&rms)
+    {
+        return Err(DetectorError::InvalidInterruptFrameLevels);
+    }
+    let clear_threshold = if has_speech {
+        0.009_f64.max(noise_floor * 1.7)
+    } else {
+        0.014_f64.max(noise_floor * 2.8)
+    };
+    let clear =
+        rms >= clear_threshold && peak >= clear_threshold * if has_speech { 1.35 } else { 1.8 };
+    let voice_shaped = rms > 0.0 && peak >= rms * 1.6;
+    let bootstrap = !has_speech && (bootstrap_eligible || soft_candidate) && rms >= 0.0025;
+    let soft = !clear && voice_shaped && (rms >= noise_floor * 1.45 || bootstrap);
+    Ok((if clear { ONSET_FRAME_CLEAR } else { 0 }) | (if soft { ONSET_FRAME_SOFT } else { 0 }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -783,6 +817,16 @@ mod tests {
             }),
             Err(DetectorError::InvalidInterruptFrameLevels)
         );
+    }
+
+    #[test]
+    fn quiet_onset_accepts_six_db_voice_and_rejects_stationary_floor() {
+        let quiet =
+            classify_onset_frame(0.002, 0.008, 0.004, false, false, false).expect("quiet voice");
+        assert_eq!(quiet, ONSET_FRAME_SOFT);
+        let floor =
+            classify_onset_frame(0.002, 0.0024, 0.002, false, false, false).expect("room floor");
+        assert_eq!(floor, 0);
     }
 
     #[test]

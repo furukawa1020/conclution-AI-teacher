@@ -387,6 +387,7 @@ test("finite quiet-candidate ring preserves 300 ms pre-roll through the latest v
     candidateContextFrame: 16 * 320,
     leadInFrames: 15,
     initialCredit: 75,
+    quietConfirmed: false,
   });
 
   const frames = harness.frameMessages();
@@ -416,6 +417,7 @@ test("confirm releases only the bounded lead-in in exact FIFO and credit order",
     candidateContextFrame: 640,
     leadInFrames: 2,
     initialCredit: 1,
+    quietConfirmed: false,
   });
   assert.equal(harness.processor.state, "confirmed");
   assert.equal(harness.frameMessages().length, 1);
@@ -478,6 +480,77 @@ test("confirm releases only the bounded lead-in in exact FIFO and credit order",
   );
 });
 
+test("Rust-confirmed quiet speech is amplified before the ASR transport with a hard ceiling", () => {
+  const harness = createHarness({
+    maximumPreConfirmFrames: 4,
+    maximumQueuedFrames: 4,
+  });
+  harness.renderFrame(0.002);
+  harness.control({
+    type: "confirm",
+    version: 1,
+    generation: harness.generation,
+    candidateContextFrame: 0,
+    leadInFrames: 0,
+    initialCredit: 1,
+    quietConfirmed: true,
+  });
+
+  const [frame] = harness.frameMessages();
+  const sample = new DataView(frame.pcm).getInt16(0, true);
+  assert.ok(sample >= 190, `quiet PCM was not materially amplified: ${sample}`);
+  assert.ok(sample <= 264, `quiet PCM exceeded the 4x ceiling: ${sample}`);
+  assert.ok(sample <= Math.round(32_767 * 0.82));
+});
+
+test("normal speech and sub-floor silence remain byte-stable at the ASR boundary", () => {
+  for (const { quietConfirmed, value } of [
+    { quietConfirmed: false, value: 0.02 },
+    { quietConfirmed: true, value: 0.001 },
+  ]) {
+    const harness = createHarness({
+      maximumPreConfirmFrames: 2,
+      maximumQueuedFrames: 2,
+    });
+    harness.renderFrame(value);
+    harness.control({
+      type: "confirm",
+      version: 1,
+      generation: harness.generation,
+      candidateContextFrame: 0,
+      leadInFrames: 0,
+      initialCredit: 1,
+      quietConfirmed,
+    });
+    assert.equal(
+      new DataView(harness.frameMessages()[0].pcm).getInt16(0, true),
+      Math.round(value * 32_767),
+    );
+  }
+});
+
+test("a quiet-to-normal transition releases gain immediately without clipping", () => {
+  const harness = createHarness({
+    maximumPreConfirmFrames: 2,
+    maximumQueuedFrames: 2,
+  });
+  harness.renderFrame(0.002);
+  harness.control({
+    type: "confirm",
+    version: 1,
+    generation: harness.generation,
+    candidateContextFrame: 0,
+    leadInFrames: 0,
+    initialCredit: 2,
+    quietConfirmed: true,
+  });
+  harness.renderFrame(0.1);
+  const samples = harness.frameMessages().map(({ pcm }) =>
+    new DataView(pcm).getInt16(0, true));
+  assert.ok(samples[0] > Math.round(0.002 * 32_767));
+  assert.equal(samples[1], Math.round(0.1 * 32_767));
+});
+
 test("20 ms PCM frames retain exact 44.1 kHz context sample-clock boundaries", () => {
   const harness = createHarness({
     maximumPreConfirmFrames: 4,
@@ -492,6 +565,7 @@ test("20 ms PCM frames retain exact 44.1 kHz context sample-clock boundaries", (
     candidateContextFrame: 1_764,
     leadInFrames: 2,
     initialCredit: 3,
+    quietConfirmed: false,
   });
   assert.deepEqual(
     harness.frameMessages().map(({ contextFrame }) => contextFrame),
@@ -513,6 +587,7 @@ test("20 ms PCM frames retain exact 48 kHz context sample-clock boundaries", () 
     candidateContextFrame: 1_920,
     leadInFrames: 2,
     initialCredit: 3,
+    quietConfirmed: false,
   });
   assert.deepEqual(
     harness.frameMessages().map(({ contextFrame }) => contextFrame),
@@ -537,6 +612,7 @@ test("stale controls are ignored while confirm drops and zeroizes pre-cutoff PCM
     candidateContextFrame: 640,
     leadInFrames: 4,
     initialCredit: 4,
+    quietConfirmed: false,
   });
   harness.control({
     type: "stop",
@@ -553,6 +629,7 @@ test("stale controls are ignored while confirm drops and zeroizes pre-cutoff PCM
     candidateContextFrame: 640,
     leadInFrames: 1,
     initialCredit: 2,
+    quietConfirmed: false,
   });
   assert.equal(isZero(dropped.pcm), true);
   assert.deepEqual(
@@ -601,6 +678,7 @@ test("a Wasm count trap clears and frees both rings with one content-free error"
     candidateContextFrame: 0,
     leadInFrames: 0,
     initialCredit: 1,
+    quietConfirmed: false,
   });
 
   assert.equal(harness.processor.state, "stopped");
@@ -632,6 +710,7 @@ test("credit starvation overflows once, zeroizes the FIFO, and stops", () => {
     candidateContextFrame: 320,
     leadInFrames: 0,
     initialCredit: 0,
+    quietConfirmed: false,
   });
   assert.equal(isZero(preConfirm), true);
 
@@ -686,6 +765,7 @@ test("seal zeroizes partial audio and posts sealed only after credited FIFO drai
     candidateContextFrame: 960,
     leadInFrames: 1,
     initialCredit: 1,
+    quietConfirmed: false,
   });
   assert.equal(harness.frameMessages().length, 1);
   assert.equal(harness.processor.confirmedQueue.count(harness.generation), 1);

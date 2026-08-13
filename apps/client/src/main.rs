@@ -141,8 +141,11 @@ const COACH_CHECKPOINT_MAX_CHARS: usize = 16 * 1024;
 const NATIVE_RESPONDENT_COACH_ROUTE: &str = "native-respondent-coach";
 const RETURNING_PASSKEY_ACTION: &str = "登録済みの方　同じパスキーで戻る";
 const NEW_PASSKEY_ACCOUNT_ACTION: &str = "初めての方　新しい仮名アカウントを作る";
-const GUEST_MODE_ACTION: &str = "パスキーなしで、今すぐ試す";
-const GUEST_MODE_PROMISE: &str = "保存しません。最初の二往復で、まとまらない話から『あなたのひとこと』を一緒に掘り当てます。ページを閉じると戻れません。";
+const GUEST_MODE_ACTION: &str = "30秒で違いを試す　パスキー不要";
+const GUEST_MODE_PROMISE: &str = "一問だけ。AIは答えを作らず、あなたの最初の一言を待ちます。音声も文字も保存せず、ページを閉じると戻れません。";
+const GUEST_SPRINT_QUESTION: &str = "今、いちばん減らしたい負担は？";
+const GUEST_SPRINT_INSTRUCTION: &str =
+    "答えだけを先に、小声で一言。理由はあとで大丈夫。『わからない』も答えです。";
 const QUIET_VOICE_COPY: &str =
     "叫ばなくて大丈夫。小声や、ぼそっとした『うん』『いや』もそのまま話してみてください。";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =
@@ -4197,7 +4200,7 @@ fn App() -> Element {
                                                         research_records.set(Vec::new());
                                                         document_info.set(None);
                                                         document_error.set(None);
-                                                        caption.set(Some("まとまっていなくて大丈夫。いま引っかかっていることを、そのまま声にしてください。".to_string()));
+                                                        caption.set(Some(format!("{GUEST_SPRINT_QUESTION}\n{GUEST_SPRINT_INSTRUCTION}")));
                                                         turn_notice.set(TurnNotice::Clear);
                                                         cloud_status.restart();
                                                         voice_state.set(VoiceState::Ready);
@@ -4323,6 +4326,16 @@ fn App() -> Element {
                     }
 
                     if !passkey_gate_visible {
+                    if route.read().as_str() == "guest-word-mining" {
+                        section {
+                            class: "guest-a-first-sprint",
+                            aria_label: "30秒A-firstスプリント",
+                            p { class: "passkey-entry__eyebrow", "30秒 / 一問 / 保存なし" }
+                            h2 { {GUEST_SPRINT_QUESTION} }
+                            p { {GUEST_SPRINT_INSTRUCTION} }
+                            p { role: "status", aria_live: "polite", "KOTAEはあなたより先にAを言いません" }
+                        }
+                    }
                     p { class: "quiet-voice-guide", {QUIET_VOICE_COPY} }
                     section {
                         class: if state_snapshot.session_active() {

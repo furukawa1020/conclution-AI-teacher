@@ -25,6 +25,8 @@ const (
 	passkeyAuthenticationFinishPath   = "/api/v1/passkeys/authentication:finish"
 	passkeyCredentialBeginPath        = "/api/v1/passkeys/credentials/registration:begin"
 	passkeyCredentialFinishPath       = "/api/v1/passkeys/credentials/registration:finish"
+	passkeyCredentialsPath            = "/api/v1/passkeys/credentials"
+	passkeyCredentialRevokePath       = "/api/v1/passkeys/credentials:revoke"
 	passkeyVoiceAuthorizationAge      = 5 * time.Minute
 	passkeyManagementAuthorizationAge = 5 * time.Minute
 	passkeyMaxCredentialBody          = 256 * 1024
@@ -37,6 +39,75 @@ type PasskeyService interface {
 	FinishAuthentication(context.Context, string, string, *http.Request) (passkey.FinishResult, error)
 	BeginCredentialRegistration(context.Context, string, string) (passkey.BeginRegistrationResult, error)
 	FinishCredentialRegistration(context.Context, string, string, string, *http.Request) error
+	ListCredentials(context.Context, string) ([]passkey.CredentialSummary, error)
+	RevokeCredential(context.Context, string, passkey.CredentialReference) error
+}
+
+type credentialSummaryResponse struct {
+	Reference  string `json:"reference"`
+	CreatedAt  string `json:"createdAt"`
+	LastUsedAt string `json:"lastUsedAt"`
+}
+
+type credentialListResponse struct {
+	Credentials []credentialSummaryResponse `json:"credentials"`
+}
+
+func (s *Server) listPasskeyCredentials(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.passkeys == nil || r.URL.RawQuery != "" {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_credential_management_failed", "Passkey credential management failed.")
+		return
+	}
+	summaries, err := s.passkeys.ListCredentials(r.Context(), principal.UID)
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_credential_management_failed", "Passkey credential management failed.")
+		return
+	}
+	result := credentialListResponse{Credentials: make([]credentialSummaryResponse, 0, len(summaries))}
+	for _, summary := range summaries {
+		result.Credentials = append(result.Credentials, credentialSummaryResponse{
+			Reference: summary.Reference.String(), CreatedAt: summary.CreatedAt.UTC().Format(time.RFC3339), LastUsedAt: summary.LastUsedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) revokePasskeyCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.passkeys == nil || r.URL.RawQuery != "" || !isJSONContentType(r) {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_not_found", "The passkey credential could not be found.")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	var body struct {
+		Reference string `json:"reference"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_not_found", "The passkey credential could not be found.")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeProblem(w, http.StatusBadRequest, "passkey_credential_not_found", "The passkey credential could not be found.")
+		return
+	}
+	reference, err := passkey.ParseCredentialReference(body.Reference)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "passkey_credential_not_found", "The passkey credential could not be found.")
+		return
+	}
+	err = s.passkeys.RevokeCredential(r.Context(), principal.UID, reference)
+	if errors.Is(err, passkey.ErrLastCredential) {
+		writeProblem(w, http.StatusConflict, "passkey_last_credential", "The final passkey cannot be revoked.")
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "passkey_credential_not_found", "The passkey credential could not be found.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) beginPasskeyCredentialRegistration(w http.ResponseWriter, r *http.Request) {

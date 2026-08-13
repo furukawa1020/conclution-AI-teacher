@@ -116,6 +116,9 @@ const PASSKEY_AUTHENTICATION_BEGIN_ENDPOINT =
   "/api/v1/passkeys/authentication:begin";
 const PASSKEY_AUTHENTICATION_FINISH_ENDPOINT =
   "/api/v1/passkeys/authentication:finish";
+const PASSKEY_CREDENTIALS_ENDPOINT = "/api/v1/passkeys/credentials";
+const PASSKEY_CREDENTIAL_REVOKE_ENDPOINT =
+  "/api/v1/passkeys/credentials:revoke";
 // The server caps finish bodies at 256 KiB. JSON produced here is ASCII-only,
 // so a character limit is also a byte-safe upper bound before fetch.
 const PASSKEY_JSON_MAX_CHARS = 255 * 1024;
@@ -1189,6 +1192,63 @@ async function startGuestMode() {
   guestModeActive = true;
   verifiedAccountUid = undefined;
   return Object.freeze({ state: "guest-ready" });
+}
+
+async function listPasskeyCredentials() {
+  const credentials = await secureCredentials(true);
+  const response = await fetch(PASSKEY_CREDENTIALS_ENDPOINT, {
+    method: "GET",
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+    headers: Object.freeze({
+      Authorization: `Bearer ${credentials.idToken}`,
+      "X-Firebase-AppCheck": credentials.appCheckToken,
+    }),
+  });
+  if (!response.ok) fail("passkey_credential_management_failed");
+  const value = await response.json();
+  if (!isPlainRecord(value) || !Array.isArray(value.credentials)) {
+    fail("passkey_credential_management_failed");
+  }
+  const summaries = value.credentials.map((summary) => {
+    if (
+      !isPlainRecord(summary) ||
+      Reflect.ownKeys(summary).length !== 3 ||
+      typeof summary.reference !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(summary.reference) ||
+      typeof summary.createdAt !== "string" ||
+      typeof summary.lastUsedAt !== "string"
+    ) fail("passkey_credential_management_failed");
+    return Object.freeze({
+      reference: summary.reference,
+      createdAt: summary.createdAt,
+      lastUsedAt: summary.lastUsedAt,
+    });
+  });
+  return Object.freeze(summaries);
+}
+
+async function revokePasskeyCredential(reference) {
+  if (typeof reference !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(reference)) {
+    fail("passkey_credential_management_failed");
+  }
+  const credentials = await secureCredentials(true);
+  const response = await fetch(PASSKEY_CREDENTIAL_REVOKE_ENDPOINT, {
+    method: "POST",
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+    headers: Object.freeze({
+      Authorization: `Bearer ${credentials.idToken}`,
+      "Content-Type": "application/json",
+      "X-Firebase-AppCheck": credentials.appCheckToken,
+    }),
+    body: JSON.stringify(Object.freeze({ reference })),
+  });
+  if (response.status === 409) fail("passkey_last_credential");
+  if (!response.ok) fail("passkey_credential_management_failed");
+  return Object.freeze({ state: "revoked" });
 }
 
 function primeVoiceTransportConnection() {
@@ -6364,7 +6424,9 @@ const publicBridge = Object.freeze({
   endTurn,
   finishTurn,
   getStatus,
+  listPasskeyCredentials,
   registerPasskeyAccount,
+  revokePasskeyCredential,
   startGuestMode,
   stopSession,
   waitForTurnEnd,

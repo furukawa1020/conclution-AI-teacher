@@ -57,6 +57,23 @@ type recordingPasskeyHTTPService struct {
 	credentialRegistrationUID   string
 	credentialBeginCalls        int
 	credentialFinishCalls       int
+	credentialSummaries         []passkey.CredentialSummary
+	credentialListCalls         int
+	credentialRevokeCalls       int
+	credentialRevokeReference   passkey.CredentialReference
+}
+
+func (s *recordingPasskeyHTTPService) ListCredentials(_ context.Context, uid string) ([]passkey.CredentialSummary, error) {
+	s.credentialRegistrationUID = uid
+	s.credentialListCalls++
+	return append([]passkey.CredentialSummary(nil), s.credentialSummaries...), s.finishErr
+}
+
+func (s *recordingPasskeyHTTPService) RevokeCredential(_ context.Context, uid string, reference passkey.CredentialReference) error {
+	s.credentialRegistrationUID = uid
+	s.credentialRevokeReference = reference
+	s.credentialRevokeCalls++
+	return s.finishErr
 }
 
 func (s *recordingPasskeyHTTPService) BeginCredentialRegistration(
@@ -887,5 +904,65 @@ func TestPasskeyManagementMissingCredentialsUseOneFixedProblemCode(t *testing.T)
 		!strings.Contains(response.Body.String(), "passkey_management_reauthentication_required") ||
 		service.credentialBeginCalls != 0 {
 		t.Fatalf("status=%d body=%s calls=%d", response.Code, response.Body.String(), service.credentialBeginCalls)
+	}
+}
+
+func TestPasskeyCredentialListAndRevokeUseOnlyVerifiedPrincipal(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	principal := identity.Principal{UID: "private-firebase-uid", AppID: "firebase-app-id", Provider: "custom", AuthMethod: "passkey-v1", PasskeyAt: now, AccountVerified: true}
+	reference, err := passkey.ParseCredentialReference("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &recordingPasskeyHTTPService{credentialSummaries: []passkey.CredentialSummary{{Reference: reference, CreatedAt: now.Add(-time.Hour), LastUsedAt: now}}}
+	handler := newPasskeyHTTPHandlerWithVerifier(t, service, &recordingPasskeyQuotaLimiter{}, passkeyHTTPVerifier{principal: principal, appID: principal.AppID})
+
+	list := httptest.NewRequest(http.MethodGet, passkeyCredentialsPath, nil)
+	list.Header.Set("Origin", allowedWebOrigin)
+	list.Header.Set("Authorization", "Bearer verified-passkey-token")
+	list.Header.Set("X-Firebase-AppCheck", "valid-app-check")
+	listResponse := httptest.NewRecorder()
+	handler.ServeHTTP(listResponse, list)
+	if listResponse.Code != http.StatusOK || service.credentialListCalls != 1 || service.credentialRegistrationUID != principal.UID || strings.Contains(listResponse.Body.String(), principal.UID) || !strings.Contains(listResponse.Body.String(), reference.String()) {
+		t.Fatalf("status=%d body=%s uid=%q calls=%d", listResponse.Code, listResponse.Body.String(), service.credentialRegistrationUID, service.credentialListCalls)
+	}
+
+	revoke := passkeyPOST(passkeyCredentialRevokePath, strings.NewReader(`{"reference":"`+reference.String()+`"}`))
+	revoke.Header.Set("Authorization", "Bearer verified-passkey-token")
+	revoke.Header.Set("Content-Type", "application/json")
+	revokeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(revokeResponse, revoke)
+	if revokeResponse.Code != http.StatusNoContent || service.credentialRevokeCalls != 1 || service.credentialRevokeReference != reference || service.credentialRegistrationUID != principal.UID {
+		t.Fatalf("status=%d body=%s reference=%q uid=%q calls=%d", revokeResponse.Code, revokeResponse.Body.String(), service.credentialRevokeReference, service.credentialRegistrationUID, service.credentialRevokeCalls)
+	}
+}
+
+func TestPasskeyCredentialRevokeCollapsesUnknownAndProtectsLastCredential(t *testing.T) {
+	now := time.Now().UTC()
+	principal := identity.Principal{UID: "private-firebase-uid", AppID: "firebase-app-id", Provider: "custom", AuthMethod: "passkey-v1", PasskeyAt: now, AccountVerified: true}
+	for _, test := range []struct {
+		name       string
+		body       string
+		serviceErr error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "unknown", body: `{"reference":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`, serviceErr: passkey.ErrCredentialNotFound, wantStatus: http.StatusNotFound, wantCode: "passkey_credential_not_found"},
+		{name: "invalid reference", body: `{"reference":"raw-credential-id"}`, wantStatus: http.StatusNotFound, wantCode: "passkey_credential_not_found"},
+		{name: "extra field", body: `{"reference":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","uid":"attacker"}`, wantStatus: http.StatusBadRequest, wantCode: "passkey_credential_not_found"},
+		{name: "last credential", body: `{"reference":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`, serviceErr: passkey.ErrLastCredential, wantStatus: http.StatusConflict, wantCode: "passkey_last_credential"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &recordingPasskeyHTTPService{finishErr: test.serviceErr}
+			handler := newPasskeyHTTPHandlerWithVerifier(t, service, &recordingPasskeyQuotaLimiter{}, passkeyHTTPVerifier{principal: principal, appID: principal.AppID})
+			request := passkeyPOST(passkeyCredentialRevokePath, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer verified-passkey-token")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), test.wantCode) || strings.Contains(response.Body.String(), "attacker") || strings.Contains(response.Body.String(), principal.UID) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }

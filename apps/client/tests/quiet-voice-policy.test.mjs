@@ -24,9 +24,10 @@ test("ゲスト小声は通常入口と同じ有限proofを使い本文をイベ
     readFile(new URL("browser/pcm-ring-audio-worklet.fixture.mjs", import.meta.url), "utf8"),
     readFile(new URL("../../../scripts/deploy-hosting.ps1", import.meta.url), "utf8"),
   ]);
-  assert.match(bridge, /kotae:quiet-voice-confirmed/u);
-  assert.match(bridge, /detail: Object\.freeze\(\{ version: 1 \}\)/u);
-  assert.doesNotMatch(bridge, /quiet-voice-confirmed[\s\S]{0,160}(caption|transcript|rms|peak)/u);
+  assert.doesNotMatch(bridge, /kotae:quiet-voice-confirmed/u);
+  assert.doesNotMatch(rust, /その小さな声で届いています/u);
+  assert.match(bridge, /recording\.softVoiceConfirmed/u);
+  assert.match(bridge, /quietConfirmed/u);
   assert.match(rust, /guestQuietOnsetSelfTest/u);
   assert.match(fixture, /guestQuietOnsetValidated/u);
   assert.match(deploy, /guestQuietOnsetValidated/u);

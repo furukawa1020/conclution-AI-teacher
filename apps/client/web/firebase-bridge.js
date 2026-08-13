@@ -2045,6 +2045,7 @@ function confirmLiveSpeech(
     !liveSession.confirmSpeech(
       candidateStartedAt,
       candidateContextFrame,
+      recording.softVoiceConfirmed,
     ) &&
     activeLiveSession === liveSession
   ) {
@@ -2142,19 +2143,11 @@ function armVad(recording) {
     }
     recording.firstVoiceAt = vadState.firstVoiceAt;
     recording.continuationEvidence = vadState.continuationEvidence;
-    const hadConfirmedSoftVoice = recording.softVoiceConfirmed;
     const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.hasSpeech;
     if (!hadConfirmedSpeech && recording.vadHasSpeech) {
       globalThis.dispatchEvent(
         new CustomEvent("kotae:voice-input-confirmed", {
-          detail: Object.freeze({ version: 1 }),
-        }),
-      );
-    }
-    if (!hadConfirmedSoftVoice && recording.softVoiceConfirmed) {
-      globalThis.dispatchEvent(
-        new CustomEvent("kotae:quiet-voice-confirmed", {
           detail: Object.freeze({ version: 1 }),
         }),
       );
@@ -3823,12 +3816,13 @@ async function startVoiceLiveSession({
       settleResult(error);
       closeSocket(4001, "cancelled");
     },
-    confirmSpeech(candidateStartedAt, candidateContextFrame) {
+    confirmSpeech(candidateStartedAt, candidateContextFrame, quietConfirmed) {
       if (
         !Number.isFinite(candidateStartedAt) ||
         candidateStartedAt < 0 ||
         !Number.isSafeInteger(candidateContextFrame) ||
         candidateContextFrame < 0 ||
+        typeof quietConfirmed !== "boolean" ||
         state === "failed" ||
         state === "cancelled" ||
         state === "committed" ||
@@ -3869,6 +3863,7 @@ async function startVoiceLiveSession({
             initialCredit:
               VOICE_LIVE_LIMITS.workletCreditWindowFrames,
             leadInFrames,
+            quietConfirmed,
             type: "confirm",
             version: 1,
           }),
@@ -4512,6 +4507,7 @@ async function startBargePcmMonitoring(
             generation,
             initialCredit: 0,
             leadInFrames,
+            quietConfirmed: false,
             type: "confirm",
             version: 1,
           }),

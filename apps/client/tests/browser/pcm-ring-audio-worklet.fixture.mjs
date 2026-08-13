@@ -236,6 +236,7 @@ function postConfirm(
   leadInFrames,
   initialCredit,
   candidateContextFrame = 0,
+  quietConfirmed = false,
 ) {
   node.port.postMessage(
     Object.freeze({
@@ -243,10 +244,38 @@ function postConfirm(
       generation,
       initialCredit,
       leadInFrames,
+      quietConfirmed,
       type: "confirm",
       version: 1,
     }),
   );
+}
+
+async function runQuietGainScenario(pcmRingModule) {
+  const { context } = await createOfflineHarness(pcmRingModule, 0.45);
+  const generation = 606;
+  const node = createNode(context, pcmRingModule, generation, 3, 10);
+  const state = createCollector(node, generation);
+  const signal = startSignal(context, node, 0.002, Number.NaN, 0);
+  const pause = context.suspend(signal.startedAt + 0.18);
+  const rendering = context.startRendering();
+  await pause;
+  invariant(state.frames.length === 0, "quiet_gain_preconfirm_pcm_leaked");
+  postConfirm(node, generation, 3, 3, 0, true);
+  await waitFor(
+    () => state.processorError || state.frames.length >= 3,
+    "quiet_gain_frames_timeout",
+  );
+  invariant(state.processorError === false, "quiet_gain_processor_error");
+  invariant(
+    state.frames.every((frame) => frame.maximum >= 190 && frame.maximum <= 264),
+    "quiet_gain_bounds_invalid",
+  );
+  postStop(node, generation);
+  await context.resume();
+  await rendering;
+  stopSignal(signal, node);
+  return true;
 }
 
 function postStop(node, generation) {
@@ -515,7 +544,7 @@ async function run() {
   );
   const intentionalFastLaneValidated =
     validateIntentionalFastLane(pcmRingModule);
-  const guestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
+  const rustGuestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
 
   currentPhase = "wrapped";
   const wrapState = await runWrappedRingScenario(pcmRingModule);
@@ -523,6 +552,7 @@ async function run() {
   const stoppedState = await runStoppedRingScenario(pcmRingModule);
   currentPhase = "fresh";
   const freshState = await runFreshGenerationScenario(pcmRingModule);
+  const quietGainValidated = await runQuietGainScenario(pcmRingModule);
   const reuseState = await runSameContextReuseScenario(pcmRingModule);
   // Every delivered frame passed the production processor's mandatory
   // postMessage sender-detachment guard. A non-detached sender immediately
@@ -542,7 +572,8 @@ async function run() {
     wasmModuleCloned: true,
     directWasmGenerationIsolation: true,
     intentionalFastLaneValidated,
-    guestQuietOnsetValidated,
+    guestQuietOnsetValidated:
+      rustGuestQuietOnsetValidated && quietGainValidated,
     temporalVadClockValidated: true,
     preConfirmFrames: 0,
     wrappedFrames: wrapState.frames.length,

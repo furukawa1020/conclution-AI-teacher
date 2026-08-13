@@ -60,6 +60,8 @@ raw audioから始まる段階経路のSTT、該当するDLP、文字列planner�
 
 段階的な経路のSTTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
 
+小声は励まし文を表示するだけでは認識改善と扱いません。Rust/Wasmの単一VADが240 msの変化する小声を確認した場合に限り、通常liveのAudioWorkletで候補開始以降のPCM16をASR送信直前に適応増幅します。20 ms frameごとの目標RMSは0.055、最大利得は4倍、peakは0.82を上限とし、attack 0.75 / release 0.2で急変を抑えます。無音床0.0015未満、通常声、未確認候補、割込み音声、古いgenerationには適用しません。判定前PCMを送らない固定ring、credit、zeroizationは維持し、RMS・peak・利得値をevent、log、stateへ出しません。ブラウザの`autoGainControl`は引き続き要求しますが、要求しただけで有効とは表示しません。圧縮MediaRecorderのHTTP fallbackはこのPCM変換を通らないため、適応利得の対象は通常live PCM経路です。
+
 Cloud Speech-to-Textのstreaming requestは公式上最大5分です。KOTAEはその境界まで使わず、端末では録音開始から最大3分30秒、Cloud Runでは受信開始から4分（20 ms PCMを最大12,000 frame、7,680,000 byte）で止めます。録音開始後に発話が確定しない無音候補は最大30秒で終了するため、その上限直前から話し始めた場合にも残りは約3分あります。ただし、無音や間も端末の3分30秒へ含まれ、3分30秒の実発話を保証するものではありません。provider上限まで60秒を残し、providerのendpoint通知は助言に留め、端末VADとの一致なしにcommitしません。commit後に得た最終文字起こし全体が160 Unicode code point以上の場合だけ、PII検査後の現在turn内で意味を変えない中心点の足場を使えます。これは長期効果や技能を判定する機能ではなく、途中候補、過去turn、保存済み本文から中心点を作りません。
 
 端末VADが音声を確認した後、最後のvoiced frameから700 ms無音が続いた時は、`kotae:voice-receipt`の固定enumだけで「ここまで届いています」を視覚表示します。発話が再開すれば表示を消し、文字起こし、要約、理解判定、confidence、発話本文はeventへ入れません。ダミーの固定音声によるreceiptは生成も再生もしません。通常Native、初回回答支援、継続Coachを別系列にし、発話終了から最初の実質音声frameまで1,000 ms以内を運用SLOとして記録します。現行のroute metadataでは初回Q-ARCと初回caption handoffを互いに分離できないため、この二つは「初回回答支援」として合算し、別系列の実測とは表示しません。視覚表示や意図的な無音`wait`は達成扱いにしません。1秒はブラウザのevent loop、回線、managed modelを含む絶対上限の保証ではありません。利用者は「ここで返して」で長い終端待ちを明示的に飛ばせます。

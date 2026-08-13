@@ -1688,6 +1688,50 @@
     letter-spacing: 0.08em;
   }
 
+  .guest-voice-comparison-choice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 14px 0;
+    padding: 12px;
+    border: 1px solid rgb(255 255 255 / 0.13);
+    border-radius: 14px;
+    background: rgb(5 18 25 / 0.44);
+    cursor: pointer;
+  }
+
+  .guest-voice-comparison-choice input {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    accent-color: #6be7c3;
+  }
+
+  .guest-voice-comparison-choice span {
+    display: grid;
+    gap: 3px;
+  }
+
+  .guest-voice-comparison-choice small {
+    color: rgb(225 239 237 / 0.68);
+  }
+
+  .guest-voice-comparison {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid rgb(107 231 195 / 0.28);
+    border-radius: 14px;
+    background: rgb(5 28 29 / 0.62);
+  }
+
+  .guest-voice-comparison p {
+    flex-basis: 100%;
+    margin: 0 0 3px;
+  }
+
   @media (max-width: 420px) {
     .answer-sculpture { padding-inline: 10px; }
     .answer-sculpture__row,

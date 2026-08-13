@@ -1101,6 +1101,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct GuestVoiceComparisonReadyListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     pub(super) struct VoiceStartLatencyListener {
         window: web_sys::Window,
         callback: Closure<dyn FnMut(web_sys::Event)>,
@@ -1228,6 +1233,12 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = startGuestMode)]
         async fn start_guest_mode_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = setGuestVoiceComparisonOptIn)]
+        fn set_guest_voice_comparison_opt_in_js(enabled: bool) -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = playGuestVoiceComparison)]
+        async fn play_guest_voice_comparison_js() -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = listPasskeyCredentials)]
         async fn list_passkey_credentials_js() -> Result<JsValue, JsValue>;
 
@@ -1294,6 +1305,28 @@ mod cloud {
             .await
             .map(|_| ())
             .map_err(user_message)
+    }
+
+    impl Drop for GuestVoiceComparisonReadyListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:guest-voice-comparison-ready",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    pub fn set_guest_voice_comparison_opt_in(enabled: bool) -> Result<(), &'static str> {
+        set_guest_voice_comparison_opt_in_js(enabled)
+            .map(|_| ())
+            .map_err(|_| "端末内の声比較を準備できませんでした")
+    }
+
+    pub async fn play_guest_voice_comparison() -> Result<(), &'static str> {
+        play_guest_voice_comparison_js()
+            .await
+            .map(|_| ())
+            .map_err(|_| "端末内の声比較を再生できませんでした")
     }
 
     pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
@@ -1554,6 +1587,38 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(VoiceInputConfirmedListener { window, callback }))
+    }
+
+    pub fn install_guest_voice_comparison_ready_listener(
+        mut ready: Signal<bool>,
+    ) -> Option<Rc<GuestVoiceComparisonReadyListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            if keys.length() == 1 && version.as_f64() == Some(1.0) {
+                ready.set(true);
+            }
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:guest-voice-comparison-ready",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(GuestVoiceComparisonReadyListener {
+            window,
+            callback,
+        }))
     }
 
     pub fn install_voice_start_latency_listener(
@@ -2297,6 +2362,14 @@ mod cloud {
         Err("WebAssembly版で使ってみて")
     }
 
+    pub fn set_guest_voice_comparison_opt_in(_enabled: bool) -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn play_guest_voice_comparison() -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
     pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
         Err("WebAssembly版で使ってみて")
     }
@@ -2373,6 +2446,10 @@ mod cloud {
     pub fn install_voice_input_confirmed_listener(
         _coach_state: Signal<CoachState>,
     ) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_guest_voice_comparison_ready_listener(_ready: Signal<bool>) -> Option<Listener> {
         None
     }
 
@@ -3844,6 +3921,8 @@ fn App() -> Element {
     let mut detected_domain = use_signal(String::new);
     let mut route = use_signal(String::new);
     let mut guest_sprint_active = use_signal(|| false);
+    let mut guest_voice_comparison_opt_in = use_signal(|| false);
+    let mut guest_voice_comparison_ready = use_signal(|| false);
     let mut coach_state = use_signal(|| CoachState::NONE);
     let mut needs_paper = use_signal(|| false);
     let mut research_status = use_signal(|| ResearchStatus::None);
@@ -3887,6 +3966,9 @@ fn App() -> Element {
     let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
     let _voice_input_confirmed_listener =
         use_hook(|| cloud::install_voice_input_confirmed_listener(coach_state));
+    let _guest_voice_comparison_ready_listener = use_hook(|| {
+        cloud::install_guest_voice_comparison_ready_listener(guest_voice_comparison_ready)
+    });
     let _voice_start_latency_listener =
         use_hook(|| cloud::install_voice_start_latency_listener(voice_start_latency));
     let _voice_start_slo_listener =
@@ -4227,6 +4309,20 @@ fn App() -> Element {
                                 p { class: "passkey-entry__lead",
                                     "KOTAEは短く返して、あなたの次の言葉を待ちます。一言、沈黙、聞くだけから始められます。名前やメールは入力しません。"
                                 }
+                                label { class: "guest-voice-comparison-choice",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: *guest_voice_comparison_opt_in.read(),
+                                        disabled: passkey_setup_is_busy || passkey_registration_recovery_required,
+                                        onchange: move |event| {
+                                            guest_voice_comparison_opt_in.set(event.checked());
+                                        }
+                                    }
+                                    span {
+                                        strong { "任意：自分の冒頭を二回だけ聞き比べる" }
+                                        small { "端末内だけ・最大1秒ずつ・再生または離脱ですぐ消去" }
+                                    }
+                                }
                                 div {
                                     class: "passkey-entry__actions",
                                     role: "group",
@@ -4247,6 +4343,16 @@ fn App() -> Element {
                                                 match cloud::start_guest_mode().await {
                                                     Ok(()) => {
                                                         passkey_setup_busy.set(false);
+                                                        let comparison_enabled =
+                                                            *guest_voice_comparison_opt_in.peek();
+                                                        if cloud::set_guest_voice_comparison_opt_in(
+                                                            comparison_enabled,
+                                                        )
+                                                        .is_err()
+                                                        {
+                                                            guest_voice_comparison_opt_in.set(false);
+                                                        }
+                                                        guest_voice_comparison_ready.set(false);
                                                         session_state.set(String::new());
                                                         detected_domain.set(String::new());
                                                          route.set("guest-word-mining".to_string());
@@ -4436,6 +4542,36 @@ fn App() -> Element {
                                     }
                                     p { "まだ変化は確認していません。確認できない時は決めつけません。" }
                                 },
+                            }
+                            if *guest_voice_comparison_ready.read() {
+                                div {
+                                    class: "guest-voice-comparison",
+                                    role: "group",
+                                    aria_label: "端末内にある二回の冒頭を一度だけ聞くか選ぶ",
+                                    p { "任意です。二回の冒頭を続けて一度だけ再生し、その直後に消去します。" }
+                                    button {
+                                        class: "control-button is-active",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                let _ = cloud::play_guest_voice_comparison().await;
+                                                guest_voice_comparison_ready.set(false);
+                                                guest_voice_comparison_opt_in.set(false);
+                                            });
+                                        },
+                                        "二回だけ聞く"
+                                    }
+                                    button {
+                                        class: "control-button",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            let _ = cloud::set_guest_voice_comparison_opt_in(false);
+                                            guest_voice_comparison_ready.set(false);
+                                            guest_voice_comparison_opt_in.set(false);
+                                        },
+                                        "聞かずに消す"
+                                    }
+                                }
                             }
                         }
                     }

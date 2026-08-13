@@ -100,6 +100,7 @@ type Store interface {
 	UpdateCredential(context.Context, []byte, int64, webauthn.Credential, time.Time) error
 	ListCredentials(context.Context, string) ([]CredentialSummary, error)
 	RevokeCredential(context.Context, string, CredentialReference, time.Time) error
+	DeleteAccountData(context.Context, string, time.Time) error
 }
 
 func credentialReference(raw []byte) CredentialReference {

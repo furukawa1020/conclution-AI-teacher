@@ -99,11 +99,12 @@ func main() {
 			os.Exit(1)
 		}
 		passkeyService, err = passkey.New(passkey.Config{
-			RPID:          cfg.PasskeyRPID,
-			RPDisplayName: "コタエーAI",
-			Origin:        cfg.PasskeyOrigin,
-			Store:         passkey.NewMemoryStore(),
-			TokenMinter:   passkey.DevelopmentTokenMinter{},
+			RPID:           cfg.PasskeyRPID,
+			RPDisplayName:  "コタエーAI",
+			Origin:         cfg.PasskeyOrigin,
+			Store:          passkey.NewMemoryStore(),
+			TokenMinter:    passkey.DevelopmentTokenMinter{},
+			AccountDeleter: passkey.DevelopmentTokenMinter{},
 		})
 		if err != nil {
 			logger.Error("initialize development passkeys", "error", err)
@@ -190,11 +191,12 @@ func main() {
 			os.Exit(1)
 		}
 		passkeyService, err = passkey.New(passkey.Config{
-			RPID:          cfg.PasskeyRPID,
-			RPDisplayName: "コタエーAI",
-			Origin:        cfg.PasskeyOrigin,
-			Store:         passkeyStore,
-			TokenMinter:   passkeyMinter,
+			RPID:           cfg.PasskeyRPID,
+			RPDisplayName:  "コタエーAI",
+			Origin:         cfg.PasskeyOrigin,
+			Store:          passkeyStore,
+			TokenMinter:    passkeyMinter,
+			AccountDeleter: passkeyMinter,
 		})
 		if err != nil {
 			logger.Error("initialize passkey service", "error", err)

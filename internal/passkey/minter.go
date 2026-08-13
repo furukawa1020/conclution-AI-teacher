@@ -26,6 +26,14 @@ func (m *FirebaseTokenMinter) MintCustomToken(
 	return m.client.CustomTokenWithClaims(ctx, uid, claims)
 }
 
+func (m *FirebaseTokenMinter) DeleteAccount(ctx context.Context, uid string) error {
+	err := m.client.DeleteUser(ctx, uid)
+	if auth.IsUserNotFound(err) {
+		return nil
+	}
+	return err
+}
+
 type DevelopmentTokenMinter struct{}
 
 func (DevelopmentTokenMinter) MintCustomToken(
@@ -37,4 +45,11 @@ func (DevelopmentTokenMinter) MintCustomToken(
 		return "", errors.New("UID is required")
 	}
 	return "local-passkey-token." + uid, nil
+}
+
+func (DevelopmentTokenMinter) DeleteAccount(_ context.Context, uid string) error {
+	if uid == "" {
+		return errors.New("UID is required")
+	}
+	return nil
 }

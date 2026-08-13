@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,13 @@ type recordingPasskeyHTTPService struct {
 	credentialListCalls         int
 	credentialRevokeCalls       int
 	credentialRevokeReference   passkey.CredentialReference
+	accountDeleteCalls          int
+}
+
+func (s *recordingPasskeyHTTPService) DeleteAccount(_ context.Context, uid string) error {
+	s.credentialRegistrationUID = uid
+	s.accountDeleteCalls++
+	return s.finishErr
 }
 
 func (s *recordingPasskeyHTTPService) ListCredentials(_ context.Context, uid string) ([]passkey.CredentialSummary, error) {
@@ -189,6 +197,33 @@ func passkeyPOST(path string, body io.Reader) *http.Request {
 	request.Header.Set("Origin", allowedWebOrigin)
 	request.Header.Set("X-Firebase-AppCheck", "valid-app-check")
 	return request
+}
+
+func TestDeletePasskeyAccountRequiresExactConfirmationAndUsesPrincipalUID(t *testing.T) {
+	service := &recordingPasskeyHTTPService{}
+	now := time.Now().UTC()
+	principal := identity.Principal{UID: "private-firebase-uid", AppID: "firebase-app-id", Provider: "custom", AuthMethod: "passkey-v1", PasskeyAt: now, AccountVerified: true}
+	handler := newPasskeyHTTPHandlerWithVerifier(t, service, &recordingPasskeyQuotaLimiter{}, passkeyHTTPVerifier{principal: principal, appID: principal.AppID})
+	bad := passkeyPOST(passkeyAccountDeletePath, strings.NewReader(`{"confirmation":"delete"}`))
+	bad.Header.Set("Authorization", "Bearer valid")
+	bad.Header.Set("Content-Type", "application/json")
+	badRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(badRecorder, bad)
+	if badRecorder.Code != http.StatusBadRequest || service.accountDeleteCalls != 0 {
+		t.Fatalf("bad delete = %d calls=%d", badRecorder.Code, service.accountDeleteCalls)
+	}
+	body := `{"confirmation":` + strconv.Quote(accountDeletionConfirmation) + `}`
+	request := passkeyPOST(passkeyAccountDeletePath, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer valid")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent || service.accountDeleteCalls != 1 || service.credentialRegistrationUID != principal.UID {
+		t.Fatalf("delete = %d calls=%d uid=%q", recorder.Code, service.accountDeleteCalls, service.credentialRegistrationUID)
+	}
+	if recorder.Header().Get("Clear-Site-Data") == "" {
+		t.Fatal("Clear-Site-Data missing")
+	}
 }
 
 type recordingPasskeyQuotaLimiter struct {

@@ -48,20 +48,26 @@ var (
 	ErrRegistration               = errors.New("passkey registration failed")
 	ErrCredentialRegistration     = errors.New("passkey credential registration failed")
 	ErrConcurrentAssertion        = errors.New("passkey credential changed concurrently")
+	ErrAccountDeletion            = errors.New("passkey account deletion failed")
 )
 
 type TokenMinter interface {
 	MintCustomToken(context.Context, string, map[string]any) (string, error)
 }
 
+type AccountDeleter interface {
+	DeleteAccount(context.Context, string) error
+}
+
 type Config struct {
-	RPID          string
-	RPDisplayName string
-	Origin        string
-	Store         Store
-	TokenMinter   TokenMinter
-	Now           func() time.Time
-	Random        io.Reader
+	RPID           string
+	RPDisplayName  string
+	Origin         string
+	Store          Store
+	TokenMinter    TokenMinter
+	AccountDeleter AccountDeleter
+	Now            func() time.Time
+	Random         io.Reader
 }
 
 type Service struct {
@@ -69,6 +75,7 @@ type Service struct {
 	registrations registrationCeremonies
 	store         Store
 	minter        TokenMinter
+	deleter       AccountDeleter
 	now           func() time.Time
 	random        io.Reader
 }
@@ -107,6 +114,9 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Store == nil || cfg.TokenMinter == nil {
 		return nil, errors.New("passkey store and token minter are required")
 	}
+	if cfg.AccountDeleter == nil {
+		cfg.AccountDeleter, _ = cfg.TokenMinter.(AccountDeleter)
+	}
 	if strings.TrimSpace(cfg.RPDisplayName) == "" {
 		cfg.RPDisplayName = "コタエーAI"
 	}
@@ -137,6 +147,7 @@ func New(cfg Config) (*Service, error) {
 		registrations: wa,
 		store:         cfg.Store,
 		minter:        cfg.TokenMinter,
+		deleter:       cfg.AccountDeleter,
 		now:           cfg.Now,
 		random:        cfg.Random,
 	}, nil
@@ -362,6 +373,20 @@ func (s *Service) RevokeCredential(ctx context.Context, principalUID string, ref
 		return ErrCredentialNotFound
 	}
 	return s.store.RevokeCredential(ctx, principalUID, reference, s.now().UTC())
+}
+
+func (s *Service) DeleteAccount(ctx context.Context, principalUID string) error {
+	principalUID = strings.TrimSpace(principalUID)
+	if principalUID == "" || s.deleter == nil {
+		return ErrAccountDeletion
+	}
+	if err := s.store.DeleteAccountData(ctx, principalUID, s.now().UTC()); err != nil {
+		return ErrAccountDeletion
+	}
+	if err := s.deleter.DeleteAccount(ctx, principalUID); err != nil {
+		return ErrAccountDeletion
+	}
+	return nil
 }
 
 // credentialRegistrationUser keeps the protocol-required opaque user handle

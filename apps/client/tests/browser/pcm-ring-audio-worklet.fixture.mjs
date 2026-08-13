@@ -97,6 +97,23 @@ function validateIntentionalFastLane(pcmRingModule) {
   return true;
 }
 
+function validateGuestQuietOnset(clientModule) {
+  currentPhase = "guest_quiet_onset";
+  const imports = Object.create(null);
+  for (const descriptor of WebAssembly.Module.imports(clientModule)) {
+    invariant(descriptor.kind === "function", "pcm_ring_import_kind_invalid");
+    imports[descriptor.module] ??= Object.create(null);
+    imports[descriptor.module][descriptor.name] = () => {
+      throw new FixtureFailure("pcm_ring_unexpected_import_call");
+    };
+  }
+  const instance = new WebAssembly.Instance(clientModule, imports);
+  const validate = instance.exports.guestQuietOnsetSelfTest;
+  invariant(typeof validate === "function", "guest_quiet_onset_export_missing");
+  invariant(validate() === 1, "guest_quiet_onset_self_test_failed");
+  return true;
+}
+
 function createCollector(node, generation) {
   const state = {
     frames: [],
@@ -482,12 +499,23 @@ async function run() {
   const pcmRingModule = await WebAssembly.compile(
     await response.arrayBuffer(),
   );
+  const clientResponse = await fetch("/wasm/kotae_client_bg.wasm", {
+    cache: "no-store",
+    credentials: "omit",
+  });
+  invariant(clientResponse.ok, "client_wasm_fetch_failed");
+  invariant(
+    clientResponse.headers.get("content-type") === "application/wasm",
+    "client_wasm_mime_invalid",
+  );
+  const clientModule = await WebAssembly.compile(await clientResponse.arrayBuffer());
   invariant(
     pcmRingModule instanceof WebAssembly.Module,
     "pcm_ring_wasm_compile_failed",
   );
   const intentionalFastLaneValidated =
     validateIntentionalFastLane(pcmRingModule);
+  const guestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
 
   currentPhase = "wrapped";
   const wrapState = await runWrappedRingScenario(pcmRingModule);
@@ -514,6 +542,7 @@ async function run() {
     wasmModuleCloned: true,
     directWasmGenerationIsolation: true,
     intentionalFastLaneValidated,
+    guestQuietOnsetValidated,
     temporalVadClockValidated: true,
     preConfirmFrames: 0,
     wrappedFrames: wrapState.frames.length,

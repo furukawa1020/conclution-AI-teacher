@@ -17,3 +17,18 @@ test("小声入口はRust/Wasm単一判定と240ms確認を公開する", async 
   assert.match(ui, /叫ばなくて大丈夫。小声や、ぼそっとした/u);
 });
 
+test("ゲスト小声は通常入口と同じ有限proofを使い本文をイベントへ載せない", async () => {
+  const [bridge, rust, fixture, deploy] = await Promise.all([
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+    readFile(new URL("browser/pcm-ring-audio-worklet.fixture.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../../../scripts/deploy-hosting.ps1", import.meta.url), "utf8"),
+  ]);
+  assert.match(bridge, /kotae:quiet-voice-confirmed/u);
+  assert.match(bridge, /detail: Object\.freeze\(\{ version: 1 \}\)/u);
+  assert.doesNotMatch(bridge, /quiet-voice-confirmed[\s\S]{0,160}(caption|transcript|rms|peak)/u);
+  assert.match(rust, /guestQuietOnsetSelfTest/u);
+  assert.match(fixture, /guestQuietOnsetValidated/u);
+  assert.match(deploy, /guestQuietOnsetValidated/u);
+});
+

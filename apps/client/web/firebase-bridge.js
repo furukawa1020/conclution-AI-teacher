@@ -2142,11 +2142,19 @@ function armVad(recording) {
     }
     recording.firstVoiceAt = vadState.firstVoiceAt;
     recording.continuationEvidence = vadState.continuationEvidence;
+    const hadConfirmedSoftVoice = recording.softVoiceConfirmed;
     const hadConfirmedSpeech = recording.vadHasSpeech;
     recording.vadHasSpeech = vadState.hasSpeech;
     if (!hadConfirmedSpeech && recording.vadHasSpeech) {
       globalThis.dispatchEvent(
         new CustomEvent("kotae:voice-input-confirmed", {
+          detail: Object.freeze({ version: 1 }),
+        }),
+      );
+    }
+    if (!hadConfirmedSoftVoice && recording.softVoiceConfirmed) {
+      globalThis.dispatchEvent(
+        new CustomEvent("kotae:quiet-voice-confirmed", {
           detail: Object.freeze({ version: 1 }),
         }),
       );

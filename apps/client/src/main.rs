@@ -44,6 +44,18 @@ pub fn classify_onset_frame_for_js(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = guestQuietOnsetSelfTest)]
+pub fn guest_quiet_onset_self_test_for_js() -> bool {
+    use kotae_audio_core::{ONSET_FRAME_SOFT, classify_onset_frame};
+
+    let changing_quiet = [(0.008, 0.004), (0.0064, 0.0032), (0.009, 0.0045)];
+    changing_quiet.iter().all(|(peak, rms)| {
+        classify_onset_frame(0.002, *peak, *rms, false, true, false) == Ok(ONSET_FRAME_SOFT)
+    }) && classify_onset_frame(0.002, 0.0024, 0.002, false, true, false) == Ok(0)
+        && classify_onset_frame(0.002, f64::NAN, 0.004, false, true, false).is_err()
+}
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = advanceTemporalVadClock)]
 pub fn advance_temporal_vad_clock_for_js(
     sample_rate_hz: u32,
@@ -1089,6 +1101,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct QuietVoiceConfirmedListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     pub(super) struct VoiceStartLatencyListener {
         window: web_sys::Window,
         callback: Closure<dyn FnMut(web_sys::Event)>,
@@ -1136,6 +1153,15 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:voice-input-confirmed",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for QuietVoiceConfirmedListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:quiet-voice-confirmed",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -1542,6 +1568,35 @@ mod cloud {
             )
             .ok()?;
         Some(Rc::new(VoiceInputConfirmedListener { window, callback }))
+    }
+
+    pub fn install_quiet_voice_confirmed_listener(
+        mut quiet_voice_confirmed: Signal<bool>,
+    ) -> Option<Rc<QuietVoiceConfirmedListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            if keys.length() == 1 && version.as_f64() == Some(1.0) {
+                quiet_voice_confirmed.set(true);
+            }
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:quiet-voice-confirmed",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(QuietVoiceConfirmedListener { window, callback }))
     }
 
     pub fn install_voice_start_latency_listener(
@@ -2360,6 +2415,12 @@ mod cloud {
 
     pub fn install_voice_input_confirmed_listener(
         _coach_state: Signal<CoachState>,
+    ) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_quiet_voice_confirmed_listener(
+        _quiet_voice_confirmed: Signal<bool>,
     ) -> Option<Listener> {
         None
     }
@@ -3832,6 +3893,7 @@ fn App() -> Element {
     let mut detected_domain = use_signal(String::new);
     let mut route = use_signal(String::new);
     let mut guest_sprint_active = use_signal(|| false);
+    let mut quiet_voice_confirmed = use_signal(|| false);
     let mut coach_state = use_signal(|| CoachState::NONE);
     let mut needs_paper = use_signal(|| false);
     let mut research_status = use_signal(|| ResearchStatus::None);
@@ -3875,6 +3937,8 @@ fn App() -> Element {
     let _voice_receipt_listener = use_hook(|| cloud::install_voice_receipt_listener(voice_receipt));
     let _voice_input_confirmed_listener =
         use_hook(|| cloud::install_voice_input_confirmed_listener(coach_state));
+    let _quiet_voice_confirmed_listener =
+        use_hook(|| cloud::install_quiet_voice_confirmed_listener(quiet_voice_confirmed));
     let _voice_start_latency_listener =
         use_hook(|| cloud::install_voice_start_latency_listener(voice_start_latency));
     let _voice_start_slo_listener =
@@ -4239,6 +4303,7 @@ fn App() -> Element {
                                                         detected_domain.set(String::new());
                                                          route.set("guest-word-mining".to_string());
                                                          guest_sprint_active.set(true);
+                                                         quiet_voice_confirmed.set(false);
                                                         coach_state.set(CoachState::NONE);
                                                         needs_paper.set(false);
                                                         research_status.set(ResearchStatus::None);
@@ -4379,6 +4444,9 @@ fn App() -> Element {
                             h2 { {GUEST_SPRINT_QUESTION} }
                             p { {GUEST_SPRINT_INSTRUCTION} }
                             p { role: "status", aria_live: "polite", "KOTAEはあなたより先にAを言いません" }
+                            if *quiet_voice_confirmed.read() {
+                                strong { role: "status", aria_live: "polite", "その小さな声で届いています。声を張らなくて大丈夫です" }
+                            }
                             match coach_snapshot.guest_a_first_outcome() {
                                 GuestAFirstOutcome::ChangedToAnswerFirst => rsx! {
                                     strong { "同じAが、後ろから一言目へ移りました" }

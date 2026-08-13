@@ -516,6 +516,7 @@ func NewWithVoiceAndPasskeys(
 	)
 	mux.Handle("GET "+passkeyCredentialsPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.listPasskeyCredentials)))
 	mux.Handle("POST "+passkeyCredentialRevokePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.revokePasskeyCredential)))
+	mux.Handle("POST "+passkeyAccountDeletePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.deletePasskeyAccount)))
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(

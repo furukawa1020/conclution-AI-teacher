@@ -42,18 +42,24 @@ document, concurrent attempts from a two-credential account can produce only
 one successful revoke; the retry observes one remaining credential and returns
 `ErrLastCredential`.
 
-The final credential cannot be revoked through this primitive. Deleting the
-last credential is account deletion and requires a separate, explicit flow that
-also handles the user record, handle reservation, Firebase account, recovery
-policy, and audit boundary.
+The final credential cannot be revoked through this primitive. Account deletion
+is a separate operation authorized from the verified principal only. It deletes
+the complete credential relation, handle reservation, and user record in one
+transaction, writes a digest-keyed 24-hour retry marker, then deletes the
+Firebase Auth user. A transient Auth failure can therefore be retried without
+recreating or trusting deleted credential state.
 
 ## What does not exist yet
 
-There is no HTTP route or client UI for list or revoke. Existing-account
-credential addition, recovery, account deletion, a non-bypassable recent-user-
-verification boundary for management operations, and management audit events
-also remain unimplemented. Until those boundaries are complete, callers must
-not expose this store API directly.
+List, existing-account credential addition, revoke, and account deletion have
+HTTP and client boundaries. Every management route requires a passkey-derived
+principal verified within five minutes; guest identity and request-supplied UID
+are rejected. Account deletion additionally requires an exact second-step
+confirmation phrase and returns no account data.
+
+Account recovery and management audit events remain unimplemented. Recovery
+must not be inferred from an ordinary Firebase token because that would weaken
+the passkey ownership boundary.
 
 This internal primitive therefore does not close the full Passkey credential
 lifecycle issue by itself.

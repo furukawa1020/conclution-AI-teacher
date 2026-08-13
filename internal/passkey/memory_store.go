@@ -24,6 +24,7 @@ type MemoryStore struct {
 	ceremonies  map[string]Ceremony
 	users       map[string]*User
 	credentials map[string]memoryCredential
+	deleted     map[string]time.Time
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -31,7 +32,34 @@ func NewMemoryStore() *MemoryStore {
 		ceremonies:  make(map[string]Ceremony),
 		users:       make(map[string]*User),
 		credentials: make(map[string]memoryCredential),
+		deleted:     make(map[string]time.Time),
 	}
+}
+
+func (s *MemoryStore) DeleteAccountData(_ context.Context, uid string, now time.Time) error {
+	if uid == "" || now.IsZero() {
+		return ErrCredentialStateInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := documentID([]byte(uid))
+	if _, deleted := s.deleted[key]; deleted {
+		return nil
+	}
+	user := s.users[key]
+	if user == nil || user.UID != uid {
+		return ErrCredentialNotFound
+	}
+	references, err := s.validateCredentialStateLocked(user, now.UTC())
+	if err != nil {
+		return err
+	}
+	for _, reference := range references {
+		delete(s.credentials, reference.String())
+	}
+	delete(s.users, key)
+	s.deleted[key] = now.UTC()
+	return nil
 }
 
 func (s *MemoryStore) PutCeremony(_ context.Context, id string, record Ceremony) error {

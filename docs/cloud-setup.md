@@ -272,7 +272,7 @@ Native Audioのlocationは`KOTAE_NATIVE_AUDIO_LOCATION=us-central1`へ固定し�
 
 起動時のsetup probeはrevision-levelのmodel・IAM・setup検査です。`GET /health`はprocess healthだけを返すため、監視やwarmupで繰り返しても、次の利用者turnのprovider接続や`StartActivity`を準備済みにはしません。通常Native turnのWebSocket `ready`は、当該turnで改めてproviderの`SetupComplete`と`StartActivity`成功を確認した後にだけ送ります。providerを使うturnごとに接続を新規作成して終了時に閉じ、cross-turn pooling、session resumption、接続再利用は行いません。
 
-本番では`KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true`を維持し、未指定でもsecure defaultとして`true`になります。まずcandidate backendを検証し、必須7 collectionのTTLをすべて`ACTIVE`にしてからservice rootへ昇格し、その後にPasskey UIを含むHostingを最終公開します。これにより、短命データを期限管理できないrevisionへ本番trafficを流さず、新しいUIが未対応の旧backendへ接続する時間も作りません。音声APIのbuffered、streaming、WebSocketすべてが、Passkey由来claimと5分以内の署名検証時刻`kotae_passkey_at`を要求します。Firebaseの`auth_time`はcustom token交換時に新しくなり得るため、freshness根拠には使いません。`false`は認証を迂回できるため、明示的なローカル開発以外では使いません。
+本番では`KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE=true`を維持し、未指定でもsecure defaultとして`true`になります。まずcandidate backendを検証し、必須9 collectionのTTLをすべて`ACTIVE`にしてからservice rootへ昇格し、その後にPasskey UIを含むHostingを最終公開します。これにより、短命データを期限管理できないrevisionへ本番trafficを流さず、新しいUIが未対応の旧backendへ接続する時間も作りません。音声APIのbuffered、streaming、WebSocketすべてが、Passkey由来claimと5分以内の署名検証時刻`kotae_passkey_at`を要求します。Firebaseの`auth_time`はcustom token交換時に新しくなり得るため、freshness根拠には使いません。`false`は認証を迂回できるため、明示的なローカル開発以外では使いません。
 
 `KOTAE_STATE_V2_WRITES`は短期support fieldの発行、`KOTAE_COACH_RESTATEMENT_BINDING`は言い直しtagの発行、`KOTAE_ANSWER_PROOF_WRITES`はQBA Proof用の質問インスタンスtag発行を制御します。`KOTAE_VERIFIER_PROGRESS_WRITES`は、現在の質問に対する検証の進行だけを表す5個の固定小数verifier-progress audit-posterior massをstateへ発行するwriter flagです。本人のretrieval状態を推定するflagではありません。`KOTAE_RETRIEVAL_POLICY_ENABLED`は、質問拘束済みQ-ARCと回答後の有限型controllerを使うbehavior flagであり、writer flagとは独立です。`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED`はNative final captionを監査済みplanner/controllerへ直接donateするbehavior flagです。policyを`true`にするには`KOTAE_STATE_V2_WRITES=true`、`KOTAE_ANSWER_PROOF_WRITES=true`、`KOTAE_COACH_RESTATEMENT_BINDING=true`が必要です。これによりA-laterは設定で即時completeへ迂回できず、質問boundな一度だけの再質問を必ず使います。caption handoffを`true`にするにはさらにverifier-progress writerとretrieval policyがともに`true`でなければなりません。長期運用ではこの6 flagをすべて`true`にします。progressには質問、回答、逐語録、診断、人物特性を入れません。本番Hostingのpreflightは、昇格済みCloud Run revisionで`KOTAE_VERIFIER_PROGRESS_WRITES=true`、`KOTAE_RETRIEVAL_POLICY_ENABLED=true`、`KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED=true`を必須とし、一つでも欠ける、または`false`なら公開前に停止します。
 
@@ -305,7 +305,7 @@ writer以降に戻せるのは新fieldを読める同一digestのreader以降の
 
 rollback時も`v1`と`v2`の状態は相互利用しません。revisionを戻した後はブラウザのopaque stateを破棄して新しいセッションから始めます。
 
-このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認し、さらに`configure-firestore-ttl.ps1`が必須7 policyの`ACTIVE`を確認した後だけ、`& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へtrafficを移し、全tag URLを同時に外します。caption以外の段階は100%、captionは前述の1%→10%→100% canaryを使います。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。Cloud Runのrevision labelはimmutableなので、誤った`source-commit`をservice labelだけ書き換えて修正済みとは扱いません。正しいfull SHAと`main`を付けた新revisionを作り、通常のcandidate検証と段階昇格を通します。Hosting scriptも、service rootが最新ready revisionへ100%昇格済みで、service・revision template・100% revisionのsource provenanceが指定commitと一致し、Passkey gateが`true`、timeout・service account・build identityが固定値、必須TTLがすべて`ACTIVE`、`/health`が正常であることを再検証してからreleaseを作ります。
+このdeployはcandidate revisionをtag URLへ公開しますが、service rootのtrafficは変更しません。candidateの`/health`と未認証`/api/v1/me`境界を確認し、さらに`configure-firestore-ttl.ps1`が必須9 policyの`ACTIVE`を確認した後だけ、`& $Gcloud run services update-traffic kotae-api --project=$ProjectId --region=asia-northeast1 --clear-tags --to-revisions="kotae-api-$RevisionSuffix=100"`で検証したrevision名へtrafficを移し、全tag URLを同時に外します。caption以外の段階は100%、captionは前述の1%→10%→100% canaryを使います。`--to-latest`は将来のrevisionへ自動追従するため使いません。revision自体はtagなし・0% trafficで残し、rollback時だけservice rootのtrafficを明示的に戻します。公開の旧tag URLは新しいprivacy境界を迂回できるため残しません。Cloud Runのrevision labelはimmutableなので、誤った`source-commit`をservice labelだけ書き換えて修正済みとは扱いません。正しいfull SHAと`main`を付けた新revisionを作り、通常のcandidate検証と段階昇格を通します。Hosting scriptも、service rootが最新ready revisionへ100%昇格済みで、service・revision template・100% revisionのsource provenanceが指定commitと一致し、Passkey gateが`true`、timeout・service account・build identityが固定値、必須TTLがすべて`ACTIVE`、`/health`が正常であることを再検証してからreleaseを作ります。
 
 Firebase HostingのCloud Run rewriteは、Cloud Run IAM用のID tokenを付けない公開transportです。そのため`kotae-api`は`--ingress=all --allow-unauthenticated`を維持します。これはAPI認証を無効にする設定ではありません。`/api/**`はアプリ側でFirebase ID tokenとApp Check tokenの両方、許可App ID、厳密なOrigin、二段rate limitを検証します。`--no-allow-unauthenticated`または`--ingress=internal-and-cloud-load-balancing`へ変更すると、Hostingからコンテナへ届かず汎用404になります。
 
@@ -330,7 +330,8 @@ barge-in候補は開始済みsessionの端末内VAD、bounded MediaRecorder、�
 | `passkeyClientRateLimits` | Passkeyの登録・認証それぞれのbegin/finish、計4 ceremony APIで共有するclient単位rate counter | `expiresAt`、48時間 |
 | `passkeyAppRateLimits` | 計4 ceremony APIで共有するFirebase App単位サーキットブレーカー | `expiresAt`、48時間 |
 | `passkey_ceremonies_v1` | App ID・purpose・challengeへ束縛した単回ceremony | `expiresAt`、5分 |
-| `passkey_users_v1` / `passkey_handles_v1` / `passkey_credentials_v1` | 仮名UID、user handle、public credential、sign counter等。秘密鍵は含まない。保存層にはraw credential IDを返さない一覧と、最後の1件を残す原子的失効primitiveがある | TTLなし。公開管理route/UI、既存accountへの追加、回復、account削除は未実装。詳細は[`passkey-credential-lifecycle.md`](passkey-credential-lifecycle.md) |
+| `passkey_account_deletions_v1` | raw UIDを含まないdigest-keyと固定状態だけを持つFirebase Auth削除再試行墓標 | `expiresAt`、24時間 |
+| `passkey_users_v1` / `passkey_handles_v1` / `passkey_credentials_v1` | 仮名UID、user handle、public credential、sign counter等。秘密鍵は含まない。一覧・追加・失効・完全削除は5分以内のパスキー再認証とprincipal UIDへ束縛する | TTLなし。回復は未実装。詳細は[`passkey-credential-lifecycle.md`](passkey-credential-lifecycle.md) |
 | `voiceLiveLeases` | SHA-256化UIDとランダム所有者だけを持つlive同時接続lease。音声・文字起こし・raw UIDは保存しない | `expiresAt`、最長7分 |
 
 ```powershell
@@ -338,7 +339,7 @@ powershell -ExecutionPolicy Bypass -File scripts/configure-firestore-ttl.ps1 `
   -ProjectId kotae-ai-u22-2026
 ```
 
-このscriptは表のうちTTLを持つ7 collectionの`expiresAt`を冪等に有効化し、一定間隔で状態を確認します。7つすべてが`ACTIVE`になってexit code 0で終了するまでは、candidateをservice rootへ昇格せず、Hostingも公開しません。timeout、CLI失敗、不正なJSON、必須policyの欠落はすべて非0で失敗します。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、ceremonyは読み出しtransactionで単回消費し、5分期限もAPIが独立検証します。live leaseもtransaction内で`expiresAt`を検証し、期限を過ぎたdocumentを削除待ちでも上書き取得できます。会話状態tokenの15分期限も、復号後にAPIが独立して検証します。
+このscriptは表のうちTTLを持つ9 collectionの`expiresAt`を冪等に有効化し、一定間隔で状態を確認します。9つすべてが`ACTIVE`になってexit code 0で終了するまでは、candidateをservice rootへ昇格せず、Hostingも公開しません。timeout、CLI失敗、不正なJSON、必須policyの欠落はすべて非0で失敗します。TTLは即時削除の仕組みではありません。期限後の物理削除には遅延があり得るため、ceremonyは読み出しtransactionで単回消費し、5分期限もAPIが独立検証します。live leaseもtransaction内で`expiresAt`を検証し、期限を過ぎたdocumentを削除待ちでも上書き取得できます。会話状態tokenの15分期限も、復号後にAPIが独立して検証します。
 
 ## Hosting
 

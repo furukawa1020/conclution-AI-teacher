@@ -27,6 +27,7 @@ const (
 	passkeyCredentialFinishPath       = "/api/v1/passkeys/credentials/registration:finish"
 	passkeyCredentialsPath            = "/api/v1/passkeys/credentials"
 	passkeyCredentialRevokePath       = "/api/v1/passkeys/credentials:revoke"
+	passkeyAccountDeletePath          = "/api/v1/passkeys/account:delete"
 	passkeyVoiceAuthorizationAge      = 5 * time.Minute
 	passkeyManagementAuthorizationAge = 5 * time.Minute
 	passkeyMaxCredentialBody          = 256 * 1024
@@ -41,7 +42,10 @@ type PasskeyService interface {
 	FinishCredentialRegistration(context.Context, string, string, string, *http.Request) error
 	ListCredentials(context.Context, string) ([]passkey.CredentialSummary, error)
 	RevokeCredential(context.Context, string, passkey.CredentialReference) error
+	DeleteAccount(context.Context, string) error
 }
+
+const accountDeletionConfirmation = "この仮名アカウントを完全に削除する"
 
 type credentialSummaryResponse struct {
 	Reference  string `json:"reference"`
@@ -107,6 +111,30 @@ func (s *Server) revokePasskeyCredential(w http.ResponseWriter, r *http.Request)
 		writeProblem(w, http.StatusNotFound, "passkey_credential_not_found", "The passkey credential could not be found.")
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deletePasskeyAccount(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.passkeys == nil || r.URL.RawQuery != "" || !isJSONContentType(r) {
+		writeProblem(w, http.StatusBadRequest, "passkey_account_deletion_failed", "Passkey account deletion failed.")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 512)
+	var body struct {
+		Confirmation string `json:"confirmation"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil || body.Confirmation != accountDeletionConfirmation || decoder.Decode(&struct{}{}) != io.EOF {
+		writeProblem(w, http.StatusBadRequest, "passkey_account_deletion_failed", "Passkey account deletion failed.")
+		return
+	}
+	if err := s.passkeys.DeleteAccount(r.Context(), principal.UID); err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_account_deletion_failed", "Passkey account deletion failed.")
+		return
+	}
+	w.Header().Set("Clear-Site-Data", "\"cache\", \"storage\"")
 	w.WriteHeader(http.StatusNoContent)
 }
 

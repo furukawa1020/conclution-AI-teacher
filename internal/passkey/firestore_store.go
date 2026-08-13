@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -19,6 +20,7 @@ const (
 	userCollection       = "passkey_users_v1"
 	handleCollection     = "passkey_handles_v1"
 	credentialCollection = "passkey_credentials_v1"
+	deletionCollection   = "passkey_account_deletions_v1"
 )
 
 type FirestoreStore struct {
@@ -56,6 +58,12 @@ type credentialDocument struct {
 type handleDocument struct {
 	UID       string    `firestore:"uid"`
 	CreatedAt time.Time `firestore:"createdAt"`
+}
+
+type deletionDocument struct {
+	State     string    `firestore:"state"`
+	CreatedAt time.Time `firestore:"createdAt"`
+	ExpiresAt time.Time `firestore:"expiresAt"`
 }
 
 func NewFirestoreStore(client *firestore.Client) (*FirestoreStore, error) {
@@ -554,6 +562,64 @@ func (s *FirestoreStore) RevokeCredential(
 		}
 		credentialRef := s.client.Collection(credentialCollection).Doc(canonicalReference.String())
 		return tx.Delete(credentialRef)
+	}))
+}
+
+func (s *FirestoreStore) DeleteAccountData(ctx context.Context, uid string, now time.Time) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" || now.IsZero() {
+		return ErrCredentialStateInvalid
+	}
+	now = now.UTC()
+	userKey := documentID([]byte(uid))
+	userRef := s.client.Collection(userCollection).Doc(userKey)
+	deletionRef := s.client.Collection(deletionCollection).Doc(userKey)
+	return normalizeStoreError(s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		deletion, deletionErr := tx.Get(deletionRef)
+		if deletionErr == nil {
+			var marker deletionDocument
+			if !deletion.Exists() || deletion.DataTo(&marker) != nil || marker.State != "auth-pending-v1" || marker.CreatedAt.IsZero() || marker.CreatedAt.After(now) || !marker.ExpiresAt.After(now) || marker.ExpiresAt.Before(marker.CreatedAt) {
+				return ErrCredentialStateInvalid
+			}
+			return nil
+		}
+		if status.Code(deletionErr) != codes.NotFound {
+			return deletionErr
+		}
+		snapshot, err := tx.Get(userRef)
+		if status.Code(err) == codes.NotFound {
+			return ErrCredentialNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var user userDocument
+		if snapshot.DataTo(&user) != nil || user.UID != uid {
+			return ErrCredentialStateInvalid
+		}
+		credentials, references, err := decodeLifecycleCredentials(user)
+		if err != nil {
+			return err
+		}
+		indexes, err := tx.GetAll(lifecycleCredentialDocumentRefs(s.client, references))
+		if err != nil {
+			return err
+		}
+		if err := validateLifecycleCredentialSnapshots(indexes, user, credentials, references, now); err != nil {
+			return err
+		}
+		for _, reference := range references {
+			if err := tx.Delete(s.client.Collection(credentialCollection).Doc(reference.String())); err != nil {
+				return err
+			}
+		}
+		if err := tx.Delete(s.client.Collection(handleCollection).Doc(documentID(user.UserHandle))); err != nil {
+			return err
+		}
+		if err := tx.Delete(userRef); err != nil {
+			return err
+		}
+		return tx.Create(deletionRef, deletionDocument{State: "auth-pending-v1", CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour)})
 	}))
 }
 

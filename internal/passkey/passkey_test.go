@@ -16,6 +16,70 @@ type recordingMinter struct {
 	claims map[string]any
 }
 
+func (m *recordingMinter) DeleteAccount(_ context.Context, uid string) error {
+	m.uid = uid
+	return nil
+}
+
+func TestDeleteAccountRemovesPasskeysAndIsIdempotentForAuthRetry(t *testing.T) {
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	store := NewMemoryStore()
+	user := lifecycleUser("pk_delete_account", 0x71)
+	if err := store.CreateCredential(context.Background(), user, lifecycleCredential("delete-account"), now); err != nil {
+		t.Fatal(err)
+	}
+	minter := &recordingMinter{}
+	service := newTestService(t, store, minter, now.Add(time.Minute))
+	if err := service.DeleteAccount(context.Background(), user.UID); err != nil {
+		t.Fatal(err)
+	}
+	if minter.uid != user.UID {
+		t.Fatalf("deleted uid = %q", minter.uid)
+	}
+	if _, err := store.LoadUserByUID(context.Background(), user.UID); !errors.Is(err, ErrCredentialNotFound) {
+		t.Fatalf("user remains: %v", err)
+	}
+	if err := service.DeleteAccount(context.Background(), user.UID); err != nil {
+		t.Fatalf("retry = %v", err)
+	}
+}
+
+type retryingAccountDeleter struct{ calls int }
+
+func (d *retryingAccountDeleter) DeleteAccount(context.Context, string) error {
+	d.calls++
+	if d.calls == 1 {
+		return errors.New("temporary auth failure")
+	}
+	return nil
+}
+
+func TestDeleteAccountRetriesAuthAfterDataDeletionWithoutCredentials(t *testing.T) {
+	now := time.Date(2026, 8, 13, 11, 0, 0, 0, time.UTC)
+	store := NewMemoryStore()
+	user := lifecycleUser("pk_delete_retry", 0x72)
+	if err := store.CreateCredential(context.Background(), user, lifecycleCredential("delete-retry"), now); err != nil {
+		t.Fatal(err)
+	}
+	deleter := &retryingAccountDeleter{}
+	service, err := New(Config{RPID: "kotae-ai.web.app", Origin: "https://kotae-ai.web.app", Store: store, TokenMinter: &recordingMinter{}, AccountDeleter: deleter, Now: func() time.Time { return now.Add(time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteAccount(context.Background(), user.UID); !errors.Is(err, ErrAccountDeletion) {
+		t.Fatalf("first = %v", err)
+	}
+	if _, err := store.LoadUserByUID(context.Background(), user.UID); !errors.Is(err, ErrCredentialNotFound) {
+		t.Fatalf("data remains: %v", err)
+	}
+	if err := service.DeleteAccount(context.Background(), user.UID); err != nil {
+		t.Fatalf("retry = %v", err)
+	}
+	if deleter.calls != 2 {
+		t.Fatalf("calls = %d", deleter.calls)
+	}
+}
+
 func (m *recordingMinter) MintCustomToken(
 	_ context.Context,
 	uid string,

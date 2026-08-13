@@ -1198,6 +1198,9 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = revokePasskeyCredential)]
         async fn revoke_passkey_credential_js(reference: &str) -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = deletePasskeyAccount)]
+        async fn delete_passkey_account_js(confirmation: &str) -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = beginTurn)]
         async fn begin_turn_js(
             session_state: &str,
@@ -1265,6 +1268,13 @@ mod cloud {
 
     pub async fn revoke_passkey_credential(reference: &str) -> Result<(), &'static str> {
         revoke_passkey_credential_js(reference)
+            .await
+            .map(|_| ())
+            .map_err(user_message)
+    }
+
+    pub async fn delete_passkey_account() -> Result<(), &'static str> {
+        delete_passkey_account_js("この仮名アカウントを完全に削除する")
             .await
             .map(|_| ())
             .map_err(user_message)
@@ -2091,6 +2101,9 @@ mod cloud {
             Some("passkey_credential_management_failed") => {
                 "パスキー管理を安全に完了できませんでした　もう一度本人確認してください"
             }
+            Some("passkey_account_deletion_failed") => {
+                "仮名アカウントを削除できませんでした　もう一度本人確認して再試行してください"
+            }
             Some("account_boundary_changed") => ACCOUNT_BOUNDARY_CHANGED_COPY,
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
@@ -2253,6 +2266,10 @@ mod cloud {
     }
 
     pub async fn revoke_passkey_credential(_reference: &str) -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn delete_passkey_account() -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
 
@@ -3778,13 +3795,14 @@ fn App() -> Element {
     let mut turn_notice = use_signal(|| TurnNotice::Clear);
     let mut captions_visible = use_signal(|| false);
     let mut strict_cloud_minimization = use_signal(|| false);
-    let cloud_status_refresh = use_signal(|| 0_u64);
+    let mut cloud_status_refresh = use_signal(|| 0_u64);
     let mut passkey_setup_busy = use_signal(|| false);
     let mut passkey_setup_feedback = use_signal(|| None::<PasskeySetupFeedback>);
     let mut passkey_credentials = use_signal(Vec::<PasskeyCredentialSummary>::new);
     let mut passkey_management_open = use_signal(|| false);
     let mut passkey_management_busy = use_signal(|| false);
     let mut passkey_revoke_confirmation = use_signal(|| None::<String>);
+    let mut account_delete_confirmation = use_signal(|| false);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
     let _account_access_refresh_listener =
@@ -4687,6 +4705,39 @@ fn App() -> Element {
                                             button { class: "control-button", r#type: "button", onclick: move |_| passkey_revoke_confirmation.set(None), "やめる" }
                                         }
                                     }
+                                }
+                                hr {}
+                                p { "アカウント削除は、すべてのパスキーと仮名アカウントを元に戻せない形で削除します。会話本文は保存していません。ゲストには関係ありません。" }
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    disabled: *passkey_management_busy.read(),
+                                    onclick: move |_| account_delete_confirmation.set(true),
+                                    "仮名アカウントの完全削除を確認する"
+                                }
+                                if *account_delete_confirmation.read() {
+                                    p { role: "alert", "すべてのパスキーで戻れなくなります。本当にこの仮名アカウントを完全に削除しますか？" }
+                                    button {
+                                        class: "control-button",
+                                        r#type: "button",
+                                        disabled: *passkey_management_busy.read(),
+                                        onclick: move |_| {
+                                            passkey_management_busy.set(true);
+                                            spawn(async move {
+                                                match cloud::delete_passkey_account().await {
+                                                    Ok(()) => {
+                                                        passkey_credentials.set(Vec::new());
+                                                        account_delete_confirmation.set(false);
+                                                        cloud_status_refresh.with_mut(|value| *value += 1);
+                                                    }
+                                                    Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                                }
+                                                passkey_management_busy.set(false);
+                                            });
+                                        },
+                                        "この仮名アカウントを完全に削除する"
+                                    }
+                                    button { class: "control-button", r#type: "button", onclick: move |_| account_delete_confirmation.set(false), "削除しない" }
                                 }
                             }
                         }

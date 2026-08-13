@@ -119,6 +119,8 @@ const PASSKEY_AUTHENTICATION_FINISH_ENDPOINT =
 const PASSKEY_CREDENTIALS_ENDPOINT = "/api/v1/passkeys/credentials";
 const PASSKEY_CREDENTIAL_REVOKE_ENDPOINT =
   "/api/v1/passkeys/credentials:revoke";
+const PASSKEY_ACCOUNT_DELETE_ENDPOINT = "/api/v1/passkeys/account:delete";
+const PASSKEY_ACCOUNT_DELETE_CONFIRMATION = "この仮名アカウントを完全に削除する";
 // The server caps finish bodies at 256 KiB. JSON produced here is ASCII-only,
 // so a character limit is also a byte-safe upper bound before fetch.
 const PASSKEY_JSON_MAX_CHARS = 255 * 1024;
@@ -6418,9 +6420,27 @@ globalThis.addEventListener("pagehide", () => {
   }
 });
 
+async function deletePasskeyAccount(confirmation) {
+  if (confirmation !== PASSKEY_ACCOUNT_DELETE_CONFIRMATION) fail("passkey_account_deletion_failed");
+  const credentials = await secureCredentials(true);
+  const response = await fetch(PASSKEY_ACCOUNT_DELETE_ENDPOINT, {
+    method: "POST", cache: "no-store", credentials: "same-origin", redirect: "error",
+    headers: Object.freeze({ Authorization: `Bearer ${credentials.idToken}`, "Content-Type": "application/json", "X-Firebase-AppCheck": credentials.appCheckToken }),
+    body: JSON.stringify(Object.freeze({ confirmation })),
+  });
+  if (!response.ok) fail("passkey_account_deletion_failed");
+  guestModeActive = false;
+  verifiedAccountUid = undefined;
+  if (authInstance) await signOut(authInstance).catch(() => {});
+  globalThis.sessionStorage?.clear();
+  globalThis.localStorage?.clear();
+  return Object.freeze({ state: "account-deleted" });
+}
+
 const publicBridge = Object.freeze({
   attachDocument,
   beginTurn,
+  deletePasskeyAccount,
   endTurn,
   finishTurn,
   getStatus,

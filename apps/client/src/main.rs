@@ -4393,14 +4393,47 @@ fn App() -> Element {
                             p { role: "status", aria_live: "polite", "KOTAEはあなたより先にAを言いません" }
                             match coach_snapshot.guest_a_first_outcome() {
                                 GuestAFirstOutcome::ChangedToAnswerFirst => rsx! {
+                                    div {
+                                        class: "answer-sculpture answer-sculpture--changed",
+                                        role: "img",
+                                        aria_live: "polite",
+                                        aria_label: "あなたのAが説明の後ろから一言目へ移った",
+                                        div { class: "answer-sculpture__row",
+                                            span { class: "answer-sculpture__time", "さっき" }
+                                            span { class: "answer-sculpture__line", aria_hidden: "true" }
+                                            span { class: "answer-sculpture__a answer-sculpture__a--back", aria_hidden: "true", "A" }
+                                        }
+                                        span { class: "answer-sculpture__arrow", aria_hidden: "true", "↓" }
+                                        div { class: "answer-sculpture__row answer-sculpture__row--now",
+                                            span { class: "answer-sculpture__time", "いま" }
+                                            span { class: "answer-sculpture__a answer-sculpture__a--front", aria_hidden: "true", "A" }
+                                            span { class: "answer-sculpture__line", aria_hidden: "true" }
+                                        }
+                                    }
                                     strong { "同じAが、後ろから一言目へ移りました" }
                                     p { "AIは答えを足していません。今回の二回だけの確認です。" }
                                 },
                                 GuestAFirstOutcome::StayedAnswerFirst => rsx! {
+                                    div {
+                                        class: "answer-sculpture answer-sculpture--stayed",
+                                        role: "img",
+                                        aria_label: "あなたのAは最初から一言目にあった",
+                                        div { class: "answer-sculpture__row answer-sculpture__row--now",
+                                            span { class: "answer-sculpture__time", "最初から" }
+                                            span { class: "answer-sculpture__a answer-sculpture__a--front", aria_hidden: "true", "A" }
+                                            span { class: "answer-sculpture__line", aria_hidden: "true" }
+                                        }
+                                    }
                                     strong { "最初から、あなたのAが一言目でした" }
                                     p { "AIは答えを足していません。上達や能力の判定ではありません。" }
                                 },
                                 GuestAFirstOutcome::NoVerifiedChange => rsx! {
+                                    div {
+                                        class: "answer-sculpture answer-sculpture--unverified",
+                                        role: "img",
+                                        aria_label: "Aの位置はまだ確認されていない",
+                                        span { class: "answer-sculpture__unknown", aria_hidden: "true", "未確認" }
+                                    }
                                     p { "まだ変化は確認していません。確認できない時は決めつけません。" }
                                 },
                             }
@@ -4909,20 +4942,21 @@ fn App() -> Element {
 mod tests {
     use super::{
         ANSWER_SUPPORT_COPY, AnswerProof, AnswerTransitionProof, COACH_CHECKPOINT_MAX_CHARS,
-        CloudState, CoachAction, CoachPhase, CoachState, NATIVE_RESPONDENT_COACH_ROUTE,
-        NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY, PASSKEY_AUTHENTICATION_FAILED_COPY,
-        PASSKEY_CANCELLED_COPY, PASSKEY_REGISTRATION_CANCELLED_COPY,
-        PASSKEY_REGISTRATION_FAILED_COPY, PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY,
-        PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget,
-        PasskeySetupFeedback, RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING,
-        STANDARD_MODE_ROUTE_COPY, STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY,
-        SUPPORT_BOUNDARY_COPY, TALK_ONLY_COPY, TurnNotice, VoicePrepareLatency,
-        VoicePrepareOutcome, VoicePrepareResult, VoicePrepareRoute, VoiceReceipt,
-        VoiceStartLatency, VoiceStartOutcome, VoiceStartRoute, VoiceState, VoiceTurnMode,
-        cloud_state_for_display, confirmed_voice_input_state, interrupted_voice_state,
-        interruption_ready_voice_state, passkey_focus_target, recoverable_wait_turn_code,
-        requires_passkey_choice, requires_passkey_registration_recovery, session_stop_pauses,
-        silent_recognition_miss, turn_mode_for_gesture_epoch, valid_answer_proof_metadata,
+        CloudState, CoachAction, CoachPhase, CoachState, GuestAFirstOutcome,
+        NATIVE_RESPONDENT_COACH_ROUTE, NEW_PASSKEY_ACCOUNT_ACTION, ORDINARY_CHAT_COPY,
+        PASSKEY_AUTHENTICATION_FAILED_COPY, PASSKEY_CANCELLED_COPY,
+        PASSKEY_REGISTRATION_CANCELLED_COPY, PASSKEY_REGISTRATION_FAILED_COPY,
+        PASSKEY_REGISTRATION_RECOVERY_REQUIRED_COPY, PASSKEY_REQUIRED_COPY,
+        PASSKEY_UNSUPPORTED_COPY, PRODUCT_PROMISE_COPY, PasskeyFocusTarget, PasskeySetupFeedback,
+        RETURNING_PASSKEY_ACTION, SEPARATE_PASSKEY_ACCOUNT_WARNING, STANDARD_MODE_ROUTE_COPY,
+        STANDARD_MODE_ROUTE_LABEL, STANDARD_VOICE_PRIVACY_COPY, SUPPORT_BOUNDARY_COPY,
+        TALK_ONLY_COPY, TurnNotice, VoicePrepareLatency, VoicePrepareOutcome, VoicePrepareResult,
+        VoicePrepareRoute, VoiceReceipt, VoiceStartLatency, VoiceStartOutcome, VoiceStartRoute,
+        VoiceState, VoiceTurnMode, cloud_state_for_display, confirmed_voice_input_state,
+        interrupted_voice_state, interruption_ready_voice_state, passkey_focus_target,
+        recoverable_wait_turn_code, requires_passkey_choice,
+        requires_passkey_registration_recovery, session_stop_pauses, silent_recognition_miss,
+        turn_mode_for_gesture_epoch, valid_answer_proof_metadata,
         valid_answer_transition_proof_metadata, valid_coach_checkpoint_keys,
         valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
         valid_streamed_audio_metadata, valid_voice_pause_metadata, valid_voice_prepare_slo_clear,
@@ -5309,6 +5343,47 @@ mod tests {
         let cleared = state.without_answer_proof();
         assert_eq!(cleared.answer_proof, AnswerProof::None);
         assert_eq!(cleared.answer_transition_proof, AnswerTransitionProof::None);
+    }
+
+    #[test]
+    fn guest_answer_sculpture_outcome_comes_only_from_terminal_finite_proofs() {
+        let changed = CoachState::from_authoritative_result(
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            AnswerProof::QuestionBoundInputAnswerFirst,
+            AnswerTransitionProof::QuestionBoundInputClauseLaterToFirst,
+        );
+        assert_eq!(
+            changed.guest_a_first_outcome(),
+            GuestAFirstOutcome::ChangedToAnswerFirst
+        );
+
+        let stayed = CoachState::from_authoritative_result(
+            CoachPhase::Complete,
+            CoachAction::Complete,
+            AnswerProof::QuestionBoundInputAnswerFirst,
+            AnswerTransitionProof::None,
+        );
+        assert_eq!(
+            stayed.guest_a_first_outcome(),
+            GuestAFirstOutcome::StayedAnswerFirst
+        );
+
+        for unverified in [
+            CoachState::NONE,
+            CoachState::from_authoritative_result(
+                CoachPhase::Expanding,
+                CoachAction::Expand,
+                AnswerProof::QuestionBoundInputAnswerFirst,
+                AnswerTransitionProof::QuestionBoundInputClauseLaterToFirst,
+            ),
+            changed.without_answer_proof(),
+        ] {
+            assert_eq!(
+                unverified.guest_a_first_outcome(),
+                GuestAFirstOutcome::NoVerifiedChange
+            );
+        }
     }
 
     #[test]

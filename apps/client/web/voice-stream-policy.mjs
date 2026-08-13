@@ -104,6 +104,14 @@ export const CONFIRMED_SPEECH_PCM_LIMITS = Object.freeze({
   maximumFrames: 75,
 });
 
+export const GUEST_VOICE_COMPARISON_LIMITS = Object.freeze({
+  clipCount: 2,
+  frameBytes: VOICE_LIVE_LIMITS.inputFrameBytes,
+  framesPerClip: 50,
+  sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
+  totalBytes: 2 * 50 * VOICE_LIVE_LIMITS.inputFrameBytes,
+});
+
 const INTERRUPT_FRAME_GUARD_VOICED = 1 << 0;
 const INTERRUPT_FRAME_VOICED = 1 << 1;
 const INTERRUPT_FRAME_FOREGROUND_VOICED = 1 << 2;
@@ -244,6 +252,127 @@ function erasePcmFrame(frame) {
   if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
     new Uint8Array(frame).fill(0);
   }
+}
+
+export function createGuestVoiceComparison() {
+  let active;
+  let clips = [];
+  let ownerGeneration;
+  let turnSerial = 0;
+  let state = "disabled";
+
+  function eraseClip(clip) {
+    for (const frame of clip ?? []) erasePcmFrame(frame);
+  }
+
+  function clear() {
+    eraseClip(active?.frames);
+    active = undefined;
+    for (const clip of clips) eraseClip(clip);
+    clips = [];
+    ownerGeneration = undefined;
+    turnSerial = 0;
+    state = "disabled";
+  }
+
+  function validOwner(generation) {
+    return Number.isSafeInteger(generation) &&
+      generation > 0 && generation === ownerGeneration;
+  }
+
+  return Object.freeze({
+    authorize(outcome, generation) {
+      if (
+        !validOwner(generation) ||
+        active !== undefined ||
+        state !== "armed" ||
+        outcome !== "changed_to_answer_first" ||
+        clips.length !== GUEST_VOICE_COMPARISON_LIMITS.clipCount ||
+        clips.some((clip) => clip.length === 0)
+      ) {
+        clear();
+        return false;
+      }
+      state = "ready";
+      return true;
+    },
+    beginTurn(generation) {
+      if (
+        !validOwner(generation) ||
+        state !== "armed" ||
+        active !== undefined ||
+        clips.length >= GUEST_VOICE_COMPARISON_LIMITS.clipCount
+      ) {
+        return 0;
+      }
+      turnSerial += 1;
+      active = { frames: [], serial: turnSerial };
+      return turnSerial;
+    },
+    captureOwnedFrame(frame, generation, serial) {
+      if (
+        !(frame instanceof ArrayBuffer) ||
+        frame.byteLength !== GUEST_VOICE_COMPARISON_LIMITS.frameBytes ||
+        !validOwner(generation) ||
+        state !== "armed" ||
+        active?.serial !== serial ||
+        active.frames.length >= GUEST_VOICE_COMPARISON_LIMITS.framesPerClip
+      ) {
+        erasePcmFrame(frame);
+        return false;
+      }
+      active.frames.push(frame);
+      return true;
+    },
+    clear,
+    finishTurn(generation, serial) {
+      if (
+        !validOwner(generation) ||
+        state !== "armed" ||
+        active?.serial !== serial ||
+        active.frames.length === 0 ||
+        clips.length >= GUEST_VOICE_COMPARISON_LIMITS.clipCount
+      ) {
+        clear();
+        return false;
+      }
+      clips.push(active.frames);
+      active = undefined;
+      return true;
+    },
+    optIn(generation) {
+      clear();
+      if (!Number.isSafeInteger(generation) || generation <= 0) return false;
+      ownerGeneration = generation;
+      state = "armed";
+      return true;
+    },
+    snapshot() {
+      return Object.freeze({
+        activeFrames: active?.frames.length ?? 0,
+        clipCount: clips.length,
+        state,
+        totalBytes:
+          (active?.frames.length ?? 0) * GUEST_VOICE_COMPARISON_LIMITS.frameBytes +
+          clips.reduce(
+            (total, clip) =>
+              total + clip.length * GUEST_VOICE_COMPARISON_LIMITS.frameBytes,
+            0,
+          ),
+      });
+    },
+    take(generation) {
+      if (!validOwner(generation) || state !== "ready") {
+        clear();
+        return undefined;
+      }
+      const owned = clips;
+      clips = [];
+      ownerGeneration = undefined;
+      state = "consumed";
+      return owned;
+    },
+  });
 }
 
 function createBoundedPcmRing(limits) {

@@ -42,6 +42,7 @@ import {
   claimAmbientLiveHandoff,
   CONFIRMED_SPEECH_PCM_LIMITS,
   createInterruptVadState,
+  createGuestVoiceComparison,
   createVoiceLiveClientTransport,
   createVoiceLiveServerProtocol,
   createVoiceStreamParser,
@@ -692,6 +693,113 @@ async function initializeFirebaseAuth() {
 
 const firebaseAuth = createRetryableInitializer(initializeFirebaseAuth);
 let guestModeActive = false;
+let guestVoiceComparisonRequested = false;
+const guestVoiceComparison = createGuestVoiceComparison();
+let guestVoiceComparisonPlayback;
+
+function guestComparisonGeneration(epoch = sessionEpoch) {
+  return epoch + 1;
+}
+
+function stopGuestVoiceComparisonPlayback() {
+  const playback = guestVoiceComparisonPlayback;
+  guestVoiceComparisonPlayback = undefined;
+  if (!playback) return;
+  for (const source of playback.sources) {
+    try {
+      source.stop();
+    } catch {
+      // The source may already have ended.
+    }
+    source.disconnect();
+  }
+  for (const buffer of playback.buffers) {
+    buffer.getChannelData(0).fill(0);
+  }
+  playback.finish();
+}
+
+function setGuestVoiceComparisonOptIn(enabled) {
+  if (typeof enabled !== "boolean" || !guestModeActive) {
+    fail("guest_voice_comparison_invalid");
+  }
+  stopGuestVoiceComparisonPlayback();
+  guestVoiceComparison.clear();
+  guestVoiceComparisonRequested = enabled;
+  return Object.freeze({ state: enabled ? "armed" : "skipped" });
+}
+
+async function playGuestVoiceComparison() {
+  if (
+    !guestModeActive ||
+    !guestVoiceComparisonRequested ||
+    guestVoiceComparisonPlayback ||
+    !audioContext ||
+    audioContext.state === "closed"
+  ) {
+    fail("guest_voice_comparison_unavailable");
+  }
+  if (audioContext.state === "suspended") await audioContext.resume();
+  const clips = guestVoiceComparison.take(guestComparisonGeneration());
+  if (!Array.isArray(clips) || clips.length !== 2) {
+    fail("guest_voice_comparison_unavailable");
+  }
+  const buffers = [];
+  const sources = [];
+  try {
+    for (const clip of clips) {
+      const sampleCount = clip.length * VOICE_LIVE_LIMITS.inputFrameBytes / 2;
+      const buffer = audioContext.createBuffer(
+        1,
+        sampleCount,
+        VOICE_LIVE_LIMITS.inputSampleRateHz,
+      );
+      const output = buffer.getChannelData(0);
+      let sampleIndex = 0;
+      for (const frame of clip) {
+        const view = new DataView(frame);
+        for (let offset = 0; offset < frame.byteLength; offset += 2) {
+          output[sampleIndex] = view.getInt16(offset, true) / 32_768;
+          sampleIndex += 1;
+        }
+        new Uint8Array(frame).fill(0);
+      }
+      buffers.push(buffer);
+    }
+    const done = new Promise((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        resolve();
+      };
+      guestVoiceComparisonPlayback = { buffers, finish, sources };
+    });
+    let startAt = audioContext.currentTime + 0.02;
+    for (const buffer of buffers) {
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+      source.start(startAt);
+      sources.push(source);
+      startAt += buffer.duration + 0.18;
+    }
+    sources.at(-1).addEventListener(
+      "ended",
+      stopGuestVoiceComparisonPlayback,
+      { once: true },
+    );
+    guestVoiceComparisonRequested = false;
+    await done;
+    return Object.freeze({ state: "played" });
+  } catch (error) {
+    for (const clip of clips) {
+      for (const frame of clip) new Uint8Array(frame).fill(0);
+    }
+    stopGuestVoiceComparisonPlayback();
+    throw error;
+  }
+}
 
 function verifiedAccountUser(user) {
   return Boolean(
@@ -1192,6 +1300,9 @@ async function startGuestMode() {
     fail("guest_start_failed");
   }
   guestModeActive = true;
+  guestVoiceComparisonRequested = false;
+  guestVoiceComparison.clear();
+  stopGuestVoiceComparisonPlayback();
   verifiedAccountUid = undefined;
   return Object.freeze({ state: "guest-ready" });
 }
@@ -2374,6 +2485,13 @@ async function beginTurn(
     dispatchVoiceStartLatency(null);
 
     const expectedEpoch = sessionEpoch;
+    if (
+      guestModeActive &&
+      guestVoiceComparisonRequested &&
+      guestVoiceComparison.snapshot().state === "disabled"
+    ) {
+      guestVoiceComparison.optIn(guestComparisonGeneration(expectedEpoch));
+    }
     if (!sessionExpiryWatchdog.arm() || !ensureActiveSession(expectedEpoch)) {
       fail(stoppedSessionCode(expectedEpoch));
     }
@@ -2846,6 +2964,33 @@ function safeVoiceResponse(payload, expectedStrictCloudMinimization) {
   });
 }
 
+function finalizeGuestVoiceComparisonResult(result, expectedEpoch) {
+  if (
+    !guestModeActive ||
+    !guestVoiceComparisonRequested ||
+    result?.coachPhase !== "complete" ||
+    result?.coachAction !== "complete"
+  ) {
+    return result;
+  }
+  const ready =
+    result.interrupted !== true &&
+    guestVoiceComparison.authorize(
+      result.guestAFirstOutcome,
+      guestComparisonGeneration(expectedEpoch),
+    );
+  if (ready) {
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:guest-voice-comparison-ready", {
+        detail: Object.freeze({ version: 1 }),
+      }),
+    );
+  } else {
+    guestVoiceComparisonRequested = false;
+  }
+  return result;
+}
+
 function mapVoiceResponseError(status) {
   if (status === 401 || status === 403) return "authentication_failed";
   if (status === 413) return "voice_turn_too_large";
@@ -3241,6 +3386,8 @@ async function startVoiceLiveSession({
   let resolveResult;
   let resultSettled = false;
   let state = preflightState;
+  let guestComparisonTurnFinished = false;
+  let guestComparisonTurnSerial = 0;
   let wsOpenMs =
     socketOpenedAt === undefined
       ? 0
@@ -3288,6 +3435,10 @@ async function startVoiceLiveSession({
   ) {
     if (captureStopped) return;
     captureStopped = true;
+    if (guestComparisonTurnSerial > 0 && !guestComparisonTurnFinished) {
+      guestVoiceComparison.clear();
+      guestVoiceComparisonRequested = false;
+    }
     settleCaptureSeal(error);
     if (adoptedCapture) {
       const ownedCapture = adoptedCapture;
@@ -3324,6 +3475,12 @@ async function startVoiceLiveSession({
         adoptedCapture = undefined;
       }
       captureStopped = true;
+      if (guestComparisonTurnSerial > 0) {
+        guestComparisonTurnFinished = guestVoiceComparison.finishTurn(
+          guestComparisonGeneration(expectedEpoch),
+          guestComparisonTurnSerial,
+        );
+      }
       return;
     }
     if (
@@ -3359,6 +3516,12 @@ async function startVoiceLiveSession({
       settleCaptureSeal();
     }
     captureStopped = true;
+    if (guestComparisonTurnSerial > 0) {
+      guestComparisonTurnFinished = guestVoiceComparison.finishTurn(
+        guestComparisonGeneration(expectedEpoch),
+        guestComparisonTurnSerial,
+      );
+    }
     captureNode.port.onmessage = discardCaptureMessage;
     try {
       captureNode.port.postMessage(
@@ -3475,6 +3638,13 @@ async function startVoiceLiveSession({
       zeroizeCaptureFrame(frame);
       failLive(new Error("voice_api_unavailable"));
       return;
+    }
+    if (guestComparisonTurnSerial > 0) {
+      guestVoiceComparison.captureOwnedFrame(
+        frame.slice(0),
+        guestComparisonGeneration(expectedEpoch),
+        guestComparisonTurnSerial,
+      );
     }
     clientTransport.pushFrame(frame);
   }
@@ -4108,6 +4278,11 @@ async function startVoiceLiveSession({
       return undefined;
     }
   } else {
+    if (guestModeActive && guestVoiceComparisonRequested) {
+      guestComparisonTurnSerial = guestVoiceComparison.beginTurn(
+        guestComparisonGeneration(expectedEpoch),
+      );
+    }
     captureSource.connect(captureNode);
   }
   return session;
@@ -6097,11 +6272,14 @@ async function finishTurn(
           fail(stoppedSessionCode(expectedEpoch));
         }
         responseClockActive = false;
-        return Object.freeze({
+        const finished = Object.freeze({
           ...completed.finalResult,
           interrupted: playback.interrupted,
           streamedAudio: completed.streamedAudio,
         });
+        return typeof finalizeGuestVoiceComparisonResult === "function"
+          ? finalizeGuestVoiceComparisonResult(finished, expectedEpoch)
+          : finished;
       } catch (error) {
         if (
           turnTimedOut ||
@@ -6260,12 +6438,22 @@ async function finishTurn(
       fail(stoppedSessionCode(expectedEpoch));
     }
     responseClockActive = false;
-    return Object.freeze({
+    const finished = Object.freeze({
       ...completed.finalResult,
       interrupted: playback.interrupted,
       streamedAudio: completed.streamedAudio,
     });
+    return typeof finalizeGuestVoiceComparisonResult === "function"
+      ? finalizeGuestVoiceComparisonResult(finished, expectedEpoch)
+      : finished;
   } catch (error) {
+    if (
+      typeof guestVoiceComparisonRequested !== "undefined" &&
+      guestVoiceComparisonRequested
+    ) {
+      guestVoiceComparison.clear();
+      guestVoiceComparisonRequested = false;
+    }
     liveSession?.cancel(
       error instanceof Error ? error : new Error("voice_api_unavailable"),
     );
@@ -6348,6 +6536,15 @@ function stopSession(reason = "request_cancelled") {
   documentEpoch += 1;
   finishGate.reset();
   sessionExpiryWatchdog.disarm();
+  if (typeof guestVoiceComparisonRequested !== "undefined") {
+    guestVoiceComparisonRequested = false;
+  }
+  if (typeof guestVoiceComparison !== "undefined") {
+    guestVoiceComparison.clear();
+  }
+  if (typeof stopGuestVoiceComparisonPlayback === "function") {
+    stopGuestVoiceComparisonPlayback();
+  }
 
   if (activePasskeyController) {
     activePasskeyController.abort();
@@ -6428,6 +6625,9 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 globalThis.addEventListener("pagehide", () => {
+  guestVoiceComparisonRequested = false;
+  guestVoiceComparison.clear();
+  stopGuestVoiceComparisonPlayback();
   if (activePasskeyController) {
     activePasskeyController.abort();
   }
@@ -6471,8 +6671,10 @@ const publicBridge = Object.freeze({
   finishTurn,
   getStatus,
   listPasskeyCredentials,
+  playGuestVoiceComparison,
   registerPasskeyAccount,
   revokePasskeyCredential,
+  setGuestVoiceComparisonOptIn,
   startGuestMode,
   stopSession,
   waitForTurnEnd,

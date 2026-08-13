@@ -6,7 +6,7 @@ import {
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,
-  softVoiceMinimumMs: 600,
+  softVoiceMinimumMs: 240,
   softVoiceSnrRatio: 1.45,
   softVoicePeakToRmsRatio: 1.6,
   softVoiceEnvelopeRatio: 1.18,
@@ -14,13 +14,13 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // bootstrap window, voice-shaped low-level audio may start a candidate from
   // an absolute floor. It still needs sustained, changing-envelope evidence.
   softVoiceBootstrapMs: 1_200,
-  softVoiceBootstrapMinimumRms: 0.004,
+  softVoiceBootstrapMinimumRms: 0.0025,
   // Envelope evidence is a renewable lease rather than a permanent flag. A
   // stationary fan/hum therefore cannot keep an already-confirmed turn alive.
   softVoiceEvidenceLeaseMs: 400,
   // Confirmation also needs envelope changes spread across time; one short
   // echo followed by a stationary tail is not a quiet utterance.
-  softVoiceMinimumEvidenceSpanMs: 320,
+  softVoiceMinimumEvidenceSpanMs: 120,
   // After clear speech, a short but genuinely changing quiet word may refresh
   // the endpoint without opting the whole turn into the three-second mode.
   softVoiceContinuationEvidenceSpanMs: 120,
@@ -120,6 +120,15 @@ const RESEARCH_RECORD_KEYS = Object.freeze([
   "url",
 ]);
 const MAX_RESEARCH_RECORDS = 5;
+
+let onsetFrameClassifier = null;
+
+export function installOnsetFrameClassifier(classifier) {
+  if (typeof classifier !== "function" || onsetFrameClassifier !== null) {
+    throw new TypeError("onset_frame_classifier_install_invalid");
+  }
+  onsetFrameClassifier = classifier;
+}
 
 function isPlainRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -957,25 +966,23 @@ export function advanceVad(
     voiceRunMs,
   } = previous;
   const elapsed = timestamp - previous.startedAt;
-  const threshold = hasSpeech
-    ? Math.max(0.009, noiseFloor * 1.7)
-    : Math.max(0.014, noiseFloor * 2.8);
-  const peakMultiplier = hasSpeech ? 1.35 : 1.8;
-  const soundsClear =
-    rms >= threshold && peak >= threshold * peakMultiplier;
-  // This path is relative to the learned room floor. It deliberately has no
-  // lower fixed speech threshold: low-SNR evidence must instead persist and
-  // show a changing speech envelope before it can become an utterance.
-  const hasVoiceShapedPeak =
-    peak >= rms * softVoicePeakToRmsRatio;
-  const bootstrapSoftVoice =
-    !hasSpeech &&
-    (elapsed <= softVoiceBootstrapMs || softVoiceCandidate) &&
-    rms >= softVoiceBootstrapMinimumRms;
-  const soundsSoft =
-    !soundsClear &&
-    hasVoiceShapedPeak &&
-    (rms >= noiseFloor * softVoiceSnrRatio || bootstrapSoftVoice);
+  if (typeof onsetFrameClassifier !== "function") {
+    throw new TypeError("onset_frame_classifier_unavailable");
+  }
+  const frameClass = onsetFrameClassifier(
+    noiseFloor,
+    peak,
+    rms,
+    hasSpeech,
+    softVoiceCandidate,
+    elapsed <= softVoiceBootstrapMs,
+  );
+  if (!Number.isSafeInteger(frameClass) || frameClass < 0 || frameClass > 3) {
+    throw new TypeError("onset_frame_classifier_result_invalid");
+  }
+  const soundsClear = (frameClass & 1) !== 0;
+  const soundsSoft = (frameClass & 2) !== 0;
+  const hasVoiceShapedPeak = rms > 0 && peak >= rms * softVoicePeakToRmsRatio;
   let sampleVoiced = soundsClear || soundsSoft;
 
   let hasRecentSoftEnvelope = false;

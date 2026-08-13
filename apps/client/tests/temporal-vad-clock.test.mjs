@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { advanceTemporalVadClock, createTemporalVadClock, installTemporalVadClockAdvancer } from "../web/temporal-vad-clock.mjs";
-import { advanceVad, createVadState } from "../web/voice-session-policy.mjs";
+import { advanceVad, createVadState, installOnsetFrameClassifier } from "../web/voice-session-policy.mjs";
 import { advanceInterruptVad, createInterruptVadState, installIntentionalInterruptAdvancer, installInterruptFrameClassifier } from "../web/voice-stream-policy.mjs";
 
 function rustClockOracle(rate, started, previous, current) {
@@ -16,6 +16,7 @@ function rustClockOracle(rate, started, previous, current) {
 }
 
 installTemporalVadClockAdvancer(rustClockOracle);
+installOnsetFrameClassifier(() => 0b01);
 installInterruptFrameClassifier(() => 0b111);
 installIntentionalInterruptAdvancer((phase, score, foregroundMs, changeCount, gapMs, lastBucket, _lastElapsedMs, _flags, _rms, _peak, creditedMs, elapsedMs, aecVerified) =>
   new Float64Array(aecVerified

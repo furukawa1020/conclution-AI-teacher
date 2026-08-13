@@ -1760,6 +1760,15 @@ func voiceResultFromDecision(
 	input httpapi.VoiceTurnInput,
 	decision conversation.VoiceTurnResult,
 ) httpapi.VoiceTurnResult {
+	guestOutcome := conversation.GuestAFirstOutcomeNoVerifiedChange
+	if input.GuestExperience {
+		switch {
+		case decision.AnswerTransitionProof == conversation.AnswerTransitionProofQuestionBoundInputClauseLaterToFirst:
+			guestOutcome = conversation.GuestAFirstOutcomeChangedToAnswerFirst
+		case decision.AnswerProof == conversation.AnswerProofQuestionBoundInputAnswerFirst:
+			guestOutcome = conversation.GuestAFirstOutcomeStayedAnswerFirst
+		}
+	}
 	return httpapi.VoiceTurnResult{
 		StateToken:            decision.StateToken,
 		DetectedDomain:        decision.Domain,
@@ -1769,6 +1778,7 @@ func voiceResultFromDecision(
 		CoachAction:           decision.CoachAction,
 		AnswerProof:           string(decision.AnswerProof),
 		AnswerTransitionProof: string(decision.AnswerTransitionProof),
+		GuestAFirstOutcome:    string(guestOutcome),
 		ResearchStatus:        decision.ResearchStatus,
 		ResearchRecords:       researchRecords(decision.ResearchRecords),
 		Route:                 decision.Route,

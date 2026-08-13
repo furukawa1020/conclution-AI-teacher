@@ -130,6 +130,7 @@ type VoiceTurnResult struct {
 	CoachAction           string                `json:"coach_action"`
 	AnswerProof           AnswerProof           `json:"answer_proof"`
 	AnswerTransitionProof AnswerTransitionProof `json:"answer_transition_proof"`
+	GuestAFirstOutcome    GuestAFirstOutcome    `json:"guest_a_first_outcome"`
 	// AnswerProofCandidate is process-private evidence produced for both
 	// provisional and committed voice input. The voice pipeline may promote it
 	// only after its exact final-transcript commit boundary. It is never
@@ -174,6 +175,16 @@ type AnswerTransitionProof string
 const (
 	AnswerTransitionProofNone                                 AnswerTransitionProof = "none"
 	AnswerTransitionProofQuestionBoundInputClauseLaterToFirst AnswerTransitionProof = "question_bound_input_clause_later_to_first"
+)
+
+// GuestAFirstOutcome is a content-free projection of independently verified
+// answer position. It carries no answer, transcript, tag, score, or identity.
+type GuestAFirstOutcome string
+
+const (
+	GuestAFirstOutcomeNoVerifiedChange     GuestAFirstOutcome = "no_verified_change"
+	GuestAFirstOutcomeChangedToAnswerFirst GuestAFirstOutcome = "changed_to_answer_first"
+	GuestAFirstOutcomeStayedAnswerFirst    GuestAFirstOutcome = "stayed_answer_first"
 )
 
 // AnswerTransitionEvidence is the finite encrypted-state antecedent for

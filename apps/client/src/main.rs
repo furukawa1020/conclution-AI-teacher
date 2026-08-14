@@ -1106,6 +1106,11 @@ mod cloud {
         callback: Closure<dyn FnMut(web_sys::Event)>,
     }
 
+    pub(super) struct SilenceReceiptListener {
+        window: web_sys::Window,
+        callback: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
     pub(super) struct VoiceStartLatencyListener {
         window: web_sys::Window,
         callback: Closure<dyn FnMut(web_sys::Event)>,
@@ -1153,6 +1158,15 @@ mod cloud {
         fn drop(&mut self) {
             let _ = self.window.remove_event_listener_with_callback(
                 "kotae:voice-input-confirmed",
+                self.callback.as_ref().unchecked_ref(),
+            );
+        }
+    }
+
+    impl Drop for SilenceReceiptListener {
+        fn drop(&mut self) {
+            let _ = self.window.remove_event_listener_with_callback(
+                "kotae:silence-receipt",
                 self.callback.as_ref().unchecked_ref(),
             );
         }
@@ -1619,6 +1633,42 @@ mod cloud {
             window,
             callback,
         }))
+    }
+
+    pub fn install_silence_receipt_listener(
+        mut visible: Signal<bool>,
+    ) -> Option<Rc<SilenceReceiptListener>> {
+        let window = web_sys::window()?;
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            let event_value = event.as_ref();
+            let Ok(detail) = js_sys::Reflect::get(event_value, &JsValue::from_str("detail")) else {
+                return;
+            };
+            let Some(detail_object) = detail.dyn_ref::<js_sys::Object>() else {
+                return;
+            };
+            let keys = js_sys::Object::keys(detail_object);
+            let Ok(outcome) = js_sys::Reflect::get(&detail, &JsValue::from_str("outcome")) else {
+                return;
+            };
+            let Ok(version) = js_sys::Reflect::get(&detail, &JsValue::from_str("version")) else {
+                return;
+            };
+            if keys.length() == 2 && version.as_f64() == Some(1.0) {
+                match outcome.as_string().as_deref() {
+                    Some("ai_waited_for_answer") => visible.set(true),
+                    Some("none") => visible.set(false),
+                    _ => {}
+                }
+            }
+        });
+        window
+            .add_event_listener_with_callback(
+                "kotae:silence-receipt",
+                callback.as_ref().unchecked_ref(),
+            )
+            .ok()?;
+        Some(Rc::new(SilenceReceiptListener { window, callback }))
     }
 
     pub fn install_voice_start_latency_listener(
@@ -2450,6 +2500,10 @@ mod cloud {
     }
 
     pub fn install_guest_voice_comparison_ready_listener(_ready: Signal<bool>) -> Option<Listener> {
+        None
+    }
+
+    pub fn install_silence_receipt_listener(_visible: Signal<bool>) -> Option<Listener> {
         None
     }
 
@@ -3923,6 +3977,7 @@ fn App() -> Element {
     let mut guest_sprint_active = use_signal(|| false);
     let mut guest_voice_comparison_opt_in = use_signal(|| false);
     let mut guest_voice_comparison_ready = use_signal(|| false);
+    let silence_receipt_visible = use_signal(|| false);
     let mut coach_state = use_signal(|| CoachState::NONE);
     let mut needs_paper = use_signal(|| false);
     let mut research_status = use_signal(|| ResearchStatus::None);
@@ -3969,6 +4024,8 @@ fn App() -> Element {
     let _guest_voice_comparison_ready_listener = use_hook(|| {
         cloud::install_guest_voice_comparison_ready_listener(guest_voice_comparison_ready)
     });
+    let _silence_receipt_listener =
+        use_hook(|| cloud::install_silence_receipt_listener(silence_receipt_visible));
     let _voice_start_latency_listener =
         use_hook(|| cloud::install_voice_start_latency_listener(voice_start_latency));
     let _voice_start_slo_listener =
@@ -4262,6 +4319,17 @@ fn App() -> Element {
                                     {latency.status()}
                                 }
                             }
+                        }
+                    }
+                    if *silence_receipt_visible.read() {
+                        section {
+                            class: "silence-receipt",
+                            role: "status",
+                            aria_live: "polite",
+                            aria_atomic: "true",
+                            p { class: "silence-receipt__eyebrow", "今回の沈黙レシート" }
+                            strong { "AIより先に、あなたの答えが出ました" }
+                            p { "AIは答えやヒントを先回りせず、この一言を待ちました。速さや上達の点数ではありません。" }
                         }
                     }
                     if coach_snapshot.shows_answer_ownership_receipt() {

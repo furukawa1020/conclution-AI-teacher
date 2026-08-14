@@ -43,6 +43,7 @@ import {
   CONFIRMED_SPEECH_PCM_LIMITS,
   createInterruptVadState,
   createGuestVoiceComparison,
+  createSilenceReceiptGate,
   createVoiceLiveClientTransport,
   createVoiceLiveServerProtocol,
   createVoiceStreamParser,
@@ -696,6 +697,35 @@ let guestModeActive = false;
 let guestVoiceComparisonRequested = false;
 const guestVoiceComparison = createGuestVoiceComparison();
 let guestVoiceComparisonPlayback;
+const silenceReceiptGate = createSilenceReceiptGate();
+
+function silenceReceiptGeneration(epoch = sessionEpoch) {
+  return epoch + 1;
+}
+
+function dispatchSilenceReceipt(outcome) {
+  if (outcome !== "none" && outcome !== "ai_waited_for_answer") return;
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:silence-receipt", {
+      detail: Object.freeze({ outcome, version: 1 }),
+    }),
+  );
+}
+
+function finalizeSilenceReceiptResult(result, expectedEpoch, fallback) {
+  const outcome = silenceReceiptGate.authorize({
+    answerProof: result?.answerProof,
+    coachAction: result?.coachAction,
+    coachPhase: result?.coachPhase,
+    fallback,
+    interrupted: result?.interrupted === true,
+    ownerGeneration: silenceReceiptGeneration(expectedEpoch),
+  });
+  if (outcome === "ai_waited_for_answer") {
+    dispatchSilenceReceipt(outcome);
+  }
+  return result;
+}
 
 function guestComparisonGeneration(epoch = sessionEpoch) {
   return epoch + 1;
@@ -2485,6 +2515,15 @@ async function beginTurn(
     dispatchVoiceStartLatency(null);
 
     const expectedEpoch = sessionEpoch;
+    if (typeof dispatchSilenceReceipt === "function") {
+      dispatchSilenceReceipt("none");
+    }
+    if (typeof silenceReceiptGate !== "undefined") {
+      silenceReceiptGate.arm(
+        silenceReceiptGeneration(expectedEpoch),
+        activePlayback === undefined,
+      );
+    }
     if (
       guestModeActive &&
       guestVoiceComparisonRequested &&
@@ -3664,6 +3703,16 @@ async function startVoiceLiveSession({
           generation: captureGeneration,
           sequence: captureExpectedSequence,
         });
+        if (
+          typeof silenceReceiptGate !== "undefined" &&
+          !silenceReceiptGate.observe(
+            silenceReceiptGeneration(expectedEpoch),
+            event.data.contextFrame,
+          )
+        ) {
+          // Receipt eligibility is independent from the already validated
+          // voice transport. A clock fault hides the receipt, not the turn.
+        }
         acceptCaptureFrame(frame);
         captureExpectedSequence += 1;
         captureNode.port.postMessage(
@@ -6277,9 +6326,12 @@ async function finishTurn(
           interrupted: playback.interrupted,
           streamedAudio: completed.streamedAudio,
         });
-        return typeof finalizeGuestVoiceComparisonResult === "function"
+        const compared = typeof finalizeGuestVoiceComparisonResult === "function"
           ? finalizeGuestVoiceComparisonResult(finished, expectedEpoch)
           : finished;
+        return typeof finalizeSilenceReceiptResult === "function"
+          ? finalizeSilenceReceiptResult(compared, expectedEpoch, false)
+          : compared;
       } catch (error) {
         if (
           turnTimedOut ||
@@ -6443,10 +6495,16 @@ async function finishTurn(
       interrupted: playback.interrupted,
       streamedAudio: completed.streamedAudio,
     });
-    return typeof finalizeGuestVoiceComparisonResult === "function"
+    const compared = typeof finalizeGuestVoiceComparisonResult === "function"
       ? finalizeGuestVoiceComparisonResult(finished, expectedEpoch)
       : finished;
+    return typeof finalizeSilenceReceiptResult === "function"
+      ? finalizeSilenceReceiptResult(compared, expectedEpoch, true)
+      : compared;
   } catch (error) {
+    if (typeof silenceReceiptGate !== "undefined") {
+      silenceReceiptGate.clear();
+    }
     if (
       typeof guestVoiceComparisonRequested !== "undefined" &&
       guestVoiceComparisonRequested
@@ -6536,6 +6594,12 @@ function stopSession(reason = "request_cancelled") {
   documentEpoch += 1;
   finishGate.reset();
   sessionExpiryWatchdog.disarm();
+  if (typeof silenceReceiptGate !== "undefined") {
+    silenceReceiptGate.clear();
+  }
+  if (typeof dispatchSilenceReceipt === "function") {
+    dispatchSilenceReceipt("none");
+  }
   if (typeof guestVoiceComparisonRequested !== "undefined") {
     guestVoiceComparisonRequested = false;
   }
@@ -6625,6 +6689,9 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 globalThis.addEventListener("pagehide", () => {
+  if (typeof silenceReceiptGate !== "undefined") {
+    silenceReceiptGate.clear();
+  }
   guestVoiceComparisonRequested = false;
   guestVoiceComparison.clear();
   stopGuestVoiceComparisonPlayback();

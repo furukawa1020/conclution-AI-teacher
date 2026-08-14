@@ -112,6 +112,103 @@ export const GUEST_VOICE_COMPARISON_LIMITS = Object.freeze({
   totalBytes: 2 * 50 * VOICE_LIVE_LIMITS.inputFrameBytes,
 });
 
+export const SILENCE_RECEIPT_OUTCOMES = Object.freeze({
+  none: "none",
+  waited: "ai_waited_for_answer",
+});
+
+// This gate never stores PCM, text, timestamps, or a duration. AudioContext's
+// integer sample clock is used only to reject a duplicated or reversing capture
+// boundary. The server's existing answer proof remains the independent turn
+// boundary shared by HTTP, streaming HTTP, and WebSocket.
+export function createSilenceReceiptGate() {
+  let generation;
+  let lastContextFrame;
+  let observedFrames = 0;
+  let state = "disabled";
+
+  function clear() {
+    generation = undefined;
+    lastContextFrame = undefined;
+    observedFrames = 0;
+    state = "disabled";
+  }
+
+  return Object.freeze({
+    arm(ownerGeneration, cleanFloor) {
+      clear();
+      if (
+        !Number.isSafeInteger(ownerGeneration) ||
+        ownerGeneration <= 0 ||
+        cleanFloor !== true
+      ) {
+        return false;
+      }
+      generation = ownerGeneration;
+      state = "armed";
+      return true;
+    },
+    clear,
+    observe(ownerGeneration, contextFrame) {
+      if (
+        state !== "armed" ||
+        ownerGeneration !== generation ||
+        !Number.isSafeInteger(contextFrame) ||
+        contextFrame < 0 ||
+        (lastContextFrame !== undefined &&
+          (contextFrame <= lastContextFrame ||
+            contextFrame - lastContextFrame > 1_920))
+      ) {
+        clear();
+        return false;
+      }
+      lastContextFrame = contextFrame;
+      observedFrames += 1;
+      return true;
+    },
+    authorize(input) {
+      const keys = input && typeof input === "object"
+        ? Object.keys(input).sort()
+        : [];
+      const expectedKeys = [
+        "answerProof",
+        "coachAction",
+        "coachPhase",
+        "fallback",
+        "interrupted",
+        "ownerGeneration",
+      ];
+      const exact =
+        keys.length === expectedKeys.length &&
+        keys.every((key, index) => key === expectedKeys[index]);
+      const {
+        answerProof,
+        coachAction,
+        coachPhase,
+        fallback,
+        interrupted,
+        ownerGeneration,
+      } = exact ? input : {};
+      const valid =
+        state === "armed" &&
+        ownerGeneration === generation &&
+        observedFrames > 0 &&
+        answerProof === "question_bound_input_answer_first" &&
+        coachPhase === "complete" &&
+        coachAction === "complete" &&
+        fallback === false &&
+        interrupted === false;
+      clear();
+      return valid
+        ? SILENCE_RECEIPT_OUTCOMES.waited
+        : SILENCE_RECEIPT_OUTCOMES.none;
+    },
+    snapshot() {
+      return Object.freeze({ observedFrames, state });
+    },
+  });
+}
+
 const INTERRUPT_FRAME_GUARD_VOICED = 1 << 0;
 const INTERRUPT_FRAME_VOICED = 1 << 1;
 const INTERRUPT_FRAME_FOREGROUND_VOICED = 1 << 2;

@@ -37,6 +37,7 @@ const REQUIRED_ARTIFACTS = Object.freeze([
   "index.html",
   "bootstrap.js",
   "firebase-bridge.js",
+  "guest-a-first-slo-policy.mjs",
   "passkey-policy.mjs",
   "temporal-vad-clock.mjs",
   "pcm-capture-worklet.js",
@@ -594,6 +595,7 @@ function validateBrowserResult(result) {
     "wasmModuleCloned",
     "directWasmGenerationIsolation",
     "intentionalFastLaneValidated",
+    "guestAFirstSprintSloValidated",
     "guestQuietOnsetValidated",
     "temporalVadClockValidated",
     "preConfirmFrames",
@@ -617,6 +619,7 @@ function validateBrowserResult(result) {
     result.wasmModuleCloned !== true ||
     result.directWasmGenerationIsolation !== true ||
     result.intentionalFastLaneValidated !== true ||
+    result.guestAFirstSprintSloValidated !== true ||
     result.guestQuietOnsetValidated !== true ||
     result.temporalVadClockValidated !== true ||
     result.preConfirmFrames !== 0 ||
@@ -821,6 +824,7 @@ async function main() {
       directWasmGenerationIsolation:
         result.directWasmGenerationIsolation,
       intentionalFastLaneValidated: result.intentionalFastLaneValidated,
+      guestAFirstSprintSloValidated: result.guestAFirstSprintSloValidated,
       guestQuietOnsetValidated: result.guestQuietOnsetValidated,
       temporalVadClockValidated: result.temporalVadClockValidated,
       wrappedFrames: result.wrappedFrames,

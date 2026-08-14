@@ -356,7 +356,7 @@ function Assert-BrowserAudioGate {
     $resultProperties = @($result.PSObject.Properties.Name | Sort-Object)
     if (
         ($resultProperties -join ",") -cne
-            "directWasmGenerationIsolation,freshGenerationFrames,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
+            "directWasmGenerationIsolation,freshGenerationFrames,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,provenance,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
         $result.status -cne "passed" -or
         $result.provenance -cne "release" -or
         $result.sourceCommit -cne $ExpectedGitCommit -or
@@ -366,6 +366,7 @@ function Assert-BrowserAudioGate {
         [bool] $result.directWasmGenerationIsolation -ne $true -or
         [bool] $result.intentionalFastLaneValidated -ne $true -or
         [bool] $result.guestQuietOnsetValidated -ne $true -or
+        [bool] $result.guestAFirstSprintSloValidated -ne $true -or
         [bool] $result.temporalVadClockValidated -ne $true -or
         [int] $result.wrappedFrames -ne 5 -or
         [int] $result.freshGenerationFrames -ne 3 -or
@@ -665,6 +666,7 @@ function Assert-HostingArtifact {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "guest-a-first-slo-policy.mjs",
         "passkey-policy.mjs",
         "temporal-vad-clock.mjs",
         "pcm-capture-worklet.js",
@@ -738,6 +740,7 @@ function Assert-HostingArtifact {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "guest-a-first-slo-policy.mjs",
                 "passkey-policy.mjs",
                 "temporal-vad-clock.mjs",
                 "pcm-capture-worklet.js",
@@ -810,6 +813,9 @@ function Assert-HostingArtifact {
     }
     if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice stream policy module."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./guest-a-first-slo-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited guest A-first SLO policy module."
     }
     if ($bridge -notmatch [regex]::Escape('from "./passkey-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited passkey policy module."

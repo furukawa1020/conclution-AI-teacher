@@ -1,3 +1,8 @@
+import {
+  createGuestAFirstSprintSlo,
+  validateGuestAFirstSloBatch,
+} from "/guest-a-first-slo-policy.mjs";
+
 const RESULT_KEY = "__KOTAE_BROWSER_AUDIO_RESULT__";
 const FRAME_BYTES = 640;
 const SAMPLE_RATE_HZ = 48_000;
@@ -93,6 +98,83 @@ function validateIntentionalFastLane(pcmRingModule) {
   invariant(
     durations[Math.floor(durations.length * 0.95)] <= 0.2,
     "intentional_wasm_p95_exceeded",
+  );
+  return true;
+}
+
+function guestAFirstObservation({
+  aiOutputBeforeAnswer = false,
+  listeningAt = 1_000,
+  responseAt = 11_000,
+  transitionProof = "question_bound_input_clause_later_to_first",
+} = {}) {
+  const slo = createGuestAFirstSprintSlo();
+  invariant(slo.begin(0), "guest_a_first_begin_rejected");
+  invariant(slo.markListening(listeningAt), "guest_a_first_listening_rejected");
+  invariant(slo.markQuestionEnded(10_000), "guest_a_first_question_end_rejected");
+  invariant(slo.markResponseStarted(responseAt), "guest_a_first_response_rejected");
+  return slo.finish(30_000, {
+    aiOutputBeforeAnswer,
+    answerProof: "question_bound_input_answer_first",
+    coachAction: "complete",
+    coachPhase: "complete",
+    guestAFirstOutcome: "changed_to_answer_first",
+    transitionProof,
+  });
+}
+
+function validateGuestAFirstSprintSlo() {
+  currentPhase = "guest_a_first_slo";
+  const observations = Array.from({ length: 100 }, (_, index) =>
+    guestAFirstObservation({
+      listeningAt: index < 95 ? 1_000 : 1_001,
+      responseAt: index < 95 ? 11_000 : 11_001,
+    }),
+  );
+  invariant(
+    validateGuestAFirstSloBatch(observations),
+    "guest_a_first_p95_boundary_invalid",
+  );
+
+  const substitution = guestAFirstObservation({ aiOutputBeforeAnswer: true });
+  invariant(
+    substitution.aiSubstitution === "detected" &&
+      substitution.counterexample === "rejected",
+    "guest_a_first_substitution_accepted",
+  );
+  invariant(
+    !validateGuestAFirstSloBatch([
+      substitution,
+      ...observations.slice(1),
+    ]),
+    "guest_a_first_substitution_batch_accepted",
+  );
+
+  const wrongTransition = guestAFirstObservation({
+    transitionProof: "question_bound_input_clause_first_to_later",
+  });
+  invariant(
+    wrongTransition.completion === "not_verified" &&
+      wrongTransition.counterexample === "rejected",
+    "guest_a_first_wrong_transition_accepted",
+  );
+
+  const missingAnswer = createGuestAFirstSprintSlo();
+  invariant(missingAnswer.begin(0), "guest_a_first_negative_begin_rejected");
+  invariant(missingAnswer.markListening(500), "guest_a_first_negative_listen_rejected");
+  invariant(missingAnswer.markQuestionEnded(10_000), "guest_a_first_negative_end_rejected");
+  invariant(missingAnswer.markResponseStarted(10_500), "guest_a_first_negative_response_rejected");
+  const rejected = missingAnswer.finish(20_000, {
+    aiOutputBeforeAnswer: false,
+    answerProof: "none",
+    coachAction: "complete",
+    coachPhase: "complete",
+    guestAFirstOutcome: "changed_to_answer_first",
+    transitionProof: "question_bound_input_clause_later_to_first",
+  });
+  invariant(
+    rejected.counterexample === "rejected",
+    "guest_a_first_no_answer_accepted",
   );
   return true;
 }
@@ -545,6 +627,7 @@ async function run() {
   const intentionalFastLaneValidated =
     validateIntentionalFastLane(pcmRingModule);
   const rustGuestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
+  const guestAFirstSprintSloValidated = validateGuestAFirstSprintSlo();
 
   currentPhase = "wrapped";
   const wrapState = await runWrappedRingScenario(pcmRingModule);
@@ -572,6 +655,7 @@ async function run() {
     wasmModuleCloned: true,
     directWasmGenerationIsolation: true,
     intentionalFastLaneValidated,
+    guestAFirstSprintSloValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,
     temporalVadClockValidated: true,

@@ -357,6 +357,7 @@ try {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "guest-a-first-slo-policy.mjs",
         "passkey-policy.mjs",
         "temporal-vad-clock.mjs",
         "voice-session-policy.mjs",
@@ -603,6 +604,7 @@ function decodeText(ptr, len) {
         "index.html",
         "bootstrap.js",
         "firebase-bridge.js",
+        "guest-a-first-slo-policy.mjs",
         "passkey-policy.mjs",
         "temporal-vad-clock.mjs",
         "pcm-capture-worklet.js",
@@ -651,6 +653,9 @@ function decodeText(ptr, len) {
     if ($bridge -notmatch [regex]::Escape('from "./voice-stream-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited voice stream policy module."
     }
+    if ($bridge -notmatch [regex]::Escape('from "./guest-a-first-slo-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited guest A-first SLO policy module."
+    }
     if ($bridge -notmatch [regex]::Escape('from "./passkey-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited passkey policy module."
     }
@@ -694,6 +699,7 @@ function decodeText(ptr, len) {
                 "index.html",
                 "bootstrap.js",
                 "firebase-bridge.js",
+                "guest-a-first-slo-policy.mjs",
                 "passkey-policy.mjs",
                 "temporal-vad-clock.mjs",
                 "pcm-capture-worklet.js",

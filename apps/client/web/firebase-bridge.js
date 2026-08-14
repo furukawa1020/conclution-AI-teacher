@@ -80,6 +80,7 @@ import {
   VOICE_PREPARE_SLO_RESULTS,
   VOICE_PREPARE_SLO_ROUTES,
 } from "./voice-prepare-slo-policy.mjs";
+import { createGuestAFirstSprintSlo } from "./guest-a-first-slo-policy.mjs";
 import {
   decidePasskeyAction,
   createPasskeyRegistrationRecoveryLatch,
@@ -697,6 +698,51 @@ let guestModeActive = false;
 let guestVoiceComparisonRequested = false;
 const guestVoiceComparison = createGuestVoiceComparison();
 let guestVoiceComparisonPlayback;
+const guestAFirstSprintSlo = createGuestAFirstSprintSlo();
+
+function dispatchGuestAFirstSlo(observation) {
+  if (!observation || typeof observation !== "object") return;
+  globalThis.dispatchEvent(
+    new CustomEvent("kotae:guest-a-first-slo", {
+      detail: observation,
+    }),
+  );
+}
+
+function finalizeGuestAFirstSloResult(result) {
+  if (!guestModeActive || !result || typeof result !== "object") return result;
+  if (result.coachPhase === "complete" && result.coachAction === "complete") {
+    dispatchGuestAFirstSlo(
+      guestAFirstSprintSlo.finish(performance.now(), {
+        aiOutputBeforeAnswer: result.streamedAudio === true,
+        answerProof: result.answerProof,
+        coachAction: result.coachAction,
+        coachPhase: result.coachPhase,
+        guestAFirstOutcome: result.guestAFirstOutcome,
+        transitionProof: result.answerTransitionProof,
+      }),
+    );
+  }
+  return result;
+}
+
+function markGuestAFirstQuestionEnded(at) {
+  if (
+    guestModeActive &&
+    typeof guestAFirstSprintSlo !== "undefined"
+  ) {
+    guestAFirstSprintSlo.markQuestionEnded(at);
+  }
+}
+
+function markGuestAFirstResponseStarted(at) {
+  if (
+    guestModeActive &&
+    typeof guestAFirstSprintSlo !== "undefined"
+  ) {
+    guestAFirstSprintSlo.markResponseStarted(at);
+  }
+}
 const silenceReceiptGate = createSilenceReceiptGate();
 
 function silenceReceiptGeneration(epoch = sessionEpoch) {
@@ -1312,6 +1358,9 @@ async function secureCredentials(interactive = false) {
 async function startGuestMode() {
   if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
     fail("guest_start_failed");
+  }
+  if (typeof guestAFirstSprintSlo !== "undefined") {
+    guestAFirstSprintSlo.begin(performance.now());
   }
   const { appCheck } = await appServices();
   const { auth } = await firebaseAuth();
@@ -2589,6 +2638,9 @@ async function beginTurn(
           coachActive,
         );
         activeRecording = recording;
+        if (guestModeActive && typeof guestAFirstSprintSlo !== "undefined") {
+          guestAFirstSprintSlo.markListening(performance.now());
+        }
         if (prepareGeneration !== undefined) {
           completeCurrentVoicePrepareSlo(
             prepareGeneration,
@@ -6105,6 +6157,9 @@ async function finishTurn(
   function disarmVoiceStartDeadline(audibleAt) {
     if (Number.isFinite(audibleAt)) {
       liveSession?.publishFirstAudible(audibleAt);
+      if (typeof markGuestAFirstResponseStarted === "function") {
+        markGuestAFirstResponseStarted(audibleAt);
+      }
     }
     voiceStartDeadlineActive = false;
     if (voiceStartDeadlineTimer !== undefined) {
@@ -6281,6 +6336,9 @@ async function finishTurn(
       if (expectedEpoch !== sessionEpoch) {
         fail(stoppedSessionCode(expectedEpoch));
       }
+      if (typeof markGuestAFirstQuestionEnded === "function") {
+        markGuestAFirstQuestionEnded(recording.lastVoiceAt);
+      }
       playback = createStreamingPlayback(
         expectedEpoch,
         liveSession.nativeAudio === true,
@@ -6329,9 +6387,12 @@ async function finishTurn(
         const compared = typeof finalizeGuestVoiceComparisonResult === "function"
           ? finalizeGuestVoiceComparisonResult(finished, expectedEpoch)
           : finished;
-        return typeof finalizeSilenceReceiptResult === "function"
+        const receipted = typeof finalizeSilenceReceiptResult === "function"
           ? finalizeSilenceReceiptResult(compared, expectedEpoch, false)
           : compared;
+        return typeof finalizeGuestAFirstSloResult === "function"
+          ? finalizeGuestAFirstSloResult(receipted)
+          : receipted;
       } catch (error) {
         if (
           turnTimedOut ||
@@ -6403,6 +6464,9 @@ async function finishTurn(
     }
     if (expectedEpoch !== sessionEpoch) {
       fail(stoppedSessionCode(expectedEpoch));
+    }
+    if (typeof markGuestAFirstQuestionEnded === "function") {
+      markGuestAFirstQuestionEnded(recording.lastVoiceAt);
     }
     playback = createStreamingPlayback(
       expectedEpoch,
@@ -6498,9 +6562,12 @@ async function finishTurn(
     const compared = typeof finalizeGuestVoiceComparisonResult === "function"
       ? finalizeGuestVoiceComparisonResult(finished, expectedEpoch)
       : finished;
-    return typeof finalizeSilenceReceiptResult === "function"
+    const receipted = typeof finalizeSilenceReceiptResult === "function"
       ? finalizeSilenceReceiptResult(compared, expectedEpoch, true)
       : compared;
+    return typeof finalizeGuestAFirstSloResult === "function"
+      ? finalizeGuestAFirstSloResult(receipted)
+      : receipted;
   } catch (error) {
     if (typeof silenceReceiptGate !== "undefined") {
       silenceReceiptGate.clear();
@@ -6596,6 +6663,9 @@ function stopSession(reason = "request_cancelled") {
   sessionExpiryWatchdog.disarm();
   if (typeof silenceReceiptGate !== "undefined") {
     silenceReceiptGate.clear();
+  }
+  if (typeof guestAFirstSprintSlo !== "undefined") {
+    guestAFirstSprintSlo.clear();
   }
   if (typeof dispatchSilenceReceipt === "function") {
     dispatchSilenceReceipt("none");

@@ -17,7 +17,7 @@ import (
 func TestNewCloudServiceRejectsNonConversationModelBeforeClientInitialization(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"", "short", "latest_short", "latest_long", "chirp_3"} {
+	for _, model := range []string{"", "short", "latest_short", "latest_long", "long"} {
 		model := model
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()
@@ -109,19 +109,19 @@ func TestRecognizedTextHandlesEmptyResponse(t *testing.T) {
 	}
 }
 
-func TestTranscribeUsesOnlyConfiguredLongModel(t *testing.T) {
+func TestTranscribeUsesOnlyConfiguredChirp3Model(t *testing.T) {
 	t.Parallel()
 
 	var calls int
 	service := &CloudService{
-		speechModel: "long",
+		speechModel: "chirp_3",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			if request.Config.Model != "long" {
-				t.Fatalf("model = %q; want long", request.Config.Model)
+			if request.Config.Model != "chirp_3" {
+				t.Fatalf("model = %q; want chirp_3", request.Config.Model)
 			}
 			if len(request.Config.LanguageCodes) != 1 ||
 				request.Config.LanguageCodes[0] != "ja-JP" {
@@ -133,6 +133,11 @@ func TestTranscribeUsesOnlyConfiguredLongModel(t *testing.T) {
 			if request.Config.Features == nil ||
 				!request.Config.Features.EnableAutomaticPunctuation {
 				t.Fatal("automatic punctuation is not enabled")
+			}
+			if request.Config.Features.MaxAlternatives != 1 ||
+				request.Config.Features.EnableWordConfidence ||
+				request.Config.Features.EnableWordTimeOffsets {
+				t.Fatalf("reviewed features = %+v", request.Config.Features)
 			}
 			return recognizedResponse("研究テーマについて相談したいです", 0.98), nil
 		},
@@ -160,14 +165,14 @@ func TestTranscribeReturnsProviderErrorWithoutRetry(t *testing.T) {
 
 	var calls int
 	service := &CloudService{
-		speechModel: "long",
+		speechModel: "chirp_3",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			if request.Config.Model != "long" {
-				t.Fatalf("model = %q; want long", request.Config.Model)
+			if request.Config.Model != "chirp_3" {
+				t.Fatalf("model = %q; want chirp_3", request.Config.Model)
 			}
 			return nil, status.Error(
 				codes.PermissionDenied,
@@ -194,7 +199,7 @@ func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 
 	var calls int
 	service := &CloudService{
-		speechModel: "long",
+		speechModel: "chirp_3",
 		recognizeCall: func(
 			_ context.Context,
 			_ *speechpb.RecognizeRequest,
@@ -216,7 +221,7 @@ func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 func TestTranscribeRejectsNonConversationModelBeforeProviderCall(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"", "short", "latest_short", "latest_long", "chirp_3"} {
+	for _, model := range []string{"", "short", "latest_short", "latest_long", "long"} {
 		model := model
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()

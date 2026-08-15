@@ -19,7 +19,7 @@ const (
 	defaultFastModel              = "vertexai/gemini-3.6-flash"
 	defaultPrecisionModel         = "vertexai/gemini-3.1-pro-preview"
 	defaultSpeechLocation         = "asia-northeast1"
-	defaultSpeechModel            = "long"
+	defaultSpeechModel            = "chirp_3"
 	defaultSpeechVoice            = "ja-JP-Chirp3-HD-Kore"
 	defaultNativeAudioLocation    = "us-central1"
 	defaultNativeAudioModel       = "gemini-live-2.5-flash-native-audio"

@@ -10,12 +10,14 @@ const MAXIMUM_CAPACITY = 10_500;
 const PCM_RING_FRAME_BYTES = 640;
 const RING_PUSH_INVALID = 0;
 const RING_SHIFT_INVALID = -2;
+const RING_QUIET_COMPENSATION_INVALID = 0;
 
 function hasRingContract(value) {
   return Boolean(
     value &&
       typeof value.capacity === "function" &&
       typeof value.clear === "function" &&
+      typeof value.compensateQuietFrame === "function" &&
       typeof value.count === "function" &&
       typeof value.free === "function" &&
       typeof value.generation === "function" &&
@@ -35,15 +37,21 @@ function verifyGenerationIsolation(ring, generation) {
   destination.fill(0x3c);
   try {
     const stalePush = ring.push(staleGeneration, 0, probe);
+    const staleCompensation = ring.compensateQuietFrame(
+      staleGeneration,
+      probe,
+    );
     const staleCount = ring.count(staleGeneration);
     const staleShift = ring.shiftInto(staleGeneration, destination);
     const staleClear = ring.clear(staleGeneration);
     if (
       stalePush !== RING_PUSH_INVALID ||
+      staleCompensation !== RING_QUIET_COMPENSATION_INVALID ||
       staleCount !== -1 ||
       staleShift !== RING_SHIFT_INVALID ||
       staleClear !== false ||
       destination.some((byte) => byte !== 0x3c) ||
+      probe.some((byte) => byte !== 0xa5) ||
       ring.count(generation) !== 0
     ) {
       try {

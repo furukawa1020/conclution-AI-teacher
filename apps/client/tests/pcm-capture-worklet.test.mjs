@@ -69,6 +69,37 @@ class TestPcmRing {
     this.freed = true;
   }
 
+  compensateQuietFrame(generation, pcm) {
+    if (
+      generation !== this.ownerGeneration ||
+      !(pcm instanceof Uint8Array) ||
+      pcm.byteLength !== 640
+    ) {
+      return 0;
+    }
+    const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+    let peak = 0;
+    let sumSquares = 0;
+    for (let offset = 0; offset < 640; offset += 2) {
+      const sample = view.getInt16(offset, true) / 32_768;
+      peak = Math.max(peak, Math.abs(sample));
+      sumSquares += sample * sample;
+    }
+    const rms = Math.sqrt(sumSquares / 320);
+    if (rms < 0.0015 || rms >= 0.055 || peak >= 0.82) return 1;
+    const gain = Math.min(3.25, 0.82 / peak);
+    for (let offset = 0; offset < 640; offset += 2) {
+      view.setInt16(
+        offset,
+        Math.max(-32_768, Math.min(32_767, Math.round(
+          view.getInt16(offset, true) * gain,
+        ))),
+        true,
+      );
+    }
+    return 2;
+  }
+
   push(generation, contextFrame, pcm) {
     if (
       generation !== this.ownerGeneration ||

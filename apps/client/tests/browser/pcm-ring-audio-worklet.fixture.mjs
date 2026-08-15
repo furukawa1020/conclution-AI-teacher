@@ -68,6 +68,24 @@ function maximumAbsolutePcm16(buffer) {
   return maximum;
 }
 
+function spectralProjectionPcm16(buffer, frequencyHz) {
+  const view = new DataView(buffer);
+  let projection = 0;
+  for (let offset = 0; offset < buffer.byteLength; offset += 2) {
+    const sampleIndex = offset / 2;
+    projection +=
+      view.getInt16(offset, true) *
+      Math.sin(2 * Math.PI * frequencyHz * sampleIndex / 16_000);
+  }
+  return Math.abs(projection);
+}
+
+function highToLowSpectralRatio(buffer) {
+  const low = spectralProjectionPcm16(buffer, 250);
+  const high = spectralProjectionPcm16(buffer, 4_000);
+  return low > 0 ? high / low : 0;
+}
+
 function validateIntentionalFastLane(pcmRingModule) {
   currentPhase = "intentional_fast_lane";
   const imports = Object.create(null);
@@ -241,6 +259,8 @@ function createCollector(node, generation) {
               : -1,
           contextFrame: message?.contextFrame,
           maximum,
+          spectralRatio:
+            validEnvelope ? highToLowSpectralRatio(message.pcm) : 0,
           sequence: message?.sequence,
           validEnvelope,
         }),
@@ -293,6 +313,33 @@ function startSignal(context, node, initialValue, nextValue, switchAfterMs) {
   return Object.freeze({ source, startedAt });
 }
 
+function startWhisperSignal(context, node) {
+  const startedAt = context.currentTime + 0.03;
+  const branches = [250, 4_000].map((frequency) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.frequency.value = frequency;
+    gain.gain.value = 0.012;
+    oscillator.connect(gain).connect(node);
+    oscillator.start(startedAt);
+    return Object.freeze({ gain, oscillator });
+  });
+  return Object.freeze({
+    source: Object.freeze({
+      stop() {
+        branches.forEach(({ oscillator }) => oscillator.stop());
+      },
+      disconnect() {
+        branches.forEach(({ gain, oscillator }) => {
+          oscillator.disconnect();
+          gain.disconnect();
+        });
+      },
+    }),
+    startedAt,
+  });
+}
+
 function startImmediateSignal(context, node, value) {
   const source = context.createConstantSource();
   const startedAt = context.currentTime;
@@ -334,11 +381,12 @@ function postConfirm(
 }
 
 async function runQuietGainScenario(pcmRingModule) {
+  const baseline = await runWhisperBaselineScenario(pcmRingModule);
   const { context } = await createOfflineHarness(pcmRingModule, 0.45);
   const generation = 606;
   const node = createNode(context, pcmRingModule, generation, 3, 10);
   const state = createCollector(node, generation);
-  const signal = startSignal(context, node, 0.002, Number.NaN, 0);
+  const signal = startWhisperSignal(context, node);
   const pause = context.suspend(signal.startedAt + 0.18);
   const rendering = context.startRendering();
   await pause;
@@ -350,7 +398,12 @@ async function runQuietGainScenario(pcmRingModule) {
   );
   invariant(state.processorError === false, "quiet_gain_processor_error");
   invariant(
-    state.frames.every((frame) => frame.maximum >= 190 && frame.maximum <= 264),
+    state.frames.every(
+      (frame) =>
+        frame.maximum > 500 &&
+        frame.maximum <= 26_870 &&
+        frame.spectralRatio > baseline * 1.1,
+    ),
     "quiet_gain_bounds_invalid",
   );
   const fallback = {
@@ -393,6 +446,7 @@ async function runQuietGainScenario(pcmRingModule) {
         message.pcm.byteLength === message.frameCount * FRAME_BYTES;
       fallback.frames.push({
         maximum: valid ? maximumAbsolutePcm16(message.pcm) : -1,
+        spectralRatio: valid ? highToLowSpectralRatio(message.pcm) : 0,
         valid,
       });
       if (message?.pcm instanceof ArrayBuffer) {
@@ -427,7 +481,10 @@ async function runQuietGainScenario(pcmRingModule) {
   invariant(
     fallback.frames.every(
       (frame) =>
-        frame.valid && frame.maximum >= 190 && frame.maximum <= 264,
+        frame.valid &&
+        frame.maximum > 500 &&
+        frame.maximum <= 26_870 &&
+        frame.spectralRatio > baseline * 1.1,
     ),
     "quiet_fallback_gain_bytes_invalid",
   );
@@ -435,6 +492,37 @@ async function runQuietGainScenario(pcmRingModule) {
   await rendering;
   stopSignal(signal, node);
   return true;
+}
+
+async function runWhisperBaselineScenario(pcmRingModule) {
+  const { context } = await createOfflineHarness(pcmRingModule, 0.32);
+  const generation = 605;
+  const node = createNode(context, pcmRingModule, generation, 3, 10);
+  const state = createCollector(node, generation);
+  const signal = startWhisperSignal(context, node);
+  const pause = context.suspend(signal.startedAt + 0.18);
+  const rendering = context.startRendering();
+  await pause;
+  postConfirm(node, generation, 3, 3, 0, false);
+  await waitFor(
+    () => state.processorError || state.frames.length >= 3,
+    "quiet_baseline_frames_timeout",
+  );
+  invariant(state.processorError === false, "quiet_baseline_processor_error");
+  invariant(
+    state.frames.every(
+      (frame) => frame.validEnvelope && frame.spectralRatio > 0,
+    ),
+    "quiet_baseline_invalid",
+  );
+  const ratio = state.frames
+    .map((frame) => frame.spectralRatio)
+    .reduce((sum, value) => sum + value, 0) / state.frames.length;
+  postStop(node, generation);
+  await context.resume();
+  await rendering;
+  stopSignal(signal, node);
+  return ratio;
 }
 
 function postStop(node, generation) {
@@ -735,6 +823,7 @@ async function run() {
     guestAFirstSprintSloValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,
+    quietSpectralCompensationValidated: quietGainValidated,
     temporalVadClockValidated: true,
     preConfirmFrames: 0,
     wrappedFrames: wrapState.frames.length,

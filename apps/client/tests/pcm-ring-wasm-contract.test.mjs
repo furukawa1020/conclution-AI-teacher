@@ -40,6 +40,10 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(rust, /inner: Option<PcmRing>/u);
   assert.match(rust, /self\.slots\.iter_mut\(\)\.for_each\(Slot::wipe\)/u);
   assert.match(rust, /context_frame <= previous/u);
+  assert.match(rust, /pub fn compensate_quiet_frame/u);
+  assert.match(rust, /const QUIET_PRE_EMPHASIS: f64 = 0\.28/u);
+  assert.match(rust, /const DC_BLOCK_POLE: f64 = 0\.995/u);
+  assert.match(rust, /filtered\.zeroize\(\)/u);
   assert.doesNotMatch(rust, /Vec<Option<Entry>>|Box<\[u8; FRAME_BYTES\]>/u);
   assert.doesNotMatch(rust, /JsValue::from_str|Result<WasmPcmRing/u);
 
@@ -51,6 +55,7 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(runtime, /export function createPcmRing/u);
   assert.match(runtime, /verifyGenerationIsolation\(ring, generation\)/u);
   assert.match(runtime, /ring\.push\(staleGeneration, 0, probe\)/u);
+  assert.match(runtime, /ring\.compensateQuietFrame\([\s\S]*staleGeneration/u);
   assert.match(runtime, /ring\.clear\(generation\)/u);
 
   assert.match(
@@ -60,6 +65,11 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(worklet, /pcmRingModule/u);
   assert.match(worklet, /this\.preConfirmRing = createPcmRing/u);
   assert.match(worklet, /this\.confirmedQueue = createPcmRing/u);
+  assert.match(
+    worklet,
+    /this\.confirmedQueue\.compensateQuietFrame\([\s\S]*new Uint8Array\(entry\.pcm\)/u,
+  );
+  assert.doesNotMatch(worklet, /QUIET_GAIN_TARGET_RMS|sample \* applied/u);
   assert.match(worklet, /this\.releaseRings\(\)/u);
   assert.match(worklet, /completed\.byteLength !== 0/u);
   assert.match(worklet, /this\.postError\("capture_invalid"\)/u);

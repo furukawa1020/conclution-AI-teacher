@@ -15,12 +15,7 @@ const CONTROL_VERSION = 1;
 const RING_PUSH_INSERTED = 1;
 const RING_PUSH_INSERTED_AFTER_EVICTION = 2;
 const RING_PUSH_FULL = 3;
-const QUIET_GAIN_TARGET_RMS = 0.055;
-const QUIET_GAIN_MAXIMUM = 4;
-const QUIET_GAIN_PEAK_CEILING = 0.82;
-const QUIET_GAIN_MINIMUM_RMS = 0.0015;
-const QUIET_GAIN_ATTACK = 0.75;
-const QUIET_GAIN_RELEASE = 0.2;
+const QUIET_COMPENSATION_INVALID = 0;
 
 function isPositiveSafeInteger(value, maximum) {
   return (
@@ -146,7 +141,6 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.sequence = 0;
     this.confirmedCutoffContextFrame = undefined;
     this.quietGainCandidateContextFrame = undefined;
-    this.quietGain = 1;
     this.quietGainEnabled = false;
 
     this.state = "preconfirm";
@@ -211,7 +205,6 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.zeroizePartialFrame(false);
     this.credit = 0;
     this.quietGainCandidateContextFrame = undefined;
-    this.quietGain = 1;
     this.quietGainEnabled = false;
   }
 
@@ -386,49 +379,14 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     if (!(entry.pcm instanceof ArrayBuffer) || entry.pcm.byteLength !== FRAME_BYTES) {
       return false;
     }
-    const view = new DataView(entry.pcm);
-    let peak = 0;
-    let sumSquares = 0;
-    for (let offset = 0; offset < FRAME_BYTES; offset += 2) {
-      const sample = view.getInt16(offset, true) / 32_768;
-      const magnitude = Math.abs(sample);
-      peak = Math.max(peak, magnitude);
-      sumSquares += sample * sample;
+    try {
+      return this.confirmedQueue.compensateQuietFrame(
+        this.generation,
+        new Uint8Array(entry.pcm),
+      ) !== QUIET_COMPENSATION_INVALID;
+    } catch {
+      return false;
     }
-    const rms = Math.sqrt(sumSquares / FRAME_SAMPLES);
-    if (!Number.isFinite(rms) || !Number.isFinite(peak)) return false;
-    if (rms < QUIET_GAIN_MINIMUM_RMS || peak === 0) return true;
-    if (rms >= QUIET_GAIN_TARGET_RMS || peak >= QUIET_GAIN_PEAK_CEILING) {
-      this.quietGain = 1;
-      return true;
-    }
-
-    const target = Math.max(
-      1,
-      Math.min(
-        QUIET_GAIN_MAXIMUM,
-        QUIET_GAIN_TARGET_RMS / rms,
-        QUIET_GAIN_PEAK_CEILING / peak,
-      ),
-    );
-    const smoothing = target > this.quietGain
-      ? QUIET_GAIN_ATTACK
-      : QUIET_GAIN_RELEASE;
-    this.quietGain += (target - this.quietGain) * smoothing;
-    const applied = Math.max(
-      1,
-      Math.min(this.quietGain, QUIET_GAIN_PEAK_CEILING / peak),
-    );
-    if (!Number.isFinite(applied) || applied > QUIET_GAIN_MAXIMUM) return false;
-    for (let offset = 0; offset < FRAME_BYTES; offset += 2) {
-      const sample = view.getInt16(offset, true);
-      const amplified = Math.max(
-        -32_768,
-        Math.min(32_767, Math.round(sample * applied)),
-      );
-      view.setInt16(offset, amplified, true);
-    }
-    return true;
   }
 
   shiftRing(ring) {
@@ -607,7 +565,6 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.credit = control.initialCredit;
     this.quietGainCandidateContextFrame = control.candidateContextFrame;
     this.quietGainEnabled = control.quietConfirmed;
-    this.quietGain = 1;
     if (control.quietConfirmed) {
       try {
         this.fallbackRing = createPcmRing(

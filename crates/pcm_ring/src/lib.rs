@@ -7,7 +7,9 @@
 use zeroize::Zeroize;
 
 pub const FRAME_BYTES: usize = 640;
-pub const MAXIMUM_CAPACITY: usize = 200;
+/// Three minutes and thirty seconds of 20 ms PCM frames. This is the hard
+/// browser voice-turn ceiling; callers may choose a smaller queue.
+pub const MAXIMUM_CAPACITY: usize = 10_500;
 #[cfg(any(test, target_arch = "wasm32"))]
 const MAXIMUM_SAFE_JS_INTEGER: f64 = 9_007_199_254_740_991.0;
 

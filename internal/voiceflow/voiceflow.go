@@ -1481,10 +1481,25 @@ func (p *Pipeline) prepareTurn(
 			)
 	}
 	transcriptionStarted := time.Now()
-	transcript, confidence, err := p.speech.Transcribe(
-		transcriptionCtx,
-		input.Audio,
-	)
+	var transcript string
+	var confidence float32
+	var err error
+	if input.MIMEType == "audio/l16" {
+		explicitPCM, ok := p.speech.(speechio.ExplicitPCM16Transcriber)
+		if !ok {
+			err = errors.New("explicit PCM transcriber is unavailable")
+		} else {
+			transcript, confidence, err = explicitPCM.TranscribePCM16(
+				transcriptionCtx,
+				input.Audio,
+			)
+		}
+	} else {
+		transcript, confidence, err = p.speech.Transcribe(
+			transcriptionCtx,
+			input.Audio,
+		)
+	}
 	transcriptionContextErr := transcriptionCtx.Err()
 	cancelTranscription()
 	if transcriptionContextErr != nil && ctx.Err() == nil {

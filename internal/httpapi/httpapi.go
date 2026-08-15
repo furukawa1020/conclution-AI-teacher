@@ -30,6 +30,10 @@ import (
 
 const (
 	maxAudioBytes = 2 * 1024 * 1024
+	// 10,500 x 20 ms x 640 bytes is the reviewed three-minute-thirty-second
+	// browser PCM owner. This larger ceiling applies only to explicit raw PCM;
+	// compressed uploads and generated response audio retain maxAudioBytes.
+	maxRawPCM16Bytes = 10_500 * 640
 	// maxDocumentBytes remains only as the historical request-envelope ceiling
 	// asserted by package tests. Runtime document fields are rejected before
 	// this or any other decoder is consulted.
@@ -757,8 +761,13 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	default:
 		return VoiceTurnInput{}, errors.New("invalid turn mode")
 	}
-	audio, err := decodeBoundedBase64(request.AudioBase64, maxAudioBytes)
-	if err != nil || len(audio) == 0 {
+	audioMaximum := maxAudioBytes
+	if mimeType == "audio/l16" {
+		audioMaximum = maxRawPCM16Bytes
+	}
+	audio, err := decodeBoundedBase64(request.AudioBase64, audioMaximum)
+	if err != nil || len(audio) == 0 ||
+		(mimeType == "audio/l16" && len(audio)%2 != 0) {
 		clear(audio)
 		return VoiceTurnInput{}, errors.New("invalid audio")
 	}
@@ -796,7 +805,7 @@ func normalizedAudioMIME(value string) string {
 		return ""
 	}
 	switch strings.ToLower(mediaType) {
-	case "audio/webm", "audio/ogg", "audio/mp4", "audio/wav", "audio/x-wav":
+	case "audio/webm", "audio/ogg", "audio/mp4", "audio/wav", "audio/x-wav", "audio/l16":
 		return strings.ToLower(mediaType)
 	default:
 		return ""

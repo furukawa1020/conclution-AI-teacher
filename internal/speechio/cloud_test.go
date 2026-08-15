@@ -160,6 +160,43 @@ func TestTranscribeUsesOnlyConfiguredChirp3Model(t *testing.T) {
 	}
 }
 
+func TestTranscribePCM16UsesExplicitJapaneseChirp3Contract(t *testing.T) {
+	t.Parallel()
+	stream := &fakeStreamingRecognizeClient{recv: []streamingRecognizeReceive{
+		{response: &speechpb.StreamingRecognizeResponse{
+			Results: []*speechpb.StreamingRecognitionResult{
+				streamingTestResult("小さな声", true, 0, 0.91),
+			},
+		}},
+	}}
+	service := streamingTestService(stream, "chirp_3")
+	audio := make([]byte, maxStreamingPCMBytes+640)
+	text, confidence, err := service.TranscribePCM16(
+		context.Background(),
+		audio,
+	)
+	if err != nil || text != "小さな声" || confidence != 0.91 {
+		t.Fatalf("result=(%q,%f,%v)", text, confidence, err)
+	}
+	if len(stream.sent) != 3 ||
+		len(stream.sent[1].GetAudio()) != maxStreamingPCMBytes ||
+		len(stream.sent[2].GetAudio()) != 640 || stream.closeCalls != 1 {
+		t.Fatalf(
+			"stream requests=%d first=%d second=%d closes=%d",
+			len(stream.sent),
+			len(stream.sent[1].GetAudio()),
+			len(stream.sent[2].GetAudio()),
+			stream.closeCalls,
+		)
+	}
+	if _, _, err := service.TranscribePCM16(
+		context.Background(),
+		[]byte{1},
+	); !errors.Is(err, ErrNoSpeech) {
+		t.Fatalf("odd PCM error = %v", err)
+	}
+}
+
 func TestTranscribeReturnsProviderErrorWithoutRetry(t *testing.T) {
 	t.Parallel()
 

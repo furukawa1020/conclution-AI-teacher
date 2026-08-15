@@ -133,6 +133,11 @@ const passkeyRegistrationRecovery = createPasskeyRegistrationRecoveryLatch(
 
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
+const QUIET_HTTP_PCM_FRAME_BYTES = 640;
+const QUIET_HTTP_PCM_MAX_FRAMES = 10_500;
+const QUIET_HTTP_PCM_MAX_BYTES =
+  QUIET_HTTP_PCM_FRAME_BYTES * QUIET_HTTP_PCM_MAX_FRAMES;
+const QUIET_HTTP_FALLBACK_TIMEOUT_MS = 5_000;
 const RESPONSE_AUDIO_MAX_BASE64_CHARS = 4 * Math.ceil(AUDIO_MAX_BYTES / 3);
 const SESSION_STATE_MAX_CHARS =
   VOICE_LIVE_LIMITS.maximumSessionStateCharacters;
@@ -2624,6 +2629,7 @@ async function beginTurn(
           liveSession?.cancel(new Error(stopCode));
           fail(stopCode);
         }
+        const liveReady = liveSession?.isLiveReady() === true;
         // Listening starts here: strong Native ready has succeeded, or the
         // bounded preparation attempt has already selected HTTP fallback.
         setStreamTracksEnabled(stream, true);
@@ -2644,10 +2650,10 @@ async function beginTurn(
         if (prepareGeneration !== undefined) {
           completeCurrentVoicePrepareSlo(
             prepareGeneration,
-            liveSession
+            liveReady
               ? VOICE_PREPARE_SLO_RESULTS.READY
               : VOICE_PREPARE_SLO_RESULTS.FALLBACK,
-            liveSession
+            liveReady
               ? VOICE_PREPARE_SLO_ROUTES.NATIVE_READY
               : VOICE_PREPARE_SLO_ROUTES.HTTP_FALLBACK,
           );
@@ -3194,6 +3200,49 @@ function liveCredential(value) {
   );
 }
 
+function buildQuietPcmPayload(chunks, totalFrames) {
+  if (
+    !Array.isArray(chunks) ||
+    !Number.isSafeInteger(totalFrames) ||
+    totalFrames <= 0 ||
+    totalFrames > QUIET_HTTP_PCM_MAX_FRAMES
+  ) {
+    throw new Error("voice_api_unavailable");
+  }
+  const pcmBytes = totalFrames * QUIET_HTTP_PCM_FRAME_BYTES;
+  if (pcmBytes > QUIET_HTTP_PCM_MAX_BYTES) {
+    throw new Error("voice_turn_too_large");
+  }
+  const pcm = new ArrayBuffer(pcmBytes);
+  const bytes = new Uint8Array(pcm);
+  let offset = 0;
+  try {
+    for (const chunk of chunks) {
+      if (
+        !(chunk instanceof ArrayBuffer) ||
+        chunk.byteLength === 0 ||
+        chunk.byteLength % QUIET_HTTP_PCM_FRAME_BYTES !== 0 ||
+        offset + chunk.byteLength > pcm.byteLength
+      ) {
+        throw new Error("voice_api_unavailable");
+      }
+      bytes.set(new Uint8Array(chunk), offset);
+      offset += chunk.byteLength;
+    }
+    if (offset !== pcm.byteLength) throw new Error("voice_api_unavailable");
+    return pcm;
+  } catch (error) {
+    bytes.fill(0);
+    throw error;
+  } finally {
+    for (const chunk of chunks) {
+      if (chunk instanceof ArrayBuffer && chunk.byteLength > 0) {
+        new Uint8Array(chunk).fill(0);
+      }
+    }
+  }
+}
+
 async function startVoiceLiveSession({
   appCheckToken,
   captureHandoff,
@@ -3396,10 +3445,7 @@ async function startVoiceLiveSession({
     }
     fail(stoppedSessionCode(expectedEpoch));
   }
-  if (preflightError) {
-    detachPreflight();
-    return undefined;
-  }
+  const fallbackOnly = preflightError !== undefined;
 
   let captureNode;
   let captureSource;
@@ -3445,6 +3491,7 @@ async function startVoiceLiveSession({
 
   let adoptedCapture;
   let captureStopped = false;
+  let captureSealed = false;
   let captureCutoffContextFrame;
   let captureExpectedSequence = 0;
   let captureSealReject;
@@ -3462,6 +3509,7 @@ async function startVoiceLiveSession({
   let speechEndedAt;
   let speechEndToEstimatedAudibleMs;
   let speechConfirmed = captureHandoff !== undefined;
+  let quietHttpFallbackEligible = false;
   let commitSent = false;
   let nativeFallbackAllowed = false;
   let nativeFallbackRequiresStatefulHTTP = false;
@@ -3476,7 +3524,7 @@ async function startVoiceLiveSession({
   let resolveReady;
   let resolveResult;
   let resultSettled = false;
-  let state = preflightState;
+  let state = fallbackOnly ? "fallback-ready" : preflightState;
   let guestComparisonTurnFinished = false;
   let guestComparisonTurnSerial = 0;
   let wsOpenMs =
@@ -3523,8 +3571,10 @@ async function startVoiceLiveSession({
 
   function stopCapture(
     error = new Error("request_cancelled"),
+    preserveQuietFallback = false,
   ) {
-    if (captureStopped) return;
+    if (captureStopped || (preserveQuietFallback && captureSealed &&
+      quietHttpFallbackEligible && captureNode)) return;
     captureStopped = true;
     if (guestComparisonTurnSerial > 0 && !guestComparisonTurnFinished) {
       guestVoiceComparison.clear();
@@ -3606,26 +3656,107 @@ async function startVoiceLiveSession({
     } finally {
       settleCaptureSeal();
     }
-    captureStopped = true;
+    captureSealed = true;
     if (guestComparisonTurnSerial > 0) {
       guestComparisonTurnFinished = guestVoiceComparison.finishTurn(
         guestComparisonGeneration(expectedEpoch),
         guestComparisonTurnSerial,
       );
     }
-    captureNode.port.onmessage = discardCaptureMessage;
+    if (!quietHttpFallbackEligible) {
+      stopCapture();
+    }
+  }
+
+  async function takeQuietHttpFallback() {
+    if (
+      captureStopped ||
+      !captureSealed ||
+      !quietHttpFallbackEligible ||
+      !captureNode ||
+      !Number.isSafeInteger(captureGeneration)
+    ) {
+      return undefined;
+    }
+    const chunks = [];
+    let expectedSequence = 0;
+    let receivedFrames = 0;
+    let timer;
+    const result = new Promise((resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("voice_api_unavailable")),
+        QUIET_HTTP_FALLBACK_TIMEOUT_MS,
+      );
+      captureNode.port.onmessage = (event) => {
+        const message = event?.data;
+        try {
+          if (message?.type === "fallback-frame") {
+            if (
+              Reflect.ownKeys(message).length !== 6 ||
+              message.version !== 1 ||
+              message.generation !== captureGeneration ||
+              message.sequence !== expectedSequence ||
+              !Number.isSafeInteger(message.frameCount) ||
+              message.frameCount <= 0 ||
+              message.frameCount > 50 ||
+              !(message.pcm instanceof ArrayBuffer) ||
+              message.pcm.byteLength !==
+                message.frameCount * QUIET_HTTP_PCM_FRAME_BYTES ||
+              receivedFrames + message.frameCount >
+                QUIET_HTTP_PCM_MAX_FRAMES
+            ) {
+              throw new Error("voice_api_unavailable");
+            }
+            chunks.push(message.pcm);
+            receivedFrames += message.frameCount;
+            expectedSequence += 1;
+            return;
+          }
+          if (
+            message?.type !== "fallback-sealed" ||
+            Reflect.ownKeys(message).length !== 5 ||
+            message.version !== 1 ||
+            message.generation !== captureGeneration ||
+            message.lastSequence !== expectedSequence - 1 ||
+            message.totalFrames !== receivedFrames ||
+            receivedFrames <= 0
+          ) {
+            throw new Error("voice_api_unavailable");
+          }
+          resolve(buildQuietPcmPayload(chunks, receivedFrames));
+        } catch (error) {
+          zeroizeCaptureFrame(message?.pcm);
+          reject(error);
+        }
+      };
+      try {
+        captureNode.port.postMessage(Object.freeze({
+          generation: captureGeneration,
+          type: "take-fallback",
+          version: 1,
+        }));
+      } catch {
+        reject(new Error("voice_api_unavailable"));
+      }
+    });
     try {
-      captureNode.port.postMessage(
-        Object.freeze({
+      return await result;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      for (const chunk of chunks) zeroizeCaptureFrame(chunk);
+      captureStopped = true;
+      captureNode.port.onmessage = discardCaptureMessage;
+      try {
+        captureNode.port.postMessage(Object.freeze({
           generation: captureGeneration,
           type: "stop",
           version: 1,
-        }),
-      );
-    } catch {
-      // The sealed worklet may already have ended.
+        }));
+      } catch {
+        // The take operation already consumes or wipes the Rust owner.
+      }
+      captureNode.disconnect();
     }
-    captureNode.disconnect();
   }
 
   function emitLatency(bargeHaltMs = 0) {
@@ -3704,13 +3835,30 @@ async function startVoiceLiveSession({
     }
     state = "failed";
     clientTransport.close();
-    stopCapture(error);
+    stopCapture(
+      error,
+      nativeFallbackAllowed && quietHttpFallbackEligible && captureSealed,
+    );
     if (session?.playback) {
       haltStreamingPlayback(session.playback, error);
     }
     settleReady(error);
     settleResult(error);
     closeSocket(4002, "voice_live_failed");
+  }
+
+  function selectPreparationFallback() {
+    if (
+      state !== "connecting" &&
+      state !== "awaiting-ready"
+    ) {
+      return false;
+    }
+    clientTransport.close();
+    state = "fallback-ready";
+    closeSocket(1000, "http_fallback");
+    settleReady();
+    return true;
   }
 
   function acceptCaptureFrame(frame) {
@@ -3728,6 +3876,10 @@ async function startVoiceLiveSession({
     if (!speechConfirmed) {
       zeroizeCaptureFrame(frame);
       failLive(new Error("voice_api_unavailable"));
+      return;
+    }
+    if (state === "fallback-ready") {
+      zeroizeCaptureFrame(frame);
       return;
     }
     if (guestComparisonTurnSerial > 0) {
@@ -3803,7 +3955,8 @@ async function startVoiceLiveSession({
     if (
       expectedEpoch !== sessionEpoch ||
       state === "failed" ||
-      state === "cancelled"
+      state === "cancelled" ||
+      state === "fallback-ready"
     ) {
       return;
     }
@@ -4022,6 +4175,12 @@ async function startVoiceLiveSession({
           session.playback.finalReceived === false,
       );
     },
+    isLiveReady() {
+      return state !== "fallback-ready";
+    },
+    takeHttpFallback() {
+      return takeQuietHttpFallback();
+    },
     handoffAmbient({
       candidateStartedAt,
       captureHandoff: nextCapture,
@@ -4148,9 +4307,14 @@ async function startVoiceLiveSession({
         return false;
       }
       speechConfirmed = true;
+      quietHttpFallbackEligible = quietConfirmed;
       return true;
     },
     async commit(playback, lastVoiceAt) {
+      if (state === "fallback-ready") {
+        await sealCapture();
+        throw new Error("voice_api_unavailable");
+      }
       if (state !== "ready") {
         await readyPromise;
       }
@@ -4200,6 +4364,7 @@ async function startVoiceLiveSession({
 
       const result = await resultPromise;
       const snapshot = protocol.snapshot();
+      stopCapture();
       return finalizeMeaningfulVoiceStream(
         playback,
         result,
@@ -4257,6 +4422,11 @@ async function startVoiceLiveSession({
       { once: true },
     );
   }
+  if (fallbackOnly) {
+    detachPreflight();
+    captureSource.connect(captureNode);
+    return session;
+  }
   socket.addEventListener("message", acceptSocketMessage);
   const acceptSocketOpen = () => {
     socketOpenedAt ??= performance.now();
@@ -4273,7 +4443,7 @@ async function startVoiceLiveSession({
         (socketOpenedAt ?? performance.now()) - liveStartedAt;
       state = "awaiting-ready";
     } catch {
-      failLive(new Error("voice_api_unavailable"));
+      selectPreparationFallback();
     }
   };
   socket.addEventListener(
@@ -4296,7 +4466,12 @@ async function startVoiceLiveSession({
         settleResult(undefined, finalResult);
         return;
       }
-      if (state !== "failed" && state !== "cancelled") {
+      if (
+        state !== "failed" &&
+        state !== "cancelled" &&
+        state !== "fallback-ready" &&
+        !selectPreparationFallback()
+      ) {
         failLive(new Error("voice_api_unavailable"));
       }
     },
@@ -4304,7 +4479,14 @@ async function startVoiceLiveSession({
   );
   socket.addEventListener(
     "error",
-    () => failLive(new Error("voice_api_unavailable")),
+    () => {
+      if (
+        state !== "fallback-ready" &&
+        !selectPreparationFallback()
+      ) {
+        failLive(new Error("voice_api_unavailable"));
+      }
+    },
     { once: true },
   );
   // Keep the preflight listeners attached until the complete session listener
@@ -4313,7 +4495,11 @@ async function startVoiceLiveSession({
   // makes that frame impossible to lose.
   detachPreflight();
   authReadyTimer = setTimeout(
-    () => failLive(new Error("voice_api_unavailable")),
+    () => {
+      if (!selectPreparationFallback()) {
+        failLive(new Error("voice_api_unavailable"));
+      }
+    },
     Math.max(
       0,
       VOICE_LIVE_LIMITS.readyTimeoutMs -
@@ -4359,7 +4545,7 @@ async function startVoiceLiveSession({
   }
   if (
     expectedEpoch !== sessionEpoch ||
-    state !== "ready" ||
+    (state !== "ready" && state !== "fallback-ready") ||
     !audioContext ||
     audioContext.state === "closed"
   ) {
@@ -6134,6 +6320,9 @@ async function finishTurn(
   }
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
+  let quietHttpAudioBuffer;
+  let httpAudioMimeType;
+  let usesQuietHttpPcm = false;
   let capture;
   let documentForTurn;
   let liveSession;
@@ -6409,6 +6598,7 @@ async function finishTurn(
         coachActive =
           coachActive ||
           liveSession.requiresStatefulHTTPFallback();
+        quietHttpAudioBuffer = await liveSession.takeHttpFallback();
         liveSession.cancel(
           error instanceof Error
             ? error
@@ -6434,23 +6624,34 @@ async function finishTurn(
     if (!capture.hasSpeech) {
       fail("no_speech");
     }
-    if (capture.blob.size > AUDIO_MAX_BYTES) {
+    if (!quietHttpAudioBuffer && capture.blob.size > AUDIO_MAX_BYTES) {
       fail("voice_turn_too_large");
     }
-    if (capture.fallbackAudioComplete !== true) {
+    if (!quietHttpAudioBuffer && capture.fallbackAudioComplete !== true) {
       // Never upload an empty suffix or prefix after the bounded recorder
       // fallback was invalidated. The live primary already had its chance to
       // finish above; a failed primary now ends explicitly.
       fail("voice_turn_too_large");
     }
+    usesQuietHttpPcm = quietHttpAudioBuffer instanceof ArrayBuffer;
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
       Promise.all([
-        capture.blob.arrayBuffer(),
+        quietHttpAudioBuffer
+          ? Promise.resolve(quietHttpAudioBuffer)
+          : capture.blob.arrayBuffer(),
         secureCredentials(),
       ]),
       () => rejectRecording(recording, "voice_turn_timeout"),
     );
-    audioBase64 = arrayBufferToBase64(audioBuffer);
+    try {
+      audioBase64 = arrayBufferToBase64(audioBuffer);
+    } finally {
+      new Uint8Array(audioBuffer).fill(0);
+      quietHttpAudioBuffer = undefined;
+    }
+    httpAudioMimeType = usesQuietHttpPcm
+      ? "audio/l16"
+      : capture.mimeType;
     const { appCheckToken, idToken } = credentials;
     if (expectedEpoch !== sessionEpoch) {
       fail(stoppedSessionCode(expectedEpoch));
@@ -6483,7 +6684,7 @@ async function finishTurn(
 
     const payload = {
       audioBase64,
-      mimeType: capture.mimeType,
+      mimeType: httpAudioMimeType,
       sessionState: serializedSessionState,
       strictCloudMinimization,
       turnMode,

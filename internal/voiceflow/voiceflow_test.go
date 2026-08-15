@@ -22,6 +22,30 @@ type fakeSpeech struct {
 	synthesizedText string
 }
 
+type explicitPCMSpeech struct {
+	fakeSpeech
+	compressedCalls int
+	pcmCalls        int
+	pcm             []byte
+}
+
+func (s *explicitPCMSpeech) Transcribe(
+	_ context.Context,
+	_ []byte,
+) (string, float32, error) {
+	s.compressedCalls++
+	return "", 0, errors.New("compressed transcription must not run")
+}
+
+func (s *explicitPCMSpeech) TranscribePCM16(
+	_ context.Context,
+	pcm []byte,
+) (string, float32, error) {
+	s.pcmCalls++
+	s.pcm = append([]byte(nil), pcm...)
+	return s.transcript, s.confidence, s.transcribeErr
+}
+
 func assertRuntimeDocumentRejected(
 	t *testing.T,
 	result httpapi.VoiceTurnResult,
@@ -164,6 +188,34 @@ func (s *fakeSpeech) Synthesize(_ context.Context, text string) ([]byte, string,
 		return nil, "", s.synthesizeErr
 	}
 	return []byte("speech"), "audio/mpeg", nil
+}
+
+func TestPipelineRoutesRawPCMOnlyToTheExplicit16KMonoBoundary(t *testing.T) {
+	t.Parallel()
+
+	speech := &explicitPCMSpeech{fakeSpeech: fakeSpeech{
+		transcript: "quiet speech",
+		confidence: 0.1,
+	}}
+	pipeline, err := New(speech, &fakeAgent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []byte{1, 2, 3, 4}
+	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio:    append([]byte(nil), input...),
+		MIMEType: "audio/l16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if speech.pcmCalls != 1 || speech.compressedCalls != 0 ||
+		!strings.EqualFold(string(speech.pcm), string(input)) {
+		t.Fatalf("explicit PCM routing mismatch: pcm=%d compressed=%d bytes=%v", speech.pcmCalls, speech.compressedCalls, speech.pcm)
+	}
+	if result.Route != routeClarifyLowConfidence {
+		t.Fatalf("result route = %q", result.Route)
+	}
 }
 
 type fakeAgent struct {

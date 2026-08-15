@@ -7,6 +7,10 @@ const FRAME_BYTES = FRAME_SAMPLES * 2;
 // 100 ms pre-roll. This is a hard 80 KB PCM16 ceiling, not an open-ended recorder.
 const MAXIMUM_PRE_CONFIRM_FRAMES = 125;
 const MAXIMUM_QUEUED_FRAMES = 200;
+// 10,500 x 20 ms = the existing three-minute-thirty-second turn ceiling.
+// This ring exists only for a Rust-confirmed quiet turn.
+const MAXIMUM_HTTP_FALLBACK_FRAMES = 10_500;
+const HTTP_FALLBACK_CHUNK_FRAMES = 50;
 const CONTROL_VERSION = 1;
 const RING_PUSH_INSERTED = 1;
 const RING_PUSH_INSERTED_AFTER_EVICTION = 2;
@@ -97,6 +101,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       processorOptions.maximumPreConfirmFrames;
     this.maximumQueuedFrames =
       processorOptions.maximumQueuedFrames;
+    this.pcmRingModule = processorOptions.pcmRingModule;
     this.contextFramesPerOutputFrame = sampleRate / 50;
 
     this.ratio = sampleRate / OUTPUT_SAMPLE_RATE_HZ;
@@ -126,6 +131,8 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
         false,
       );
       this.ringsReleased = false;
+      this.fallbackRing = undefined;
+      this.fallbackRingReleased = false;
     } catch (error) {
       try {
         this.preConfirmRing?.clear?.(this.generation);
@@ -196,6 +203,7 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   clearPrivateAudio() {
     this.clearPreConfirmRing();
     this.clearConfirmedQueue();
+    this.clearFallbackRing();
     zeroizeFloats(this.carry);
     this.carry = new Float32Array(0);
     this.carryContextFrame = undefined;
@@ -207,7 +215,16 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.quietGainEnabled = false;
   }
 
-  releaseRings() {
+  clearFallbackRing() {
+    if (this.fallbackRingReleased || !this.fallbackRing) return;
+    try {
+      this.fallbackRing.clear(this.generation);
+    } catch {
+      // The processor remains fail-closed even if the Wasm instance faulted.
+    }
+  }
+
+  releaseTransportRings() {
     if (this.ringsReleased) return;
     this.clearPreConfirmRing();
     this.clearConfirmedQueue();
@@ -219,6 +236,19 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
         // clear already wiped all retained frames before ownership release.
       }
     }
+  }
+
+  releaseRings() {
+    this.releaseTransportRings();
+    if (this.fallbackRingReleased) return;
+    this.clearFallbackRing();
+    this.fallbackRingReleased = true;
+    try {
+      this.fallbackRing?.free?.();
+    } catch {
+      // clear already wiped all retained fallback frames.
+    }
+    this.fallbackRing = undefined;
   }
 
   countRing(ring, maximum) {
@@ -309,7 +339,15 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       return;
     }
     let result = 0;
+    let fallbackResult = RING_PUSH_INSERTED;
     try {
+      if (this.fallbackRing) {
+        fallbackResult = this.fallbackRing.push(
+          this.generation,
+          entry.contextFrame,
+          new Uint8Array(entry.pcm),
+        );
+      }
       result = this.confirmedQueue.push(
         this.generation,
         entry.contextFrame,
@@ -320,11 +358,14 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     } finally {
       zeroizeBuffer(entry.pcm);
     }
-    if (result === RING_PUSH_FULL) {
+    if (result === RING_PUSH_FULL || fallbackResult === RING_PUSH_FULL) {
       this.failOverflow();
       return;
     }
-    if (result !== RING_PUSH_INSERTED) {
+    if (
+      result !== RING_PUSH_INSERTED ||
+      fallbackResult !== RING_PUSH_INSERTED
+    ) {
       this.failClosed();
       return;
     }
@@ -470,8 +511,13 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
       // No audio remains queued; terminal failure is already fail-closed.
     }
     this.credit = 0;
-    this.releaseRings();
-    this.state = "stopped";
+    this.releaseTransportRings();
+    if (this.fallbackRing) {
+      this.state = "sealed";
+    } else {
+      this.releaseRings();
+      this.state = "stopped";
+    }
   }
 
   completeFrame(entry) {
@@ -562,6 +608,19 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.quietGainCandidateContextFrame = control.candidateContextFrame;
     this.quietGainEnabled = control.quietConfirmed;
     this.quietGain = 1;
+    if (control.quietConfirmed) {
+      try {
+        this.fallbackRing = createPcmRing(
+          this.pcmRingModule,
+          this.generation,
+          MAXIMUM_HTTP_FALLBACK_FRAMES,
+          false,
+        );
+      } catch {
+        this.failClosed();
+        return;
+      }
+    }
     this.state = "confirmed";
 
     while (this.state === "confirmed") {
@@ -634,6 +693,94 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
     this.flushConfirmed();
   }
 
+  takeFallback(control) {
+    if (
+      this.state !== "sealed" ||
+      !this.fallbackRing ||
+      !hasExactKeys(control, ["type", "version", "generation"]) ||
+      control.type !== "take-fallback" ||
+      control.version !== CONTROL_VERSION
+    ) {
+      this.failClosed();
+      return;
+    }
+    let remaining = this.countRing(
+      this.fallbackRing,
+      MAXIMUM_HTTP_FALLBACK_FRAMES,
+    );
+    if (remaining === undefined || remaining <= 0) {
+      this.failClosed();
+      return;
+    }
+    const totalFrames = remaining;
+    let sequence = 0;
+    let lastContextFrame = -1;
+    while (remaining > 0) {
+      const frameCount = Math.min(
+        remaining,
+        HTTP_FALLBACK_CHUNK_FRAMES,
+      );
+      const pcm = new ArrayBuffer(frameCount * FRAME_BYTES);
+      let valid = true;
+      try {
+        for (let index = 0; index < frameCount; index += 1) {
+          const destination = new Uint8Array(
+            pcm,
+            index * FRAME_BYTES,
+            FRAME_BYTES,
+          );
+          const contextFrame = this.fallbackRing.shiftInto(
+            this.generation,
+            destination,
+          );
+          if (
+            !Number.isSafeInteger(contextFrame) ||
+            contextFrame <= lastContextFrame
+          ) {
+            valid = false;
+            break;
+          }
+          lastContextFrame = contextFrame;
+        }
+        if (!valid) throw new Error("fallback_shift_invalid");
+        this.port.postMessage(
+          Object.freeze({
+            type: "fallback-frame",
+            version: CONTROL_VERSION,
+            generation: this.generation,
+            sequence,
+            frameCount,
+            pcm,
+          }),
+          [pcm],
+        );
+        if (pcm.byteLength !== 0) {
+          throw new Error("fallback_transfer_failed");
+        }
+      } catch {
+        zeroizeBuffer(pcm);
+        this.failClosed();
+        return;
+      }
+      remaining -= frameCount;
+      sequence += 1;
+    }
+    try {
+      this.port.postMessage(Object.freeze({
+        type: "fallback-sealed",
+        version: CONTROL_VERSION,
+        generation: this.generation,
+        lastSequence: sequence - 1,
+        totalFrames,
+      }));
+    } catch {
+      this.failClosed();
+      return;
+    }
+    this.releaseRings();
+    this.state = "stopped";
+  }
+
   stop(control) {
     if (
       !hasExactKeys(control, [
@@ -670,6 +817,9 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
         break;
       case "seal":
         this.seal(control);
+        break;
+      case "take-fallback":
+        this.takeFallback(control);
         break;
       case "stop":
         this.stop(control);

@@ -1075,12 +1075,55 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
 
   assert.match(
     finish,
-    /Promise\.all\(\[\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
+    /Promise\.all\(\[\s*quietHttpAudioBuffer\s*\? Promise\.resolve\(quietHttpAudioBuffer\)\s*:\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
   );
   const joinedAt = finish.indexOf("Promise.all([");
   const encodeAt = finish.indexOf("arrayBufferToBase64(audioBuffer)");
   assert.ok(joinedAt >= 0);
   assert.ok(encodeAt > joinedAt);
+});
+
+test("reviewed Native failure transfers quiet Rust PCM once before cancelling", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function finishTurn(");
+  const end = bridge.indexOf("\n}\n\nfunction safeDocumentName", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const finish = bridge.slice(start, end);
+
+  const takeAt = finish.indexOf(
+    "quietHttpAudioBuffer = await liveSession.takeHttpFallback()",
+  );
+  const cancelAt = finish.indexOf("liveSession.cancel(", takeAt);
+  assert.ok(takeAt >= 0);
+  assert.ok(cancelAt > takeAt);
+  assert.match(finish, /usesQuietHttpPcm\s*=\s*quietHttpAudioBuffer instanceof ArrayBuffer/u);
+  assert.match(finish, /\? "audio\/l16"\s*:\s*capture\.mimeType/u);
+  assert.match(finish, /new Uint8Array\(audioBuffer\)\.fill\(0\)/u);
+});
+
+test("failed Native preparation keeps the quiet AudioWorklet as HTTP owner", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  const start = bridge.indexOf("async function startVoiceLiveSession(");
+  const end = bridge.indexOf("\n}\n\nfunction isNdjsonContentType", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const live = bridge.slice(start, end);
+
+  assert.match(live, /const fallbackOnly = preflightError !== undefined/u);
+  assert.match(live, /state = "fallback-ready"/u);
+  assert.match(live, /captureSource\.connect\(captureNode\);\s*return session/u);
+  assert.match(live, /if \(state === "fallback-ready"\) \{\s*await sealCapture\(\);\s*throw new Error\("voice_api_unavailable"\)/u);
+  assert.match(
+    live,
+    /state !== "fallback-ready" &&\s*!selectPreparationFallback\(\)/u,
+  );
 });
 
 test("empty capture drops authority and keeps the bounded session alive", async () => {

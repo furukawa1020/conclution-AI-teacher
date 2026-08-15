@@ -9,6 +9,9 @@ AI応答への割込み候補と、通常のlive入力が確定する前のPCM�
 - constructorが固定`Slot { occupied, context_frame, pcm: [u8; 640] }`をcapacity分だけ一度確保します。push、eviction、shiftではheap allocationしません。
 - `context_frame`は0以上のJavaScript safe integerかつ、同じring内で厳密に増加する値だけを受理します。重複・逆行はfail-closedです。
 - confirm前はPCMをmain threadやnetworkへ返しません。confirm後もcreditのあるframeだけを一つずつAudioWorkletから移します。
+- Rustが小声と確定したturnだけ、同じ補正済みframeを最大10,500 frame（3分30秒、6,720,000 byte）の専用fallback ringへ保持します。Nativeが完了すれば即時消去し、Nativeが準備不能または応答前に失敗した時だけ、generationに束縛した`take-fallback`で一度だけmain threadへ移譲します。
+- HTTP移譲はheaderなし16 kHz・mono・little-endian PCM16の`audio/l16`です。serverは圧縮形式として再推測せず、同じ明示設定のCloud Speech streamingへ15 KiB以下のchunkで渡します。これにより同期認識の短い時間上限へ3分30秒turnを誤って流しません。
+- live queueとfallback ringのどちらか一方がoverflow、clock逆行、Wasm例外、generation不一致になれば両方をzeroizeしてfail-closedになります。同じframeをNativeとHTTPへ同時送信する経路はありません。
 - eviction、cutoff discard、shift、clear、stop、overflow、fatal、seal完了、Rust `Drop`で保持slotをzeroizeします。terminal経路は`clear`してからWasm handleを一度だけ`free`します。
 - 原音、特徴量、発話本文をStorage、Firestore、log、telemetryへ保存するAPIはありません。
 
@@ -18,7 +21,7 @@ AudioWorklet内のzeroize済みmemoryを外部へ公開するtest APIは設け�
 
 main threadは同一originから25 KiB前後の専用Wasmを取得・compileし、`WebAssembly.Module`を`processorOptions`でAudioWorkletへ渡します。配布するWorkletは、監査対象のwasm-bindgen同期glue、ring runtime、capture processorをbuild時に決定論的に一つへ束ねたself-contained moduleです。AudioWorkletGlobalScopeにない`TextDecoder`や非同期loader、外部JavaScript importを含む成果物はbuildで拒否し、中間glueとruntimeは公開しません。
 
-runtime、module、ABI、control、sample clock、ring操作のどれかが不正ならJavaScript ringへfallbackせず、保持PCMを消去して一度だけ本文なしの`capture_invalid`を返します。これによりPCM handoffだけを破棄し、既存のbounded MediaRecorder fallbackと再生継続の所有権を壊しません。
+runtime、module、ABI、control、sample clock、ring操作のどれかが不正ならJavaScript ringへfallbackせず、保持PCMを消去して一度だけ本文なしの`capture_invalid`を返します。通常音声には既存のbounded MediaRecorder fallbackを残しますが、小声と確定したturnでは補正前の録音へ戻らず、Rustが保持する補正済みPCMだけをHTTPへ移譲します。
 
 ## 検証
 

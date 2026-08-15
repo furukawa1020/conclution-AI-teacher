@@ -226,7 +226,7 @@ LACの`Target Slot Coverage`、`Commitment Front Position`、`Meaning Preservati
 - 30秒の空captureと認証済みSTT no-speechはForegroundで再待受し、Intentional権限を継承しない。確定発話の送信失敗を自動再送しない
 - 通常発話は1.2秒、1.6秒以上の発話は2.2秒の間を待つ。12秒以上続いた明確な独話だけ5秒へ延ばし、短い質問の確定待ちは増やさない。約3分の連続発話を、録音開始から最大3分30秒という端末上限とserverの4分上限の内側で処理する
 - 確定文字起こしが160 rune以上の時だけ、`extended speech`を現在turnの主点反射・構成に使う。分類も本文もcross-turn stateへ残さず、3分話せることを長期的な会話能力向上の証拠とは扱わない
-- 圧縮音声fallbackが2 MiBを超えた時は全chunkを破棄し、切れた音声をuploadしない。fallbackを約3分の長時間保証として扱わない
+- 通常の圧縮音声fallbackが2 MiBを超えた時は全chunkを破棄し、切れた音声をuploadしない。Rustが小声と確定したturnだけは、補正済み16 kHz mono PCM16を3分30秒・6,720,000 byteで別に有限化し、NativeかHTTP streaming認識の一方へ一度だけ移譲する。stale generation、奇数byte、超過、重複takeはfail-closedである
 - 4分のcaptureとcommit後最大50秒の処理がGo live 6分deadline内に収まり、Cloud Run request timeoutが420秒である
 - 未認証live handshakeはinstanceごとのnon-blockingな2 slotだけへ入り、満杯時はupgrade前に429となる。`--concurrency=4`の最大1/2に抑え、受け入れ後も最初のframeを2秒で打ち切り、認証検証完了時にslotを解放する
 - 同じFirebase UIDのlive接続は、音声受信前にFirestoreの短命leaseを取得して同時に1本へ制限する。接続終了時はpipelineをcancelして終了を最大5秒待ち、終了を確認した時だけ所有者照合付きでUID leaseを解放する。終了未確認またはinstance消失時は7分TTLまで保持する

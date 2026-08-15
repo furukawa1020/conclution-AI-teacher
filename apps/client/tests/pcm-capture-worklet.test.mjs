@@ -23,7 +23,7 @@ class TestPcmRing {
     if (!Number.isSafeInteger(generation) || generation <= 0) {
       throw new Error("invalid_generation");
     }
-    if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > 200) {
+    if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > 10_500) {
       throw new Error("invalid_capacity");
     }
     this.ownerGeneration = generation;
@@ -825,4 +825,58 @@ test("seal zeroizes partial audio and posts sealed only after credited FIFO drai
   );
   assert.equal(harness.processor.state, "stopped");
   assert.equal(harness.renderFrame(), false);
+});
+
+test("quiet PCM stays in the Rust owner until one HTTP fallback transfer", () => {
+  const harness = createHarness({ maximumQueuedFrames: 8 });
+  harness.renderFrame(0.002);
+  harness.control({
+    type: "confirm",
+    version: 1,
+    generation: harness.generation,
+    candidateContextFrame: 0,
+    leadInFrames: 1,
+    initialCredit: 8,
+    quietConfirmed: true,
+  });
+  harness.renderFrame(0.002);
+  harness.control({
+    type: "seal",
+    version: 1,
+    generation: harness.generation,
+  });
+  assert.equal(harness.processor.state, "sealed");
+  assert.equal(harness.processor.fallbackRing.count(harness.generation), 2);
+
+  harness.control({
+    type: "take-fallback",
+    version: 1,
+    generation: harness.generation,
+  });
+  const fallback = harness.output.filter(
+    ({ message }) => message.type === "fallback-frame",
+  );
+  assert.equal(fallback.length, 1);
+  assert.equal(fallback[0].transferCount, 1);
+  assert.equal(fallback[0].message.frameCount, 2);
+  assert.equal(fallback[0].message.pcm.byteLength, 1_280);
+  const sample = new DataView(fallback[0].message.pcm).getInt16(640, true);
+  assert.ok(sample > Math.round(0.002 * 32_767));
+  const terminal = harness.output.at(-1).message;
+  assert.deepEqual(terminal, {
+    type: "fallback-sealed",
+    version: 1,
+    generation: harness.generation,
+    lastSequence: 0,
+    totalFrames: 2,
+  });
+  assert.equal(harness.processor.state, "stopped");
+
+  const before = harness.output.length;
+  harness.control({
+    type: "take-fallback",
+    version: 1,
+    generation: harness.generation,
+  });
+  assert.equal(harness.output.length, before);
 });

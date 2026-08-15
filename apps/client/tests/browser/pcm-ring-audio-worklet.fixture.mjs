@@ -353,7 +353,84 @@ async function runQuietGainScenario(pcmRingModule) {
     state.frames.every((frame) => frame.maximum >= 190 && frame.maximum <= 264),
     "quiet_gain_bounds_invalid",
   );
-  postStop(node, generation);
+  const fallback = {
+    frames: [],
+    sealed: false,
+    terminal: false,
+  };
+  node.port.onmessage = (event) => {
+    const message = event?.data;
+    if (message?.type === "sealed") {
+      fallback.sealed =
+        exactKeys(message, [
+          "type",
+          "version",
+          "generation",
+          "lastSequence",
+        ]) &&
+        message.version === 1 &&
+        message.generation === generation &&
+        message.lastSequence === state.frames.length - 1;
+      return;
+    }
+    if (message?.type === "fallback-frame") {
+      const valid =
+        exactKeys(message, [
+          "type",
+          "version",
+          "generation",
+          "sequence",
+          "frameCount",
+          "pcm",
+        ]) &&
+        message.version === 1 &&
+        message.generation === generation &&
+        message.sequence === fallback.frames.length &&
+        Number.isSafeInteger(message.frameCount) &&
+        message.frameCount > 0 &&
+        message.frameCount <= 50 &&
+        message.pcm instanceof ArrayBuffer &&
+        message.pcm.byteLength === message.frameCount * FRAME_BYTES;
+      fallback.frames.push({
+        maximum: valid ? maximumAbsolutePcm16(message.pcm) : -1,
+        valid,
+      });
+      if (message?.pcm instanceof ArrayBuffer) {
+        new Uint8Array(message.pcm).fill(0);
+      }
+      return;
+    }
+    if (message?.type === "fallback-sealed") {
+      fallback.terminal =
+        exactKeys(message, [
+          "type",
+          "version",
+          "generation",
+          "lastSequence",
+          "totalFrames",
+        ]) &&
+        message.version === 1 &&
+        message.generation === generation &&
+        message.lastSequence === fallback.frames.length - 1 &&
+        message.totalFrames === state.frames.length;
+    }
+  };
+  node.port.postMessage(
+    Object.freeze({ generation, type: "seal", version: 1 }),
+  );
+  await waitFor(() => fallback.sealed, "quiet_fallback_seal_timeout");
+  node.port.postMessage(
+    Object.freeze({ generation, type: "take-fallback", version: 1 }),
+  );
+  await waitFor(() => fallback.terminal, "quiet_fallback_take_timeout");
+  invariant(fallback.frames.length === 1, "quiet_fallback_chunk_count_invalid");
+  invariant(
+    fallback.frames.every(
+      (frame) =>
+        frame.valid && frame.maximum >= 190 && frame.maximum <= 264,
+    ),
+    "quiet_fallback_gain_bytes_invalid",
+  );
   await context.resume();
   await rendering;
   stopSignal(signal, node);

@@ -6,7 +6,7 @@ import {
 } from "/wasm/kotae_pcm_ring.js";
 
 let initialized = false;
-const MAXIMUM_CAPACITY = 200;
+const MAXIMUM_CAPACITY = 10_500;
 const PCM_RING_FRAME_BYTES = 640;
 const RING_PUSH_INVALID = 0;
 const RING_SHIFT_INVALID = -2;

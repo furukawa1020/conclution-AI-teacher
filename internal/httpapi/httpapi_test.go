@@ -1305,6 +1305,62 @@ func TestVoiceTurnModeIsExplicitAndIndependentOfState(t *testing.T) {
 	}
 }
 
+func TestVoiceTurnAcceptsOnlyAnExplicitRawPCMContentType(t *testing.T) {
+	t.Parallel()
+
+	input, err := decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64: "AQIDBA==",
+		MIMEType:    "audio/l16;rate=16000;channels=1",
+		TurnMode:    VoiceTurnIntentional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearVoiceInput(&input)
+	if input.MIMEType != "audio/l16" || !bytes.Equal(input.Audio, []byte{1, 2, 3, 4}) {
+		t.Fatalf("raw PCM input = %+v", input)
+	}
+}
+
+func TestVoiceTurnRawPCMHasItsExactThreeMinuteThirtySecondCeiling(t *testing.T) {
+	t.Parallel()
+
+	if maxRawPCM16Bytes != 10_500*640 {
+		t.Fatalf("raw PCM ceiling = %d", maxRawPCM16Bytes)
+	}
+	encoded := base64.StdEncoding.EncodeToString(make([]byte, maxRawPCM16Bytes))
+	input, err := decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64: encoded,
+		MIMEType:    "audio/l16",
+		TurnMode:    VoiceTurnIntentional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearVoiceInput(&input)
+
+	encoded = base64.StdEncoding.EncodeToString(make([]byte, maxRawPCM16Bytes+2))
+	input, err = decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64: encoded,
+		MIMEType:    "audio/l16",
+		TurnMode:    VoiceTurnIntentional,
+	})
+	clearVoiceInput(&input)
+	if err == nil {
+		t.Fatal("raw PCM above the exact ceiling was accepted")
+	}
+
+	input, err = decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64: "AQID",
+		MIMEType:    "audio/l16",
+		TurnMode:    VoiceTurnIntentional,
+	})
+	clearVoiceInput(&input)
+	if err == nil {
+		t.Fatal("odd raw PCM was accepted")
+	}
+}
+
 func TestVoiceStateLimitMatchesConversationAndClientBoundary(t *testing.T) {
 	t.Parallel()
 

@@ -32,7 +32,7 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   ]);
 
   assert.match(rust, /const FRAME_BYTES: usize = 640/u);
-  assert.match(rust, /const MAXIMUM_CAPACITY: usize = 200/u);
+  assert.match(rust, /const MAXIMUM_CAPACITY: usize = 10_500/u);
   assert.match(rust, /pcm: \[u8; FRAME_BYTES\]/u);
   assert.match(rust, /slots: Vec<Slot>/u);
   assert.match(rust, /generation: u64/u);
@@ -46,7 +46,7 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(runtime, /from "\/wasm\/kotae_pcm_ring\.js"/u);
   assert.match(runtime, /initSync\(\{ module \}\)/u);
   assert.match(runtime, /module instanceof WebAssembly\.Module/u);
-  assert.match(runtime, /const MAXIMUM_CAPACITY = 200/u);
+  assert.match(runtime, /const MAXIMUM_CAPACITY = 10_500/u);
   assert.match(runtime, /capacity > MAXIMUM_CAPACITY/u);
   assert.match(runtime, /export function createPcmRing/u);
   assert.match(runtime, /verifyGenerationIsolation\(ring, generation\)/u);

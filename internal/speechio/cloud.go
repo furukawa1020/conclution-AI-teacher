@@ -47,6 +47,12 @@ type Service interface {
 	Synthesize(ctx context.Context, text string) ([]byte, string, error)
 }
 
+// ExplicitPCM16Transcriber accepts only headerless 16 kHz mono little-endian
+// PCM produced by the reviewed browser AudioWorklet fallback owner.
+type ExplicitPCM16Transcriber interface {
+	TranscribePCM16(ctx context.Context, audio []byte) (string, float32, error)
+}
+
 // StreamChunkHandler consumes one raw, signed 16-bit little-endian PCM chunk.
 // The byte slice is valid only for the duration of the call. Returning an error
 // aborts synthesis.
@@ -164,6 +170,65 @@ func (s *CloudService) Transcribe(
 	}
 
 	transcript, confidence := recognizedText(response)
+	if transcript == "" {
+		return "", 0, ErrNoSpeech
+	}
+	if utf8.RuneCountInString(transcript) > maxTranscriptRunes {
+		return "", 0, ErrTranscriptLong
+	}
+	return transcript, confidence, nil
+}
+
+func (s *CloudService) TranscribePCM16(
+	ctx context.Context,
+	audio []byte,
+) (string, float32, error) {
+	if len(audio) == 0 || len(audio)%2 != 0 {
+		return "", 0, ErrNoSpeech
+	}
+	// Synchronous Recognize has a shorter duration boundary than the reviewed
+	// 3m30s browser turn, so replay the bounded owner through the same explicit
+	// 16 kHz mono streaming contract used by Native recognition.
+	session, err := s.OpenStreamingTranscription(ctx)
+	if err != nil {
+		return "", 0, fmt.Errorf("start regional explicit PCM recognition: %w", err)
+	}
+	for offset := 0; offset < len(audio); {
+		end := min(offset+maxStreamingPCMBytes, len(audio))
+		if err := session.SendPCM(audio[offset:end]); err != nil {
+			return "", 0, fmt.Errorf("send regional explicit PCM recognition: %w", err)
+		}
+		offset = end
+	}
+	if err := session.CloseSend(); err != nil {
+		return "", 0, fmt.Errorf("close regional explicit PCM recognition: %w", err)
+	}
+
+	fragments := make([]string, 0, 4)
+	confidence := float32(0)
+	confidenceObserved := false
+	for {
+		event, err := session.RecvEvent()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", 0, fmt.Errorf("receive regional explicit PCM recognition: %w", err)
+		}
+		if event.Kind != StreamingTranscriptionFinal {
+			continue
+		}
+		fragment := strings.TrimSpace(event.Text)
+		if fragment != "" {
+			fragments = append(fragments, fragment)
+		}
+		if event.Confidence > 0 &&
+			(!confidenceObserved || event.Confidence < confidence) {
+			confidence = event.Confidence
+			confidenceObserved = true
+		}
+	}
+	transcript := strings.TrimSpace(strings.Join(fragments, " "))
 	if transcript == "" {
 		return "", 0, ErrNoSpeech
 	}

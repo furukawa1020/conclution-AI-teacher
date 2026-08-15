@@ -58,7 +58,7 @@ Cloud Run kotae-api（asia-northeast1）
 
 raw audioから始まる段階経路のSTT、該当するDLP、文字列plannerのTTSは`asia-northeast1`のリージョナルAPIエンドポイントへ固定しています。回答支援の初回・継続caption handoffは2回目のSTTを使いませんが、選ばれた短い応答文には東京リージョンTTSを使い得ます。標準liveのraw audioとNative Audio応答はVertex AI `us-central1`、段階経路の文字列推論はVertex AI `global`で処理します。したがって、音声や推論対象が日本国内だけで処理されるとは保証しません。
 
-段階的な経路のSTTは`asia-northeast1`・`ja-JP`の`long`だけを使います。自然な会話の途中の短い間を文末と誤認しにくい会話向けlong-form modelを選び、端末側VADとの一致をcommit条件にしてproviderの判定だけで発話を確定しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、別modelや東京域外へ自動退避しません。
+段階的な経路のSTTは`asia-northeast1`・`ja-JP`のSpeech-to-Text V2 `chirp_3`だけを使います。小声を含む日本語の認識精度と速度を改善した現行の多言語ASRを、buffered `Recognize`とlive `StreamingRecognize`で同じモデルへ固定します。端末側Rust VADとの一致をcommit条件にしてproviderの判定だけで発話を確定せず、返されたtop hypothesis以外を合成しません。STTのIAM拒否、model利用不可、timeout、decode失敗はすべてfail-closedにし、旧`long`や東京域外へ自動退避しません。
 
 小声は励まし文を表示するだけでは認識改善と扱いません。Rust/Wasmの単一VADが240 msの変化する小声を確認した場合に限り、通常liveのAudioWorkletで候補開始以降のPCM16をASR送信直前に適応増幅します。20 ms frameごとの目標RMSは0.055、最大利得は4倍、peakは0.82を上限とし、attack 0.75 / release 0.2で急変を抑えます。無音床0.0015未満、通常声、未確認候補、割込み音声、古いgenerationには適用しません。判定前PCMを送らない固定ring、credit、zeroizationは維持し、RMS・peak・利得値をevent、log、stateへ出しません。ブラウザの`autoGainControl`は引き続き要求しますが、要求しただけで有効とは表示しません。圧縮MediaRecorderのHTTP fallbackはこのPCM変換を通らないため、適応利得の対象は通常live PCM経路です。
 

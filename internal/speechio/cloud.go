@@ -20,7 +20,7 @@ const (
 	maxSpokenReplyRunes        = 1_200
 	maxStreamingAudioChunkSize = 1 << 20
 	maxStreamingAudioTotalSize = 16 << 20
-	conversationSpeechModel    = "long"
+	conversationSpeechModel    = "chirp_3"
 
 	// StreamingAudioContentType describes the raw audio bytes returned by
 	// StreamSynthesize. The stream has no container or file header.
@@ -186,19 +186,24 @@ func (s *CloudService) recognize(
 			},
 			Model:         model,
 			LanguageCodes: []string{"ja-JP"},
-			Features: &speechpb.RecognitionFeatures{
-				EnableAutomaticPunctuation: true,
-				EnableWordConfidence:       false,
-				EnableWordTimeOffsets:      false,
-			},
+			Features:      reviewedJapaneseRecognitionFeatures(),
 		},
 		AudioSource: &speechpb.RecognizeRequest_Content{Content: audio},
 	})
 }
 
+func reviewedJapaneseRecognitionFeatures() *speechpb.RecognitionFeatures {
+	return &speechpb.RecognitionFeatures{
+		EnableAutomaticPunctuation: true,
+		EnableWordConfidence:       false,
+		EnableWordTimeOffsets:      false,
+		MaxAlternatives:            1,
+	}
+}
+
 func validateConversationSpeechModel(model string) error {
 	if model != conversationSpeechModel {
-		return errors.New("speech model is not approved for continuous conversation")
+		return errors.New("speech model is not the reviewed Japanese Chirp 3 recognizer")
 	}
 	return nil
 }

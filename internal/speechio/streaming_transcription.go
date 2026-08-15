@@ -156,12 +156,7 @@ func streamingRecognitionConfigRequest(
 					},
 					Model:         strings.TrimSpace(model),
 					LanguageCodes: []string{"ja-JP"},
-					Features: &speechpb.RecognitionFeatures{
-						EnableAutomaticPunctuation: true,
-						EnableWordConfidence:       false,
-						EnableWordTimeOffsets:      false,
-						MaxAlternatives:            1,
-					},
+					Features:      reviewedJapaneseRecognitionFeatures(),
 				},
 				StreamingFeatures: streamingFeatures,
 			},

@@ -71,6 +71,12 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   pendingDocumentLimitMs: 5 * 60_000,
 });
 
+export const QUIET_EVIDENCE_FLAGS = Object.freeze({
+  candidate: 1,
+  spectralChange: 2,
+  stationary: 4,
+});
+
 // A content-free receipt is a separate UX budget from endpointing and the
 // semantic response. It may become visible while a reflective pause is still
 // open, then disappears immediately if speech resumes. This acknowledges
@@ -877,7 +883,7 @@ export function shouldCommitHybridEndpoint({
 
 export function advanceVad(
   previous,
-  { clockFrame = null, now, peak, rms },
+  { acousticEvidence = null, clockFrame = null, now, peak, rms },
   {
     intervalMs = VOICE_SESSION_LIMITS.vadIntervalMs,
     minimumVoiceMs = VOICE_SESSION_LIMITS.minimumVoiceMs,
@@ -938,6 +944,19 @@ export function advanceVad(
   ) {
     throw new TypeError("vad_sample_invalid");
   }
+  if (
+    acousticEvidence !== null &&
+    (!isPlainRecord(acousticEvidence) ||
+      Reflect.ownKeys(acousticEvidence).length !== 2 ||
+      !Number.isSafeInteger(acousticEvidence.flags) ||
+      acousticEvidence.flags < 0 ||
+      acousticEvidence.flags > 7 ||
+      !Number.isFinite(acousticEvidence.noiseFloor) ||
+      acousticEvidence.noiseFloor < 0.002 ||
+      acousticEvidence.noiseFloor > 0.04)
+  ) {
+    throw new TypeError("vad_acoustic_evidence_invalid");
+  }
   if (previous.action !== null) return previous;
 
   let effectiveIntervalMs = intervalMs;
@@ -965,6 +984,9 @@ export function advanceVad(
     softVoiceRunMs = 0,
     voiceRunMs,
   } = previous;
+  if (acousticEvidence !== null) {
+    noiseFloor = acousticEvidence.noiseFloor;
+  }
   const elapsed = timestamp - previous.startedAt;
   if (typeof onsetFrameClassifier !== "function") {
     throw new TypeError("onset_frame_classifier_unavailable");
@@ -981,7 +1003,10 @@ export function advanceVad(
     throw new TypeError("onset_frame_classifier_result_invalid");
   }
   const soundsClear = (frameClass & 1) !== 0;
-  const soundsSoft = (frameClass & 2) !== 0;
+  const rustQuietCandidate =
+    acousticEvidence === null ||
+    (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.candidate) !== 0;
+  const soundsSoft = (frameClass & 2) !== 0 && rustQuietCandidate;
   const hasVoiceShapedPeak = rms > 0 && peak >= rms * softVoicePeakToRmsRatio;
   let sampleVoiced = soundsClear || soundsSoft;
 
@@ -1135,7 +1160,9 @@ export function advanceVad(
     ) {
       // A stationary hum can remain above the learned floor indefinitely. A
       // full probe with no envelope movement is room noise, not quiet speech.
-      noiseFloor = Math.min(0.04, Math.max(0.0025, rms));
+      if (acousticEvidence === null) {
+        noiseFloor = Math.min(0.04, Math.max(0.0025, rms));
+      }
       clearVoiceRunMs = 0;
       softVoiceCandidate = false;
       softVoiceEvidenceAt = null;
@@ -1146,10 +1173,12 @@ export function advanceVad(
       sampleVoiced = false;
     }
   } else {
-    noiseFloor = Math.min(
-      0.04,
-      Math.max(0.0025, noiseFloor * 0.94 + rms * 0.06),
-    );
+    if (acousticEvidence === null) {
+      noiseFloor = Math.min(
+        0.04,
+        Math.max(0.0025, noiseFloor * 0.94 + rms * 0.06),
+      );
+    }
     // Preserve brief gaps and unvoiced consonants without accepting an
     // isolated noise spike as speech.
     clearVoiceRunMs = Math.max(

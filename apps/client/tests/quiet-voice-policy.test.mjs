@@ -17,6 +17,34 @@ test("小声入口はRust/Wasm単一判定と240ms確認を公開する", async 
   assert.match(ui, /叫ばなくて大丈夫。小声や、ぼそっとした/u);
 });
 
+test("小声の帯域証拠はRustの二時間尺度floorからproduction VADへ入る", async () => {
+  const [core, client, policy, bridge, bootstrap] = await Promise.all([
+    readFile(new URL("../../../crates/audio_core/src/lib.rs", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.rs", import.meta.url), "utf8"),
+    readFile(new URL("../web/voice-session-policy.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../web/bootstrap.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(core, /pub struct QuietEvidenceTracker/u);
+  assert.match(core, /QUIET_EVIDENCE_BANDS_HZ/u);
+  assert.match(core, /fast_band_floor/u);
+  assert.match(core, /slow_band_floor/u);
+  assert.match(core, /freeze_until_frame/u);
+  assert.match(client, /createQuietEvidenceTracker/u);
+  assert.match(
+    bootstrap,
+    /installQuietEvidenceTrackerFactory\(createQuietEvidenceTracker\)/u,
+  );
+  assert.match(
+    bridge,
+    /quietEvidenceTracker\.advance\(\s*clockFrame,\s*pcm/u,
+  );
+  assert.match(bridge, /acousticEvidence: Object\.freeze/u);
+  assert.match(policy, /rustQuietCandidate/u);
+  assert.match(policy, /QUIET_EVIDENCE_FLAGS/u);
+  assert.doesNotMatch(bridge, /kotae:quiet.*evidence/iu);
+});
+
 test("ゲスト小声は通常入口と同じ有限proofを使い本文をイベントへ載せない", async () => {
   const [bridge, rust, fixture, deploy] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),

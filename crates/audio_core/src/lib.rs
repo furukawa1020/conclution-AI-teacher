@@ -13,8 +13,207 @@ pub const INTERRUPT_FRAME_VOICED: u8 = 1 << 1;
 pub const INTERRUPT_FRAME_FOREGROUND_VOICED: u8 = 1 << 2;
 pub const ONSET_FRAME_CLEAR: u8 = 1 << 0;
 pub const ONSET_FRAME_SOFT: u8 = 1 << 1;
+pub const QUIET_EVIDENCE_CANDIDATE: u8 = 1 << 0;
+pub const QUIET_EVIDENCE_SPECTRAL_CHANGE: u8 = 1 << 1;
+pub const QUIET_EVIDENCE_STATIONARY: u8 = 1 << 2;
 
 pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
+
+const QUIET_EVIDENCE_BANDS_HZ: [f64; 6] = [250.0, 500.0, 1_000.0, 1_800.0, 2_800.0, 4_000.0];
+const QUIET_EVIDENCE_MINIMUM_ENERGY: f64 = 1.0e-12;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuietEvidenceStep {
+    pub flags: u8,
+    pub noise_floor: f64,
+}
+
+/// Owns bounded, content-free acoustic history for normal-turn quiet speech.
+///
+/// The six fixed Goertzel bands approximate an ERB-spaced auditory front end
+/// without retaining PCM or a reconstructable spectrum. Fast and slow floors
+/// learn only outside a finite candidate/cooldown lease; changing low-SNR
+/// speech therefore cannot be absorbed into the room model that decides it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuietEvidenceTracker {
+    sample_rate_hz: u32,
+    last_frame: u64,
+    freeze_until_frame: u64,
+    fast_band_floor: [f64; 6],
+    slow_band_floor: [f64; 6],
+    previous_band_energy: [f64; 6],
+    fast_rms_floor: f64,
+    slow_rms_floor: f64,
+    initialized: bool,
+}
+
+impl QuietEvidenceTracker {
+    pub fn new(sample_rate_hz: u32, started_frame: u64) -> Result<Self, DetectorError> {
+        if !(16_000..=192_000).contains(&sample_rate_hz) {
+            return Err(DetectorError::InvalidQuietEvidenceState);
+        }
+        Ok(Self {
+            sample_rate_hz,
+            last_frame: started_frame,
+            freeze_until_frame: started_frame,
+            fast_band_floor: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
+            slow_band_floor: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
+            previous_band_energy: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
+            fast_rms_floor: 0.006,
+            slow_rms_floor: 0.006,
+            initialized: false,
+        })
+    }
+
+    pub fn advance(
+        &mut self,
+        current_frame: u64,
+        pcm: &[f32],
+    ) -> Result<QuietEvidenceStep, DetectorError> {
+        if current_frame <= self.last_frame || !(128..=4_096).contains(&pcm.len()) {
+            return Err(DetectorError::InvalidQuietEvidenceState);
+        }
+        // A suspended main thread must not manufacture dwell credit, but a
+        // short browser scheduling stall is not itself corrupt audio. The
+        // tracker consumes one observation only; elapsed-time credit remains
+        // owned by `advance_temporal_vad_clock`.
+        let maximum_delta = u64::from(self.sample_rate_hz) * 5;
+        if current_frame - self.last_frame > maximum_delta {
+            return Err(DetectorError::InvalidQuietEvidenceState);
+        }
+
+        let mut square_sum = 0.0_f64;
+        for sample in pcm {
+            if !sample.is_finite() {
+                return Err(DetectorError::NonFiniteSample);
+            }
+            let bounded = f64::from(sample.clamp(-1.0, 1.0));
+            square_sum += bounded * bounded;
+        }
+        let rms = (square_sum / pcm.len() as f64).sqrt();
+        let band_energy = quiet_band_energy(self.sample_rate_hz, pcm)?;
+
+        if !self.initialized {
+            self.fast_band_floor =
+                band_energy.map(|value| value.max(QUIET_EVIDENCE_MINIMUM_ENERGY));
+            self.slow_band_floor = self.fast_band_floor;
+            self.previous_band_energy = self.fast_band_floor;
+            self.fast_rms_floor = rms.clamp(0.002, 0.04);
+            self.slow_rms_floor = self.fast_rms_floor;
+            self.initialized = true;
+            self.last_frame = current_frame;
+            return Ok(QuietEvidenceStep {
+                flags: QUIET_EVIDENCE_STATIONARY,
+                noise_floor: self.slow_rms_floor,
+            });
+        }
+
+        let mut active_bands = 0_u8;
+        let mut positive_flux = 0.0_f64;
+        let mut speech_band_energy = 0.0_f64;
+        for (index, energy) in band_energy.iter().copied().enumerate() {
+            let floor = self.slow_band_floor[index].max(QUIET_EVIDENCE_MINIMUM_ENERGY);
+            let ratio = energy / floor;
+            if ratio >= 3.0 {
+                active_bands = active_bands.saturating_add(1);
+            }
+            let previous = self.previous_band_energy[index].max(floor);
+            positive_flux += ((energy - previous) / previous).clamp(0.0, 8.0);
+            if (1..=4).contains(&index) {
+                speech_band_energy += energy;
+            }
+        }
+        positive_flux /= band_energy.len() as f64;
+        let total_energy: f64 = band_energy.iter().sum();
+        let speech_shaped = total_energy > QUIET_EVIDENCE_MINIMUM_ENERGY
+            && speech_band_energy / total_energy >= 0.30;
+        let changed = active_bands >= 2 && positive_flux >= 0.20 && speech_shaped;
+        let lease_active =
+            current_frame <= self.freeze_until_frame && active_bands >= 2 && speech_shaped;
+        let candidate = changed || lease_active;
+        if changed {
+            let lease_frames = u64::from(self.sample_rate_hz) * 400 / 1_000;
+            self.freeze_until_frame = current_frame.saturating_add(lease_frames);
+        }
+
+        if !candidate && current_frame > self.freeze_until_frame {
+            for (index, energy) in band_energy.iter().copied().enumerate() {
+                self.fast_band_floor[index] =
+                    asymmetric_floor(self.fast_band_floor[index], energy, 0.25, 0.04);
+                self.slow_band_floor[index] = asymmetric_floor(
+                    self.slow_band_floor[index],
+                    self.fast_band_floor[index],
+                    0.02,
+                    0.005,
+                );
+            }
+            self.fast_rms_floor = asymmetric_floor(self.fast_rms_floor, rms, 0.25, 0.04);
+            self.slow_rms_floor =
+                asymmetric_floor(self.slow_rms_floor, self.fast_rms_floor, 0.02, 0.005);
+        }
+        self.previous_band_energy = band_energy;
+        self.last_frame = current_frame;
+        let mut flags = 0;
+        if candidate {
+            flags |= QUIET_EVIDENCE_CANDIDATE;
+        } else {
+            flags |= QUIET_EVIDENCE_STATIONARY;
+        }
+        if changed {
+            flags |= QUIET_EVIDENCE_SPECTRAL_CHANGE;
+        }
+        Ok(QuietEvidenceStep {
+            flags,
+            noise_floor: self.slow_rms_floor.clamp(0.002, 0.04),
+        })
+    }
+}
+
+impl Drop for QuietEvidenceTracker {
+    fn drop(&mut self) {
+        self.fast_band_floor.fill(0.0);
+        self.slow_band_floor.fill(0.0);
+        self.previous_band_energy.fill(0.0);
+        self.fast_rms_floor = 0.0;
+        self.slow_rms_floor = 0.0;
+        self.last_frame = 0;
+        self.freeze_until_frame = 0;
+        self.initialized = false;
+    }
+}
+
+fn asymmetric_floor(previous: f64, observed: f64, falling: f64, rising: f64) -> f64 {
+    let rate = if observed < previous { falling } else { rising };
+    (previous + (observed - previous) * rate).max(QUIET_EVIDENCE_MINIMUM_ENERGY)
+}
+
+fn quiet_band_energy(sample_rate_hz: u32, pcm: &[f32]) -> Result<[f64; 6], DetectorError> {
+    let mut result = [0.0_f64; 6];
+    let rate = f64::from(sample_rate_hz);
+    let normalization = (pcm.len() as f64 * pcm.len() as f64).max(1.0);
+    for (index, frequency) in QUIET_EVIDENCE_BANDS_HZ.iter().enumerate() {
+        if *frequency >= rate / 2.0 {
+            return Err(DetectorError::InvalidQuietEvidenceState);
+        }
+        let coefficient = 2.0 * (core::f64::consts::TAU * frequency / rate).cos();
+        let mut previous = 0.0_f64;
+        let mut before_previous = 0.0_f64;
+        for sample in pcm {
+            if !sample.is_finite() {
+                return Err(DetectorError::NonFiniteSample);
+            }
+            let current =
+                f64::from(sample.clamp(-1.0, 1.0)) + coefficient * previous - before_previous;
+            before_previous = previous;
+            previous = current;
+        }
+        result[index] = (previous * previous + before_previous * before_previous
+            - coefficient * previous * before_previous)
+            .max(0.0)
+            / normalization;
+    }
+    Ok(result)
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -505,6 +704,7 @@ pub enum DetectorError {
     InvalidInterruptFrameLevels,
     InvalidTemporalVadClock,
     InvalidIntentionalInterruptState,
+    InvalidQuietEvidenceState,
 }
 
 impl fmt::Display for DetectorError {
@@ -524,6 +724,9 @@ impl fmt::Display for DetectorError {
                 .write_str("temporal VAD clock must be monotonic and use a supported sample rate"),
             Self::InvalidIntentionalInterruptState => {
                 formatter.write_str("intentional interruption state must be finite and bounded")
+            }
+            Self::InvalidQuietEvidenceState => {
+                formatter.write_str("quiet evidence state must be finite, monotonic, and bounded")
             }
         }
     }
@@ -827,6 +1030,95 @@ mod tests {
         let floor =
             classify_onset_frame(0.002, 0.0024, 0.002, false, false, false).expect("room floor");
         assert_eq!(floor, 0);
+    }
+
+    #[test]
+    fn subband_tracker_separates_changing_quiet_voice_from_stationary_noise() {
+        let sample_rate = 48_000_u32;
+        let frame_samples = 1_024_usize;
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        let stationary = tone_frame(frame_samples, sample_rate, &[(1_000.0, 0.002)]);
+        let first = tracker.advance(1_920, &stationary).expect("calibrate");
+        assert_eq!(first.flags, QUIET_EVIDENCE_STATIONARY);
+        for frame in 2..=20_u64 {
+            let step = tracker
+                .advance(frame * 1_920, &stationary)
+                .expect("stationary frame");
+            assert_eq!(step.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+        }
+
+        let changing = tone_frame(
+            frame_samples,
+            sample_rate,
+            &[(500.0, 0.006), (1_800.0, 0.005), (2_800.0, 0.004)],
+        );
+        let voice = tracker.advance(21 * 1_920, &changing).expect("quiet voice");
+        assert_ne!(voice.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+        assert_ne!(voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE, 0);
+        assert!((0.002..=0.04).contains(&voice.noise_floor));
+    }
+
+    #[test]
+    fn subband_candidate_freezes_floor_and_clock_faults_fail_closed() {
+        let sample_rate = 48_000_u32;
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        let room = tone_frame(1_024, sample_rate, &[(250.0, 0.002), (500.0, 0.001)]);
+        tracker.advance(1_920, &room).expect("calibrate");
+        let voice = tone_frame(
+            1_024,
+            sample_rate,
+            &[(500.0, 0.007), (1_000.0, 0.006), (2_800.0, 0.004)],
+        );
+        let start = tracker.advance(3_840, &voice).expect("candidate");
+        let held = tracker.advance(5_760, &voice).expect("lease");
+        assert_ne!(start.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+        assert_ne!(held.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+        assert_eq!(start.noise_floor, held.noise_floor);
+        assert_eq!(
+            tracker.advance(5_760, &voice),
+            Err(DetectorError::InvalidQuietEvidenceState)
+        );
+        assert_eq!(
+            tracker.advance(300_000, &voice),
+            Err(DetectorError::InvalidQuietEvidenceState)
+        );
+    }
+
+    #[test]
+    fn stationary_h0_has_zero_quiet_accepts_in_one_hundred_thousand_frames() {
+        let sample_rate = 16_000_u32;
+        let stationary = tone_frame(
+            128,
+            sample_rate,
+            &[(250.0, 0.0015), (1_000.0, 0.001), (4_000.0, 0.0005)],
+        );
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        let mut false_accepts = 0_u32;
+        for frame in 1..=100_000_u64 {
+            let step = tracker
+                .advance(frame * 640, &stationary)
+                .expect("monotonic stationary observation");
+            false_accepts += u32::from(step.flags & QUIET_EVIDENCE_CANDIDATE != 0);
+        }
+        assert_eq!(false_accepts, 0);
+        let one_sided_95_upper = 1.0_f64 - 0.05_f64.powf(1.0 / 100_000.0);
+        assert!(one_sided_95_upper < 0.000_03);
+    }
+
+    fn tone_frame(samples: usize, sample_rate_hz: u32, tones: &[(f64, f64)]) -> Vec<f32> {
+        (0..samples)
+            .map(|index| {
+                tones
+                    .iter()
+                    .map(|(frequency, amplitude)| {
+                        (core::f64::consts::TAU * frequency * index as f64
+                            / f64::from(sample_rate_hz))
+                        .sin()
+                            * amplitude
+                    })
+                    .sum::<f64>() as f32
+            })
+            .collect()
     }
 
     #[test]

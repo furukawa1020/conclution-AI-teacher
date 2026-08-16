@@ -780,6 +780,11 @@ async function main() {
         "--metrics-recording-only",
         "--no-default-browser-check",
         "--no-first-run",
+        // Windows CI/job-object isolation can make Chromium's nested sandbox
+        // terminate its GPU process before CDP attaches. This fixture serves
+        // only hash-verified release bytes over loopback; Linux keeps the
+        // browser sandbox enabled.
+        ...(process.platform === "win32" ? ["--no-sandbox"] : []),
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
         `--user-data-dir=${profileDirectory}`,

@@ -2,6 +2,12 @@ import {
   createGuestAFirstSprintSlo,
   validateGuestAFirstSloBatch,
 } from "/guest-a-first-slo-policy.mjs";
+import {
+  advanceVad,
+  createVadState,
+  installOnsetFrameClassifier,
+  QUIET_EVIDENCE_FLAGS,
+} from "/voice-session-policy.mjs";
 
 const RESULT_KEY = "__KOTAE_BROWSER_AUDIO_RESULT__";
 const FRAME_BYTES = 640;
@@ -284,6 +290,53 @@ function validateAcousticExchangeability(clientModule) {
     "acoustic_exchangeability_export_missing",
   );
   invariant(validate() === 1, "acoustic_exchangeability_self_test_failed");
+  return true;
+}
+
+function validateAcousticCoverageWire() {
+  currentPhase = "acoustic_coverage_wire";
+  installOnsetFrameClassifier(() => 2);
+  const coveredStationary = advanceVad(createVadState(0), {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.stationary |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage,
+      noiseFloor: 0.002,
+    },
+    now: 40,
+    peak: 0.002,
+    rms: 0.001,
+  });
+  const coveredCandidate = advanceVad(coveredStationary, {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.candidate |
+        QUIET_EVIDENCE_FLAGS.spectralChange |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage,
+      noiseFloor: 0.002,
+    },
+    now: 80,
+    peak: 0.008,
+    rms: 0.004,
+  });
+  invariant(
+    coveredCandidate.softVoiceCandidate === true,
+    "acoustic_coverage_wire_candidate_rejected",
+  );
+  for (const flags of [QUIET_EVIDENCE_FLAGS.candidate, 16]) {
+    let rejected = false;
+    try {
+      advanceVad(createVadState(0), {
+        acousticEvidence: { flags, noiseFloor: 0.002 },
+        now: 40,
+        peak: 0.008,
+        rms: 0.004,
+      });
+    } catch {
+      rejected = true;
+    }
+    invariant(rejected, "acoustic_coverage_wire_malformed_accepted");
+  }
   return true;
 }
 
@@ -885,6 +938,7 @@ async function run() {
   const quietSubbandEvidenceValidated = validateQuietSubbandEvidence(clientModule);
   const acousticExchangeabilityValidated =
     validateAcousticExchangeability(clientModule);
+  const acousticCoverageWireValidated = validateAcousticCoverageWire();
   const guestAFirstSprintSloValidated = validateGuestAFirstSprintSlo();
 
   currentPhase = "wrapped";
@@ -915,6 +969,7 @@ async function run() {
     intentionalFastLaneValidated,
     observationAddingValidated,
     acousticExchangeabilityValidated,
+    acousticCoverageWireValidated,
     guestAFirstSprintSloValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,

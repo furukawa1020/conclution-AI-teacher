@@ -134,7 +134,8 @@ test("Rust subband evidence rejects stationary low audio and admits changing qui
       acousticEvidence: {
         flags:
           QUIET_EVIDENCE_FLAGS.candidate |
-          QUIET_EVIDENCE_FLAGS.spectralChange,
+          QUIET_EVIDENCE_FLAGS.spectralChange |
+          QUIET_EVIDENCE_FLAGS.inSessionCoverage,
         noiseFloor: 0.002,
       },
       now: (index + 1) * 40,
@@ -149,7 +150,9 @@ test("Rust subband evidence rejects stationary low audio and admits changing qui
 test("Rust acoustic evidence is exact and malformed evidence fails closed", () => {
   const base = createVadState(0);
   for (const acousticEvidence of [
-    { flags: 8, noiseFloor: 0.002 },
+    { flags: 16, noiseFloor: 0.002 },
+    { flags: QUIET_EVIDENCE_FLAGS.candidate, noiseFloor: 0.002 },
+    { flags: QUIET_EVIDENCE_FLAGS.spectralChange, noiseFloor: 0.002 },
     { flags: QUIET_EVIDENCE_FLAGS.candidate, noiseFloor: 0.001 },
     {
       flags: QUIET_EVIDENCE_FLAGS.candidate,
@@ -168,6 +171,36 @@ test("Rust acoustic evidence is exact and malformed evidence fails closed", () =
       /vad_acoustic_evidence_invalid/u,
     );
   }
+});
+
+test("Rust session coverage bit crosses the executable VAD policy", () => {
+  const base = createVadState(0);
+  const coveredStationary = advanceVad(base, {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.stationary |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage,
+      noiseFloor: 0.002,
+    },
+    now: 40,
+    peak: 0.002,
+    rms: 0.001,
+  });
+  assert.equal(coveredStationary.hasSpeech, false);
+
+  const coveredCandidate = advanceVad(coveredStationary, {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.candidate |
+        QUIET_EVIDENCE_FLAGS.spectralChange |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage,
+      noiseFloor: 0.002,
+    },
+    now: 80,
+    peak: 0.008,
+    rms: 0.004,
+  });
+  assert.equal(coveredCandidate.softVoiceCandidate, true);
 });
 
 test("the content-free receipt stays inside a sub-three-second budget", () => {

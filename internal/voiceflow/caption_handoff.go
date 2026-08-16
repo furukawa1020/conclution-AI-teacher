@@ -364,6 +364,8 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 			handoff.input,
 			finalCaption,
 			0,
+			false,
+			true,
 			conversation.FloorEvidenceHybridCommitted,
 		)
 		conversationMS = time.Since(started).Milliseconds()

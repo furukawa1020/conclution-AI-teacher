@@ -182,7 +182,7 @@ KOTAE ReflexとLatent Answer Contract（LAC）はプロジェクト独自の実�
 - 自己修正の兆候がある時は、AIの訂正より本人の言い直しを優先する
 - 日常のぼやきや感情表現を、常に論理誤りとして矯正しない
 - runtime PDF uploadは全モードで推論経路へ入る前に拒否する。Native Audioで医療、法律、金融、研究・tool要求を決定論的に検出した時はprovider出力を解放せず、まだ音声を一切返していない同一turnだけを明示sentinelで段階的な精密経路へ再送する。段階的な経路でも高リスクとして扱い、精密経路が使えない時は実質回答を読み上げない
-- STTが0より大きく0.65未満のconfidenceを返した場合、文字起こしをモデルへ渡さず、intentionalなら固定文で一度だけ聞き返し、foregroundと受動ambientは沈黙してマイクを閉じる。confidence 0はAPIが値を提供しなかった状態として扱い、低信頼判定とは区別する
+- STTの採用境界は `internal/asrrisk` の有限enum (`accept / reobserve / reject`) が単独所有する。production bootstrapは従来の0.65境界を互換維持するが統計coverageを主張せず、confidence 0も `coverage-unavailable` と明示する。digest・bucket・有限標本ceiling rankを検証済みの較正artifactを有効化した時は、confidence未提供、未知bucket、不正値をモデルへ渡さず再観測または棄却する。intentionalなら固定文で一度だけ聞き返し、foregroundと受動ambientは沈黙する。Native final captionはclient入力では作れないserver-authored commit能力でだけ別経路採用する
 
 `0.65`は未校正の補助境界であり、誤認識をゼロにする保証ではありません。Google Cloudが返す値を真の確率とはみなさず、実利用条件の音声でROC、聞き返し率、取りこぼし率を測って校正する必要があります。
 

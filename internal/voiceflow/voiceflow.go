@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/furukawa1020/conclution-ai-teacher/internal/asrrisk"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
@@ -18,10 +19,9 @@ import (
 )
 
 const (
-	minUsableTranscriptConfidence = 0.65
-	minSpeculativeStability       = 0.85
-	minSpeculativeCandidateRunes  = 8
-	minSpeculativeStableDuration  = 160 * time.Millisecond
+	minSpeculativeStability      = 0.85
+	minSpeculativeCandidateRunes = 8
+	minSpeculativeStableDuration = 160 * time.Millisecond
 	// This is a semantic-content threshold, not a score. It marks a finalized
 	// transcript as extended only when there is enough recognized material to
 	// ground a same-turn main-point reflection safely.
@@ -45,6 +45,7 @@ type Pipeline struct {
 	speech         speechio.Service
 	agent          conversation.Agent
 	strictBoundary *privacyguard.StrictBoundary
+	riskController asrrisk.Controller
 	now            func() time.Time
 }
 
@@ -160,7 +161,31 @@ func New(speech speechio.Service, agent conversation.Agent) (*Pipeline, error) {
 	if speech == nil || agent == nil {
 		return nil, errors.New("voiceflow: speech and conversation agent are required")
 	}
-	return &Pipeline{speech: speech, agent: agent, now: time.Now}, nil
+	return &Pipeline{
+		speech:         speech,
+		agent:          agent,
+		riskController: asrrisk.NewBootstrapController(),
+		now:            time.Now,
+	}, nil
+}
+
+// NewWithASRRisk installs an already validated, content-free recognition risk
+// controller. A zero or hand-built controller cannot silently replace the
+// operational boundary.
+func NewWithASRRisk(
+	speech speechio.Service,
+	agent conversation.Agent,
+	controller asrrisk.Controller,
+) (*Pipeline, error) {
+	if !controller.Valid() {
+		return nil, errors.New("voiceflow: valid ASR risk controller is required")
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		return nil, err
+	}
+	pipeline.riskController = controller
+	return pipeline, nil
 }
 
 // NewWithPrivacy equips the ordinary pipeline with an opt-in strict boundary.
@@ -775,7 +800,11 @@ func (p *Pipeline) processLive(
 		}
 	} else {
 		adoptedSpeculation := false
-		if transcriptConfidenceTooLow(finalConfidence) {
+		if p.transcriptRiskDecision(
+			finalConfidence,
+			finalConfidenceObserved,
+			false,
+		).Decision != asrrisk.Accept {
 			if responseExpected {
 				specMiss = 1
 				if speculation != nil {
@@ -903,6 +932,8 @@ func (p *Pipeline) processLive(
 				input,
 				finalTranscript,
 				finalConfidence,
+				finalConfidenceObserved,
+				false,
 				floorEvidenceForHybridCommit(hybridFloorCommitted),
 			)
 			conversationMS = time.Since(conversationStarted).Milliseconds()
@@ -1563,6 +1594,8 @@ func (p *Pipeline) prepareTurn(
 		input,
 		transcript,
 		confidence,
+		confidence != 0,
+		false,
 		conversation.FloorEvidenceUnknown,
 	)
 }
@@ -1624,6 +1657,8 @@ func (p *Pipeline) prepareRecognizedTurn(
 	input httpapi.VoiceTurnInput,
 	transcript string,
 	confidence float32,
+	confidenceObserved bool,
+	nativeFinalCommitted bool,
 	floorEvidence conversation.FloorEvidence,
 ) (httpapi.VoiceTurnResult, string, error) {
 	if input.StrictCloudMinimization {
@@ -1633,7 +1668,11 @@ func (p *Pipeline) prepareRecognizedTurn(
 			return strictPrivacyBlockedResult(), "", nil
 		}
 	}
-	if transcriptConfidenceTooLow(confidence) {
+	if p.transcriptRiskDecision(
+		confidence,
+		confidenceObserved,
+		nativeFinalCommitted,
+	).Decision != asrrisk.Accept {
 		if !promptOnRecognitionMiss(input) {
 			return p.silentRecognitionResult(
 				uid,
@@ -1942,14 +1981,21 @@ func researchRecords(records []conversation.ResearchRecord) []httpapi.ResearchRe
 	return result
 }
 
+func (p *Pipeline) transcriptRiskDecision(
+	confidence float32,
+	confidenceObserved bool,
+	nativeFinalCommitted bool,
+) asrrisk.Result {
+	return p.riskController.Decide(asrrisk.Evidence{
+		Confidence:           confidence,
+		ConfidenceObserved:   confidenceObserved,
+		NativeFinalCommitted: nativeFinalCommitted,
+	})
+}
+
 func transcriptConfidenceTooLow(confidence float32) bool {
-	if math.IsNaN(float64(confidence)) ||
-		math.IsInf(float64(confidence), 0) ||
-		confidence < 0 ||
-		confidence > 1 {
-		return true
-	}
-	// Some recognizers omit utterance confidence and return zero. Treat zero
-	// as "not provided", not as a measured zero-confidence transcript.
-	return confidence > 0 && confidence < minUsableTranscriptConfidence
+	return asrrisk.NewBootstrapController().Decide(asrrisk.Evidence{
+		Confidence:         confidence,
+		ConfidenceObserved: confidence != 0,
+	}).Decision != asrrisk.Accept
 }

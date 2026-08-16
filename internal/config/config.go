@@ -71,6 +71,8 @@ type Config struct {
 	PasskeyOrigin                string
 	RequireRecentPasskeyForVoice bool
 	GuestModeEnabled             bool
+	SemanticaShadowEnabled       bool
+	SemanticaShadowURL           string
 	AllowInsecureDev             bool
 }
 
@@ -264,6 +266,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	semanticaShadowEnabled, err := envStrictBool("KOTAE_SEMANTICA_SHADOW_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		AppEnv:                      envOr("KOTAE_ENV", "production"),
 		Port:                        envOr("PORT", defaultPort),
@@ -316,6 +322,8 @@ func Load() (Config, error) {
 		PasskeyOrigin:                envOr("KOTAE_PASSKEY_ORIGIN", defaultPasskeyOrigin),
 		RequireRecentPasskeyForVoice: requireRecentPasskey,
 		GuestModeEnabled:             guestModeEnabled,
+		SemanticaShadowEnabled:       semanticaShadowEnabled,
+		SemanticaShadowURL:           strings.TrimSpace(os.Getenv("KOTAE_SEMANTICA_SHADOW_URL")),
 		AllowInsecureDev:             allowInsecureDev,
 	}
 
@@ -359,6 +367,13 @@ func Load() (Config, error) {
 		return Config{}, errors.New(
 			"KOTAE_NATIVE_CAPTION_HANDOFF_ENABLED requires KOTAE_RETRIEVAL_POLICY_ENABLED and KOTAE_VERIFIER_PROGRESS_WRITES",
 		)
+	}
+	if cfg.SemanticaShadowEnabled {
+		if err := validatePrivateServiceURL(cfg.SemanticaShadowURL); err != nil {
+			return Config{}, err
+		}
+	} else if cfg.SemanticaShadowURL != "" {
+		return Config{}, errors.New("KOTAE_SEMANTICA_SHADOW_URL requires KOTAE_SEMANTICA_SHADOW_ENABLED=true")
 	}
 	if !cfg.AllowInsecureDev && strings.TrimSpace(cfg.ProjectID) == "" {
 		return Config{}, errors.New("GOOGLE_CLOUD_PROJECT is required")
@@ -445,6 +460,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func validatePrivateServiceURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Path != "" && parsed.Path != "/") {
+		return errors.New("KOTAE_SEMANTICA_SHADOW_URL must be an HTTPS service origin without credentials, path, query, or fragment")
+	}
+	return nil
 }
 
 func rejectLegacyEnvironment() error {

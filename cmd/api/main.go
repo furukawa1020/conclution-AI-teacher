@@ -22,9 +22,11 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/nativevoice"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/passkey"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/privacyguard"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/semanticshadow"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/voiceflow"
+	"google.golang.org/api/idtoken"
 )
 
 func newAPIServer(addr string, handler http.Handler) *http.Server {
@@ -77,6 +79,7 @@ func main() {
 	var closeFirestore func() error
 	var closeSpeech func() error
 	closeNative := func() error { return nil }
+	var semanticDispatcher *semanticshadow.Dispatcher
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
@@ -363,6 +366,24 @@ func main() {
 			logger.Error("close Firestore client", "error", err)
 		}
 	}()
+	if cfg.SemanticaShadowEnabled {
+		authenticatedClient, clientErr := idtoken.NewClient(ctx, cfg.SemanticaShadowURL)
+		if clientErr != nil {
+			logger.Error("initialize Semantica shadow identity", "error_class", "semantic_shadow_identity_failure")
+			os.Exit(1)
+		}
+		exporter, exporterErr := semanticshadow.NewHTTPExporter(authenticatedClient, cfg.SemanticaShadowURL)
+		if exporterErr != nil {
+			logger.Error("initialize Semantica shadow exporter", "error_class", "semantic_shadow_configuration_failure")
+			os.Exit(1)
+		}
+		semanticDispatcher, err = semanticshadow.NewDispatcher(exporter)
+		if err != nil {
+			logger.Error("initialize Semantica shadow dispatcher", "error_class", "semantic_shadow_configuration_failure")
+			os.Exit(1)
+		}
+		defer semanticDispatcher.Close()
+	}
 	defer func() {
 		if err := closeSpeech(); err != nil {
 			logger.Error("close regional speech clients", "error", err)
@@ -396,6 +417,8 @@ func main() {
 			MaxRequestBytes:      cfg.MaxVoiceBytes,
 			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,
 			GuestModeEnabled:     cfg.GuestModeEnabled,
+			SemanticShadow:       semanticDispatcher,
+			SemanticShadowKey:    cfg.StateKey,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,
@@ -415,6 +438,7 @@ func main() {
 			"native_audio_enabled", cfg.NativeAudioEnabled,
 			"native_caption_handoff_enabled", cfg.NativeCaptionHandoffEnabled,
 			"native_audio_location", cfg.NativeAudioLocation,
+			"semantica_shadow_enabled", cfg.SemanticaShadowEnabled,
 			"privacy_boundary", "evaluation-deidentify-and-strict-voice-inspect-fail-closed",
 		)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {

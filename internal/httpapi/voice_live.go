@@ -1401,6 +1401,7 @@ outcomeReady:
 		cancelLive()
 		return
 	}
+	s.observeSemanticShadow(liveCtx, outcome.result)
 	s.logVoiceLiveSession(
 		liveCtx,
 		started,

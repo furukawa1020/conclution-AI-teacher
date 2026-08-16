@@ -131,6 +131,18 @@ const passkeyRegistrationRecovery = createPasskeyRegistrationRecoveryLatch(
   () => globalThis.sessionStorage,
 );
 
+let quietEvidenceTrackerFactory = null;
+
+export function installQuietEvidenceTrackerFactory(factory) {
+  if (
+    typeof factory !== "function" ||
+    quietEvidenceTrackerFactory !== null
+  ) {
+    throw new TypeError("quiet_evidence_tracker_install_invalid");
+  }
+  quietEvidenceTrackerFactory = factory;
+}
+
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const QUIET_HTTP_PCM_FRAME_BYTES = 640;
@@ -1841,6 +1853,14 @@ function stopVad(recording) {
     recording.vadPcm.fill(0);
     recording.vadPcm = undefined;
   }
+  if (recording.quietEvidenceTracker) {
+    try {
+      recording.quietEvidenceTracker.free();
+    } catch {
+      // Rust Drop is best-effort after every retained feature was zeroized.
+    }
+    recording.quietEvidenceTracker = undefined;
+  }
 }
 
 function recordingErrorCode(recording) {
@@ -2284,6 +2304,19 @@ function armVad(recording) {
     rejectRecording(recording, "voice_turn_invalid");
     return;
   }
+  if (typeof quietEvidenceTrackerFactory !== "function") {
+    rejectRecording(recording, "voice_turn_invalid");
+    return;
+  }
+  try {
+    recording.quietEvidenceTracker = quietEvidenceTrackerFactory(
+      initialClock.sampleRateHz,
+      initialClock.startedFrame,
+    );
+  } catch {
+    rejectRecording(recording, "voice_turn_invalid");
+    return;
+  }
   let vadState = createVadState(recording.startedAt, initialClock);
   let candidateCapture = createCandidateCaptureState();
 
@@ -2313,9 +2346,34 @@ function armVad(recording) {
       return;
     }
     try {
+      const rustEvidence = recording.quietEvidenceTracker.advance(
+        clockFrame,
+        pcm,
+      );
+      if (
+        !(rustEvidence instanceof Float64Array) ||
+        rustEvidence.length !== 2 ||
+        !Number.isSafeInteger(rustEvidence[0]) ||
+        rustEvidence[0] < 0 ||
+        rustEvidence[0] > 7 ||
+        !Number.isFinite(rustEvidence[1]) ||
+        rustEvidence[1] < 0.002 ||
+        rustEvidence[1] > 0.04
+      ) {
+        throw new TypeError("quiet_evidence_result_invalid");
+      }
       vadState = advanceVad(
         vadState,
-        { clockFrame, now, peak, rms },
+        {
+          acousticEvidence: Object.freeze({
+            flags: rustEvidence[0],
+            noiseFloor: rustEvidence[1],
+          }),
+          clockFrame,
+          now,
+          peak,
+          rms,
+        },
         {
           coachActive: recording.coachActive,
           nativeAudio: recording.nativeAudio,
@@ -2486,6 +2544,7 @@ function createRecordingState(
     turnEnded: false,
     turnEndedPromise,
     vadHasSpeech: false,
+    quietEvidenceTracker: undefined,
     vadPcm: undefined,
     vadTimer: undefined,
   };

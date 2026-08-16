@@ -30,6 +30,7 @@ import {
   shouldShowVoiceReceipt,
   shouldStopSessionForLifecycle,
   turnModeForGestureEpoch,
+  QUIET_EVIDENCE_FLAGS,
   VOICE_RECEIPT_LIMITS,
   VOICE_SESSION_LIMITS,
 } from "../web/voice-session-policy.mjs";
@@ -107,6 +108,67 @@ installOnsetFrameClassifier(
     return Number(clear) | (Number(soft) << 1);
   },
 );
+
+test("Rust subband evidence rejects stationary low audio and admits changing quiet speech", () => {
+  let stationary = createVadState(0);
+  for (let now = 40; now <= 1_200; now += 40) {
+    stationary = advanceVad(stationary, {
+      acousticEvidence: {
+        flags: QUIET_EVIDENCE_FLAGS.stationary,
+        noiseFloor: 0.002,
+      },
+      now,
+      peak: 0.008,
+      rms: 0.004,
+    });
+  }
+  assert.equal(stationary.hasSpeech, false);
+  assert.equal(stationary.softVoiceCandidate, false);
+  assert.equal(stationary.noiseFloor, 0.002);
+
+  let changing = createVadState(0);
+  const envelope = [0.004, 0.0031, 0.0048, 0.0033, 0.005, 0.0035, 0.0052];
+  for (let index = 0; index < envelope.length; index += 1) {
+    const rms = envelope[index];
+    changing = advanceVad(changing, {
+      acousticEvidence: {
+        flags:
+          QUIET_EVIDENCE_FLAGS.candidate |
+          QUIET_EVIDENCE_FLAGS.spectralChange,
+        noiseFloor: 0.002,
+      },
+      now: (index + 1) * 40,
+      peak: rms * 2,
+      rms,
+    });
+  }
+  assert.equal(changing.hasSpeech, true);
+  assert.equal(changing.softVoiceConfirmed, true);
+});
+
+test("Rust acoustic evidence is exact and malformed evidence fails closed", () => {
+  const base = createVadState(0);
+  for (const acousticEvidence of [
+    { flags: 8, noiseFloor: 0.002 },
+    { flags: QUIET_EVIDENCE_FLAGS.candidate, noiseFloor: 0.001 },
+    {
+      flags: QUIET_EVIDENCE_FLAGS.candidate,
+      noiseFloor: 0.002,
+      transcript: "x",
+    },
+  ]) {
+    assert.throws(
+      () =>
+        advanceVad(base, {
+          acousticEvidence,
+          now: 40,
+          peak: 0.008,
+          rms: 0.004,
+        }),
+      /vad_acoustic_evidence_invalid/u,
+    );
+  }
+});
 
 test("the content-free receipt stays inside a sub-three-second budget", () => {
   assert.equal(VOICE_RECEIPT_LIMITS.visibleAfterSilenceMs, 700);

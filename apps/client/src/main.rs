@@ -4,6 +4,109 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 #[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub struct QuietEvidenceTrackerForJs {
+    inner: kotae_audio_core::QuietEvidenceTracker,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+impl QuietEvidenceTrackerForJs {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = advance)]
+    pub fn advance_for_js(
+        &mut self,
+        current_frame: f64,
+        pcm: &js_sys::Float32Array,
+    ) -> Result<js_sys::Float64Array, wasm_bindgen::JsValue> {
+        const MAXIMUM_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        if !current_frame.is_finite()
+            || !(0.0..=MAXIMUM_SAFE_INTEGER).contains(&current_frame)
+            || current_frame.fract() != 0.0
+            || pcm.length() < 128
+            || pcm.length() > 4_096
+        {
+            return Err(wasm_bindgen::JsValue::from_str(
+                "quiet evidence input is invalid",
+            ));
+        }
+        let mut samples = pcm.to_vec();
+        let step = self
+            .inner
+            .advance(current_frame as u64, &samples)
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()));
+        samples.fill(0.0);
+        let step = step?;
+        let result = js_sys::Float64Array::new_with_length(2);
+        result.set_index(0, f64::from(step.flags));
+        result.set_index(1, step.noise_floor);
+        Ok(result)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = createQuietEvidenceTracker)]
+pub fn create_quiet_evidence_tracker_for_js(
+    sample_rate_hz: u32,
+    started_frame: f64,
+) -> Result<QuietEvidenceTrackerForJs, wasm_bindgen::JsValue> {
+    const MAXIMUM_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !started_frame.is_finite()
+        || !(0.0..=MAXIMUM_SAFE_INTEGER).contains(&started_frame)
+        || started_frame.fract() != 0.0
+    {
+        return Err(wasm_bindgen::JsValue::from_str(
+            "quiet evidence start frame is invalid",
+        ));
+    }
+    let inner = kotae_audio_core::QuietEvidenceTracker::new(sample_rate_hz, started_frame as u64)
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+    Ok(QuietEvidenceTrackerForJs { inner })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = quietSubbandEvidenceSelfTest)]
+pub fn quiet_subband_evidence_self_test_for_js() -> bool {
+    use kotae_audio_core::{
+        QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceTracker,
+    };
+
+    let sample_rate = 48_000_u32;
+    let tones = |components: &[(f64, f64)]| {
+        (0..1_024)
+            .map(|index| {
+                components
+                    .iter()
+                    .map(|(frequency, amplitude)| {
+                        (core::f64::consts::TAU * frequency * index as f64 / f64::from(sample_rate))
+                            .sin()
+                            * amplitude
+                    })
+                    .sum::<f64>() as f32
+            })
+            .collect::<Vec<_>>()
+    };
+    let stationary = tones(&[(1_000.0, 0.002)]);
+    let changing = tones(&[(500.0, 0.006), (1_800.0, 0.005), (2_800.0, 0.004)]);
+    let result = (|| {
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).ok()?;
+        let room = tracker.advance(1_920, &stationary).ok()?;
+        let room_again = tracker.advance(3_840, &stationary).ok()?;
+        let voice = tracker.advance(5_760, &changing).ok()?;
+        Some(
+            room.flags & QUIET_EVIDENCE_CANDIDATE == 0
+                && room_again.flags & QUIET_EVIDENCE_CANDIDATE == 0
+                && voice.flags & QUIET_EVIDENCE_CANDIDATE != 0
+                && voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE != 0
+                && (0.002..=0.04).contains(&voice.noise_floor),
+        )
+    })()
+    .unwrap_or(false);
+    drop(stationary);
+    drop(changing);
+    result
+}
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = classifyInterruptFrame)]
 pub fn classify_interrupt_frame_for_js(
     noise_floor: f64,

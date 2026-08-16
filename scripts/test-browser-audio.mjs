@@ -597,6 +597,7 @@ function validateBrowserResult(result) {
     "intentionalFastLaneValidated",
     "guestAFirstSprintSloValidated",
     "guestQuietOnsetValidated",
+    "quietSubbandEvidenceValidated",
     "quietSpectralCompensationValidated",
     "temporalVadClockValidated",
     "preConfirmFrames",
@@ -622,6 +623,7 @@ function validateBrowserResult(result) {
     result.intentionalFastLaneValidated !== true ||
     result.guestAFirstSprintSloValidated !== true ||
     result.guestQuietOnsetValidated !== true ||
+    result.quietSubbandEvidenceValidated !== true ||
     result.quietSpectralCompensationValidated !== true ||
     result.temporalVadClockValidated !== true ||
     result.preConfirmFrames !== 0 ||
@@ -828,6 +830,7 @@ async function main() {
       intentionalFastLaneValidated: result.intentionalFastLaneValidated,
       guestAFirstSprintSloValidated: result.guestAFirstSprintSloValidated,
       guestQuietOnsetValidated: result.guestQuietOnsetValidated,
+      quietSubbandEvidenceValidated: result.quietSubbandEvidenceValidated,
       quietSpectralCompensationValidated:
         result.quietSpectralCompensationValidated,
       temporalVadClockValidated: result.temporalVadClockValidated,

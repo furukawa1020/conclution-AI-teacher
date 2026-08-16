@@ -1,4 +1,4 @@
-await import("/firebase-bridge.js");
+const { installQuietEvidenceTrackerFactory } = await import("/firebase-bridge.js");
 
 const {
   default: init,
@@ -6,6 +6,7 @@ const {
   advanceTemporalVadClock,
   classifyInterruptFrame,
   classifyOnsetFrame,
+  createQuietEvidenceTracker,
 } = await import("/wasm/kotae_client.js");
 const { installTemporalVadClockAdvancer } = await import(
   "/temporal-vad-clock.mjs"
@@ -21,6 +22,7 @@ const {
 );
 installInterruptFrameClassifier(classifyInterruptFrame);
 installOnsetFrameClassifier(classifyOnsetFrame);
+installQuietEvidenceTrackerFactory(createQuietEvidenceTracker);
 installIntentionalInterruptAdvancer(advanceIntentionalInterrupt);
 installTemporalVadClockAdvancer(advanceTemporalVadClock);
 await init();

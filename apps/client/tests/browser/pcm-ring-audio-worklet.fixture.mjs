@@ -214,6 +214,26 @@ function validateGuestQuietOnset(clientModule) {
   return true;
 }
 
+function validateQuietSubbandEvidence(clientModule) {
+  currentPhase = "quiet_subband_evidence";
+  const imports = Object.create(null);
+  for (const descriptor of WebAssembly.Module.imports(clientModule)) {
+    invariant(descriptor.kind === "function", "quiet_subband_import_kind_invalid");
+    imports[descriptor.module] ??= Object.create(null);
+    imports[descriptor.module][descriptor.name] = () => {
+      throw new FixtureFailure("quiet_subband_unexpected_import_call");
+    };
+  }
+  const instance = new WebAssembly.Instance(clientModule, imports);
+  const validate = instance.exports.quietSubbandEvidenceSelfTest;
+  invariant(
+    typeof validate === "function",
+    "quiet_subband_evidence_export_missing",
+  );
+  invariant(validate() === 1, "quiet_subband_evidence_self_test_failed");
+  return true;
+}
+
 function createCollector(node, generation) {
   const state = {
     frames: [],
@@ -792,6 +812,7 @@ async function run() {
   const intentionalFastLaneValidated =
     validateIntentionalFastLane(pcmRingModule);
   const rustGuestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
+  const quietSubbandEvidenceValidated = validateQuietSubbandEvidence(clientModule);
   const guestAFirstSprintSloValidated = validateGuestAFirstSprintSlo();
 
   currentPhase = "wrapped";
@@ -823,6 +844,7 @@ async function run() {
     guestAFirstSprintSloValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,
+    quietSubbandEvidenceValidated,
     quietSpectralCompensationValidated: quietGainValidated,
     temporalVadClockValidated: true,
     preConfirmFrames: 0,

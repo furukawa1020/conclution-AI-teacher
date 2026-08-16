@@ -25,6 +25,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/semanticshadow"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
 )
 
@@ -379,6 +380,8 @@ type VoiceOptions struct {
 	MaxRequestBytes      int64
 	RequireRecentPasskey bool
 	GuestModeEnabled     bool
+	SemanticShadow       *semanticshadow.Dispatcher
+	SemanticShadowKey    []byte
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -387,6 +390,28 @@ type VoiceOptions struct {
 	// provider preparation is content-free but must never outlive the browser's
 	// bounded preflight window or retain its UID lease after HTTP fallback.
 	liveNativeReadyTimeout time.Duration
+}
+
+func (s *Server) observeSemanticShadow(ctx context.Context, result VoiceTurnResult) {
+	if s.voice.SemanticShadow == nil || len(s.voice.SemanticShadowKey) != 32 {
+		return
+	}
+	digest, err := semanticshadow.TurnDigest(
+		s.voice.SemanticShadowKey,
+		requestIDFromContext(ctx),
+	)
+	if err != nil {
+		return
+	}
+	_ = s.voice.SemanticShadow.Observe(digest, semanticshadow.Signals{
+		AssistanceTarget:      result.AssistanceTarget,
+		RespondentStage:       result.RespondentStage,
+		CoachPhase:            result.CoachPhase,
+		CoachAction:           result.CoachAction,
+		AnswerProof:           normalizedAnswerProof(result.AnswerProof),
+		AnswerTransitionProof: normalizedAnswerTransitionProof(result.AnswerTransitionProof),
+		GuestAFirstOutcome:    normalizedGuestAFirstOutcome(result.GuestAFirstOutcome),
+	})
 }
 
 type Server struct {
@@ -664,6 +689,7 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	s.observeSemanticShadow(ctx, result)
 	s.logger.InfoContext(ctx, "voice turn completed",
 		"request_id", requestIDFromContext(ctx),
 		"route", result.Route,

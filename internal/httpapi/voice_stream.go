@@ -220,6 +220,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flusher.Flush()
+	s.observeSemanticShadow(ctx, result)
 
 	firstAudioMS := int64(-1)
 	if !firstAudioAt.IsZero() {

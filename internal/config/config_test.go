@@ -33,6 +33,8 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_PASSKEY_ORIGIN", "")
 	t.Setenv("KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE", "")
 	t.Setenv("KOTAE_GUEST_MODE_ENABLED", "")
+	t.Setenv("KOTAE_SEMANTICA_SHADOW_ENABLED", "")
+	t.Setenv("KOTAE_SEMANTICA_SHADOW_URL", "")
 	t.Setenv("KOTAE_MAX_VOICE_BYTES", "")
 	t.Setenv("KOTAE_SPEECH_MODEL", "")
 	t.Setenv("KOTAE_SPEECH_VOICE", "")
@@ -47,6 +49,30 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_ANSWER_PROOF_WRITES", "")
 	t.Setenv("KOTAE_VERIFIER_PROGRESS_WRITES", "")
 	t.Setenv("KOTAE_RETRIEVAL_POLICY_ENABLED", "")
+}
+
+func TestLoadValidatesSemanticaShadowBoundary(t *testing.T) {
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_SEMANTICA_SHADOW_ENABLED", "true")
+	t.Setenv("KOTAE_SEMANTICA_SHADOW_URL", "https://semantica-shadow.example.run.app")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SemanticaShadowEnabled || cfg.SemanticaShadowURL == "" {
+		t.Fatalf("config = %+v", cfg)
+	}
+
+	for _, invalid := range []string{"http://example.run.app", "https://user@example.run.app", "https://example.run.app/path", "https://example.run.app?token=x"} {
+		t.Run(invalid, func(t *testing.T) {
+			setTestEnvironment(t)
+			t.Setenv("KOTAE_SEMANTICA_SHADOW_ENABLED", "true")
+			t.Setenv("KOTAE_SEMANTICA_SHADOW_URL", invalid)
+			if _, err := Load(); err == nil {
+				t.Fatal("invalid shadow URL was accepted")
+			}
+		})
+	}
 }
 
 func unsetTestEnvironment(t *testing.T, key string) {

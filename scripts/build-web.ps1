@@ -454,6 +454,11 @@ try {
         -Needle "export function intentionalFastLaneSelfTest" `
         -Replacement "function intentionalFastLaneSelfTest" `
         -Boundary "wasm-bindgen intentional fast lane fixture export"
+    $ringGlue = Replace-LiteralExactlyOnce `
+        -Text $ringGlue `
+        -Needle "export function observationAddingSelfTest" `
+        -Replacement "function observationAddingSelfTest" `
+        -Boundary "wasm-bindgen observation adding fixture export"
     $ringGlue = Remove-RegexExactlyOnce `
         -Text $ringGlue `
         -Pattern '(?s)\nexport function intentionalFastLaneFrameSelfTest\(\) \{.*?\n\}\n' `
@@ -517,7 +522,7 @@ function decodeText(ptr, len) {
         -Replacement "" `
         -Boundary "wasm-bindgen final export"
 
-    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  intentionalFastLaneSelfTest,`n  temporalVadClockSelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
+    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  intentionalFastLaneSelfTest,`n  observationAddingSelfTest,`n  temporalVadClockSelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
     $ringRuntime = Replace-LiteralExactlyOnce `
         -Text $ringRuntime `
         -Needle $runtimeImport `

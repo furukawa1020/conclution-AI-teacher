@@ -91,6 +91,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   );
   assert.match(
     deploy,
+    /\[bool\]\s*\$result\.observationAddingValidated\s+-ne\s+\$true/u,
+  );
+  assert.match(
+    deploy,
     /\[bool\]\s*\$result\.guestQuietOnsetValidated\s+-ne\s+\$true/u,
   );
   assert.match(
@@ -107,7 +111,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   );
   assert.match(
     deploy,
-    /directWasmGenerationIsolation,freshGenerationFrames,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,provenance,quietSpectralCompensationValidated,quietSubbandEvidenceValidated,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture/u,
+    /directWasmGenerationIsolation,freshGenerationFrames,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,observationAddingValidated,provenance,quietSpectralCompensationValidated,quietSubbandEvidenceValidated,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture/u,
   );
   assert.match(
     deploy,

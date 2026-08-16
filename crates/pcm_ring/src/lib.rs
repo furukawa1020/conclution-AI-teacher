@@ -38,13 +38,19 @@ const QUIET_TARGET_RMS: f64 = 0.055;
 const QUIET_MINIMUM_RMS: f64 = 0.0015;
 const QUIET_PEAK_CEILING: f64 = 0.82;
 const QUIET_MAXIMUM_GAIN: f64 = 4.0;
+const QUIET_MAXIMUM_CREST_FACTOR: f64 = 8.0;
 const QUIET_GAIN_ATTACK: f64 = 0.75;
 const QUIET_GAIN_RELEASE: f64 = 0.2;
 const DC_BLOCK_POLE: f64 = 0.995;
 const QUIET_PRE_EMPHASIS: f64 = 0.28;
+const OBSERVATION_MINIMUM_MIX: f64 = 0.30;
+const OBSERVATION_MAXIMUM_MIX: f64 = 0.40;
+const OBSERVATION_MINIMUM_CORRELATION: f64 = 0.35;
+const OBSERVATION_MAXIMUM_RESIDUAL_RATIO: f64 = 16.0;
 
 struct QuietSpectralState {
     gain: f64,
+    observation_mix: f64,
     previous_input: f64,
     previous_dc: f64,
 }
@@ -52,6 +58,7 @@ struct QuietSpectralState {
 impl Zeroize for QuietSpectralState {
     fn zeroize(&mut self) {
         self.gain = 0.0;
+        self.observation_mix = 0.0;
         self.previous_input = 0.0;
         self.previous_dc = 0.0;
     }
@@ -61,6 +68,7 @@ impl QuietSpectralState {
     fn new() -> Self {
         Self {
             gain: 1.0,
+            observation_mix: OBSERVATION_MAXIMUM_MIX,
             previous_input: 0.0,
             previous_dc: 0.0,
         }
@@ -69,6 +77,7 @@ impl QuietSpectralState {
     fn reset(&mut self) {
         self.zeroize();
         self.gain = 1.0;
+        self.observation_mix = OBSERVATION_MAXIMUM_MIX;
     }
 }
 
@@ -243,7 +252,10 @@ impl PcmRing {
             self.quiet_spectral.reset();
             return QuietCompensationResult::Unchanged;
         }
-        if rms >= QUIET_TARGET_RMS || peak >= QUIET_PEAK_CEILING {
+        if rms >= QUIET_TARGET_RMS
+            || peak >= QUIET_PEAK_CEILING
+            || peak / rms > QUIET_MAXIMUM_CREST_FACTOR
+        {
             self.quiet_spectral.reset();
             return QuietCompensationResult::Unchanged;
         }
@@ -259,15 +271,18 @@ impl PcmRing {
         let smoothed_gain =
             self.quiet_spectral.gain + (requested_gain - self.quiet_spectral.gain) * smoothing;
 
+        let mut raw = [0.0_f64; FRAME_BYTES / 2];
         let mut filtered = [0.0_f64; FRAME_BYTES / 2];
         let mut previous_input = self.quiet_spectral.previous_input;
         let mut previous_dc = self.quiet_spectral.previous_dc;
         let mut filtered_peak = 0.0_f64;
         for (index, bytes) in pcm.chunks_exact(2).enumerate() {
             let input = f64::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32_768.0;
+            raw[index] = input;
             let dc = input - previous_input + DC_BLOCK_POLE * previous_dc;
             let tilted = dc + QUIET_PRE_EMPHASIS * (dc - previous_dc);
             if !tilted.is_finite() {
+                raw.zeroize();
                 filtered.zeroize();
                 return QuietCompensationResult::Invalid;
             }
@@ -277,6 +292,7 @@ impl PcmRing {
             previous_dc = dc;
         }
         if filtered_peak == 0.0 || !filtered_peak.is_finite() {
+            raw.zeroize();
             filtered.zeroize();
             return QuietCompensationResult::Invalid;
         }
@@ -284,17 +300,72 @@ impl PcmRing {
             .min(QUIET_PEAK_CEILING / filtered_peak)
             .clamp(0.0, QUIET_MAXIMUM_GAIN);
         if !applied_gain.is_finite() {
+            raw.zeroize();
             filtered.zeroize();
             return QuietCompensationResult::Invalid;
         }
+
+        let mut raw_energy = 0.0_f64;
+        let mut enhanced_energy = 0.0_f64;
+        let mut cross_energy = 0.0_f64;
+        let mut residual_energy = 0.0_f64;
+        for (observation, enhanced) in raw.iter().zip(filtered.iter_mut()) {
+            *enhanced *= applied_gain;
+            raw_energy += observation * observation;
+            enhanced_energy += *enhanced * *enhanced;
+            cross_energy += observation * *enhanced;
+            let residual = *enhanced - observation;
+            residual_energy += residual * residual;
+        }
+        let denominator = (raw_energy * enhanced_energy).sqrt();
+        let correlation = if denominator > 0.0 {
+            cross_energy / denominator
+        } else {
+            0.0
+        };
+        let residual_ratio = residual_energy / raw_energy.max(f64::EPSILON);
+        if !correlation.is_finite()
+            || !residual_ratio.is_finite()
+            || correlation < OBSERVATION_MINIMUM_CORRELATION
+            || residual_ratio > OBSERVATION_MAXIMUM_RESIDUAL_RATIO
+        {
+            raw.zeroize();
+            filtered.zeroize();
+            self.quiet_spectral.reset();
+            return QuietCompensationResult::Unchanged;
+        }
+        let correlation_risk = ((1.0 - correlation) / 0.65).clamp(0.0, 1.0);
+        let residual_risk = (residual_ratio / 9.0).clamp(0.0, 1.0);
+        let requested_observation_mix = (OBSERVATION_MINIMUM_MIX
+            + (OBSERVATION_MAXIMUM_MIX - OBSERVATION_MINIMUM_MIX)
+                * correlation_risk.max(residual_risk))
+        .clamp(OBSERVATION_MINIMUM_MIX, OBSERVATION_MAXIMUM_MIX);
+        let observation_mix = (self.quiet_spectral.observation_mix * 0.35
+            + requested_observation_mix * 0.65)
+            .clamp(OBSERVATION_MINIMUM_MIX, OBSERVATION_MAXIMUM_MIX);
+
+        let mut mixed_peak = 0.0_f64;
+        for (observation, enhanced) in raw.iter().zip(filtered.iter_mut()) {
+            *enhanced = observation_mix * observation + (1.0 - observation_mix) * *enhanced;
+            mixed_peak = mixed_peak.max(enhanced.abs());
+        }
+        if !mixed_peak.is_finite() || mixed_peak == 0.0 {
+            raw.zeroize();
+            filtered.zeroize();
+            self.quiet_spectral.reset();
+            return QuietCompensationResult::Unchanged;
+        }
+        let headroom = (QUIET_PEAK_CEILING / mixed_peak).min(1.0);
         for (sample, output) in filtered.iter().zip(pcm.chunks_exact_mut(2)) {
-            let scaled = (sample * applied_gain * 32_768.0)
+            let scaled = (sample * headroom * 32_768.0)
                 .round()
                 .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
             output.copy_from_slice(&scaled.to_le_bytes());
         }
+        raw.zeroize();
         filtered.zeroize();
-        self.quiet_spectral.gain = applied_gain;
+        self.quiet_spectral.gain = applied_gain * headroom;
+        self.quiet_spectral.observation_mix = observation_mix;
         self.quiet_spectral.previous_input = previous_input;
         self.quiet_spectral.previous_dc = previous_dc;
         QuietCompensationResult::Compensated
@@ -325,8 +396,8 @@ mod wasm_boundary {
     use zeroize::Zeroize;
 
     use super::{
-        FRAME_BYTES, OverflowPolicy, PcmRing, PushResult, QuietCompensationResult,
-        parse_context_frame,
+        FRAME_BYTES, OBSERVATION_MAXIMUM_MIX, OBSERVATION_MINIMUM_MIX, OverflowPolicy, PcmRing,
+        PushResult, QuietCompensationResult, parse_context_frame,
     };
 
     /// Browser release fixture for the same audio-core clock transition used
@@ -437,6 +508,39 @@ mod wasm_boundary {
         step.fast_ready
             && step.state.phase == IntentionalInterruptPhase::Confirmed
             && step.state.last_elapsed_ms == 400
+    }
+
+    #[wasm_bindgen(js_name = observationAddingSelfTest)]
+    pub fn observation_adding_self_test() -> bool {
+        use core::f64::consts::TAU;
+
+        let mut input = [0_u8; FRAME_BYTES];
+        for (index, bytes) in input.chunks_exact_mut(2).enumerate() {
+            let time = index as f64 / 16_000.0;
+            let sample = 0.009 * (TAU * 250.0 * time).sin()
+                + 0.007 * (TAU * 1_800.0 * time).sin()
+                + 0.004 * (TAU * 4_000.0 * time).sin();
+            let pcm = (sample * 32_768.0)
+                .round()
+                .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+            bytes.copy_from_slice(&pcm.to_le_bytes());
+        }
+        let mut original = input;
+        let Ok(mut ring) = PcmRing::new(91, 2, OverflowPolicy::Reject) else {
+            input.zeroize();
+            return false;
+        };
+        let result = ring.compensate_quiet_frame(91, &mut input);
+        let mix = ring.quiet_spectral.observation_mix;
+        let preserved = input != original
+            && result == QuietCompensationResult::Compensated
+            && (OBSERVATION_MINIMUM_MIX..=OBSERVATION_MAXIMUM_MIX).contains(&mix)
+            && input
+                .chunks_exact(2)
+                .all(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]).unsigned_abs() <= 26_870);
+        input.zeroize();
+        original.zeroize();
+        preserved
     }
 
     #[wasm_bindgen(js_name = PcmRing)]
@@ -784,7 +888,54 @@ mod tests {
         assert!(ring.quiet_spectral.gain > 1.0);
         assert!(ring.clear(71));
         assert_eq!(ring.quiet_spectral.gain, 1.0);
+        assert_eq!(ring.quiet_spectral.observation_mix, OBSERVATION_MAXIMUM_MIX);
         assert_eq!(ring.quiet_spectral.previous_input, 0.0);
         assert_eq!(ring.quiet_spectral.previous_dc, 0.0);
+    }
+
+    #[test]
+    fn observation_adding_preserves_raw_support_under_large_enhancement() {
+        let mut ring = PcmRing::new(81, 2, OverflowPolicy::Reject).unwrap();
+        let original = tonal_frame(0.009);
+        let mut compensated = original;
+        assert_eq!(
+            ring.compensate_quiet_frame(81, &mut compensated),
+            QuietCompensationResult::Compensated
+        );
+        assert!(
+            (OBSERVATION_MINIMUM_MIX..=OBSERVATION_MAXIMUM_MIX)
+                .contains(&ring.quiet_spectral.observation_mix)
+        );
+        assert!(projection(&compensated, 250.0) >= projection(&original, 250.0));
+        assert!(projection(&compensated, 4_000.0) > projection(&original, 4_000.0));
+    }
+
+    #[test]
+    fn excessive_distortion_returns_the_original_bytes() {
+        let mut ring = PcmRing::new(82, 2, OverflowPolicy::Reject).unwrap();
+        let mut impulse = [0_u8; FRAME_BYTES];
+        impulse[0..2].copy_from_slice(&1_311_i16.to_le_bytes());
+        let original = impulse;
+        assert_eq!(
+            ring.compensate_quiet_frame(82, &mut impulse),
+            QuietCompensationResult::Unchanged
+        );
+        assert_eq!(impulse, original);
+    }
+
+    #[test]
+    fn h0_bypass_is_byte_stable_for_one_hundred_thousand_frames() {
+        let mut ring = PcmRing::new(83, 2, OverflowPolicy::Reject).unwrap();
+        let silence = [0_u8; FRAME_BYTES];
+        let normal = tonal_frame(0.09);
+        for trace in 0..100_000_u32 {
+            let original = if trace % 2 == 0 { silence } else { normal };
+            let mut observed = original;
+            assert_eq!(
+                ring.compensate_quiet_frame(83, &mut observed),
+                QuietCompensationResult::Unchanged
+            );
+            assert_eq!(observed, original);
+        }
     }
 }

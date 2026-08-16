@@ -356,7 +356,7 @@ function Assert-BrowserAudioGate {
     $resultProperties = @($result.PSObject.Properties.Name | Sort-Object)
     if (
         ($resultProperties -join ",") -cne
-            "acousticExchangeabilityValidated,directWasmGenerationIsolation,freshGenerationFrames,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,observationAddingValidated,provenance,quietSpectralCompensationValidated,quietSubbandEvidenceValidated,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
+            "acousticCoverageWireValidated,acousticExchangeabilityValidated,directWasmGenerationIsolation,freshGenerationFrames,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,observationAddingValidated,provenance,quietSpectralCompensationValidated,quietSubbandEvidenceValidated,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture" -or
         $result.status -cne "passed" -or
         $result.provenance -cne "release" -or
         $result.sourceCommit -cne $ExpectedGitCommit -or
@@ -367,6 +367,7 @@ function Assert-BrowserAudioGate {
         [bool] $result.intentionalFastLaneValidated -ne $true -or
         [bool] $result.observationAddingValidated -ne $true -or
         [bool] $result.acousticExchangeabilityValidated -ne $true -or
+        [bool] $result.acousticCoverageWireValidated -ne $true -or
         [bool] $result.guestQuietOnsetValidated -ne $true -or
         [bool] $result.quietSubbandEvidenceValidated -ne $true -or
         [bool] $result.quietSpectralCompensationValidated -ne $true -or

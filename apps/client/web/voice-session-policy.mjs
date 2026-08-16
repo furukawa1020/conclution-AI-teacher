@@ -75,6 +75,7 @@ export const QUIET_EVIDENCE_FLAGS = Object.freeze({
   candidate: 1,
   spectralChange: 2,
   stationary: 4,
+  inSessionCoverage: 8,
 });
 
 // A content-free receipt is a separate UX budget from endpointing and the
@@ -950,7 +951,13 @@ export function advanceVad(
       Reflect.ownKeys(acousticEvidence).length !== 2 ||
       !Number.isSafeInteger(acousticEvidence.flags) ||
       acousticEvidence.flags < 0 ||
-      acousticEvidence.flags > 7 ||
+      acousticEvidence.flags > 15 ||
+      ((acousticEvidence.flags &
+        (QUIET_EVIDENCE_FLAGS.candidate |
+          QUIET_EVIDENCE_FLAGS.spectralChange)) !==
+        0 &&
+        (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.inSessionCoverage) ===
+          0) ||
       !Number.isFinite(acousticEvidence.noiseFloor) ||
       acousticEvidence.noiseFloor < 0.002 ||
       acousticEvidence.noiseFloor > 0.04)

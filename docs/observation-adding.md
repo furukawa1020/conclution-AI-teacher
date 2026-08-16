@@ -32,4 +32,4 @@ frame-local配列は返却前にzeroizeする。generation不一致、clear、Dr
 - 配布Wasmの `observationAddingSelfTest` を実Chromeで直接実行
 - `observationAddingValidated=true` がないHosting releaseを拒否
 
-これは学習済みSSL enhancerそのものではなく、Issue #108で今後接続するenhancerが越えられないproduction安全境界である。raw/enhanced二経路ASRのtoken採用はIssue #109、実日本語小声コーパスはIssue #97で別に検証する。
+これは学習済みSSL enhancerそのものではなく、Issue #108で今後接続するenhancerが越えられないproduction安全境界である。Issue #123ではRust確認済み小声のHTTP fallbackに限り、raw/enhancedを独立Chirp 3へ渡し、全文一致時だけ採用する第一境界を実装した。Native liveのtoken区間採用はIssue #109、実日本語小声コーパスはIssue #97で別に検証する。

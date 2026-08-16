@@ -146,7 +146,7 @@ export function installQuietEvidenceTrackerFactory(factory) {
 const DOCUMENT_MAX_BYTES = 7 * 1024 * 1024;
 const AUDIO_MAX_BYTES = 2 * 1024 * 1024;
 const QUIET_HTTP_PCM_FRAME_BYTES = 640;
-const QUIET_HTTP_PCM_MAX_FRAMES = 10_500;
+const QUIET_HTTP_PCM_MAX_FRAMES = 1_500;
 const QUIET_HTTP_PCM_MAX_BYTES =
   QUIET_HTTP_PCM_FRAME_BYTES * QUIET_HTTP_PCM_MAX_FRAMES;
 const QUIET_HTTP_FALLBACK_TIMEOUT_MS = 5_000;
@@ -3609,6 +3609,7 @@ async function startVoiceLiveSession({
 
   function discardCaptureMessage(event) {
     zeroizeCaptureFrame(event?.data?.pcm);
+    zeroizeCaptureFrame(event?.data?.baselinePcm);
   }
 
   function settleCaptureSeal(error) {
@@ -3738,6 +3739,7 @@ async function startVoiceLiveSession({
       return undefined;
     }
     const chunks = [];
+    const baselineChunks = [];
     let expectedSequence = 0;
     let receivedFrames = 0;
     let timer;
@@ -3751,7 +3753,7 @@ async function startVoiceLiveSession({
         try {
           if (message?.type === "fallback-frame") {
             if (
-              Reflect.ownKeys(message).length !== 6 ||
+              Reflect.ownKeys(message).length !== 7 ||
               message.version !== 1 ||
               message.generation !== captureGeneration ||
               message.sequence !== expectedSequence ||
@@ -3759,14 +3761,17 @@ async function startVoiceLiveSession({
               message.frameCount <= 0 ||
               message.frameCount > 50 ||
               !(message.pcm instanceof ArrayBuffer) ||
+              !(message.baselinePcm instanceof ArrayBuffer) ||
               message.pcm.byteLength !==
                 message.frameCount * QUIET_HTTP_PCM_FRAME_BYTES ||
+              message.baselinePcm.byteLength !== message.pcm.byteLength ||
               receivedFrames + message.frameCount >
                 QUIET_HTTP_PCM_MAX_FRAMES
             ) {
               throw new Error("voice_api_unavailable");
             }
             chunks.push(message.pcm);
+            baselineChunks.push(message.baselinePcm);
             receivedFrames += message.frameCount;
             expectedSequence += 1;
             return;
@@ -3782,9 +3787,18 @@ async function startVoiceLiveSession({
           ) {
             throw new Error("voice_api_unavailable");
           }
-          resolve(buildQuietPcmPayload(chunks, receivedFrames));
+          const enhanced = buildQuietPcmPayload(chunks, receivedFrames);
+          let baseline;
+          try {
+            baseline = buildQuietPcmPayload(baselineChunks, receivedFrames);
+          } catch (error) {
+            zeroizeCaptureFrame(enhanced);
+            throw error;
+          }
+          resolve(Object.freeze({ baseline, enhanced }));
         } catch (error) {
           zeroizeCaptureFrame(message?.pcm);
+          zeroizeCaptureFrame(message?.baselinePcm);
           reject(error);
         }
       };
@@ -3803,6 +3817,7 @@ async function startVoiceLiveSession({
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       for (const chunk of chunks) zeroizeCaptureFrame(chunk);
+      for (const chunk of baselineChunks) zeroizeCaptureFrame(chunk);
       captureStopped = true;
       captureNode.port.onmessage = discardCaptureMessage;
       try {
@@ -6379,6 +6394,7 @@ async function finishTurn(
   }
   const expectedEpoch = sessionEpoch;
   let audioBase64 = "";
+  let baselineAudioBase64 = "";
   let quietHttpAudioBuffer;
   let httpAudioMimeType;
   let usesQuietHttpPcm = false;
@@ -6692,11 +6708,23 @@ async function finishTurn(
       // finish above; a failed primary now ends explicitly.
       fail("voice_turn_too_large");
     }
-    usesQuietHttpPcm = quietHttpAudioBuffer instanceof ArrayBuffer;
+    usesQuietHttpPcm =
+      quietHttpAudioBuffer !== null &&
+      typeof quietHttpAudioBuffer === "object" &&
+      !Array.isArray(quietHttpAudioBuffer) &&
+      Reflect.ownKeys(quietHttpAudioBuffer).length === 2 &&
+      quietHttpAudioBuffer.baseline instanceof ArrayBuffer &&
+      quietHttpAudioBuffer.enhanced instanceof ArrayBuffer &&
+      quietHttpAudioBuffer.baseline.byteLength > 0 &&
+      quietHttpAudioBuffer.baseline.byteLength ===
+        quietHttpAudioBuffer.enhanced.byteLength;
+    if (quietHttpAudioBuffer && !usesQuietHttpPcm) {
+      fail("voice_api_unavailable");
+    }
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
       Promise.all([
-        quietHttpAudioBuffer
-          ? Promise.resolve(quietHttpAudioBuffer)
+        usesQuietHttpPcm
+          ? Promise.resolve(quietHttpAudioBuffer.enhanced)
           : capture.blob.arrayBuffer(),
         secureCredentials(),
       ]),
@@ -6704,8 +6732,16 @@ async function finishTurn(
     );
     try {
       audioBase64 = arrayBufferToBase64(audioBuffer);
+      if (usesQuietHttpPcm) {
+        baselineAudioBase64 = arrayBufferToBase64(
+          quietHttpAudioBuffer.baseline,
+        );
+      }
     } finally {
       new Uint8Array(audioBuffer).fill(0);
+      if (usesQuietHttpPcm) {
+        zeroizeCaptureFrame(quietHttpAudioBuffer.baseline);
+      }
       quietHttpAudioBuffer = undefined;
     }
     httpAudioMimeType = usesQuietHttpPcm
@@ -6743,6 +6779,7 @@ async function finishTurn(
 
     const payload = {
       audioBase64,
+      ...(usesQuietHttpPcm ? { baselineAudioBase64 } : {}),
       mimeType: httpAudioMimeType,
       sessionState: serializedSessionState,
       strictCloudMinimization,

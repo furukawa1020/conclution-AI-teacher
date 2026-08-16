@@ -1361,6 +1361,76 @@ func TestVoiceTurnRawPCMHasItsExactThreeMinuteThirtySecondCeiling(t *testing.T) 
 	}
 }
 
+func TestVoiceTurnAcceptsOnlyCompleteAlignedPairedPCM(t *testing.T) {
+	t.Parallel()
+	baseline := bytes.Repeat([]byte{1, 0}, 320)
+	enhanced := bytes.Repeat([]byte{2, 0}, 320)
+	input, err := decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64:         base64.StdEncoding.EncodeToString(enhanced),
+		BaselineAudioBase64: base64.StdEncoding.EncodeToString(baseline),
+		MIMEType:            "audio/l16",
+		TurnMode:            VoiceTurnIntentional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearVoiceInput(&input)
+	if !bytes.Equal(input.Audio, enhanced) ||
+		!bytes.Equal(input.BaselineAudio, baseline) {
+		t.Fatalf("paired input was not preserved")
+	}
+
+	for _, test := range []voiceTurnRequest{
+		{
+			AudioBase64:         base64.StdEncoding.EncodeToString(enhanced),
+			BaselineAudioBase64: base64.StdEncoding.EncodeToString(baseline[:638]),
+			MIMEType:            "audio/l16",
+			TurnMode:            VoiceTurnIntentional,
+		},
+		{
+			AudioBase64:         "YXVkaW8=",
+			BaselineAudioBase64: "YXVkaW8=",
+			MIMEType:            "audio/webm",
+			TurnMode:            VoiceTurnIntentional,
+		},
+	} {
+		invalid, err := decodeVoiceTurn(test)
+		clearVoiceInput(&invalid)
+		if err == nil {
+			t.Fatal("invalid paired PCM was accepted")
+		}
+	}
+}
+
+func TestVoiceTurnPairedPCMHasThirtySecondPerPathCeiling(t *testing.T) {
+	t.Parallel()
+	if maxPairedPCM16Bytes != 1_500*640 {
+		t.Fatalf("paired PCM ceiling = %d", maxPairedPCM16Bytes)
+	}
+	maximum := base64.StdEncoding.EncodeToString(make([]byte, maxPairedPCM16Bytes))
+	input, err := decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64:         maximum,
+		BaselineAudioBase64: maximum,
+		MIMEType:            "audio/l16",
+		TurnMode:            VoiceTurnIntentional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearVoiceInput(&input)
+	over := base64.StdEncoding.EncodeToString(make([]byte, maxPairedPCM16Bytes+640))
+	input, err = decodeVoiceTurn(voiceTurnRequest{
+		AudioBase64:         over,
+		BaselineAudioBase64: over,
+		MIMEType:            "audio/l16",
+		TurnMode:            VoiceTurnIntentional,
+	})
+	clearVoiceInput(&input)
+	if err == nil {
+		t.Fatal("paired PCM above 30 seconds was accepted")
+	}
+}
+
 func TestVoiceStateLimitMatchesConversationAndClientBoundary(t *testing.T) {
 	t.Parallel()
 

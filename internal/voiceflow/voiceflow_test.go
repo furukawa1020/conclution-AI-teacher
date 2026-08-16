@@ -1,6 +1,7 @@
 package voiceflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -29,6 +30,25 @@ type explicitPCMSpeech struct {
 	pcm             []byte
 }
 
+type pairedPCMSpeech struct {
+	fakeSpeech
+	baseline    []byte
+	enhanced    []byte
+	pairedCalls int
+	pairedErr   error
+}
+
+func (s *pairedPCMSpeech) TranscribePairedPCM16(
+	_ context.Context,
+	baseline []byte,
+	enhanced []byte,
+) (string, float32, error) {
+	s.pairedCalls++
+	s.baseline = append([]byte(nil), baseline...)
+	s.enhanced = append([]byte(nil), enhanced...)
+	return s.transcript, s.confidence, s.pairedErr
+}
+
 func (s *explicitPCMSpeech) Transcribe(
 	_ context.Context,
 	_ []byte,
@@ -44,6 +64,55 @@ func (s *explicitPCMSpeech) TranscribePCM16(
 	s.pcmCalls++
 	s.pcm = append([]byte(nil), pcm...)
 	return s.transcript, s.confidence, s.transcribeErr
+}
+
+func TestPipelineUsesPairedPCMWithoutSinglePathFallback(t *testing.T) {
+	t.Parallel()
+	baseline := make([]byte, 640)
+	enhanced := bytes.Repeat([]byte{1, 0}, 320)
+	speech := &pairedPCMSpeech{fakeSpeech: fakeSpeech{
+		transcript: "小さな声です",
+		confidence: .91,
+	}}
+	agent := &fakeAgent{result: conversation.VoiceTurnResult{
+		Domain: "daily", AssistanceTarget: "assistant", RespondentStage: "none",
+		ResearchStatus: "none", ResearchRecords: []conversation.ResearchRecord{},
+		Route: "fast", StateToken: "state", SpokenReply: "届きました",
+	}}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio: enhanced, BaselineAudio: baseline, MIMEType: "audio/l16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if speech.pairedCalls != 1 || agent.calls != 1 ||
+		!bytes.Equal(speech.baseline, baseline) ||
+		!bytes.Equal(speech.enhanced, enhanced) {
+		t.Fatalf("paired boundary was bypassed: speech=%+v agent=%d", speech, agent.calls)
+	}
+}
+
+func TestPipelineTreatsPairedDisagreementAsRecognitionMiss(t *testing.T) {
+	t.Parallel()
+	speech := &pairedPCMSpeech{fakeSpeech: fakeSpeech{}, pairedErr: speechio.ErrPairedRecognitionUnresolved}
+	agent := &fakeAgent{}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio: make([]byte, 640), BaselineAudio: make([]byte, 640), MIMEType: "audio/l16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.calls != 0 || result.Route != routeClarifyNoSpeech {
+		t.Fatalf("disagreement escaped: result=%+v agent=%d", result, agent.calls)
+	}
 }
 
 func assertRuntimeDocumentRejected(

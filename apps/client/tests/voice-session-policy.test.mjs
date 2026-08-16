@@ -1137,7 +1137,7 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
 
   assert.match(
     finish,
-    /Promise\.all\(\[\s*quietHttpAudioBuffer\s*\? Promise\.resolve\(quietHttpAudioBuffer\)\s*:\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
+    /Promise\.all\(\[\s*usesQuietHttpPcm\s*\? Promise\.resolve\(quietHttpAudioBuffer\.enhanced\)\s*:\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
   );
   const joinedAt = finish.indexOf("Promise.all([");
   const encodeAt = finish.indexOf("arrayBufferToBase64(audioBuffer)");
@@ -1162,7 +1162,10 @@ test("reviewed Native failure transfers quiet Rust PCM once before cancelling", 
   const cancelAt = finish.indexOf("liveSession.cancel(", takeAt);
   assert.ok(takeAt >= 0);
   assert.ok(cancelAt > takeAt);
-  assert.match(finish, /usesQuietHttpPcm\s*=\s*quietHttpAudioBuffer instanceof ArrayBuffer/u);
+  assert.match(finish, /quietHttpAudioBuffer\.baseline instanceof ArrayBuffer/u);
+  assert.match(finish, /quietHttpAudioBuffer\.enhanced instanceof ArrayBuffer/u);
+  assert.match(finish, /baselineAudioBase64 = arrayBufferToBase64/u);
+  assert.match(finish, /\{ baselineAudioBase64 \}/u);
   assert.match(finish, /\? "audio\/l16"\s*:\s*capture\.mimeType/u);
   assert.match(finish, /new Uint8Array\(audioBuffer\)\.fill\(0\)/u);
 });

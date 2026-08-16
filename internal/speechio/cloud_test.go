@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"cloud.google.com/go/speech/apiv2/speechpb"
@@ -13,6 +14,111 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func pairedStreamingService(
+	streams ...*fakeStreamingRecognizeClient,
+) *CloudService {
+	var mutex sync.Mutex
+	next := 0
+	return &CloudService{
+		recognizer:  "projects/project/locations/asia-northeast1/recognizers/_",
+		speechModel: "chirp_3",
+		streamRecognizeCall: func(context.Context) (streamingRecognizeClient, error) {
+			mutex.Lock()
+			defer mutex.Unlock()
+			if next >= len(streams) {
+				return nil, errors.New("unexpected stream")
+			}
+			stream := streams[next]
+			next++
+			return stream, nil
+		},
+	}
+}
+
+func pairedFinalStream(text string, confidence float32) *fakeStreamingRecognizeClient {
+	return &fakeStreamingRecognizeClient{recv: []streamingRecognizeReceive{{
+		response: &speechpb.StreamingRecognizeResponse{Results: []*speechpb.StreamingRecognitionResult{
+			streamingTestResult(text, true, 0, confidence),
+		}},
+	}}}
+}
+
+func TestPairedPCM16AcceptsOnlyExactIndependentAgreement(t *testing.T) {
+	baselineStream := pairedFinalStream(" 小さな 声です ", .91)
+	enhancedStream := pairedFinalStream("小さな 声です", .87)
+	service := pairedStreamingService(baselineStream, enhancedStream)
+	baseline := bytes.Repeat([]byte{1, 0}, 320)
+	enhanced := bytes.Repeat([]byte{2, 0}, 320)
+	text, confidence, err := service.TranscribePairedPCM16(
+		context.Background(),
+		baseline,
+		enhanced,
+	)
+	if err != nil || text != "小さな 声です" || confidence != .87 {
+		t.Fatalf("result=(%q,%f,%v)", text, confidence, err)
+	}
+	observed := map[byte]bool{}
+	for _, stream := range []*fakeStreamingRecognizeClient{baselineStream, enhancedStream} {
+		if len(stream.sent) != 2 || len(stream.sent[1].GetAudio()) != 640 {
+			t.Fatalf("stream requests = %#v", stream.sent)
+		}
+		observed[stream.sent[1].GetAudio()[0]] = true
+	}
+	if !observed[1] || !observed[2] {
+		t.Fatalf("independent inputs were not both decoded: %#v", observed)
+	}
+}
+
+func TestPairedPCM16RejectsSubstitutionAndOneSidedSpeech(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		baseline *fakeStreamingRecognizeClient
+		enhanced *fakeStreamingRecognizeClient
+	}{
+		{
+			name:     "substitution",
+			baseline: pairedFinalStream("今日は休みます", .9),
+			enhanced: pairedFinalStream("今日は走ります", .99),
+		},
+		{
+			name:     "enhanced only",
+			baseline: &fakeStreamingRecognizeClient{},
+			enhanced: pairedFinalStream("補完された文", .99),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := pairedStreamingService(test.baseline, test.enhanced)
+			_, _, err := service.TranscribePairedPCM16(
+				context.Background(),
+				make([]byte, 640),
+				make([]byte, 640),
+			)
+			if !errors.Is(err, ErrPairedRecognitionUnresolved) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPairedAgreementRejectsOneHundredThousandTokenCounterexamples(t *testing.T) {
+	for index := 0; index < 100_000; index++ {
+		baseline := "token-" + string(rune(0x3041+(index%80)))
+		enhanced := baseline + " insertion"
+		if pairedTranscriptsAgree(baseline, enhanced) ||
+			pairedTranscriptsAgree(baseline, "deletion") ||
+			pairedTranscriptsAgree(baseline, "substitution") {
+			t.Fatalf("counterexample %d was accepted", index)
+		}
+	}
+}
+
+func TestPairedAgreementRejectsInvalidUTF8(t *testing.T) {
+	invalid := string([]byte{0xff, 0xfe})
+	if pairedTranscriptsAgree(invalid, invalid) {
+		t.Fatal("invalid UTF-8 was accepted as paired recognition")
+	}
+}
 
 func TestNewCloudServiceRejectsNonConversationModelBeforeClientInitialization(t *testing.T) {
 	t.Parallel()

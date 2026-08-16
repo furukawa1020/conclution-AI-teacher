@@ -56,6 +56,7 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(runtime, /verifyGenerationIsolation\(ring, generation\)/u);
   assert.match(runtime, /ring\.push\(staleGeneration, 0, probe\)/u);
   assert.match(runtime, /ring\.compensateQuietFrame\([\s\S]*staleGeneration/u);
+  assert.match(runtime, /observationAddingSelfTest\(\)\s*!==\s*true/u);
   assert.match(runtime, /ring\.clear\(generation\)/u);
 
   assert.match(

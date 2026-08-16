@@ -2,6 +2,7 @@ import {
   initSync,
   PcmRing,
   intentionalFastLaneSelfTest,
+  observationAddingSelfTest,
   temporalVadClockSelfTest,
 } from "/wasm/kotae_pcm_ring.js";
 
@@ -93,6 +94,9 @@ export function createPcmRing(
     }
     if (intentionalFastLaneSelfTest() !== true) {
       throw new Error("intentional_fast_lane_self_test_failed");
+    }
+    if (observationAddingSelfTest() !== true) {
+      throw new Error("observation_adding_self_test_failed");
     }
     initialized = true;
   }

@@ -595,6 +595,7 @@ function validateBrowserResult(result) {
     "wasmModuleCloned",
     "directWasmGenerationIsolation",
     "intentionalFastLaneValidated",
+    "observationAddingValidated",
     "guestAFirstSprintSloValidated",
     "guestQuietOnsetValidated",
     "quietSubbandEvidenceValidated",
@@ -621,6 +622,7 @@ function validateBrowserResult(result) {
     result.wasmModuleCloned !== true ||
     result.directWasmGenerationIsolation !== true ||
     result.intentionalFastLaneValidated !== true ||
+    result.observationAddingValidated !== true ||
     result.guestAFirstSprintSloValidated !== true ||
     result.guestQuietOnsetValidated !== true ||
     result.quietSubbandEvidenceValidated !== true ||
@@ -833,6 +835,7 @@ async function main() {
       directWasmGenerationIsolation:
         result.directWasmGenerationIsolation,
       intentionalFastLaneValidated: result.intentionalFastLaneValidated,
+      observationAddingValidated: result.observationAddingValidated,
       guestAFirstSprintSloValidated: result.guestAFirstSprintSloValidated,
       guestQuietOnsetValidated: result.guestQuietOnsetValidated,
       quietSubbandEvidenceValidated: result.quietSubbandEvidenceValidated,

@@ -120,6 +120,36 @@ function validateIntentionalFastLane(pcmRingModule) {
   return true;
 }
 
+function validateObservationAdding(pcmRingModule) {
+  currentPhase = "observation_adding";
+  const imports = Object.create(null);
+  for (const descriptor of WebAssembly.Module.imports(pcmRingModule)) {
+    invariant(descriptor.kind === "function", "observation_import_kind_invalid");
+    imports[descriptor.module] ??= Object.create(null);
+    imports[descriptor.module][descriptor.name] = () => {
+      throw new FixtureFailure("observation_unexpected_import_call");
+    };
+  }
+  const instance = new WebAssembly.Instance(pcmRingModule, imports);
+  const validate = instance.exports.observationAddingSelfTest;
+  invariant(typeof validate === "function", "observation_adding_export_missing");
+  for (let warmup = 0; warmup < 16; warmup += 1) {
+    invariant(validate() === 1, "observation_adding_warmup_failed");
+  }
+  const durations = [];
+  for (let sample = 0; sample < 256; sample += 1) {
+    const startedAt = performance.now();
+    invariant(validate() === 1, "observation_adding_self_test_failed");
+    durations.push(performance.now() - startedAt);
+  }
+  durations.sort((left, right) => left - right);
+  invariant(
+    durations[Math.floor(durations.length * 0.95)] <= 0.5,
+    "observation_adding_wasm_p95_exceeded",
+  );
+  return true;
+}
+
 function guestAFirstObservation({
   aiOutputBeforeAnswer = false,
   listeningAt = 1_000,
@@ -418,13 +448,16 @@ async function runQuietGainScenario(pcmRingModule) {
   );
   invariant(state.processorError === false, "quiet_gain_processor_error");
   invariant(
-    state.frames.every(
-      (frame) =>
-        frame.maximum > 500 &&
-        frame.maximum <= 26_870 &&
-        frame.spectralRatio > baseline * 1.1,
-    ),
-    "quiet_gain_bounds_invalid",
+    state.frames.every((frame) => frame.maximum > 500),
+    "quiet_observation_gain_floor_invalid",
+  );
+  invariant(
+    state.frames.every((frame) => frame.maximum <= 26_870),
+    "quiet_observation_headroom_invalid",
+  );
+  invariant(
+    state.frames.every((frame) => frame.spectralRatio > baseline * 1.1),
+    "quiet_observation_spectral_support_invalid",
   );
   const fallback = {
     frames: [],
@@ -811,6 +844,7 @@ async function run() {
   );
   const intentionalFastLaneValidated =
     validateIntentionalFastLane(pcmRingModule);
+  const observationAddingValidated = validateObservationAdding(pcmRingModule);
   const rustGuestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
   const quietSubbandEvidenceValidated = validateQuietSubbandEvidence(clientModule);
   const guestAFirstSprintSloValidated = validateGuestAFirstSprintSlo();
@@ -841,6 +875,7 @@ async function run() {
     wasmModuleCloned: true,
     directWasmGenerationIsolation: true,
     intentionalFastLaneValidated,
+    observationAddingValidated,
     guestAFirstSprintSloValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,

@@ -33,3 +33,5 @@ frame-local配列は返却前にzeroizeする。generation不一致、clear、Dr
 - `observationAddingValidated=true` がないHosting releaseを拒否
 
 これは学習済みSSL enhancerそのものではなく、Issue #108で今後接続するenhancerが越えられないproduction安全境界である。Issue #123ではRust確認済み小声のHTTP fallbackに限り、raw/enhancedを独立Chirp 3へ渡し、全文一致時だけ採用する第一境界を実装した。Native liveのtoken区間採用はIssue #109、実日本語小声コーパスはIssue #97で別に検証する。
+
+小声candidateをこの強調境界へ渡す前には、[端末内acoustic exchangeability gate](acoustic-exchangeability.md)が同じsession内の安定基準を要求する。clippingやsample-clock断絶でcoverageを失った観測を、強調によって救済したことにはしない。

@@ -264,6 +264,29 @@ function validateQuietSubbandEvidence(clientModule) {
   return true;
 }
 
+function validateAcousticExchangeability(clientModule) {
+  currentPhase = "acoustic_exchangeability";
+  const imports = Object.create(null);
+  for (const descriptor of WebAssembly.Module.imports(clientModule)) {
+    invariant(
+      descriptor.kind === "function",
+      "acoustic_exchangeability_import_kind_invalid",
+    );
+    imports[descriptor.module] ??= Object.create(null);
+    imports[descriptor.module][descriptor.name] = () => {
+      throw new FixtureFailure("acoustic_exchangeability_unexpected_import_call");
+    };
+  }
+  const instance = new WebAssembly.Instance(clientModule, imports);
+  const validate = instance.exports.acousticExchangeabilitySelfTest;
+  invariant(
+    typeof validate === "function",
+    "acoustic_exchangeability_export_missing",
+  );
+  invariant(validate() === 1, "acoustic_exchangeability_self_test_failed");
+  return true;
+}
+
 function createCollector(node, generation) {
   const state = {
     frames: [],
@@ -860,6 +883,8 @@ async function run() {
   const observationAddingValidated = validateObservationAdding(pcmRingModule);
   const rustGuestQuietOnsetValidated = validateGuestQuietOnset(clientModule);
   const quietSubbandEvidenceValidated = validateQuietSubbandEvidence(clientModule);
+  const acousticExchangeabilityValidated =
+    validateAcousticExchangeability(clientModule);
   const guestAFirstSprintSloValidated = validateGuestAFirstSprintSlo();
 
   currentPhase = "wrapped";
@@ -889,6 +914,7 @@ async function run() {
     directWasmGenerationIsolation: true,
     intentionalFastLaneValidated,
     observationAddingValidated,
+    acousticExchangeabilityValidated,
     guestAFirstSprintSloValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,

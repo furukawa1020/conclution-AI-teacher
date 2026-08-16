@@ -30,6 +30,9 @@ test("小声の帯域証拠はRustの二時間尺度floorからproduction VADへ
   assert.match(core, /fast_band_floor/u);
   assert.match(core, /slow_band_floor/u);
   assert.match(core, /freeze_until_frame/u);
+  assert.match(core, /QUIET_EVIDENCE_IN_SESSION_COVERAGE/u);
+  assert.match(core, /coverage_stable_observations/u);
+  assert.match(core, /QUIET_COVERAGE_MAXIMUM_CLIPPED_PER_MILLE/u);
   assert.match(client, /createQuietEvidenceTracker/u);
   assert.match(
     bootstrap,
@@ -40,6 +43,11 @@ test("小声の帯域証拠はRustの二時間尺度floorからproduction VADへ
     /quietEvidenceTracker\.advance\(\s*clockFrame,\s*pcm/u,
   );
   assert.match(bridge, /acousticEvidence: Object\.freeze/u);
+  assert.match(bridge, /rustEvidence\[0\] > 15/u);
+  assert.match(
+    bridge,
+    /\(rustEvidence\[0\] & 3\) !== 0 && \(rustEvidence\[0\] & 8\) === 0/u,
+  );
   assert.match(policy, /rustQuietCandidate/u);
   assert.match(policy, /QUIET_EVIDENCE_FLAGS/u);
   assert.doesNotMatch(bridge, /kotae:quiet.*evidence/iu);

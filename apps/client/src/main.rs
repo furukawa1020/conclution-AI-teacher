@@ -67,7 +67,8 @@ pub fn create_quiet_evidence_tracker_for_js(
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = quietSubbandEvidenceSelfTest)]
 pub fn quiet_subband_evidence_self_test_for_js() -> bool {
     use kotae_audio_core::{
-        QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceTracker,
+        QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_IN_SESSION_COVERAGE,
+        QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceTracker,
     };
 
     let sample_rate = 48_000_u32;
@@ -95,6 +96,7 @@ pub fn quiet_subband_evidence_self_test_for_js() -> bool {
         Some(
             room.flags & QUIET_EVIDENCE_CANDIDATE == 0
                 && room_again.flags & QUIET_EVIDENCE_CANDIDATE == 0
+                && room_again.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE != 0
                 && voice.flags & QUIET_EVIDENCE_CANDIDATE != 0
                 && voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE != 0
                 && (0.002..=0.04).contains(&voice.noise_floor),
@@ -103,6 +105,53 @@ pub fn quiet_subband_evidence_self_test_for_js() -> bool {
     .unwrap_or(false);
     drop(stationary);
     drop(changing);
+    result
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = acousticExchangeabilitySelfTest)]
+pub fn acoustic_exchangeability_self_test_for_js() -> bool {
+    use kotae_audio_core::{
+        QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_IN_SESSION_COVERAGE, QuietEvidenceTracker,
+    };
+
+    let sample_rate = 48_000_u32;
+    let tones = |components: &[(f64, f64)]| {
+        (0..1_024)
+            .map(|index| {
+                components
+                    .iter()
+                    .map(|(frequency, amplitude)| {
+                        (core::f64::consts::TAU * frequency * index as f64 / f64::from(sample_rate))
+                            .sin()
+                            * amplitude
+                    })
+                    .sum::<f64>() as f32
+            })
+            .collect::<Vec<_>>()
+    };
+    let room = tones(&[(500.0, 0.002), (1_000.0, 0.001)]);
+    let quiet_voice = tones(&[(500.0, 0.007), (1_800.0, 0.005), (2_800.0, 0.004)]);
+    let clipped = vec![1.0_f32; 1_024];
+    let result = (|| {
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).ok()?;
+        let first = tracker.advance(1_920, &room).ok()?;
+        let covered = tracker.advance(3_840, &room).ok()?;
+        let voice = tracker.advance(5_760, &quiet_voice).ok()?;
+        let rejected = tracker.advance(7_680, &clipped).ok()?;
+        Some(
+            first.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE == 0
+                && covered.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE != 0
+                && voice.flags & QUIET_EVIDENCE_CANDIDATE != 0
+                && voice.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE != 0
+                && rejected.flags & QUIET_EVIDENCE_CANDIDATE == 0
+                && rejected.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE == 0,
+        )
+    })()
+    .unwrap_or(false);
+    drop(room);
+    drop(quiet_voice);
+    drop(clipped);
     result
 }
 

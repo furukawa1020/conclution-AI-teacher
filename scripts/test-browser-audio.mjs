@@ -596,6 +596,7 @@ function validateBrowserResult(result) {
     "directWasmGenerationIsolation",
     "intentionalFastLaneValidated",
     "observationAddingValidated",
+    "acousticExchangeabilityValidated",
     "guestAFirstSprintSloValidated",
     "guestQuietOnsetValidated",
     "quietSubbandEvidenceValidated",
@@ -623,6 +624,7 @@ function validateBrowserResult(result) {
     result.directWasmGenerationIsolation !== true ||
     result.intentionalFastLaneValidated !== true ||
     result.observationAddingValidated !== true ||
+    result.acousticExchangeabilityValidated !== true ||
     result.guestAFirstSprintSloValidated !== true ||
     result.guestQuietOnsetValidated !== true ||
     result.quietSubbandEvidenceValidated !== true ||
@@ -836,6 +838,8 @@ async function main() {
         result.directWasmGenerationIsolation,
       intentionalFastLaneValidated: result.intentionalFastLaneValidated,
       observationAddingValidated: result.observationAddingValidated,
+      acousticExchangeabilityValidated:
+        result.acousticExchangeabilityValidated,
       guestAFirstSprintSloValidated: result.guestAFirstSprintSloValidated,
       guestQuietOnsetValidated: result.guestQuietOnsetValidated,
       quietSubbandEvidenceValidated: result.quietSubbandEvidenceValidated,

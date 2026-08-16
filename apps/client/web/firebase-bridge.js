@@ -2355,7 +2355,8 @@ function armVad(recording) {
         rustEvidence.length !== 2 ||
         !Number.isSafeInteger(rustEvidence[0]) ||
         rustEvidence[0] < 0 ||
-        rustEvidence[0] > 7 ||
+        rustEvidence[0] > 15 ||
+        ((rustEvidence[0] & 3) !== 0 && (rustEvidence[0] & 8) === 0) ||
         !Number.isFinite(rustEvidence[1]) ||
         rustEvidence[1] < 0.002 ||
         rustEvidence[1] > 0.04

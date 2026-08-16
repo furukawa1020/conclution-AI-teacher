@@ -16,11 +16,16 @@ pub const ONSET_FRAME_SOFT: u8 = 1 << 1;
 pub const QUIET_EVIDENCE_CANDIDATE: u8 = 1 << 0;
 pub const QUIET_EVIDENCE_SPECTRAL_CHANGE: u8 = 1 << 1;
 pub const QUIET_EVIDENCE_STATIONARY: u8 = 1 << 2;
+pub const QUIET_EVIDENCE_IN_SESSION_COVERAGE: u8 = 1 << 3;
 
 pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
 
 const QUIET_EVIDENCE_BANDS_HZ: [f64; 6] = [250.0, 500.0, 1_000.0, 1_800.0, 2_800.0, 4_000.0];
 const QUIET_EVIDENCE_MINIMUM_ENERGY: f64 = 1.0e-12;
+const QUIET_COVERAGE_MINIMUM_STABLE_OBSERVATIONS: u8 = 2;
+const QUIET_COVERAGE_MAXIMUM_CLOCK_GAP_MS: u64 = 500;
+const QUIET_COVERAGE_MAXIMUM_CLIPPED_PER_MILLE: usize = 5;
+const QUIET_COVERAGE_FLOOR_SHIFT_RATIO: f64 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuietEvidenceStep {
@@ -44,6 +49,9 @@ pub struct QuietEvidenceTracker {
     previous_band_energy: [f64; 6],
     fast_rms_floor: f64,
     slow_rms_floor: f64,
+    coverage_stable_observations: u8,
+    coverage_shift_observations: u8,
+    in_session_coverage: bool,
     initialized: bool,
 }
 
@@ -61,6 +69,9 @@ impl QuietEvidenceTracker {
             previous_band_energy: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
             fast_rms_floor: 0.006,
             slow_rms_floor: 0.006,
+            coverage_stable_observations: 0,
+            coverage_shift_observations: 0,
+            in_session_coverage: false,
             initialized: false,
         })
     }
@@ -82,13 +93,18 @@ impl QuietEvidenceTracker {
             return Err(DetectorError::InvalidQuietEvidenceState);
         }
 
+        let frame_delta = current_frame - self.last_frame;
         let mut square_sum = 0.0_f64;
+        let mut clipped_samples = 0_usize;
         for sample in pcm {
             if !sample.is_finite() {
                 return Err(DetectorError::NonFiniteSample);
             }
             let bounded = f64::from(sample.clamp(-1.0, 1.0));
             square_sum += bounded * bounded;
+            if bounded.abs() >= 0.999 {
+                clipped_samples = clipped_samples.saturating_add(1);
+            }
         }
         let rms = (square_sum / pcm.len() as f64).sqrt();
         let band_energy = quiet_band_energy(self.sample_rate_hz, pcm)?;
@@ -100,6 +116,9 @@ impl QuietEvidenceTracker {
             self.previous_band_energy = self.fast_band_floor;
             self.fast_rms_floor = rms.clamp(0.002, 0.04);
             self.slow_rms_floor = self.fast_rms_floor;
+            self.coverage_stable_observations = 1;
+            self.coverage_shift_observations = 0;
+            self.in_session_coverage = false;
             self.initialized = true;
             self.last_frame = current_frame;
             return Ok(QuietEvidenceStep {
@@ -136,7 +155,36 @@ impl QuietEvidenceTracker {
             self.freeze_until_frame = current_frame.saturating_add(lease_frames);
         }
 
-        if !candidate && current_frame > self.freeze_until_frame {
+        let clock_gap_limit =
+            u64::from(self.sample_rate_hz) * QUIET_COVERAGE_MAXIMUM_CLOCK_GAP_MS / 1_000;
+        let clipping_invalid = clipped_samples.saturating_mul(1_000)
+            >= pcm
+                .len()
+                .saturating_mul(QUIET_COVERAGE_MAXIMUM_CLIPPED_PER_MILLE);
+        if clipping_invalid || frame_delta > clock_gap_limit {
+            self.coverage_stable_observations = 0;
+            self.coverage_shift_observations = 0;
+            self.in_session_coverage = false;
+        } else if !candidate && current_frame > self.freeze_until_frame {
+            let floor = self.slow_rms_floor.max(0.002);
+            let floor_shift = rms > floor * QUIET_COVERAGE_FLOOR_SHIFT_RATIO
+                || rms * QUIET_COVERAGE_FLOOR_SHIFT_RATIO < floor;
+            if floor_shift {
+                self.coverage_shift_observations =
+                    self.coverage_shift_observations.saturating_add(1);
+                if self.coverage_shift_observations >= 2 {
+                    self.coverage_stable_observations = 0;
+                    self.in_session_coverage = false;
+                }
+            } else {
+                self.coverage_shift_observations = 0;
+                self.coverage_stable_observations = self
+                    .coverage_stable_observations
+                    .saturating_add(1)
+                    .min(QUIET_COVERAGE_MINIMUM_STABLE_OBSERVATIONS);
+                self.in_session_coverage =
+                    self.coverage_stable_observations >= QUIET_COVERAGE_MINIMUM_STABLE_OBSERVATIONS;
+            }
             for (index, energy) in band_energy.iter().copied().enumerate() {
                 self.fast_band_floor[index] =
                     asymmetric_floor(self.fast_band_floor[index], energy, 0.25, 0.04);
@@ -154,13 +202,16 @@ impl QuietEvidenceTracker {
         self.previous_band_energy = band_energy;
         self.last_frame = current_frame;
         let mut flags = 0;
-        if candidate {
+        if candidate && self.in_session_coverage && !clipping_invalid {
             flags |= QUIET_EVIDENCE_CANDIDATE;
         } else {
             flags |= QUIET_EVIDENCE_STATIONARY;
         }
-        if changed {
+        if changed && self.in_session_coverage && !clipping_invalid {
             flags |= QUIET_EVIDENCE_SPECTRAL_CHANGE;
+        }
+        if self.in_session_coverage && !clipping_invalid {
+            flags |= QUIET_EVIDENCE_IN_SESSION_COVERAGE;
         }
         Ok(QuietEvidenceStep {
             flags,
@@ -176,6 +227,9 @@ impl Drop for QuietEvidenceTracker {
         self.previous_band_energy.fill(0.0);
         self.fast_rms_floor = 0.0;
         self.slow_rms_floor = 0.0;
+        self.coverage_stable_observations = 0;
+        self.coverage_shift_observations = 0;
+        self.in_session_coverage = false;
         self.last_frame = 0;
         self.freeze_until_frame = 0;
         self.initialized = false;
@@ -1064,24 +1118,75 @@ mod tests {
         let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
         let room = tone_frame(1_024, sample_rate, &[(250.0, 0.002), (500.0, 0.001)]);
         tracker.advance(1_920, &room).expect("calibrate");
+        let covered = tracker.advance(3_840, &room).expect("establish coverage");
+        assert_ne!(covered.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE, 0);
         let voice = tone_frame(
             1_024,
             sample_rate,
             &[(500.0, 0.007), (1_000.0, 0.006), (2_800.0, 0.004)],
         );
-        let start = tracker.advance(3_840, &voice).expect("candidate");
-        let held = tracker.advance(5_760, &voice).expect("lease");
+        let start = tracker.advance(5_760, &voice).expect("candidate");
+        let held = tracker.advance(7_680, &voice).expect("lease");
         assert_ne!(start.flags & QUIET_EVIDENCE_CANDIDATE, 0);
         assert_ne!(held.flags & QUIET_EVIDENCE_CANDIDATE, 0);
         assert_eq!(start.noise_floor, held.noise_floor);
         assert_eq!(
-            tracker.advance(5_760, &voice),
+            tracker.advance(7_680, &voice),
             Err(DetectorError::InvalidQuietEvidenceState)
         );
         assert_eq!(
             tracker.advance(300_000, &voice),
             Err(DetectorError::InvalidQuietEvidenceState)
         );
+    }
+
+    #[test]
+    fn quiet_candidate_requires_stable_session_coverage_and_clipping_revokes_it() {
+        let sample_rate = 48_000_u32;
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        let room = tone_frame(1_024, sample_rate, &[(500.0, 0.002), (1_000.0, 0.001)]);
+        let voice = tone_frame(
+            1_024,
+            sample_rate,
+            &[(500.0, 0.007), (1_800.0, 0.005), (2_800.0, 0.004)],
+        );
+
+        let first = tracker.advance(1_920, &room).expect("first room frame");
+        assert_eq!(first.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE, 0);
+        let covered = tracker.advance(3_840, &room).expect("stable room frame");
+        assert_ne!(covered.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE, 0);
+        let admitted = tracker.advance(5_760, &voice).expect("covered voice");
+        assert_ne!(admitted.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+
+        let clipped = vec![1.0_f32; 1_024];
+        let rejected = tracker.advance(7_680, &clipped).expect("clipped frame");
+        assert_eq!(rejected.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE, 0);
+        assert_eq!(rejected.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+
+        let mut clock_fault = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        clock_fault.advance(1_920, &room).expect("first room frame");
+        clock_fault
+            .advance(3_840, &room)
+            .expect("stable room frame");
+        let after_gap = clock_fault
+            .advance(3_840 + u64::from(sample_rate), &voice)
+            .expect("bounded but uncovered clock gap");
+        assert_eq!(after_gap.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE, 0);
+        assert_eq!(after_gap.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+
+        let mut floor_shift = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        floor_shift.advance(1_920, &room).expect("first room frame");
+        floor_shift
+            .advance(3_840, &room)
+            .expect("stable room frame");
+        let lowered_room = tone_frame(1_024, sample_rate, &[(500.0, 0.0001), (1_000.0, 0.00005)]);
+        floor_shift
+            .advance(5_760, &lowered_room)
+            .expect("first shifted floor");
+        let revoked = floor_shift
+            .advance(7_680, &lowered_room)
+            .expect("persistent shifted floor");
+        assert_eq!(revoked.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE, 0);
     }
 
     #[test]

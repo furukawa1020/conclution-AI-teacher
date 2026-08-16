@@ -35,6 +35,10 @@ const (
 	// browser PCM owner. This larger ceiling applies only to explicit raw PCM;
 	// compressed uploads and generated response audio retain maxAudioBytes.
 	maxRawPCM16Bytes = 10_500 * 640
+	// Paired baseline/challenger recognition is intentionally shorter than the
+	// ordinary PCM owner: 1,500 x 20 ms = 30 seconds per path. This keeps both
+	// base64 paths inside the existing authenticated voice request ceiling.
+	maxPairedPCM16Bytes = 1_500 * 640
 	// maxDocumentBytes remains only as the historical request-envelope ceiling
 	// asserted by package tests. Runtime document fields are rejected before
 	// this or any other decoder is consulted.
@@ -76,6 +80,7 @@ const (
 
 type VoiceTurnInput struct {
 	Audio                   []byte
+	BaselineAudio           []byte
 	MIMEType                string
 	StateToken              string
 	RequestID               string
@@ -561,6 +566,7 @@ func NewWithVoiceAndPasskeys(
 
 type voiceTurnRequest struct {
 	AudioBase64             string                `json:"audioBase64"`
+	BaselineAudioBase64     string                `json:"baselineAudioBase64,omitempty"`
 	MIMEType                string                `json:"mimeType"`
 	SessionState            string                `json:"sessionState"`
 	TurnMode                VoiceTurnMode         `json:"turnMode"`
@@ -789,7 +795,11 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	}
 	audioMaximum := maxAudioBytes
 	if mimeType == "audio/l16" {
-		audioMaximum = maxRawPCM16Bytes
+		if request.BaselineAudioBase64 != "" {
+			audioMaximum = maxPairedPCM16Bytes
+		} else {
+			audioMaximum = maxRawPCM16Bytes
+		}
 	}
 	audio, err := decodeBoundedBase64(request.AudioBase64, audioMaximum)
 	if err != nil || len(audio) == 0 ||
@@ -797,9 +807,26 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		clear(audio)
 		return VoiceTurnInput{}, errors.New("invalid audio")
 	}
+	var baselineAudio []byte
+	if request.BaselineAudioBase64 != "" {
+		if mimeType != "audio/l16" || len(audio)%640 != 0 {
+			clear(audio)
+			return VoiceTurnInput{}, errors.New("invalid paired audio metadata")
+		}
+		baselineAudio, err = decodeBoundedBase64(
+			request.BaselineAudioBase64,
+			maxPairedPCM16Bytes,
+		)
+		if err != nil || len(baselineAudio) != len(audio) || len(baselineAudio)%640 != 0 {
+			clear(audio)
+			clear(baselineAudio)
+			return VoiceTurnInput{}, errors.New("invalid paired audio")
+		}
+	}
 
 	input := VoiceTurnInput{
 		Audio:                   audio,
+		BaselineAudio:           baselineAudio,
 		MIMEType:                mimeType,
 		StateToken:              request.SessionState,
 		TurnMode:                request.TurnMode,
@@ -1158,6 +1185,8 @@ func clearVoiceInput(input *VoiceTurnInput) {
 	}
 	clear(input.Audio)
 	input.Audio = nil
+	clear(input.BaselineAudio)
+	input.BaselineAudio = nil
 	if input.Document != nil {
 		clear(input.Document.Data)
 		input.Document.Data = nil

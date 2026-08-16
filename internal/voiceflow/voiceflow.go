@@ -1516,14 +1516,27 @@ func (p *Pipeline) prepareTurn(
 	var confidence float32
 	var err error
 	if input.MIMEType == "audio/l16" {
-		explicitPCM, ok := p.speech.(speechio.ExplicitPCM16Transcriber)
-		if !ok {
-			err = errors.New("explicit PCM transcriber is unavailable")
+		if len(input.BaselineAudio) > 0 {
+			pairedPCM, ok := p.speech.(speechio.PairedPCM16Transcriber)
+			if !ok {
+				err = errors.New("paired PCM transcriber is unavailable")
+			} else {
+				transcript, confidence, err = pairedPCM.TranscribePairedPCM16(
+					transcriptionCtx,
+					input.BaselineAudio,
+					input.Audio,
+				)
+			}
 		} else {
-			transcript, confidence, err = explicitPCM.TranscribePCM16(
-				transcriptionCtx,
-				input.Audio,
-			)
+			explicitPCM, ok := p.speech.(speechio.ExplicitPCM16Transcriber)
+			if !ok {
+				err = errors.New("explicit PCM transcriber is unavailable")
+			} else {
+				transcript, confidence, err = explicitPCM.TranscribePCM16(
+					transcriptionCtx,
+					input.Audio,
+				)
+			}
 		}
 	} else {
 		transcript, confidence, err = p.speech.Transcribe(
@@ -1564,7 +1577,8 @@ func (p *Pipeline) prepareTurn(
 			"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
 			"recognized", false,
 		)
-		if errors.Is(err, speechio.ErrNoSpeech) {
+		if errors.Is(err, speechio.ErrNoSpeech) ||
+			errors.Is(err, speechio.ErrPairedRecognitionUnresolved) {
 			if !promptOnRecognitionMiss(input) {
 				return p.silentRecognitionResult(
 					uid,

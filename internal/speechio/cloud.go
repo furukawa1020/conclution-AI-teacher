@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	speech "cloud.google.com/go/speech/apiv2"
@@ -31,13 +32,16 @@ const (
 )
 
 var (
-	ErrNoSpeech               = errors.New("no speech was recognized")
-	ErrTranscriptLong         = errors.New("recognized speech is too long")
-	ErrReplyLong              = errors.New("spoken reply is too long")
-	ErrNoStreamingAudio       = errors.New("streaming speech synthesis returned no audio")
-	ErrEmptyStreamingChunk    = errors.New("streaming speech synthesis returned an empty audio chunk")
-	ErrStreamingChunkTooLarge = errors.New("streaming speech synthesis chunk is too large")
-	ErrStreamingAudioTooLarge = errors.New("streaming speech synthesis audio is too large")
+	ErrNoSpeech                    = errors.New("no speech was recognized")
+	ErrTranscriptLong              = errors.New("recognized speech is too long")
+	ErrReplyLong                   = errors.New("spoken reply is too long")
+	ErrNoStreamingAudio            = errors.New("streaming speech synthesis returned no audio")
+	ErrEmptyStreamingChunk         = errors.New("streaming speech synthesis returned an empty audio chunk")
+	ErrStreamingChunkTooLarge      = errors.New("streaming speech synthesis chunk is too large")
+	ErrStreamingAudioTooLarge      = errors.New("streaming speech synthesis audio is too large")
+	ErrPairedRecognitionUnresolved = errors.New(
+		"baseline and enhanced recognition did not establish agreement",
+	)
 )
 
 // Service is the deliberately narrow audio boundary for KOTAE. Raw audio is
@@ -51,6 +55,18 @@ type Service interface {
 // PCM produced by the reviewed browser AudioWorklet fallback owner.
 type ExplicitPCM16Transcriber interface {
 	TranscribePCM16(ctx context.Context, audio []byte) (string, float32, error)
+}
+
+// PairedPCM16Transcriber independently decodes sample-aligned baseline and
+// enhanced PCM. Implementations return text only when both paths establish the
+// exact same canonical observation; a single enhanced hypothesis is never
+// sufficient authority for semantic inference.
+type PairedPCM16Transcriber interface {
+	TranscribePairedPCM16(
+		ctx context.Context,
+		baseline []byte,
+		enhanced []byte,
+	) (string, float32, error)
 }
 
 // StreamChunkHandler consumes one raw, signed 16-bit little-endian PCM chunk.
@@ -236,6 +252,64 @@ func (s *CloudService) TranscribePCM16(
 		return "", 0, ErrTranscriptLong
 	}
 	return transcript, confidence, nil
+}
+
+func (s *CloudService) TranscribePairedPCM16(
+	ctx context.Context,
+	baseline []byte,
+	enhanced []byte,
+) (string, float32, error) {
+	if len(baseline) == 0 || len(baseline) != len(enhanced) ||
+		len(baseline)%640 != 0 {
+		return "", 0, ErrPairedRecognitionUnresolved
+	}
+	type outcome struct {
+		text       string
+		confidence float32
+		err        error
+	}
+	results := make([]outcome, 2)
+	inputs := [][]byte{baseline, enhanced}
+	var group sync.WaitGroup
+	group.Add(len(inputs))
+	for index := range inputs {
+		index := index
+		go func() {
+			defer group.Done()
+			results[index].text, results[index].confidence, results[index].err =
+				s.TranscribePCM16(ctx, inputs[index])
+		}()
+	}
+	group.Wait()
+	if ctx.Err() != nil {
+		return "", 0, ctx.Err()
+	}
+	if results[0].err != nil || results[1].err != nil ||
+		!pairedTranscriptsAgree(results[0].text, results[1].text) {
+		return "", 0, ErrPairedRecognitionUnresolved
+	}
+	confidence := results[0].confidence
+	if confidence == 0 || results[1].confidence == 0 {
+		confidence = 0
+	} else if results[1].confidence < confidence {
+		confidence = results[1].confidence
+	}
+	return canonicalPairedTranscript(results[0].text), confidence, nil
+}
+
+func pairedTranscriptsAgree(baseline string, enhanced string) bool {
+	if !utf8.ValidString(baseline) || !utf8.ValidString(enhanced) {
+		return false
+	}
+	baseline = canonicalPairedTranscript(baseline)
+	enhanced = canonicalPairedTranscript(enhanced)
+	return baseline != "" && baseline == enhanced
+}
+
+func canonicalPairedTranscript(value string) string {
+	// Do not case-fold, normalize Unicode, remove punctuation, or invoke a
+	// language model here. Those operations can collapse a real substitution.
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func (s *CloudService) recognize(

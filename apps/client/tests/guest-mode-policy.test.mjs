@@ -11,7 +11,15 @@ test("guest mode is one-tap, ephemeral, and App Check-bound", async () => {
     readFile(new URL("internal/conversation/agent.go", root), "utf8"),
   ]);
   assert.match(bridge, /signInAnonymously/u);
-  assert.match(bridge, /setPersistence\(auth, inMemoryPersistence\)/u);
+  assert.match(bridge, /GUEST_FIREBASE_APP_NAME = "kotae-guest"/u);
+  assert.match(
+    bridge,
+    /initializeApp\(primaryApp\.options, GUEST_FIREBASE_APP_NAME\)/u,
+  );
+  assert.match(
+    bridge,
+    /initializeAuth\(guestApp, \{\s*persistence: inMemoryPersistence/u,
+  );
   assert.match(bridge, /getAppCheckToken\(appCheck, false\)/u);
   assert.match(
     bridge,
@@ -32,7 +40,24 @@ test("guest mode is one-tap, ephemeral, and App Check-bound", async () => {
   assert.match(bridge, /GUEST_START_DEADLINE_MS = 12_000/u);
   assert.match(bridge, /guestStartGate\.isCurrent\(generation\)/u);
   assert.match(ui, /安全なゲスト接続を準備中…/u);
-  assert.match(bridge, /guestModeActive = false;[\s\S]*signOut\(authInstance\)/u);
+  const guestStart = bridge.slice(
+    bridge.indexOf("async function startGuestMode()"),
+    bridge.indexOf("async function listPasskeyCredentials()"),
+  );
+  assert.match(guestStart, /firebaseGuestServices\(\)/u);
+  assert.doesNotMatch(guestStart, /firebaseAuth\(\)|appServices\(\)/u);
+  const pagehide = bridge.slice(
+    bridge.indexOf('globalThis.addEventListener("pagehide"'),
+    bridge.indexOf("async function deletePasskeyAccount"),
+  );
+  assert.match(
+    pagehide,
+    /guestModeActive = false;[\s\S]*signOut\(guestAuthInstance\)/u,
+  );
+  assert.doesNotMatch(
+    pagehide,
+    /signOut\(authInstance\)/u,
+  );
   assert.match(bridge, /guest_session_expired/u);
   assert.match(ui, /30秒で違いを試す　パスキー不要/u);
   assert.match(ui, /保存しません/u);

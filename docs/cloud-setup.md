@@ -5,7 +5,7 @@
 - Google Cloud / Firebase project: `kotae-ai-u22-2026`
 - 公開URL: `https://kotae-ai.web.app`
 - Firebase Hosting: 静的Wasm UI、Passkey等の`/api/**` Cloud Run rewrite。音声stream / WebSocketは固定`run.app`へ認証付きで直接接続
-- Firebase Auth: Passkey検証後に発行する仮名custom account session
+- Firebase Auth: Passkey検証後に発行する仮名custom account sessionと、保存しないゲスト専用の匿名session。匿名providerは明示的に有効化する
 - Firebase App Check: reCAPTCHA Enterprise、Passkey ceremonyと独自APIで強制
 - Firestore: `(default)`、`asia-northeast1`、削除保護、ceremony・rate counter・live接続leaseのTTL
 - Cloud Run: `kotae-api`、`asia-northeast1`
@@ -358,6 +358,8 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-hosting.ps1 `
 ```
 
 Hosting release buildは、開始時と完了時のcleanな作業ツリー、`HEAD`、指定commitを照合し、全公開artifactのSHA-256とbyte数をrelease manifestへ固定します。preflightと本番deployは、指定commitが`HEAD`と`origin/main`の両方に一致し、manifestと公開artifactが完全一致しない限りCloud APIを呼びません。さらに、Cloud Run service、revision template、100% promoted revisionの`source-commit`が同じ40桁commit、`source-revision`が`main`でなければreleaseを停止します。検証済みbyte列のsnapshotだけをuploadし、manifest自体は公開しません。引数なしの`build-web.ps1`はローカル確認用で、Hostingへreleaseできません。
+
+Hosting preflightはIdentity Toolkit管理設定も読み取り、対象projectの匿名認証が明示的に`enabled: true`であり、`kotae-ai.web.app`が許可domainに重複なく含まれることを必須化します。匿名providerが無効なままUIだけを公開すると`accounts:signUp`がHTTP 400となるため、この設定ドリフトをrelease前に停止します。
 
 Passkey、`/me`等の通常APIは`https://kotae-ai.web.app/api/**`を使い、Firebase HostingがCloud Runへrewriteします。低遅延音声はHosting rewriteがWebSocketを中継しないため、固定した`https://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/turns:stream`と`wss://kotae-api-r6kgkvtrmq-an.a.run.app/api/v1/voice/live`へ直接CORS/TLSで接続します。Cloud Run側はFirebase token、App Check、exact Hosting Origin、mode、quotaを検証します。Cloud RunではWebSocketも長時間HTTP requestとしてrequest timeoutの対象になるため、`420`秒は永続接続の保証ではありません。切断後の再接続は新しいrequestとして扱い、確定済み音声を自動再送しません。同期圧縮HTTP fallbackの音声は2 MiB上限なので、3分級の発話を処理できるとは保証しません。
 

@@ -318,4 +318,17 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
 
   const config = JSON.parse(firebase);
   assert.equal(config.hosting.rewrites[0].run.pinTag, false);
+  const csp = config.hosting.headers
+    .flatMap((entry) => entry.headers)
+    .find((header) => header.key === "Content-Security-Policy")?.value;
+  assert.equal(typeof csp, "string");
+  assert.match(
+    csp,
+    /connect-src[^;]+https:\/\/www\.gstatic\.com\/firebasejs\/12\.16\.0\//u,
+  );
+  assert.doesNotMatch(csp, /connect-src[^;]+https:\/\/www\.gstatic\.com(?:\s|;)/u);
+  assert.match(
+    deploy,
+    /connect-src 'self' \$expectedRunUrl \$expectedRunWebSocketUrl[^;]+https:\/\/www\.gstatic\.com\/firebasejs\/12\.16\.0\//u,
+  );
 });

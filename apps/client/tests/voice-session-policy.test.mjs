@@ -890,6 +890,9 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.match(warm, /fetch\(VOICE_WARMUP_ENDPOINT/u);
   assert.match(warm, /credentials:\s*"omit"/u);
   assert.match(warm, /mode:\s*"no-cors"/u);
+  assert.match(warm, /redirect:\s*"follow"/u);
+  assert.match(warm, /referrerPolicy:\s*"no-referrer"/u);
+  assert.doesNotMatch(warm, /redirect:\s*"error"/u);
   assert.doesNotMatch(
     warm,
     /Authorization|audioBase64|sessionState|X-Firebase-AppCheck/u,

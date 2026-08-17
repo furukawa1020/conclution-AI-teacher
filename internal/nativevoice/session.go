@@ -26,6 +26,23 @@ type receiveResult struct {
 // its bounded handshake timeout; any session returned after our deadline is
 // closed by the dialing goroutine.
 func (s *Service) Open(ctx context.Context) (Session, error) {
+	return s.open(ctx, s.config.SystemPrompt)
+}
+
+// OpenWithContext creates the same one-turn session while binding one prior
+// exchange into setup as escaped JSON data.
+func (s *Service) OpenWithContext(
+	ctx context.Context,
+	conversationContext string,
+) (Session, error) {
+	systemPrompt, err := s.contextualSystemPrompt(conversationContext)
+	if err != nil {
+		return nil, err
+	}
+	return s.open(ctx, systemPrompt)
+}
+
+func (s *Service) open(ctx context.Context, systemPrompt string) (Session, error) {
 	if ctx == nil {
 		return nil, errors.New("native voice open context is required")
 	}
@@ -36,7 +53,7 @@ func (s *Service) Open(ctx context.Context) (Session, error) {
 	setupCtx, cancelSetup := context.WithTimeout(ctx, s.config.SetupTimeout)
 	defer cancelSetup()
 
-	raw, err := s.connect(setupCtx)
+	raw, err := s.connect(setupCtx, systemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -67,12 +84,19 @@ func (s *Service) Open(ctx context.Context) (Session, error) {
 	return session, nil
 }
 
-func (s *Service) connect(ctx context.Context) (ProviderSession, error) {
+func (s *Service) connect(
+	ctx context.Context,
+	systemPrompt string,
+) (ProviderSession, error) {
 	var attemptMu sync.Mutex
 	abandoned := false
 	resultCh := make(chan connectResult, 1)
 	go func() {
-		session, err := s.dialer.Connect(ctx, s.config.Model, s.connectConfig())
+		session, err := s.dialer.Connect(
+			ctx,
+			s.config.Model,
+			s.connectConfig(systemPrompt),
+		)
 		attemptMu.Lock()
 		defer attemptMu.Unlock()
 		if abandoned {

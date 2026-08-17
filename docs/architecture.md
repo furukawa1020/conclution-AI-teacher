@@ -75,7 +75,7 @@ AI応答へのbarge-inでは、既存sessionの端末内VAD、bounded MediaRecor
 
 ## 状態
 
-標準モードでは長い会話履歴をサーバーへ永続化しません。通常のNative Audio turnは発話本文を含まないAES-256-GCM認証暗号state leaseを返します。回答支援はoperator、required slot、非可逆の質問継続tagと有限coach制御metadataを同じ認証暗号tokenとしてブラウザメモリへ返します。具体的な外部質問や回答本文は入れません。verifier-progress writerを有効にしたrolloutでは、現在の質問に対する検証の進行だけを表す5状態audit posteriorを合計10,000の固定小数massとして追加します。これは短期control priorであり、本人のretrieval状態、診断、能力、性格や内面の推定ではありません。厳格モードはcross-turn stateを受け取らず、返しません。
+標準モードでは長い会話履歴をサーバーへ永続化しません。通常のNative Audio turnは、決定論的な機微情報screenを通った直前一往復の末尾だけを上限化したAES-256-GCM認証暗号state leaseとしてブラウザメモリへ返し、次turnのprovider setupへdataとして渡します。screenが検出したturnは会話を失敗させずstate更新だけを省略します。DB read/writeと追加のモデル呼び出しはありません。回答支援はoperator、required slot、非可逆の質問継続tagと有限coach制御metadataを同じ認証暗号tokenとしてブラウザメモリへ返します。具体的な外部質問や回答本文は入れません。verifier-progress writerを有効にしたrolloutでは、現在の質問に対する検証の進行だけを表す5状態audit posteriorを合計10,000の固定小数massとして追加します。これは短期control priorであり、本人のretrieval状態、診断、能力、性格や内面の推定ではありません。厳格モードはcross-turn stateを受け取らず、返しません。
 
 ```text
 AES-256-GCM token
@@ -84,7 +84,7 @@ AES-256-GCM token
   └─ last intervention metadata
 ```
 
-tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret ManagerからCloud Runへ注入します。逐語録、会話の自由文要約、chain-of-thoughtは入れません。runtime PDF inputはtoken生成より前に拒否するため、PDF本文や要約も入りません。ただしフィルタ済みの意味nodeも機微情報になり得て、Cloud Runは復号できるためE2EEではありません。
+tokenはFirebase UIDをAADへ含め、15分で失効します。鍵はSecret ManagerからCloud Runへ注入します。通常Nativeの直前一往復を除く長い逐語録、自由文要約、chain-of-thoughtは入れません。runtime PDF inputはtoken生成より前に拒否するため、PDF本文や要約も入りません。ただしフィルタ済みの意味nodeやscreenを通過した直前一往復も機微情報になり得て、Cloud Runは復号できるためE2EEではありません。
 
 ## 技術境界
 

@@ -58,9 +58,82 @@ func (f fakePreparer) PrepareNativeState(string, string) (string, bool, error) {
 }
 
 type fakeOpener struct {
-	session nativevoice.Session
-	opens   int
-	onOpen  func()
+	session      nativevoice.Session
+	opens        int
+	onOpen       func()
+	contextValue string
+}
+
+type fakeContinuityPreparer struct {
+	fakePreparer
+	contextValue       string
+	committedToken     string
+	committedUser      string
+	committedAssistant string
+	commitCalls        int
+}
+
+func (f *fakeContinuityPreparer) NativeConversationContext(
+	_ string,
+	_ string,
+) (string, error) {
+	return f.contextValue, nil
+}
+
+func (f *fakeContinuityPreparer) CommitNativeExchange(
+	_ string,
+	_ string,
+	userCaption string,
+	assistantCaption string,
+) (string, error) {
+	f.commitCalls++
+	f.committedUser = userCaption
+	f.committedAssistant = assistantCaption
+	return f.committedToken, nil
+}
+
+func TestNativeFlowDoesNotCarrySensitiveExchangeIntoState(t *testing.T) {
+	session := newScriptedSession(
+		nativevoice.Event{
+			Kind:         nativevoice.EventInputCaption,
+			CaptionUTF8:  []byte("連絡方法を確認しました"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{
+			Kind:            nativevoice.EventAudioPCM,
+			PCM:             []byte{1, 0},
+			SampleRateHertz: nativevoice.OutputSampleRateHertz,
+		},
+		nativevoice.Event{
+			Kind:         nativevoice.EventOutputCaption,
+			CaptionUTF8:  []byte("メールはperson@example.comです"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+	)
+	preparer := &fakeContinuityPreparer{
+		fakePreparer:   fakePreparer{token: "prepared-state"},
+		committedToken: "must-not-be-used",
+	}
+	service, err := New(&fakeOpener{session: session}, preparer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	result, err := service.ProcessLive(
+		context.Background(),
+		"privacy-user",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preparer.commitCalls != 0 || result.StateToken != "prepared-state" {
+		t.Fatalf("commit calls=%d state=%q", preparer.commitCalls, result.StateToken)
+	}
 }
 
 type fakeCaptionHandoffService struct {
@@ -114,6 +187,14 @@ func (f *fakeOpener) Open(context.Context) (nativevoice.Session, error) {
 		return nil, errors.New("unavailable")
 	}
 	return f.session, nil
+}
+
+func (f *fakeOpener) OpenWithContext(
+	ctx context.Context,
+	contextValue string,
+) (nativevoice.Session, error) {
+	f.contextValue = contextValue
+	return f.Open(ctx)
 }
 
 type scriptedSession struct {
@@ -1077,6 +1158,66 @@ func TestNativeFlowReleasesMeaningfulAudioOnlyAfterFinalInputGate(t *testing.T) 
 		if waterfallStages[stage] != 1 {
 			t.Fatalf("stage %d count = %d; all=%v", stage, waterfallStages[stage], waterfallStages)
 		}
+	}
+}
+
+func TestNativeFlowCarriesPriorExchangeAndCommitsTheCurrentExchange(t *testing.T) {
+	const (
+		priorContext      = "直前のAI: 最近楽しかったことは何ですか？"
+		userAnswer        = "昨日ゲームをしました"
+		assistantFollowUp = "どんなゲームが楽しかったですか？"
+	)
+	session := newScriptedSession(
+		nativevoice.Event{
+			Kind:         nativevoice.EventInputCaption,
+			CaptionUTF8:  []byte(userAnswer),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{
+			Kind:            nativevoice.EventAudioPCM,
+			PCM:             []byte{1, 0},
+			SampleRateHertz: nativevoice.OutputSampleRateHertz,
+		},
+		nativevoice.Event{
+			Kind:         nativevoice.EventOutputCaption,
+			CaptionUTF8:  []byte(assistantFollowUp),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+	)
+	opener := &fakeOpener{session: session}
+	preparer := &fakeContinuityPreparer{
+		fakePreparer:   fakePreparer{token: "prepared-state"},
+		contextValue:   priorContext,
+		committedToken: "committed-exchange-state",
+	}
+	service, err := New(opener, preparer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	result, err := service.ProcessLive(
+		context.Background(),
+		"continuity-user",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opener.contextValue != priorContext ||
+		preparer.committedUser != userAnswer ||
+		preparer.committedAssistant != assistantFollowUp ||
+		result.StateToken != "committed-exchange-state" {
+		t.Fatalf(
+			"context=%q user=%q assistant=%q state=%q",
+			opener.contextValue,
+			preparer.committedUser,
+			preparer.committedAssistant,
+			result.StateToken,
+		)
 	}
 }
 

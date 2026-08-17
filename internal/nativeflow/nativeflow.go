@@ -1,7 +1,8 @@
 // Package nativeflow adapts bounded native-audio sessions to KOTAE's live
 // voice transport. Each browser turn owns one provider connection; there is
 // no provider-session resumption, and audio or captions are never persisted
-// or logged.
+// server-side or logged. A bounded, screened prior exchange may be carried in
+// the caller-bound, short-lived encrypted state token.
 package nativeflow
 
 import (
@@ -64,6 +65,7 @@ type streamInputResult struct {
 type Service struct {
 	opener         nativevoice.Opener
 	preparer       conversation.NativeStatePreparer
+	continuity     conversation.NativeConversationContinuity
 	captionHandoff httpapi.VoiceCaptionHandoffService
 
 	ctx    context.Context
@@ -105,9 +107,11 @@ func newService(
 		return nil, errors.New("native audio dependencies are required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	continuity, _ := preparer.(conversation.NativeConversationContinuity)
 	return &Service{
 		opener:         opener,
 		preparer:       preparer,
+		continuity:     continuity,
 		captionHandoff: handoff,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -232,7 +236,17 @@ func (s *Service) processLive(
 		return missingTimingResult, httpapi.ErrVoiceNativeFallback
 	}
 
-	pooled, err := s.acquire(ctx, uid)
+	conversationContext := ""
+	if s.continuity != nil && !requiresStaged {
+		conversationContext, err = s.continuity.NativeConversationContext(
+			uid,
+			preparedStateToken,
+		)
+		if err != nil {
+			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceStateInvalid
+		}
+	}
+	pooled, err := s.acquire(ctx, uid, conversationContext)
 	if err != nil {
 		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
 	}
@@ -267,6 +281,8 @@ func (s *Service) processLive(
 
 	var caption []byte
 	var inputCaption []byte
+	var continuityInput []byte
+	defer clear(continuityInput)
 	var firstAudioAt time.Time
 	var inputCaptionFinalAt time.Time
 	var riskRouteGateAt time.Time
@@ -571,6 +587,7 @@ func (s *Service) processLive(
 					outputCommitAt,
 				)
 				inputGatePassed = true
+				continuityInput = bytes.Clone(inputCaption)
 				clear(inputCaption)
 				inputCaption = nil
 				if !endpointPublished && onEndpoint != nil {
@@ -650,8 +667,24 @@ func (s *Service) processLive(
 		return nativeFailureResult(), errNativeFlowUnavailable
 	}
 	healthy = true
+	stateToken := preparedStateToken
+	if s.continuity != nil &&
+		!privacyguard.HasHighConfidenceFinding(string(continuityInput)) &&
+		!privacyguard.HasHighConfidenceFinding(string(caption)) {
+		stateToken, err = s.continuity.CommitNativeExchange(
+			uid,
+			preparedStateToken,
+			string(continuityInput),
+			string(caption),
+		)
+		if err != nil {
+			clear(inputCaption)
+			clear(caption)
+			return nativeFailureResult(), errNativeFlowUnavailable
+		}
+	}
 	result := httpapi.VoiceTurnResult{
-		StateToken:       preparedStateToken,
+		StateToken:       stateToken,
 		DetectedDomain:   "unknown",
 		AssistanceTarget: "assistant",
 		RespondentStage:  "none",
@@ -922,7 +955,11 @@ func millisecondsBetween(start, end time.Time) int64 {
 	return result
 }
 
-func (s *Service) acquire(ctx context.Context, uid string) (*pooledSession, error) {
+func (s *Service) acquire(
+	ctx context.Context,
+	uid string,
+	conversationContext string,
+) (*pooledSession, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -935,7 +972,18 @@ func (s *Service) acquire(ctx context.Context, uid string) (*pooledSession, erro
 	s.sessions[uid] = pooled
 	s.mu.Unlock()
 
-	session, err := s.opener.Open(ctx)
+	var session nativevoice.Session
+	var err error
+	if conversationContext == "" {
+		session, err = s.opener.Open(ctx)
+	} else {
+		contextual, ok := s.opener.(nativevoice.ContextualOpener)
+		if !ok {
+			err = errNativeFlowUnavailable
+		} else {
+			session, err = contextual.OpenWithContext(ctx, conversationContext)
+		}
+	}
 	if err != nil || ctx.Err() != nil {
 		if session != nil {
 			_ = session.Close()

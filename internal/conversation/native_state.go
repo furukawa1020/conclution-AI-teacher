@@ -1,6 +1,15 @@
 package conversation
 
-import "reflect"
+import (
+	"reflect"
+	"strings"
+	"unicode/utf8"
+)
+
+const (
+	nativeUserSummaryRunes      = 128
+	nativeAssistantSummaryRunes = 168
+)
 
 // PrepareNativeState validates the caller-bound state before any native audio
 // provider is opened. A signed active answer scope remains staged authority:
@@ -27,8 +36,8 @@ func (agent *vertexAgent) PrepareNativeState(
 // RefreshStateToken validates the caller-bound state and advances an empty or
 // existing semantic envelope without adding current-turn content. The method
 // is deliberately local and model-free: each native provider connection is
-// one turn, while this encrypted token remains only a safe legacy-fallback and
-// session lease. It never claims to encode a native-audio transcript.
+// one turn. Native live commits its bounded prior exchange separately after a
+// successful turn; this refresh operation never creates transcript content.
 func (agent *vertexAgent) RefreshStateToken(uid string, token string) (string, error) {
 	state, err := agent.openNativeState(uid, token)
 	if err != nil {
@@ -84,6 +93,68 @@ func (agent *vertexAgent) advanceNativeState(
 	}
 	state.Turn++
 	return agent.codec.seal(uid, state)
+}
+
+// NativeConversationContext authenticates and returns only the bounded prior
+// exchange already carried by the caller. It never advances state.
+func (agent *vertexAgent) NativeConversationContext(
+	uid string,
+	token string,
+) (string, error) {
+	if token == "" {
+		return "", nil
+	}
+	state, err := agent.openNativeState(uid, token)
+	if err != nil {
+		return "", err
+	}
+	return state.ConversationSummary, nil
+}
+
+// CommitNativeExchange replaces the previous bounded summary with the one
+// exchange the next provider connection needs. The plaintext exists only for
+// this call and the returned AES-GCM token; no server-side history is stored.
+func (agent *vertexAgent) CommitNativeExchange(
+	uid string,
+	token string,
+	userCaption string,
+	assistantCaption string,
+) (string, error) {
+	if token == "" || !validNativeCaption(userCaption, MaxUtteranceRunes) ||
+		!validNativeCaption(assistantCaption, MaxSpokenReplyRunes) {
+		return "", ErrInvalidStateToken
+	}
+	state, err := agent.openNativeState(uid, token)
+	if err != nil || state.PendingAnswer.Active {
+		return "", ErrInvalidStateToken
+	}
+	state.ConversationSummary = nativeExchangeSummary(
+		userCaption,
+		assistantCaption,
+	)
+	return agent.sealState(uid, state)
+}
+
+func validNativeCaption(value string, maximumRunes int) bool {
+	return utf8.ValidString(value) && strings.TrimSpace(value) != "" &&
+		utf8.RuneCountInString(value) <= maximumRunes
+}
+
+func nativeExchangeSummary(userCaption string, assistantCaption string) string {
+	user := tailRunes(collapseSpace(userCaption), nativeUserSummaryRunes)
+	assistant := tailRunes(
+		collapseSpace(assistantCaption),
+		nativeAssistantSummaryRunes,
+	)
+	return "直前の利用者: " + user + " / 直前のAI: " + assistant
+}
+
+func tailRunes(value string, maximum int) string {
+	runes := []rune(value)
+	if len(runes) <= maximum {
+		return value
+	}
+	return string(runes[len(runes)-maximum:])
 }
 
 // validatePreparedNativeStateTransition authenticates the process-local state

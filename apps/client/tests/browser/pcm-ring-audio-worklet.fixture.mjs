@@ -323,7 +323,11 @@ function validateAcousticCoverageWire() {
     coveredCandidate.softVoiceCandidate === true,
     "acoustic_coverage_wire_candidate_rejected",
   );
-  for (const flags of [QUIET_EVIDENCE_FLAGS.candidate, 16]) {
+  for (const flags of [
+    QUIET_EVIDENCE_FLAGS.candidate,
+    QUIET_EVIDENCE_FLAGS.excitationInvariant,
+    32,
+  ]) {
     let rejected = false;
     try {
       advanceVad(createVadState(0), {

@@ -97,14 +97,26 @@ installInterruptFrameClassifier(
 );
 
 installOnsetFrameClassifier(
-  (noiseFloor, peak, rms, hasSpeech, softCandidate, bootstrapEligible) => {
+  (
+    noiseFloor,
+    peak,
+    rms,
+    hasSpeech,
+    softCandidate,
+    bootstrapEligible,
+    excitationInvariantCandidate,
+  ) => {
     const threshold = hasSpeech
       ? Math.max(0.009, noiseFloor * 1.7)
       : Math.max(0.014, noiseFloor * 2.8);
     const clear = rms >= threshold && peak >= threshold * (hasSpeech ? 1.35 : 1.8);
     const soft = !clear && rms > 0 && peak >= rms * 1.6 &&
       (rms >= noiseFloor * 1.45 ||
-        (!hasSpeech && (bootstrapEligible || softCandidate) && rms >= 0.0025));
+        (!hasSpeech && (bootstrapEligible || softCandidate) && rms >= 0.0025) ||
+        (!hasSpeech &&
+          excitationInvariantCandidate &&
+          rms >= 0.0014 &&
+          rms >= noiseFloor * 0.7));
     return Number(clear) | (Number(soft) << 1);
   },
 );
@@ -150,7 +162,8 @@ test("Rust subband evidence rejects stationary low audio and admits changing qui
 test("Rust acoustic evidence is exact and malformed evidence fails closed", () => {
   const base = createVadState(0);
   for (const acousticEvidence of [
-    { flags: 16, noiseFloor: 0.002 },
+    { flags: 32, noiseFloor: 0.002 },
+    { flags: QUIET_EVIDENCE_FLAGS.excitationInvariant, noiseFloor: 0.002 },
     { flags: QUIET_EVIDENCE_FLAGS.candidate, noiseFloor: 0.002 },
     { flags: QUIET_EVIDENCE_FLAGS.spectralChange, noiseFloor: 0.002 },
     { flags: QUIET_EVIDENCE_FLAGS.candidate, noiseFloor: 0.001 },
@@ -171,6 +184,42 @@ test("Rust acoustic evidence is exact and malformed evidence fails closed", () =
       /vad_acoustic_evidence_invalid/u,
     );
   }
+});
+
+test("excitation-invariant formant evidence admits sub-bootstrap whisper levels", () => {
+  let whisper = createVadState(0);
+  const envelope = [0.0015, 0.0019, 0.00145, 0.0021, 0.00155, 0.0022, 0.0016];
+  for (let index = 0; index < envelope.length; index += 1) {
+    const rms = envelope[index];
+    whisper = advanceVad(whisper, {
+      acousticEvidence: {
+        flags:
+          QUIET_EVIDENCE_FLAGS.candidate |
+          QUIET_EVIDENCE_FLAGS.spectralChange |
+          QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+          QUIET_EVIDENCE_FLAGS.excitationInvariant,
+        noiseFloor: 0.002,
+      },
+      now: (index + 1) * 40,
+      peak: rms * 1.9,
+      rms,
+    });
+  }
+  assert.equal(whisper.hasSpeech, true);
+  assert.equal(whisper.softVoiceConfirmed, true);
+
+  const withoutFormantProof = advanceVad(createVadState(0), {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.stationary |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage,
+      noiseFloor: 0.002,
+    },
+    now: 40,
+    peak: 0.003,
+    rms: 0.0015,
+  });
+  assert.equal(withoutFormantProof.softVoiceCandidate, false);
 });
 
 test("Rust session coverage bit crosses the executable VAD policy", () => {

@@ -76,6 +76,7 @@ export const QUIET_EVIDENCE_FLAGS = Object.freeze({
   spectralChange: 2,
   stationary: 4,
   inSessionCoverage: 8,
+  excitationInvariant: 16,
 });
 
 // A content-free receipt is a separate UX budget from endpointing and the
@@ -951,13 +952,16 @@ export function advanceVad(
       Reflect.ownKeys(acousticEvidence).length !== 2 ||
       !Number.isSafeInteger(acousticEvidence.flags) ||
       acousticEvidence.flags < 0 ||
-      acousticEvidence.flags > 15 ||
+      acousticEvidence.flags > 31 ||
       ((acousticEvidence.flags &
         (QUIET_EVIDENCE_FLAGS.candidate |
           QUIET_EVIDENCE_FLAGS.spectralChange)) !==
-        0 &&
+          0 &&
         (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.inSessionCoverage) ===
           0) ||
+      ((acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.excitationInvariant) !==
+        0 &&
+        (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.candidate) === 0) ||
       !Number.isFinite(acousticEvidence.noiseFloor) ||
       acousticEvidence.noiseFloor < 0.002 ||
       acousticEvidence.noiseFloor > 0.04)
@@ -1005,6 +1009,8 @@ export function advanceVad(
     hasSpeech,
     softVoiceCandidate,
     elapsed <= softVoiceBootstrapMs,
+    acousticEvidence !== null &&
+      (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.excitationInvariant) !== 0,
   );
   if (!Number.isSafeInteger(frameClass) || frameClass < 0 || frameClass > 3) {
     throw new TypeError("onset_frame_classifier_result_invalid");

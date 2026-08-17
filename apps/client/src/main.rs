@@ -68,8 +68,9 @@ pub fn create_quiet_evidence_tracker_for_js(
 #[wasm_bindgen::prelude::wasm_bindgen(js_name = quietSubbandEvidenceSelfTest)]
 pub fn quiet_subband_evidence_self_test_for_js() -> bool {
     use kotae_audio_core::{
-        QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_IN_SESSION_COVERAGE,
-        QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceClass, QuietEvidenceTracker,
+        QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_EXCITATION_INVARIANT,
+        QUIET_EVIDENCE_IN_SESSION_COVERAGE, QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceClass,
+        QuietEvidenceTracker,
     };
 
     let sample_rate = 48_000_u32;
@@ -89,11 +90,18 @@ pub fn quiet_subband_evidence_self_test_for_js() -> bool {
     };
     let stationary = tones(&[(1_000.0, 0.002)]);
     let changing = tones(&[(500.0, 0.006), (1_800.0, 0.005), (2_800.0, 0.004)]);
+    let whisper_a = tones(&[(500.0, 0.0018), (1_800.0, 0.0014)]);
+    let whisper_b = tones(&[(1_000.0, 0.0014), (2_800.0, 0.0018)]);
     let result = (|| {
         let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).ok()?;
         let room = tracker.advance(1_920, &stationary).ok()?;
         let room_again = tracker.advance(3_840, &stationary).ok()?;
         let voice = tracker.advance(5_760, &changing).ok()?;
+        let mut whisper_tracker = QuietEvidenceTracker::new(sample_rate, 0).ok()?;
+        whisper_tracker.advance(1_920, &stationary).ok()?;
+        whisper_tracker.advance(3_840, &stationary).ok()?;
+        let whisper_first = whisper_tracker.advance(5_760, &whisper_a).ok()?;
+        let whisper_admitted = whisper_tracker.advance(7_680, &whisper_b).ok()?;
         Some(
             room.flags & QUIET_EVIDENCE_CANDIDATE == 0
                 && room.class == QuietEvidenceClass::Bootstrap
@@ -103,12 +111,17 @@ pub fn quiet_subband_evidence_self_test_for_js() -> bool {
                 && voice.flags & QUIET_EVIDENCE_CANDIDATE != 0
                 && voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE != 0
                 && voice.class == QuietEvidenceClass::QuietOnset
-                && (0.002..=0.04).contains(&voice.noise_floor),
+                && (0.002..=0.04).contains(&voice.noise_floor)
+                && whisper_first.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT == 0
+                && whisper_admitted.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT != 0
+                && whisper_admitted.class == QuietEvidenceClass::ExcitationInvariantOnset,
         )
     })()
     .unwrap_or(false);
     drop(stationary);
     drop(changing);
+    drop(whisper_a);
+    drop(whisper_b);
     result
 }
 
@@ -187,6 +200,7 @@ pub fn classify_onset_frame_for_js(
     has_speech: bool,
     soft_candidate: bool,
     bootstrap_eligible: bool,
+    excitation_invariant_candidate: bool,
 ) -> Result<u8, wasm_bindgen::JsValue> {
     kotae_audio_core::classify_onset_frame(
         noise_floor,
@@ -195,6 +209,7 @@ pub fn classify_onset_frame_for_js(
         has_speech,
         soft_candidate,
         bootstrap_eligible,
+        excitation_invariant_candidate,
     )
     .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
 }
@@ -206,9 +221,9 @@ pub fn guest_quiet_onset_self_test_for_js() -> bool {
 
     let changing_quiet = [(0.008, 0.004), (0.0064, 0.0032), (0.009, 0.0045)];
     changing_quiet.iter().all(|(peak, rms)| {
-        classify_onset_frame(0.002, *peak, *rms, false, true, false) == Ok(ONSET_FRAME_SOFT)
-    }) && classify_onset_frame(0.002, 0.0024, 0.002, false, true, false) == Ok(0)
-        && classify_onset_frame(0.002, f64::NAN, 0.004, false, true, false).is_err()
+        classify_onset_frame(0.002, *peak, *rms, false, true, false, false) == Ok(ONSET_FRAME_SOFT)
+    }) && classify_onset_frame(0.002, 0.0024, 0.002, false, true, false, false) == Ok(0)
+        && classify_onset_frame(0.002, f64::NAN, 0.004, false, true, false, false).is_err()
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -17,6 +17,7 @@ pub const QUIET_EVIDENCE_CANDIDATE: u8 = 1 << 0;
 pub const QUIET_EVIDENCE_SPECTRAL_CHANGE: u8 = 1 << 1;
 pub const QUIET_EVIDENCE_STATIONARY: u8 = 1 << 2;
 pub const QUIET_EVIDENCE_IN_SESSION_COVERAGE: u8 = 1 << 3;
+pub const QUIET_EVIDENCE_EXCITATION_INVARIANT: u8 = 1 << 4;
 
 pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
 
@@ -26,6 +27,9 @@ const QUIET_COVERAGE_MINIMUM_STABLE_OBSERVATIONS: u8 = 2;
 const QUIET_COVERAGE_MAXIMUM_CLOCK_GAP_MS: u64 = 500;
 const QUIET_COVERAGE_MAXIMUM_CLIPPED_PER_MILLE: usize = 5;
 const QUIET_COVERAGE_FLOOR_SHIFT_RATIO: f64 = 8.0;
+const QUIET_FORMANT_MINIMUM_TRANSPORT: f64 = 0.14;
+const QUIET_FORMANT_MINIMUM_RMS: f64 = 0.0014;
+const QUIET_FORMANT_MINIMUM_OBSERVATIONS: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuietEvidenceStep {
@@ -47,6 +51,7 @@ pub enum QuietEvidenceClass {
     QuietOnset = 5,
     CandidateCooldown = 6,
     CoverageRevoked = 7,
+    ExcitationInvariantOnset = 8,
 }
 
 /// Owns bounded, content-free acoustic history for normal-turn quiet speech.
@@ -63,10 +68,12 @@ pub struct QuietEvidenceTracker {
     fast_band_floor: [f64; 6],
     slow_band_floor: [f64; 6],
     previous_band_energy: [f64; 6],
+    previous_speech_distribution: [f64; 4],
     fast_rms_floor: f64,
     slow_rms_floor: f64,
     coverage_stable_observations: u8,
     coverage_shift_observations: u8,
+    formant_transport_observations: u8,
     in_session_coverage: bool,
     initialized: bool,
 }
@@ -83,10 +90,12 @@ impl QuietEvidenceTracker {
             fast_band_floor: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
             slow_band_floor: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
             previous_band_energy: [QUIET_EVIDENCE_MINIMUM_ENERGY; 6],
+            previous_speech_distribution: [0.25; 4],
             fast_rms_floor: 0.006,
             slow_rms_floor: 0.006,
             coverage_stable_observations: 0,
             coverage_shift_observations: 0,
+            formant_transport_observations: 0,
             in_session_coverage: false,
             initialized: false,
         })
@@ -132,6 +141,7 @@ impl QuietEvidenceTracker {
                 band_energy.map(|value| value.max(QUIET_EVIDENCE_MINIMUM_ENERGY));
             self.slow_band_floor = self.fast_band_floor;
             self.previous_band_energy = self.fast_band_floor;
+            self.previous_speech_distribution = speech_band_distribution(&band_energy);
             self.fast_rms_floor = rms.clamp(0.002, 0.04);
             self.slow_rms_floor = self.fast_rms_floor;
             self.coverage_stable_observations = 1;
@@ -167,9 +177,39 @@ impl QuietEvidenceTracker {
             && speech_band_energy / total_energy >= 0.30;
         let impulsive =
             rms > 0.0 && peak / rms >= 8.0 && rms >= self.slow_rms_floor.max(0.002) * 1.20;
-        let changed = active_bands >= 2 && positive_flux >= 0.20 && speech_shaped && !impulsive;
+        let conventional_changed =
+            active_bands >= 2 && positive_flux >= 0.20 && speech_shaped && !impulsive;
+        let speech_distribution = speech_band_distribution(&band_energy);
+        let formant_transport =
+            distribution_transport(&self.previous_speech_distribution, &speech_distribution);
+        let active_speech_bands = (1..=4)
+            .filter(|index| {
+                band_energy[*index]
+                    / self.slow_band_floor[*index].max(QUIET_EVIDENCE_MINIMUM_ENERGY)
+                    >= 1.15
+            })
+            .count();
+        let low_energy_formant_support = active_speech_bands >= 2
+            && speech_shaped
+            && !impulsive
+            && rms >= QUIET_FORMANT_MINIMUM_RMS
+            && rms >= self.slow_rms_floor * 0.70;
+        if self.in_session_coverage
+            && low_energy_formant_support
+            && formant_transport >= QUIET_FORMANT_MINIMUM_TRANSPORT
+        {
+            self.formant_transport_observations = self
+                .formant_transport_observations
+                .saturating_add(1)
+                .min(QUIET_FORMANT_MINIMUM_OBSERVATIONS);
+        } else {
+            self.formant_transport_observations = 0;
+        }
+        let formant_onset =
+            self.formant_transport_observations >= QUIET_FORMANT_MINIMUM_OBSERVATIONS;
+        let changed = conventional_changed || formant_onset;
         let lease_active = current_frame <= self.freeze_until_frame
-            && active_bands >= 2
+            && (active_bands >= 2 || low_energy_formant_support)
             && speech_shaped
             && !impulsive;
         let candidate = changed || lease_active;
@@ -225,6 +265,7 @@ impl QuietEvidenceTracker {
                 asymmetric_floor(self.slow_rms_floor, self.fast_rms_floor, 0.02, 0.005);
         }
         self.previous_band_energy = band_energy;
+        self.previous_speech_distribution = speech_distribution;
         self.last_frame = current_frame;
         let mut flags = 0;
         if candidate && self.in_session_coverage && !clipping_invalid {
@@ -235,6 +276,12 @@ impl QuietEvidenceTracker {
         if changed && self.in_session_coverage && !clipping_invalid {
             flags |= QUIET_EVIDENCE_SPECTRAL_CHANGE;
         }
+        if (formant_onset || (lease_active && low_energy_formant_support))
+            && self.in_session_coverage
+            && !clipping_invalid
+        {
+            flags |= QUIET_EVIDENCE_EXCITATION_INVARIANT;
+        }
         if self.in_session_coverage && !clipping_invalid {
             flags |= QUIET_EVIDENCE_IN_SESSION_COVERAGE;
         }
@@ -243,7 +290,9 @@ impl QuietEvidenceTracker {
             QuietEvidenceClass::CoverageRevoked
         } else if impulsive {
             QuietEvidenceClass::ImpulsiveTransient
-        } else if changed {
+        } else if formant_onset {
+            QuietEvidenceClass::ExcitationInvariantOnset
+        } else if conventional_changed {
             QuietEvidenceClass::QuietOnset
         } else if lease_active {
             QuietEvidenceClass::CandidateCooldown
@@ -269,15 +318,41 @@ impl Drop for QuietEvidenceTracker {
         self.fast_band_floor.fill(0.0);
         self.slow_band_floor.fill(0.0);
         self.previous_band_energy.fill(0.0);
+        self.previous_speech_distribution.fill(0.0);
         self.fast_rms_floor = 0.0;
         self.slow_rms_floor = 0.0;
         self.coverage_stable_observations = 0;
         self.coverage_shift_observations = 0;
+        self.formant_transport_observations = 0;
         self.in_session_coverage = false;
         self.last_frame = 0;
         self.freeze_until_frame = 0;
         self.initialized = false;
     }
+}
+
+fn speech_band_distribution(band_energy: &[f64; 6]) -> [f64; 4] {
+    let mut distribution = [0.0_f64; 4];
+    let total = band_energy[1..=4]
+        .iter()
+        .sum::<f64>()
+        .max(QUIET_EVIDENCE_MINIMUM_ENERGY);
+    for (target, energy) in distribution.iter_mut().zip(&band_energy[1..=4]) {
+        *target = *energy / total;
+    }
+    distribution
+}
+
+/// A bounded one-dimensional Wasserstein proxy over four fixed speech bands.
+/// Only the current scalar is used; neither a spectrum nor PCM leaves Rust.
+fn distribution_transport(previous: &[f64; 4], current: &[f64; 4]) -> f64 {
+    let mut cumulative = 0.0_f64;
+    let mut transport = 0.0_f64;
+    for index in 0..3 {
+        cumulative += current[index] - previous[index];
+        transport += cumulative.abs();
+    }
+    (transport / 3.0).clamp(0.0, 1.0)
 }
 
 fn asymmetric_floor(previous: f64, observed: f64, falling: f64, rising: f64) -> f64 {
@@ -678,6 +753,7 @@ pub fn classify_onset_frame(
     has_speech: bool,
     soft_candidate: bool,
     bootstrap_eligible: bool,
+    excitation_invariant_candidate: bool,
 ) -> Result<u8, DetectorError> {
     if !noise_floor.is_finite()
         || !(0.0..=1.0).contains(&noise_floor)
@@ -697,7 +773,12 @@ pub fn classify_onset_frame(
         rms >= clear_threshold && peak >= clear_threshold * if has_speech { 1.35 } else { 1.8 };
     let voice_shaped = rms > 0.0 && peak >= rms * 1.6;
     let bootstrap = !has_speech && (bootstrap_eligible || soft_candidate) && rms >= 0.0025;
-    let soft = !clear && voice_shaped && (rms >= noise_floor * 1.45 || bootstrap);
+    let excitation_invariant = !has_speech
+        && excitation_invariant_candidate
+        && rms >= QUIET_FORMANT_MINIMUM_RMS
+        && rms >= noise_floor * 0.70;
+    let soft =
+        !clear && voice_shaped && (rms >= noise_floor * 1.45 || bootstrap || excitation_invariant);
     Ok((if clear { ONSET_FRAME_CLEAR } else { 0 }) | (if soft { ONSET_FRAME_SOFT } else { 0 }))
 }
 
@@ -1122,11 +1203,11 @@ mod tests {
 
     #[test]
     fn quiet_onset_accepts_six_db_voice_and_rejects_stationary_floor() {
-        let quiet =
-            classify_onset_frame(0.002, 0.008, 0.004, false, false, false).expect("quiet voice");
+        let quiet = classify_onset_frame(0.002, 0.008, 0.004, false, false, false, false)
+            .expect("quiet voice");
         assert_eq!(quiet, ONSET_FRAME_SOFT);
-        let floor =
-            classify_onset_frame(0.002, 0.0024, 0.002, false, false, false).expect("room floor");
+        let floor = classify_onset_frame(0.002, 0.0024, 0.002, false, false, false, false)
+            .expect("room floor");
         assert_eq!(floor, 0);
     }
 
@@ -1156,6 +1237,65 @@ mod tests {
         assert_ne!(voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE, 0);
         assert_eq!(voice.class, QuietEvidenceClass::QuietOnset);
         assert!((0.002..=0.04).contains(&voice.noise_floor));
+    }
+
+    #[test]
+    fn formant_transport_admits_whisper_below_legacy_bootstrap_floor() {
+        let sample_rate = 48_000_u32;
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        let room = tone_frame(1_024, sample_rate, &[(1_000.0, 0.0018)]);
+        tracker.advance(1_920, &room).expect("calibrate");
+        tracker.advance(3_840, &room).expect("establish coverage");
+
+        let whispered_formant_a =
+            tone_frame(1_024, sample_rate, &[(500.0, 0.0018), (1_800.0, 0.0014)]);
+        let whispered_formant_b =
+            tone_frame(1_024, sample_rate, &[(1_000.0, 0.0014), (2_800.0, 0.0018)]);
+        let rms = |pcm: &[f32]| {
+            (pcm.iter()
+                .map(|sample| f64::from(*sample) * f64::from(*sample))
+                .sum::<f64>()
+                / pcm.len() as f64)
+                .sqrt()
+        };
+        assert!(rms(&whispered_formant_a) < 0.0025);
+        assert!(rms(&whispered_formant_b) < 0.0025);
+
+        let first = tracker
+            .advance(5_760, &whispered_formant_a)
+            .expect("first transport observation");
+        assert_eq!(first.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT, 0);
+        let admitted = tracker
+            .advance(7_680, &whispered_formant_b)
+            .expect("second transport observation");
+        assert_ne!(admitted.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+        assert_ne!(admitted.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT, 0);
+        assert_eq!(admitted.class, QuietEvidenceClass::ExcitationInvariantOnset);
+
+        let onset = classify_onset_frame(
+            admitted.noise_floor,
+            0.0030,
+            0.0015,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("formant-bound onset");
+        assert_eq!(onset, ONSET_FRAME_SOFT);
+        assert_eq!(
+            classify_onset_frame(
+                admitted.noise_floor,
+                0.0030,
+                0.0015,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("unproven onset"),
+            0
+        );
     }
 
     #[test]

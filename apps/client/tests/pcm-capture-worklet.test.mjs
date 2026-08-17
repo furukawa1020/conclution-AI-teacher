@@ -33,6 +33,7 @@ class TestPcmRing {
     this.size = 0;
     this.overwriteOldest = overwriteOldest === true;
     this.freed = false;
+    this.phaseIntegrity = 0;
   }
 
   capacity() {
@@ -58,6 +59,7 @@ class TestPcmRing {
     this.head = 0;
     this.lastContextFrame = undefined;
     this.size = 0;
+    this.phaseIntegrity = 0;
   }
 
   count(generation) {
@@ -97,7 +99,12 @@ class TestPcmRing {
         true,
       );
     }
+    this.phaseIntegrity = 1;
     return 2;
+  }
+
+  quietPhaseIntegrity(generation) {
+    return generation === this.ownerGeneration ? this.phaseIntegrity : -1;
   }
 
   push(generation, contextFrame, pcm) {
@@ -239,7 +246,12 @@ function createHarness(config = {}) {
   }
   return {
     control(data) {
-      processor.port.onmessage({ data });
+      const normalized =
+        data?.type === "confirm" &&
+        !Object.prototype.hasOwnProperty.call(data, "aecVerified")
+          ? { ...data, aecVerified: true }
+          : data;
+      processor.port.onmessage({ data: normalized });
     },
     frameMessages() {
       return output
@@ -532,6 +544,31 @@ test("Rust-confirmed quiet speech is amplified before the ASR transport with a h
   assert.ok(sample >= 190, `quiet PCM was not materially amplified: ${sample}`);
   assert.ok(sample <= 264, `quiet PCM exceeded the 4x ceiling: ${sample}`);
   assert.ok(sample <= Math.round(32_767 * 0.82));
+});
+
+test("quiet enhancement stays raw when browser AEC is not verified", () => {
+  const harness = createHarness({
+    maximumPreConfirmFrames: 4,
+    maximumQueuedFrames: 4,
+  });
+  harness.renderFrame(0.01);
+  harness.control({
+    type: "confirm",
+    version: 1,
+    generation: harness.generation,
+    candidateContextFrame: 0,
+    leadInFrames: 0,
+    initialCredit: 1,
+    aecVerified: false,
+    quietConfirmed: true,
+  });
+  const [message] = harness.frameMessages();
+  assert.ok(message);
+  const view = new DataView(message.pcm);
+  assert.equal(view.getInt16(0, true), Math.round(0.01 * 32_767));
+  assert.equal(harness.processor.quietGainEnabled, false);
+  assert.equal(harness.processor.fallbackRing, undefined);
+  assert.equal(harness.processor.baselineFallbackRing, undefined);
 });
 
 test("normal speech and sub-floor silence remain byte-stable at the ASR boundary", () => {

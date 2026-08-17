@@ -4366,6 +4366,7 @@ async function startVoiceLiveSession({
       try {
         captureNode.port.postMessage(
           Object.freeze({
+            aecVerified: hasVerifiedEchoCancellation(stream),
             candidateContextFrame,
             generation: captureGeneration,
             initialCredit:
@@ -4385,7 +4386,8 @@ async function startVoiceLiveSession({
         return false;
       }
       speechConfirmed = true;
-      quietHttpFallbackEligible = quietConfirmed;
+      quietHttpFallbackEligible =
+        quietConfirmed && hasVerifiedEchoCancellation(stream);
       return true;
     },
     async commit(playback, lastVoiceAt) {
@@ -5043,6 +5045,7 @@ async function startBargePcmMonitoring(
       try {
         node.port.postMessage(
           Object.freeze({
+            aecVerified: hasVerifiedEchoCancellation(stream),
             candidateContextFrame,
             generation,
             initialCredit: 0,

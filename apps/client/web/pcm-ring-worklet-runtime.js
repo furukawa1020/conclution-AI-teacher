@@ -22,6 +22,7 @@ function hasRingContract(value) {
       typeof value.count === "function" &&
       typeof value.free === "function" &&
       typeof value.generation === "function" &&
+      typeof value.quietPhaseIntegrity === "function" &&
       typeof value.push === "function" &&
       typeof value.shiftInto === "function",
   );
@@ -43,12 +44,14 @@ function verifyGenerationIsolation(ring, generation) {
       probe,
     );
     const staleCount = ring.count(staleGeneration);
+    const stalePhaseIntegrity = ring.quietPhaseIntegrity(staleGeneration);
     const staleShift = ring.shiftInto(staleGeneration, destination);
     const staleClear = ring.clear(staleGeneration);
     if (
       stalePush !== RING_PUSH_INVALID ||
       staleCompensation !== RING_QUIET_COMPENSATION_INVALID ||
       staleCount !== -1 ||
+      stalePhaseIntegrity !== -1 ||
       staleShift !== RING_SHIFT_INVALID ||
       staleClear !== false ||
       destination.some((byte) => byte !== 0x3c) ||

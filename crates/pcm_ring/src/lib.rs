@@ -34,6 +34,17 @@ pub enum QuietCompensationResult {
     Compensated = 2,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum QuietPhaseIntegrity {
+    Invalid = 0,
+    Consistent = 1,
+    InsufficientSupport = 2,
+    NonCausalOnset = 3,
+    ExcessGroupDelay = 4,
+    TemporalSmear = 5,
+}
+
 const QUIET_TARGET_RMS: f64 = 0.055;
 const QUIET_MINIMUM_RMS: f64 = 0.0015;
 const QUIET_PEAK_CEILING: f64 = 0.82;
@@ -47,12 +58,19 @@ const OBSERVATION_MINIMUM_MIX: f64 = 0.30;
 const OBSERVATION_MAXIMUM_MIX: f64 = 0.40;
 const OBSERVATION_MINIMUM_CORRELATION: f64 = 0.35;
 const OBSERVATION_MAXIMUM_RESIDUAL_RATIO: f64 = 16.0;
+const PHASE_SAMPLE_RATE_HZ: f64 = 16_000.0;
+const PHASE_FREQUENCIES_HZ: [f64; 6] = [250.0, 500.0, 1_000.0, 1_800.0, 2_800.0, 4_000.0];
+const PHASE_MINIMUM_SUPPORTED_BANDS: usize = 2;
+const PHASE_MAXIMUM_ONSET_ADVANCE_SAMPLES: usize = 1;
+const PHASE_MAXIMUM_SMEAR_SAMPLES: usize = 12;
+const PHASE_MAXIMUM_GROUP_DELAY_SAMPLES: f64 = 8.0;
 
 struct QuietSpectralState {
     gain: f64,
     observation_mix: f64,
     previous_input: f64,
     previous_dc: f64,
+    phase_integrity: QuietPhaseIntegrity,
 }
 
 impl Zeroize for QuietSpectralState {
@@ -61,6 +79,7 @@ impl Zeroize for QuietSpectralState {
         self.observation_mix = 0.0;
         self.previous_input = 0.0;
         self.previous_dc = 0.0;
+        self.phase_integrity = QuietPhaseIntegrity::Invalid;
     }
 }
 
@@ -71,6 +90,7 @@ impl QuietSpectralState {
             observation_mix: OBSERVATION_MAXIMUM_MIX,
             previous_input: 0.0,
             previous_dc: 0.0,
+            phase_integrity: QuietPhaseIntegrity::Invalid,
         }
     }
 
@@ -146,6 +166,10 @@ impl PcmRing {
 
     pub fn count(&self, generation: u64) -> Option<usize> {
         (generation == self.generation).then_some(self.count)
+    }
+
+    pub fn quiet_phase_integrity(&self, generation: u64) -> Option<QuietPhaseIntegrity> {
+        (generation == self.generation).then_some(self.quiet_spectral.phase_integrity)
     }
 
     pub fn is_full(&self) -> bool {
@@ -334,6 +358,14 @@ impl PcmRing {
             self.quiet_spectral.reset();
             return QuietCompensationResult::Unchanged;
         }
+        let phase_integrity = verify_quiet_phase_integrity(&raw, &filtered);
+        if phase_integrity != QuietPhaseIntegrity::Consistent {
+            raw.zeroize();
+            filtered.zeroize();
+            self.quiet_spectral.reset();
+            self.quiet_spectral.phase_integrity = phase_integrity;
+            return QuietCompensationResult::Unchanged;
+        }
         let correlation_risk = ((1.0 - correlation) / 0.65).clamp(0.0, 1.0);
         let residual_risk = (residual_ratio / 9.0).clamp(0.0, 1.0);
         let requested_observation_mix = (OBSERVATION_MINIMUM_MIX
@@ -368,8 +400,150 @@ impl PcmRing {
         self.quiet_spectral.observation_mix = observation_mix;
         self.quiet_spectral.previous_input = previous_input;
         self.quiet_spectral.previous_dc = previous_dc;
+        self.quiet_spectral.phase_integrity = QuietPhaseIntegrity::Consistent;
         QuietCompensationResult::Compensated
     }
+}
+
+fn verify_quiet_phase_integrity(
+    raw: &[f64; FRAME_BYTES / 2],
+    enhanced: &[f64; FRAME_BYTES / 2],
+) -> QuietPhaseIntegrity {
+    if raw
+        .iter()
+        .chain(enhanced.iter())
+        .any(|sample| !sample.is_finite())
+    {
+        return QuietPhaseIntegrity::Invalid;
+    }
+    let raw_peak = raw
+        .iter()
+        .fold(0.0_f64, |peak, sample| peak.max(sample.abs()));
+    let enhanced_peak = enhanced
+        .iter()
+        .fold(0.0_f64, |peak, sample| peak.max(sample.abs()));
+    if raw_peak == 0.0 || enhanced_peak == 0.0 {
+        return QuietPhaseIntegrity::InsufficientSupport;
+    }
+    let raw_onset = support_start(raw, raw_peak * 0.20);
+    let enhanced_onset = support_start(enhanced, enhanced_peak * 0.20);
+    let (Some(raw_onset), Some(enhanced_onset)) = (raw_onset, enhanced_onset) else {
+        return QuietPhaseIntegrity::InsufficientSupport;
+    };
+    if enhanced_onset.saturating_add(PHASE_MAXIMUM_ONSET_ADVANCE_SAMPLES) < raw_onset {
+        return QuietPhaseIntegrity::NonCausalOnset;
+    }
+    let raw_end = support_end(raw, raw_peak * 0.12).unwrap_or(raw_onset);
+    let enhanced_end = support_end(enhanced, enhanced_peak * 0.12).unwrap_or(enhanced_onset);
+    if enhanced_end > raw_end.saturating_add(PHASE_MAXIMUM_SMEAR_SAMPLES) {
+        return QuietPhaseIntegrity::TemporalSmear;
+    }
+    let Some(alignment_lag) = best_alignment_lag(raw, enhanced, 16) else {
+        return QuietPhaseIntegrity::InsufficientSupport;
+    };
+    if alignment_lag.unsigned_abs() as f64 > PHASE_MAXIMUM_GROUP_DELAY_SAMPLES {
+        return QuietPhaseIntegrity::ExcessGroupDelay;
+    }
+
+    let mut supported = 0_usize;
+    let mut previous_phase: Option<(f64, f64)> = None;
+    for frequency in PHASE_FREQUENCIES_HZ {
+        let (raw_real, raw_imaginary) = complex_projection(raw, frequency);
+        let (enhanced_real, enhanced_imaginary) = complex_projection(enhanced, frequency);
+        let raw_energy = raw_real * raw_real + raw_imaginary * raw_imaginary;
+        let enhanced_energy =
+            enhanced_real * enhanced_real + enhanced_imaginary * enhanced_imaginary;
+        if raw_energy < 1.0e-8 || enhanced_energy < 1.0e-8 {
+            continue;
+        }
+        let cross_real = enhanced_real * raw_real + enhanced_imaginary * raw_imaginary;
+        let cross_imaginary = enhanced_imaginary * raw_real - enhanced_real * raw_imaginary;
+        let phase = cross_imaginary.atan2(cross_real);
+        if !phase.is_finite() {
+            return QuietPhaseIntegrity::Invalid;
+        }
+        if let Some((previous_frequency, previous)) = previous_phase {
+            let phase_delta = wrap_phase(phase - previous);
+            let radians_per_sample =
+                core::f64::consts::TAU * (frequency - previous_frequency) / PHASE_SAMPLE_RATE_HZ;
+            let group_delay_samples = -phase_delta / radians_per_sample;
+            if !group_delay_samples.is_finite()
+                || group_delay_samples.abs() > PHASE_MAXIMUM_GROUP_DELAY_SAMPLES
+            {
+                return QuietPhaseIntegrity::ExcessGroupDelay;
+            }
+        }
+        previous_phase = Some((frequency, phase));
+        supported = supported.saturating_add(1);
+    }
+    if supported < PHASE_MINIMUM_SUPPORTED_BANDS {
+        QuietPhaseIntegrity::InsufficientSupport
+    } else {
+        QuietPhaseIntegrity::Consistent
+    }
+}
+
+fn support_start(samples: &[f64], threshold: f64) -> Option<usize> {
+    samples.iter().position(|sample| sample.abs() >= threshold)
+}
+
+fn support_end(samples: &[f64], threshold: f64) -> Option<usize> {
+    samples.iter().rposition(|sample| sample.abs() >= threshold)
+}
+
+fn best_alignment_lag(raw: &[f64], enhanced: &[f64], maximum_lag: isize) -> Option<isize> {
+    let mut best: Option<(f64, isize)> = None;
+    for lag in -maximum_lag..=maximum_lag {
+        let mut cross = 0.0_f64;
+        let mut raw_energy = 0.0_f64;
+        let mut enhanced_energy = 0.0_f64;
+        for (raw_index, observation) in raw.iter().copied().enumerate() {
+            let enhanced_index = raw_index as isize + lag;
+            if !(0..enhanced.len() as isize).contains(&enhanced_index) {
+                continue;
+            }
+            let candidate = enhanced[enhanced_index as usize];
+            cross += observation * candidate;
+            raw_energy += observation * observation;
+            enhanced_energy += candidate * candidate;
+        }
+        let denominator = (raw_energy * enhanced_energy).sqrt();
+        if denominator <= f64::EPSILON {
+            continue;
+        }
+        let correlation = cross / denominator;
+        if correlation.is_finite()
+            && best.is_none_or(|(best_correlation, _)| correlation > best_correlation)
+        {
+            best = Some((correlation, lag));
+        }
+    }
+    best.map(|(_, lag)| lag)
+}
+
+fn complex_projection(samples: &[f64], frequency_hz: f64) -> (f64, f64) {
+    let last = samples.len().saturating_sub(1).max(1) as f64;
+    samples
+        .iter()
+        .enumerate()
+        .fold((0.0_f64, 0.0_f64), |(real, imaginary), (index, sample)| {
+            let window = 0.5 - 0.5 * (core::f64::consts::TAU * index as f64 / last).cos();
+            let phase = core::f64::consts::TAU * frequency_hz * index as f64 / PHASE_SAMPLE_RATE_HZ;
+            (
+                real + sample * window * phase.cos(),
+                imaginary - sample * window * phase.sin(),
+            )
+        })
+}
+
+fn wrap_phase(mut phase: f64) -> f64 {
+    while phase > core::f64::consts::PI {
+        phase -= core::f64::consts::TAU;
+    }
+    while phase < -core::f64::consts::PI {
+        phase += core::f64::consts::TAU;
+    }
+    phase
 }
 
 impl Drop for PcmRing {
@@ -397,7 +571,8 @@ mod wasm_boundary {
 
     use super::{
         FRAME_BYTES, OBSERVATION_MAXIMUM_MIX, OBSERVATION_MINIMUM_MIX, OverflowPolicy, PcmRing,
-        PushResult, QuietCompensationResult, parse_context_frame,
+        PushResult, QuietCompensationResult, QuietPhaseIntegrity, parse_context_frame,
+        verify_quiet_phase_integrity,
     };
 
     /// Browser release fixture for the same audio-core clock transition used
@@ -532,14 +707,26 @@ mod wasm_boundary {
         };
         let result = ring.compensate_quiet_frame(91, &mut input);
         let mix = ring.quiet_spectral.observation_mix;
+        let mut raw_onset = [0.0_f64; FRAME_BYTES / 2];
+        let mut advanced = [0.0_f64; FRAME_BYTES / 2];
+        for index in 32..160 {
+            raw_onset[index] = 0.01 * (TAU * 1_000.0 * index as f64 / 16_000.0).sin();
+            advanced[index - 4] = raw_onset[index];
+        }
+        let non_causal_rejected = verify_quiet_phase_integrity(&raw_onset, &advanced)
+            == QuietPhaseIntegrity::NonCausalOnset;
         let preserved = input != original
             && result == QuietCompensationResult::Compensated
+            && ring.quiet_phase_integrity(91) == Some(QuietPhaseIntegrity::Consistent)
+            && non_causal_rejected
             && (OBSERVATION_MINIMUM_MIX..=OBSERVATION_MAXIMUM_MIX).contains(&mix)
             && input
                 .chunks_exact(2)
                 .all(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]).unsigned_abs() <= 26_870);
         input.zeroize();
         original.zeroize();
+        raw_onset.zeroize();
+        advanced.zeroize();
         preserved
     }
 
@@ -627,6 +814,17 @@ mod wasm_boundary {
             }
             frame.zeroize();
             result as u8
+        }
+
+        #[wasm_bindgen(js_name = quietPhaseIntegrity)]
+        pub fn quiet_phase_integrity(&self, generation: f64) -> i8 {
+            let Some(generation) = parse_context_frame(generation) else {
+                return -1;
+            };
+            self.inner
+                .as_ref()
+                .and_then(|inner| inner.quiet_phase_integrity(generation))
+                .map_or(-1, |integrity| integrity as i8)
         }
 
         #[wasm_bindgen(js_name = shiftInto)]
@@ -847,6 +1045,11 @@ mod tests {
             ring.compensate_quiet_frame(51, &mut compensated),
             QuietCompensationResult::Compensated
         );
+        assert_eq!(
+            ring.quiet_phase_integrity(51),
+            Some(QuietPhaseIntegrity::Consistent)
+        );
+        assert_eq!(ring.quiet_phase_integrity(52), None);
         let output_ratio = projection(&compensated, 4_000.0) / projection(&compensated, 250.0);
         assert!(output_ratio > input_ratio * 1.15);
         let output_peak = compensated
@@ -891,6 +1094,10 @@ mod tests {
         assert_eq!(ring.quiet_spectral.observation_mix, OBSERVATION_MAXIMUM_MIX);
         assert_eq!(ring.quiet_spectral.previous_input, 0.0);
         assert_eq!(ring.quiet_spectral.previous_dc, 0.0);
+        assert_eq!(
+            ring.quiet_spectral.phase_integrity,
+            QuietPhaseIntegrity::Invalid
+        );
     }
 
     #[test]
@@ -937,5 +1144,69 @@ mod tests {
             );
             assert_eq!(observed, original);
         }
+    }
+
+    #[test]
+    fn phase_integrity_rejects_one_hundred_thousand_advance_and_smear_counterexamples() {
+        let mut rejected = 0_u32;
+        for trace in 0..100_000_usize {
+            let start = 32 + trace % 48;
+            let end = start + 96;
+            let mut raw = [0.0_f64; FRAME_BYTES / 2];
+            for (index, sample) in raw.iter_mut().enumerate().take(end).skip(start) {
+                *sample = 0.01
+                    * (core::f64::consts::TAU * 1_000.0 * index as f64 / PHASE_SAMPLE_RATE_HZ)
+                        .sin();
+            }
+            let mut counterexample = [0.0_f64; FRAME_BYTES / 2];
+            if trace % 2 == 0 {
+                let advance = 2 + trace % 12;
+                counterexample[(start - advance)..(end - advance)]
+                    .copy_from_slice(&raw[start..end]);
+            } else {
+                counterexample.copy_from_slice(&raw);
+                let smear = 13 + trace % 24;
+                for (index, sample) in counterexample
+                    .iter_mut()
+                    .enumerate()
+                    .take((end + smear).min(FRAME_BYTES / 2))
+                    .skip(end)
+                {
+                    *sample = 0.01
+                        * (core::f64::consts::TAU * 1_000.0 * index as f64 / PHASE_SAMPLE_RATE_HZ)
+                            .sin();
+                }
+            }
+            let class = verify_quiet_phase_integrity(&raw, &counterexample);
+            rejected += u32::from(class != QuietPhaseIntegrity::Consistent);
+            raw.zeroize();
+            counterexample.zeroize();
+        }
+        assert_eq!(rejected, 100_000);
+    }
+
+    #[test]
+    fn phase_integrity_accepts_causal_identity_and_rejects_excess_group_delay() {
+        let mut raw = [0.0_f64; FRAME_BYTES / 2];
+        for (index, sample) in raw.iter_mut().enumerate() {
+            *sample = 0.008
+                * ((core::f64::consts::TAU * 500.0 * index as f64 / PHASE_SAMPLE_RATE_HZ).sin()
+                    + (core::f64::consts::TAU * 1_800.0 * index as f64 / PHASE_SAMPLE_RATE_HZ)
+                        .sin()
+                    + (core::f64::consts::TAU * 2_800.0 * index as f64 / PHASE_SAMPLE_RATE_HZ)
+                        .sin());
+        }
+        assert_eq!(
+            verify_quiet_phase_integrity(&raw, &raw),
+            QuietPhaseIntegrity::Consistent
+        );
+        let mut delayed = [0.0_f64; FRAME_BYTES / 2];
+        delayed[10..].copy_from_slice(&raw[..FRAME_BYTES / 2 - 10]);
+        assert_eq!(
+            verify_quiet_phase_integrity(&raw, &delayed),
+            QuietPhaseIntegrity::ExcessGroupDelay
+        );
+        raw.zeroize();
+        delayed.zeroize();
     }
 }

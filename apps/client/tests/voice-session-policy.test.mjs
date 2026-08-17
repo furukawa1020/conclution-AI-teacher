@@ -816,16 +816,19 @@ test("bridge keeps anonymous identity inside the explicit guest function and nev
   assert.notEqual(end, -1);
   const initializeUser = bridge.slice(start, end);
 
-  const appCheckAt = initializeUser.indexOf(
-    "await getAppCheckToken(appCheck, false)",
-  );
   const initializeAuthAt = initializeUser.indexOf("initializeAuth(app");
-  assert.ok(appCheckAt >= 0);
-  assert.ok(initializeAuthAt > appCheckAt);
+  assert.ok(initializeAuthAt >= 0);
+  assert.doesNotMatch(initializeUser, /getAppCheckToken/u);
   const guestStart = bridge.indexOf("async function startGuestMode()");
   const guestEnd = bridge.indexOf("async function getStatus()", guestStart);
   assert.ok(guestStart >= 0 && guestEnd > guestStart);
-  assert.match(bridge.slice(guestStart, guestEnd), /signInAnonymously/u);
+  const guestFunction = bridge.slice(guestStart, guestEnd);
+  const guestAppCheckAt = guestFunction.indexOf(
+    "await getAppCheckToken(appCheck, false)",
+  );
+  const guestAnonymousAt = guestFunction.indexOf("signInAnonymously(auth)");
+  assert.ok(guestAppCheckAt >= 0);
+  assert.ok(guestAnonymousAt > guestAppCheckAt);
   assert.doesNotMatch(initializeUser, /signInAnonymously/u);
   assert.doesNotMatch(bridge, /signInWithPopup|GoogleAuthProvider/u);
   assert.match(bridge, /!user\.isAnonymous/u);

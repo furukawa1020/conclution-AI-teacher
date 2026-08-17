@@ -2399,6 +2399,12 @@ mod cloud {
             Some("guest_start_failed") => {
                 "ゲストを開始できませんでした　このタブを開き直してもう一度ためしてみて"
             }
+            Some("guest_attestation_failed") => {
+                "安全な接続を確認できませんでした　通信やブラウザの保護設定を確認してもう一度ためしてみて"
+            }
+            Some("guest_start_timeout") | Some("guest_start_busy") => {
+                "ゲスト接続の準備が時間内に終わりませんでした　少し待ってもう一度ためしてみて"
+            }
             Some("guest_session_expired") => {
                 "保存しないゲスト体験は終了しました　もう一度すぐ始められます"
             }
@@ -4146,6 +4152,7 @@ fn App() -> Element {
     let mut strict_cloud_minimization = use_signal(|| false);
     let mut cloud_status_refresh = use_signal(|| 0_u64);
     let mut passkey_setup_busy = use_signal(|| false);
+    let mut guest_starting = use_signal(|| false);
     let mut passkey_setup_feedback = use_signal(|| None::<PasskeySetupFeedback>);
     let mut passkey_credentials = use_signal(Vec::<PasskeyCredentialSummary>::new);
     let mut passkey_management_open = use_signal(|| false);
@@ -4558,15 +4565,20 @@ fn App() -> Element {
                                         aria_describedby: "guest-mode-promise",
                                         disabled: passkey_setup_is_busy || passkey_registration_recovery_required,
                                         onclick: move |_| {
-                                            if *passkey_setup_busy.peek() || passkey_registration_recovery_required {
+                                            if *passkey_setup_busy.peek()
+                                                || *guest_starting.peek()
+                                                || passkey_registration_recovery_required
+                                            {
                                                 return;
                                             }
                                             passkey_setup_busy.set(true);
+                                            guest_starting.set(true);
                                             passkey_setup_feedback.set(None);
                                             spawn(async move {
                                                 match cloud::start_guest_mode().await {
                                                     Ok(()) => {
                                                         passkey_setup_busy.set(false);
+                                                        guest_starting.set(false);
                                                         let comparison_enabled =
                                                             *guest_voice_comparison_opt_in.peek();
                                                         if cloud::set_guest_voice_comparison_opt_in(
@@ -4601,13 +4613,18 @@ fn App() -> Element {
                                                     }
                                                     Err(message) => {
                                                         passkey_setup_busy.set(false);
+                                                        guest_starting.set(false);
                                                         passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message)));
                                                     }
                                                 }
                                             });
                                         },
                                         span { aria_hidden: "true", "◎" }
-                                        {GUEST_MODE_ACTION}
+                                        if *guest_starting.read() {
+                                            "安全なゲスト接続を準備中…"
+                                        } else {
+                                            {GUEST_MODE_ACTION}
+                                        }
                                     }
                                     button {
                                         id: "new-passkey-account-action",

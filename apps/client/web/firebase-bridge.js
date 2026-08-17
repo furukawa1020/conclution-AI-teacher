@@ -80,7 +80,10 @@ import {
   VOICE_PREPARE_SLO_RESULTS,
   VOICE_PREPARE_SLO_ROUTES,
 } from "./voice-prepare-slo-policy.mjs";
-import { createGuestAFirstSprintSlo } from "./guest-a-first-slo-policy.mjs";
+import {
+  createGuestAFirstSprintSlo,
+  createGuestStartGate,
+} from "./guest-a-first-slo-policy.mjs";
 import {
   decidePasskeyAction,
   createPasskeyRegistrationRecoveryLatch,
@@ -673,11 +676,7 @@ function siteKeyConfigured() {
   );
 }
 
-async function initializeAppServices() {
-  if (!siteKeyConfigured()) {
-    fail("app_check_not_configured");
-  }
-
+async function initializeFirebaseApp() {
   const config = await loadFirebaseConfig();
   const app = getApps().length === 0 ? initializeApp(config) : getApp();
   if (
@@ -686,6 +685,17 @@ async function initializeAppServices() {
   ) {
     fail("firebase_project_mismatch");
   }
+
+  return Object.freeze({ app });
+}
+
+const firebaseApp = createRetryableInitializer(initializeFirebaseApp);
+
+async function initializeAppServices() {
+  if (!siteKeyConfigured()) {
+    fail("app_check_not_configured");
+  }
+  const { app } = await firebaseApp();
 
   const appCheck = initializeAppCheck(app, {
     provider: new ReCaptchaEnterpriseProvider(RECAPTCHA_SITE_KEY),
@@ -697,11 +707,10 @@ async function initializeAppServices() {
 const appServices = createRetryableInitializer(initializeAppServices);
 
 async function initializeFirebaseAuth() {
-  const { app, appCheck } = await appServices();
-  // Authentication has App Check enforcement enabled in production. Prime the
-  // attestation token before Auth exchanges so a fresh browser never races the
-  // identity provider with the reCAPTCHA Enterprise exchange.
-  await getAppCheckToken(appCheck, false);
+  const { app } = await firebaseApp();
+  // A fresh, signed-out browser has no Auth exchange to protect yet. Do not
+  // evaluate reCAPTCHA before the user's guest/passkey gesture: a rejected
+  // preflight is throttled by the SDK and would make that later gesture inert.
   authInstance ??= initializeAuth(app, {
     persistence: browserSessionPersistence,
   });
@@ -716,6 +725,9 @@ let guestVoiceComparisonRequested = false;
 const guestVoiceComparison = createGuestVoiceComparison();
 let guestVoiceComparisonPlayback;
 const guestAFirstSprintSlo = createGuestAFirstSprintSlo();
+const guestStartGate = createGuestStartGate();
+const GUEST_START_DEADLINE_MS = 12_000;
+let guestStartCleanup;
 
 function dispatchGuestAFirstSlo(observation) {
   if (!observation || typeof observation !== "object") return;
@@ -1376,31 +1388,92 @@ async function startGuestMode() {
   if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
     fail("guest_start_failed");
   }
+  if (guestStartCleanup !== undefined) fail("guest_start_busy");
+  const generation = guestStartGate.begin();
+  if (generation === null) fail("guest_start_busy");
   if (typeof guestAFirstSprintSlo !== "undefined") {
     guestAFirstSprintSlo.begin(performance.now());
   }
-  const { appCheck } = await appServices();
-  const { auth } = await firebaseAuth();
-  await getAppCheckToken(appCheck, false);
-  if (auth.currentUser && auth.currentUser.isAnonymous !== true) {
-    fail("guest_start_failed");
+  let timer;
+  const operation = (async () => {
+    let auth;
+    let signedIn;
+    try {
+      const { appCheck } = await appServices();
+      if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
+      ({ auth } = await firebaseAuth());
+      if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
+      await getAppCheckToken(appCheck, false);
+      if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
+      if (auth.currentUser && auth.currentUser.isAnonymous !== true) {
+        fail("guest_start_failed");
+      }
+      // A guest identity is a page-lifetime capability, not an account session.
+      await setPersistence(auth, inMemoryPersistence);
+      if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
+      signedIn = auth.currentUser
+        ? { user: auth.currentUser }
+        : await signInAnonymously(auth);
+      if (
+        !guestStartGate.isCurrent(generation) ||
+        !signedIn.user ||
+        signedIn.user.isAnonymous !== true
+      ) {
+        if (
+          signedIn?.user?.isAnonymous === true &&
+          auth.currentUser === signedIn.user
+        ) {
+          await signOut(auth).catch(() => {});
+        }
+        fail("guest_start_stale");
+      }
+      guestModeActive = true;
+      guestVoiceComparisonRequested = false;
+      guestVoiceComparison.clear();
+      stopGuestVoiceComparisonPlayback();
+      verifiedAccountUid = undefined;
+      return Object.freeze({ state: "guest-ready" });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        ["guest_start_failed", "guest_start_stale"].includes(error.message)
+      ) {
+        throw error;
+      }
+      if (
+        error &&
+        typeof error === "object" &&
+        typeof error.code === "string" &&
+        error.code.startsWith("appCheck/")
+      ) {
+        fail("guest_attestation_failed");
+      }
+      fail("guest_start_failed");
+    }
+  })();
+  guestStartCleanup = operation.finally(() => {
+    guestStartCleanup = undefined;
+  });
+  guestStartCleanup.catch(() => {});
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      guestStartGate.clear();
+      reject(new Error("guest_start_timeout"));
+    }, GUEST_START_DEADLINE_MS);
+  });
+  try {
+    const result = await Promise.race([operation, deadline]);
+    guestStartGate.finish(generation);
+    return result;
+  } catch (error) {
+    guestStartGate.clear();
+    if (typeof guestAFirstSprintSlo !== "undefined") {
+      guestAFirstSprintSlo.clear();
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  // A guest identity is a page-lifetime capability, not an account session.
-  // Switching persistence before minting it also covers crashes where the
-  // best-effort `pagehide` cleanup cannot run.
-  await setPersistence(auth, inMemoryPersistence);
-  const signedIn = auth.currentUser
-    ? { user: auth.currentUser }
-    : await signInAnonymously(auth);
-  if (!signedIn.user || signedIn.user.isAnonymous !== true) {
-    fail("guest_start_failed");
-  }
-  guestModeActive = true;
-  guestVoiceComparisonRequested = false;
-  guestVoiceComparison.clear();
-  stopGuestVoiceComparisonPlayback();
-  verifiedAccountUid = undefined;
-  return Object.freeze({ state: "guest-ready" });
 }
 
 async function listPasskeyCredentials() {
@@ -1488,6 +1561,10 @@ async function getStatus() {
     return Object.freeze({ state: "configuration-required" });
   }
   try {
+    const { auth } = await firebaseAuth();
+    if (!auth.currentUser) {
+      return Object.freeze({ state: "identity-required" });
+    }
     if (guestModeActive) {
       await secureCredentials();
       return Object.freeze({ state: "guest-ready" });
@@ -7069,6 +7146,7 @@ globalThis.addEventListener("pagehide", () => {
   guestVoiceComparisonRequested = false;
   guestVoiceComparison.clear();
   stopGuestVoiceComparisonPlayback();
+  guestStartGate.clear();
   if (activePasskeyController) {
     activePasskeyController.abort();
   }

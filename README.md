@@ -19,6 +19,8 @@ KOTAE ReflexとLACは、このプロジェクトで設計・実装している�
 
 ## 現在の音声経路
 
+通常Native会話は、一問一答化を避けるため、決定論的な機微情報screenを通った直前一往復の末尾だけをUID-boundなAES-256-GCM tokenとしてブラウザメモリへ返します。15分で失効し、Firestore／Cloud Storage／localStorageへ会話本文を保存せず、DB read/writeや追加の要約モデルをhot pathへ加えません。回答支援stateは従来どおり具体的な外部質問・回答本文を保持しません。
+
 ```text
 Rust / Dioxus / Wasm UI
   └─ ブラウザ境界: MediaRecorder / Web Audio、Rust/Wasm PCM ring、Firebase SDK

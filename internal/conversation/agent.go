@@ -184,6 +184,20 @@ type NativeStatePreparer interface {
 	)
 }
 
+// NativeConversationContinuity carries one bounded, caller-bound exchange
+// across Native Audio connections. The token is encrypted and expires with
+// the existing state lease; implementations must not persist or log either
+// caption.
+type NativeConversationContinuity interface {
+	NativeConversationContext(uid string, token string) (string, error)
+	CommitNativeExchange(
+		uid string,
+		token string,
+		userCaption string,
+		assistantCaption string,
+	) (string, error)
+}
+
 type ContentGenerator interface {
 	GenerateContent(
 		ctx context.Context,

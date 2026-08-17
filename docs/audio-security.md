@@ -2,11 +2,11 @@
 
 ## 現在の保証範囲
 
-現在の公開音声経路は「録音を暗号化して長期保存するサービス」ではありません。利用者が明示的に開始したセッション中に、一つの発話を認識して音声で返します。KOTAE側では原音、文字起こし、Native Audio caption、モデル応答を永続化しません。
+現在の公開音声経路は「録音を暗号化して長期保存するサービス」ではありません。利用者が明示的に開始したセッション中に、一つの発話を認識して音声で返します。KOTAE側では原音、文字起こし、Native Audio caption、モデル応答をFirestore、Cloud Storage、アプリログへ永続化しません。通常Native会話では直前一往復の短い末尾だけが15分の暗号化stateとしてブラウザメモリに残り得ます。
 
 標準live turnは、raw audioを`us-central1`のVertex AI Native Audioへstreamします。GA endpointのsetupは`responseModalities`に`AUDIO`だけを指定し、captionは`inputAudioTranscription` / `outputAudioTranscription`を有効化して受け取ります。一度に許される応答modalityは一つなので`TEXT`を併記しません。providerが返す音声とcaptionは、最終入力captionの確定とCloud Run内の決定論的なPII・高リスク・tool要求screenが終わるまで利用者へ解放しません。このscreenはregional DLPでも、Vertex AIへ送信する前の原音検査でもありません。本人が外部の質問への回答支援を明示した初回turnはNative出力を破棄します。対象条件を満たす新規scopeでは、質問本文・回答候補を入力に取らない質問拘束済みQ-ARCが有限template IDとslotを選び、監査済みrendererだけがcueへ変換します。安定した暫定captionからdecisionとstreaming TTSをprivate commit buffer内で先行できますが、空白だけを正規化した候補byte列とfinal captionの完全一致、browser commit、同じ報告質問由来の用途分離HMACへ束縛したAES-256-GCM認証暗号stateを含む有限coach checkpointがそろうまで状態・判断・PCMを解放しません。汎用scope、汎用checkpoint、cached cueは使いません。不一致なら先読みした状態とPCMを破棄し、final captionを一度だけ処理します。それ以外はNativeのfinal input captionを監査済み文字列plannerへ直接handoffし、同じ原音をregional STTへ再送しません。保留中の継続turnもNativeでfinal captionを確定し、そのcaptionを監査済み段階controllerへ直接donateします。継続コーチのために同じ原音を東京STTへ二重通過させません。監査済みplanner経路では、実質問から作ったoperator、required slot、非可逆の質問継続tagで次turnを照合し、無関係な発話を回答完了にしません。具体的な質問・答え・逐語録はstateやDBへ保存しません。厳格モードとNative Audioを使えない接続fallbackだけがraw audioから段階経路へ入り、regional STTを一度だけ使います。runtime PDF uploadはモードを問わず、state decode・STT・モデル推論前にbackendで拒否し、PDF payloadをbase64 decodeせず下流へ渡さず、request終了時に参照を破棄します。厳格モードはrequestからresponseまで別の型として扱い、文字起こしとモデル応答の両方をCloud Run内の決定論的検査とregional DLPで検査します。`clear`以外、timeout、権限エラー、応答mode不一致は停止し、外部探索とcross-turn stateを許可しません。どちらのモードもE2EEでも完全なPII除去でもありません。
 
-ここでいう「KOTAE側で保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話本文を書かないという意味です。標準liveの音声は発話ごとのrequest dataとしてVertex AI Native Audioへ、raw audioから始まる段階経路ではregional STTへ渡し、KOTAEはrequest終了後に履歴を保持しません。回答支援の初回・継続caption handoffではNative input captionをCloud Run内のplanner/controllerが平文で扱いますが、regional STTは扱いません。一方、処理に必要な平文は端末、Cloud Run、Vertex AI、および該当する段階経路のSpeech-to-Text、Sensitive Data Protection（DLP）、Text-to-Speechから見えます。Firebase Authenticationも認証用アカウント情報を扱います。E2EE、完全な端末内処理、完全なPII除去、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。管理サービス側のデータ利用・ログ条件は公式契約とproject設定を別に確認します。
+ここでいう「KOTAE側で永続保存しない」は、KOTAEのFirestore、Cloud Storage、アプリログ、ブラウザのlocalStorageへ会話本文を書かないという意味です。標準liveの音声は発話ごとのrequest dataとしてVertex AI Native Audioへ、raw audioから始まる段階経路ではregional STTへ渡します。通常Native会話では、決定論的な機微情報screenを通った直前の利用者caption末尾128 runeとAI caption末尾168 runeだけをUID-boundなAES-256-GCM tokenへ入れ、ブラウザメモリから次turnへ一度引き継ぎます。token全体は15分TTLで、DB read/write、追加の要約モデル、localStorageは使いません。screenが検出したturnはstate更新を省略します。回答支援の初回・継続caption handoffではNative input captionをCloud Run内のplanner/controllerが平文で扱いますが、regional STTは扱いません。一方、処理に必要な平文は端末、Cloud Run、Vertex AI、および該当する段階経路のSpeech-to-Text、Sensitive Data Protection（DLP）、Text-to-Speechから見えます。Firebase Authenticationも認証用アカウント情報を扱います。E2EE、完全な端末内処理、完全なPII除去、メモリフォレンジックに対する消去保証、Google Cloud全体のゼロ保持を意味しません。管理サービス側のデータ利用・ログ条件は公式契約とproject設定を別に確認します。
 
 開始速度eventは`generation`、有限`route`、有限`outcome`、bounded latencyまたは固定milestoneだけで、音声、caption、transcript、credential、会話stateを受け取りません。1秒は発話終了から最初の有意味出力までの目標、3秒はmiss観測点です。Native safe replayはそれとは別にcommit+3秒と未確定barge-in候補の解決を待ち、zero-audioかつcheckpoint未発行の既存predicateを通る場合だけです。commit+3秒が発話終了+10秒より後なら再試行権限は生じません。10秒はcapture、認証、transport、予約再生までを覆うzero-meaningful-audioの絶対停止点です。Web Audio slotもこの停止点より前かつ現在から250 ms以内の時だけ所有時に先行確定し、遠いslotは推定可聴境界まで待ちます。silent finalなどで先にterminal結果へ達したturnは10秒まで保持しません。どのdeadlineも公開済み音声やCoach checkpointを二重生成する権限にはしません。server側も有効な無音PCMをframes/bytesには計上しますが、first-audio clockはWebSocket書込に成功した最初の有意味PCMでのみ開始します。
 
@@ -40,7 +40,7 @@ Cloud Run kotae-api（asia-northeast1）
 | データ | 処理先 | アプリ側の永続化 | セッション継続に残るもの |
 |---|---|---|---|
 | マイク音声 | ブラウザ、Cloud Run、標準liveではVertex AI `us-central1`。厳格 / fallbackだけ東京リージョンSTT | なし | なし |
-| Native Audio caption / 音声 | Vertex AI `us-central1`、Cloud Run、ブラウザ。明示回答支援の初回Native出力はブラウザへ解放せず破棄し、初回・継続final input captionは質問boundなAES-256-GCM認証暗号stateの確立または監査済みplanner/controllerへの直接handoffに使う | なし | Q-ARC自体へ質問本文を渡さず、発話本文を状態tokenへ入れない |
+| Native Audio caption / 音声 | Vertex AI `us-central1`、Cloud Run、ブラウザ。通常Nativeはscreen済み直前一往復の上限付き末尾を次turnのdataへ渡す。明示回答支援の初回Native出力はブラウザへ解放せず破棄し、初回・継続final input captionは質問boundなAES-256-GCM認証暗号stateの確立または監査済みplanner/controllerへの直接handoffに使う | なし | 通常Nativeの短期継続以外は発話本文を状態tokenへ入れず、Q-ARC自体へ質問本文を渡さない |
 | STT直後の文字起こし | 厳格 / fallbackのraw audioから始まる段階経路のCloud Run。厳格時だけ東京リージョンDLP。回答支援のcaption handoffでは生成しない | なし | 厳格時は`clear`でなければVertex AIへ進めない |
 | Vertex AIへ渡す文字列 | Cloud Run、Vertex AI `global` | なし | 標準時だけ、未検出情報を含み得る短いgraph nodeが入る可能性がある |
 | モデル応答文 | Cloud Run、東京リージョンTTS | なし | 原文は状態へ保存しない |
@@ -48,7 +48,7 @@ Cloud Run kotae-api（asia-northeast1）
 | PDF | backendが全モードでstate decode・STT・modelより前に拒否し、受信PDF payloadをbase64 decodeせず下流へ渡さず、request終了時に参照を破棄。Vertex AIへ送らない | なし | なし。提供PDFは課題・設計の参照資料で、runtime機能ではない |
 | 明示した研究query | 標準時だけCloud Run、Crossref | なし | DOI、topic、候補をcross-turn stateへ残さない |
 | 研究候補 | Cloud Run、ブラウザ | なし | title、DOI、日付、sourceを現在のresponseだけへ返す |
-| 会話状態 | 標準時だけブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | 通常Native turnは発話本文を含まないlease。回答支援は実質問由来のoperator・required slot・非可逆tagと有限coach制御metadata。verifier-progress writerのrollout時は、現在の質問に対する検証の進行だけを表す5個の固定小数audit-posterior massを追加し、本人のretrieval状態、質問、回答、診断、人物特性は入れない。段階的な標準turnはフィルタ済み意味グラフと有限coach制御metadata。15分TTL。厳格時は空 |
+| 会話状態 | 標準時だけブラウザメモリ、次ターンのCloud Run | サーバーDBには保存しない | 通常Native turnはscreen済み直前一往復の末尾を合計320 rune以内で持つ15分lease。回答支援は実質問由来のoperator・required slot・非可逆tagと有限coach制御metadata。verifier-progress writerのrollout時は、現在の質問に対する検証の進行だけを表す5個の固定小数audit-posterior massを追加し、本人のretrieval状態、質問、回答、診断、人物特性は入れない。段階的な標準turnはフィルタ済み意味グラフと有限coach制御metadata。厳格時は空 |
 | Passkey credential | authenticator、Cloud Run、Firestore | SHA-256由来document ID、仮名user handle、public credential、sign counter等。秘密鍵はなし | 仮名アカウント。ceremonyは5分・単回利用 |
 | 長期測定 | 明示参加した端末のlocalStorage | 端末内のみ | 有限回答、1〜5、日単位の測定日、無作為な端末内ID、同意・schema version。会話本文・音声・Firebase UID・自由文・時刻は含めず、168日期限を次回アクセス時にprune。全削除後は回答復活防止用の固定markerだけを残す |
 | 音声レート制限 | Firestore | 48時間TTL | UIDまたはFirebase App IDのSHA-256由来document IDと回数・時刻 |
@@ -140,7 +140,7 @@ runtimeの`document`は標準・厳格を問わず受け付けません。backen
 - 発行から15分で失効
 - schema、長さ、turn数を復号後にも検証
 - 暗号鍵は32 byteで、Cloud RunへSecret Managerから注入
-- tokenへ逐語録、会話・資料の自由文要約、PDF本文、モデルのchain-of-thoughtを入れない
+- tokenへ通常Nativeのscreen済み直前一往復を超える逐語録、会話・資料の自由文要約、PDF本文、モデルのchain-of-thoughtを入れない
 - `extended_speech`の今回限りの判定値と逐語録・発話本文はtokenへ入れない。一方、長い発話も通常会話と同じ状態更新の対象であり、PII検査と決定論的フィルタを通した抽象化済み・件数と長さに上限のあるgoal、claim、ground、assumption、constraint、open loop、contradiction、decisionは15分tokenへ残り得る
 - graph nodeはemail、電話番号、長い数列、credentialらしいtokenを含む場合、または現在発話との4-gram重複が高い場合にnodeごと破棄する
 - 本人へ一度だけ言い直しを頼んだ場合は、target evidenceを含む正規化意味節本文ではなく、状態暗号鍵から用途分離して導出した秘密鍵によるHMAC-SHA-256の128 bit tagだけをtokenへ入れる。MAC inputを暗号化session IDへも束縛する。tagは`awaiting_restatement`以外では拒否し、planner、critic、TTS、response metadata、ログへ渡さない

@@ -2397,6 +2397,7 @@ function maybeCommitHybridEndpoint(recording, now) {
       nativeAudio: recording.nativeAudio,
       now,
       providerEndpointAt: recording.providerEndpointAt,
+      shortUtteranceConfirmed: recording.shortUtteranceConfirmed,
       softVoiceConfirmed: recording.softVoiceConfirmed,
     })
   ) {
@@ -2465,9 +2466,10 @@ function armVad(recording) {
         rustEvidence.length !== 3 ||
         !Number.isSafeInteger(rustEvidence[0]) ||
         rustEvidence[0] < 0 ||
-        rustEvidence[0] > 31 ||
+        rustEvidence[0] > 63 ||
         ((rustEvidence[0] & 3) !== 0 && (rustEvidence[0] & 8) === 0) ||
         ((rustEvidence[0] & 16) !== 0 && (rustEvidence[0] & 1) === 0) ||
+        ((rustEvidence[0] & 32) !== 0 && (rustEvidence[0] & 27) !== 27) ||
         !Number.isFinite(rustEvidence[1]) ||
         rustEvidence[1] < 0.002 ||
         rustEvidence[1] > 0.04 ||
@@ -2521,6 +2523,7 @@ function armVad(recording) {
       );
     }
     recording.softVoiceConfirmed = vadState.softVoiceConfirmed;
+    recording.shortUtteranceConfirmed = vadState.shortUtteranceConfirmed;
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }
@@ -2655,6 +2658,7 @@ function createRecordingState(
     stopReason: "",
     stream,
     softVoiceConfirmed: false,
+    shortUtteranceConfirmed: false,
     totalBytes: 0,
     turnEnded: false,
     turnEndedPromise,

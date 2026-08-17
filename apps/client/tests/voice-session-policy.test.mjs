@@ -113,8 +113,7 @@ installOnsetFrameClassifier(
     const soft = !clear && rms > 0 && peak >= rms * 1.6 &&
       (rms >= noiseFloor * 1.45 ||
         (!hasSpeech && (bootstrapEligible || softCandidate) && rms >= 0.0025) ||
-        (!hasSpeech &&
-          excitationInvariantCandidate &&
+        (excitationInvariantCandidate &&
           rms >= 0.0014 &&
           rms >= noiseFloor * 0.7));
     return Number(clear) | (Number(soft) << 1);
@@ -220,6 +219,101 @@ test("excitation-invariant formant evidence admits sub-bootstrap whisper levels"
     rms: 0.0015,
   });
   assert.equal(withoutFormantProof.softVoiceCandidate, false);
+});
+
+test("Rust short-utterance proof confirms an 80 ms quiet word without lowering the general floor", () => {
+  let word = createVadState(0);
+  word = advanceVad(word, {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.candidate |
+        QUIET_EVIDENCE_FLAGS.spectralChange |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+        QUIET_EVIDENCE_FLAGS.excitationInvariant,
+      noiseFloor: 0.002,
+    },
+    now: 40,
+    peak: 0.0034,
+    rms: 0.0018,
+  });
+  assert.equal(word.hasSpeech, false);
+
+  word = advanceVad(word, {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.candidate |
+        QUIET_EVIDENCE_FLAGS.spectralChange |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+        QUIET_EVIDENCE_FLAGS.excitationInvariant |
+        QUIET_EVIDENCE_FLAGS.shortUtterance,
+      noiseFloor: 0.002,
+    },
+    now: 80,
+    peak: 0.0038,
+    rms: 0.002,
+  });
+  assert.equal(word.hasSpeech, true);
+  assert.equal(word.softVoiceConfirmed, true);
+  assert.equal(word.shortUtteranceConfirmed, true);
+  word = advanceVad(
+    word,
+    {
+      acousticEvidence: {
+        flags:
+          QUIET_EVIDENCE_FLAGS.stationary |
+          QUIET_EVIDENCE_FLAGS.inSessionCoverage,
+        noiseFloor: 0.002,
+      },
+      now: 480,
+      peak: 0.0004,
+      rms: 0.0002,
+    },
+    {
+      endOfTurnSilenceMs:
+        VOICE_SESSION_LIMITS.nativeAudioEndOfTurnSilenceMs,
+      nativeAudio: true,
+    },
+  );
+  assert.equal(word.action, "end-of-turn");
+
+  const unproven = advanceVad(createVadState(0), {
+    acousticEvidence: {
+      flags:
+        QUIET_EVIDENCE_FLAGS.candidate |
+        QUIET_EVIDENCE_FLAGS.spectralChange |
+        QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+        QUIET_EVIDENCE_FLAGS.excitationInvariant,
+      noiseFloor: 0.002,
+    },
+    now: 40,
+    peak: 0.0038,
+    rms: 0.002,
+  });
+  assert.equal(unproven.hasSpeech, false);
+});
+
+test("a continued quiet phrase outgrows the short-word capability", () => {
+  let phrase = createVadState(0);
+  for (let frame = 1; frame <= 8; frame += 1) {
+    const shortProof = frame === 2;
+    phrase = advanceVad(phrase, {
+      acousticEvidence: {
+        flags:
+          QUIET_EVIDENCE_FLAGS.candidate |
+          QUIET_EVIDENCE_FLAGS.spectralChange |
+          QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+          QUIET_EVIDENCE_FLAGS.excitationInvariant |
+          (shortProof ? QUIET_EVIDENCE_FLAGS.shortUtterance : 0),
+        noiseFloor: 0.002,
+      },
+      now: frame * 40,
+      peak: frame % 2 === 0 ? 0.0044 : 0.0032,
+      rms: frame % 2 === 0 ? 0.0022 : 0.0017,
+    });
+  }
+  assert.equal(phrase.hasSpeech, true);
+  assert.equal(phrase.softVoiceConfirmed, true);
+  assert.equal(phrase.shortUtteranceConfirmed, false);
 });
 
 test("Rust session coverage bit crosses the executable VAD policy", () => {

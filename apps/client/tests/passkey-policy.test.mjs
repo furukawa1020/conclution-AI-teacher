@@ -550,7 +550,11 @@ test("replacement passkey flows preserve the old Firebase session until proof su
     "async function secureCredentials(",
     explicitStart,
   );
-  const statusStart = bridge.indexOf("async function getStatus(", secureStart);
+  const statusStart = bridge.indexOf(
+    "async function startGuestMode(",
+    secureStart,
+  );
+  assert.ok(statusStart > secureStart);
   const explicitRegistration = bridge.slice(explicitStart, secureStart);
   const secureCredentials = bridge.slice(secureStart, statusStart);
   assert.doesNotMatch(explicitRegistration, /\bsignOut\b/u);

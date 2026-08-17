@@ -21,6 +21,36 @@ export const GUEST_A_FIRST_SLO_OUTCOMES = Object.freeze({
   startOnTarget: "on_target",
 });
 
+export function createGuestStartGate() {
+  let generation = 0;
+  let activeGeneration = null;
+
+  function invalidate() {
+    generation = generation >= Number.MAX_SAFE_INTEGER ? 1 : generation + 1;
+    activeGeneration = null;
+  }
+
+  return Object.freeze({
+    begin() {
+      if (activeGeneration !== null) return null;
+      generation = generation >= Number.MAX_SAFE_INTEGER ? 1 : generation + 1;
+      activeGeneration = generation;
+      return generation;
+    },
+    clear() {
+      invalidate();
+    },
+    finish(candidate) {
+      if (candidate !== activeGeneration) return false;
+      activeGeneration = null;
+      return true;
+    },
+    isCurrent(candidate) {
+      return Number.isSafeInteger(candidate) && candidate > 0 && candidate === activeGeneration;
+    },
+  });
+}
+
 const EVENT_KEYS = Object.freeze([
   "aiSubstitution",
   "completion",

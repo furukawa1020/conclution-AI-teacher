@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createGuestAFirstSprintSlo,
+  createGuestStartGate,
   validateGuestAFirstSloBatch,
 } from "../web/guest-a-first-slo-policy.mjs";
 
@@ -61,4 +62,19 @@ test("one hundred content-free observations enforce p95 and zero substitution", 
   assert.equal(validateGuestAFirstSloBatch(events), true);
   events[0] = run({ evidence: proof({ aiOutputBeforeAnswer: true }) });
   assert.equal(validateGuestAFirstSloBatch(events), false);
+});
+
+test("guest start generation rejects overlap and every stale completion", () => {
+  const gate = createGuestStartGate();
+  const first = gate.begin();
+  assert.equal(Number.isSafeInteger(first), true);
+  assert.equal(gate.begin(), null);
+  assert.equal(gate.isCurrent(first), true);
+  gate.clear();
+  assert.equal(gate.isCurrent(first), false);
+  assert.equal(gate.finish(first), false);
+  const second = gate.begin();
+  assert.notEqual(second, first);
+  assert.equal(gate.finish(second), true);
+  assert.equal(gate.isCurrent(second), false);
 });

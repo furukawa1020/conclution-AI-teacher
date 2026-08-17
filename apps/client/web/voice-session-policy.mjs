@@ -787,6 +787,7 @@ export function advanceCandidateCapture(
 }
 
 export function createVadState(startedAt, sampleClock = null) {
+  const observedAt = finiteTimestamp(startedAt, "vad_started_at");
   const temporalClock =
     sampleClock === null ? null : createTemporalVadClock(sampleClock);
   return Object.freeze({
@@ -797,6 +798,7 @@ export function createVadState(startedAt, sampleClock = null) {
     hasSpeech: false,
     lastVoiceAt: null,
     noiseFloor: 0.006,
+    observedAt,
     sampleVoiced: false,
     shortUtteranceConfirmed: false,
     softVoiceCandidate: false,
@@ -806,7 +808,7 @@ export function createVadState(startedAt, sampleClock = null) {
     softVoiceMaxRms: 0,
     softVoiceMinRms: null,
     softVoiceRunMs: 0,
-    startedAt: finiteTimestamp(startedAt, "vad_started_at"),
+    startedAt: observedAt,
     ...(temporalClock === null ? {} : { temporalClock }),
     voiceRunMs: 0,
   });
@@ -933,6 +935,8 @@ export function advanceVad(
     previous === null ||
     typeof previous !== "object" ||
     !Number.isFinite(previous.startedAt) ||
+    !Number.isFinite(previous.observedAt) ||
+    previous.observedAt < previous.startedAt ||
     typeof coachActive !== "boolean" ||
     typeof nativeAudio !== "boolean" ||
     !Number.isFinite(coachEndOfTurnSilenceMs) ||
@@ -991,6 +995,9 @@ export function advanceVad(
     temporalClock = tick.clock;
     effectiveIntervalMs = tick.creditedMs;
     timestamp = previous.startedAt + tick.elapsedMs;
+  }
+  if (timestamp < previous.observedAt) {
+    throw new TypeError("vad_sample_invalid");
   }
 
   let {
@@ -1288,6 +1295,7 @@ export function advanceVad(
     hasSpeech,
     lastVoiceAt,
     noiseFloor,
+    observedAt: timestamp,
     sampleVoiced,
     shortUtteranceConfirmed,
     softVoiceCandidate,

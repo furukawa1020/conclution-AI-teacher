@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { advanceTemporalVadClock, createTemporalVadClock, installTemporalVadClockAdvancer } from "../web/temporal-vad-clock.mjs";
-import { advanceVad, createVadState, installOnsetFrameClassifier } from "../web/voice-session-policy.mjs";
+import { advanceVad, createVadState, installOnsetFrameClassifier, shouldShowVoiceReceipt } from "../web/voice-session-policy.mjs";
 import { advanceInterruptVad, createInterruptVadState, installIntentionalInterruptAdvancer, installInterruptFrameClassifier } from "../web/voice-stream-policy.mjs";
 
 function rustClockOracle(rate, started, previous, current) {
@@ -42,7 +42,30 @@ test("a delayed JS task cannot manufacture normal-VAD dwell", () => {
   });
   assert.equal(state.clearVoiceRunMs, 40);
   assert.equal(state.hasSpeech, false);
+  assert.equal(state.observedAt, 11_000);
   assert.equal(state.temporalClock.lastFrame, 48_000);
+});
+
+test("sample-clock-ahead speech keeps the receipt state valid", () => {
+  let state = createVadState(10_000, { sampleRateHz: 48_000, startedFrame: 0 });
+  for (const clockFrame of [48_000, 49_920, 51_840]) {
+    state = advanceVad(state, {
+      clockFrame,
+      now: 10_001,
+      peak: 0.08,
+      rms: 0.03,
+    });
+  }
+
+  assert.equal(state.hasSpeech, true);
+  assert.ok(state.lastVoiceAt > 10_001);
+  assert.doesNotThrow(() =>
+    shouldShowVoiceReceipt({
+      hasSpeech: state.hasSpeech,
+      lastVoiceAt: state.lastVoiceAt,
+      now: state.observedAt,
+    }),
+  );
 });
 
 test("interrupt confirmation remains sample-clock dwell bounded", () => {
@@ -56,6 +79,7 @@ test("interrupt confirmation remains sample-clock dwell bounded", () => {
   });
   assert.equal(state.phase, "candidate");
   assert.equal(state.voiceRunMs, 40);
+  assert.equal(state.observedAt, 2_000);
   assert.notEqual(state.action, "confirm");
   assert.throws(() => advanceInterruptVad(state, {
     clockFrame: 48_000,

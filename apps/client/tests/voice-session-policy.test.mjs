@@ -1017,7 +1017,7 @@ test("runtime PDF is rejected before browser file access", async () => {
 	assert.match(ui, /PDF入力[\s\S]*公開版では未提供/u);
 });
 
-test("explicit voice start warms only the fixed transport without private data", async () => {
+test("explicit voice start preconnects without a cross-origin warmup fetch", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -1028,14 +1028,10 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.notEqual(warmEnd, -1);
   const warm = bridge.slice(warmStart, warmEnd);
 
-  assert.match(bridge, /VOICE_WARMUP_ENDPOINT = `\$\{VOICE_ORIGIN\}\/health`/u);
-  assert.doesNotMatch(bridge, /\/healthz/u);
-  assert.match(warm, /fetch\(VOICE_WARMUP_ENDPOINT/u);
-  assert.match(warm, /credentials:\s*"omit"/u);
-  assert.match(warm, /mode:\s*"no-cors"/u);
-  assert.match(warm, /redirect:\s*"follow"/u);
-  assert.match(warm, /referrerPolicy:\s*"no-referrer"/u);
-  assert.doesNotMatch(warm, /redirect:\s*"error"/u);
+  assert.doesNotMatch(bridge, /VOICE_WARMUP_ENDPOINT|\/healthz/u);
+  assert.match(warm, /preconnect\.rel = "preconnect"/u);
+  assert.match(warm, /preconnect\.href = VOICE_ORIGIN/u);
+  assert.doesNotMatch(warm, /fetch\(/u);
   assert.doesNotMatch(
     warm,
     /Authorization|audioBase64|sessionState|X-Firebase-AppCheck/u,
@@ -1052,6 +1048,22 @@ test("explicit voice start warms only the fixed transport without private data",
   assert.ok(sessionAt >= 0);
   assert.ok(warmAt > sessionAt);
   assert.ok(microphoneAt > warmAt);
+});
+
+test("sample-clock time owns every same-tick normal and interrupt consumer", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    bridge,
+    /const observedAt = vadState\.observedAt;[\s\S]*updateVoiceReceipt\(recording, observedAt\);[\s\S]*maybeCommitHybridEndpoint\(recording, observedAt\)/u,
+  );
+  assert.equal(
+    bridge.match(/updateVoiceReceipt\(recording, observedAt\)/gu)?.length,
+    2,
+  );
 });
 
 test("unfinished respondent coaching keeps Native input when privacy permits", async () => {
@@ -5211,6 +5223,7 @@ test("interrupt confirmation can be withheld without changing its state shape", 
     "foregroundVoiceMs",
     "lastVoiceAt",
     "noiseFloor",
+    "observedAt",
     "phase",
     "startedAt",
     "voiceRunMs",
@@ -6320,7 +6333,9 @@ test("confirmed follow-up speech expires only the previous turn proof", async ()
   const eventAt = monitor.indexOf(
     'new CustomEvent("kotae:voice-input-confirmed"',
   );
-  const endpointAt = monitor.indexOf("maybeCommitHybridEndpoint(recording, now)");
+  const endpointAt = monitor.indexOf(
+    "maybeCommitHybridEndpoint(recording, observedAt)",
+  );
   assert.ok(priorAt >= 0);
   assert.ok(transitionAt > priorAt);
   assert.ok(eventAt > transitionAt);

@@ -1653,6 +1653,7 @@ export function createInterruptVadState(startedAt, sampleClock = null) {
     foregroundVoiceMs: 0,
     lastVoiceAt: null,
     noiseFloor: 0.004,
+    observedAt: startedAt,
     phase: "guard",
     startedAt,
     ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
@@ -1676,6 +1677,8 @@ export function advanceInterruptVad(
     !isPlainRecord(state) ||
     !Number.isFinite(state.startedAt) ||
     state.startedAt < 0 ||
+    !Number.isFinite(state.observedAt) ||
+    state.observedAt < state.startedAt ||
     !boundedLevel(state.noiseFloor) ||
     !Number.isFinite(state.candidateSilenceMs) ||
     state.candidateSilenceMs < 0 ||
@@ -1718,6 +1721,9 @@ export function advanceInterruptVad(
     temporalClock = tick.clock;
     intervalMs = tick.creditedMs;
     now = state.startedAt + tick.elapsedMs;
+  }
+  if (now < state.observedAt) {
+    throw new TypeError("interrupt_vad_state_invalid");
   }
 
   let {
@@ -1765,6 +1771,7 @@ export function advanceInterruptVad(
       foregroundVoiceMs: 0,
       lastVoiceAt,
       noiseFloor,
+      observedAt: now,
       phase:
         now - state.startedAt < INTERRUPT_VAD_LIMITS.guardMs
           ? "guard"
@@ -1838,6 +1845,7 @@ export function advanceInterruptVad(
       foregroundVoiceMs,
       lastVoiceAt,
       noiseFloor,
+      observedAt: now,
       phase,
       startedAt: state.startedAt,
       ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
@@ -1954,6 +1962,7 @@ export function advanceInterruptVad(
           foregroundVoiceMs,
           lastVoiceAt,
           noiseFloor,
+          observedAt: now,
           phase,
           startedAt: state.startedAt,
           ...(intentionalFastLane === null ? {} : { intentionalFastLane }),
@@ -1978,6 +1987,7 @@ export function advanceInterruptVad(
     foregroundVoiceMs,
     lastVoiceAt,
     noiseFloor,
+    observedAt: now,
     phase,
     startedAt: state.startedAt,
     ...(intentionalFastLane === null ? {} : { intentionalFastLane }),

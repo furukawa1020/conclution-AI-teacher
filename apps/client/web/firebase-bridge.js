@@ -113,7 +113,6 @@ const PCM_RING_WASM_MAX_BYTES = 256 * 1024;
 const PCM_RING_FETCH_TIMEOUT_MS = 3_000;
 const PCM_CAPTURE_WORKLET_LOAD_TIMEOUT_MS = 3_500;
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
-const VOICE_WARMUP_ENDPOINT = `${VOICE_ORIGIN}/health`;
 const PASSKEY_REGISTRATION_BEGIN_ENDPOINT =
   "/api/v1/passkeys/registration:begin";
 const PASSKEY_REGISTRATION_FINISH_ENDPOINT =
@@ -1572,21 +1571,6 @@ function primeVoiceTransportConnection() {
   preconnect.href = VOICE_ORIGIN;
   preconnect.crossOrigin = "anonymous";
   document.head.append(preconnect);
-
-  // This carries no audio, transcript, identity token, or session state. It is
-  // started only after the user opens a voice session, so DNS/TLS and a
-  // possible Cloud Run cold start overlap the user's first utterance.
-  void fetch(VOICE_WARMUP_ENDPOINT, {
-    method: "GET",
-    cache: "no-store",
-    credentials: "omit",
-    mode: "no-cors",
-    // The request carries no body or credentials and its opaque response is
-    // never read. Follow an edge redirect so warmup cannot create a noisy,
-    // caught Fetch error before the real authenticated voice transport.
-    redirect: "follow",
-    referrerPolicy: "no-referrer",
-  }).catch(() => {});
 }
 
 async function getStatus() {
@@ -2527,7 +2511,8 @@ function armVad(recording) {
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }
-    updateVoiceReceipt(recording, now);
+    const observedAt = vadState.observedAt;
+    updateVoiceReceipt(recording, observedAt);
     if (
       vadState.softVoiceCandidate &&
       recording.candidate &&
@@ -2541,13 +2526,13 @@ function armVad(recording) {
       rejectRecording(recording, "voice_turn_invalid");
       return;
     }
-    if (maybeCommitHybridEndpoint(recording, now)) {
+    if (maybeCommitHybridEndpoint(recording, observedAt)) {
       return;
     }
     candidateCapture = advanceCandidateCapture(
       candidateCapture,
       vadState,
-      now,
+      observedAt,
     );
     if (candidateCapture.action === "start") {
       // Start on the first voiced analysis frame, limiting loss at the start
@@ -5894,8 +5879,9 @@ function startBargeInMonitoring(playback, expectedEpoch, guardStartedAt) {
     if (Number.isFinite(vadState.lastVoiceAt)) {
       recording.lastVoiceAt = vadState.lastVoiceAt;
     }
-    updateVoiceReceipt(recording, now);
-    if (maybeCommitHybridEndpoint(recording, now)) {
+    const observedAt = vadState.observedAt;
+    updateVoiceReceipt(recording, observedAt);
+    if (maybeCommitHybridEndpoint(recording, observedAt)) {
       return;
     }
 

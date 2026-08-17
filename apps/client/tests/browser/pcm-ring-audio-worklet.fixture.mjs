@@ -492,9 +492,11 @@ function postConfirm(
   initialCredit,
   candidateContextFrame = 0,
   quietConfirmed = false,
+  aecVerified = true,
 ) {
   node.port.postMessage(
     Object.freeze({
+      aecVerified,
       candidateContextFrame,
       generation,
       initialCredit,

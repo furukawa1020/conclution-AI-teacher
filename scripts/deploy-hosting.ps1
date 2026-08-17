@@ -224,6 +224,31 @@ function Invoke-FirebaseJson {
     return Invoke-RestMethod @parameters
 }
 
+function Assert-FirebaseGuestAuthBoundary {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable] $Headers
+    )
+
+    $identityConfig = Invoke-FirebaseJson `
+        -Method Get `
+        -Uri "https://identitytoolkit.googleapis.com/admin/v2/projects/$ProjectId/config" `
+        -Headers $Headers
+    if (
+        $identityConfig.name -cne "projects/$expectedProjectNumber/config" -or
+        $identityConfig.signIn.anonymous.enabled -cne $true
+    ) {
+        throw "Firebase anonymous authentication is not enabled for the reviewed project."
+    }
+    $authorizedDomains = @($identityConfig.authorizedDomains)
+    if (
+        $authorizedDomains.Count -ne ($authorizedDomains | Select-Object -Unique).Count -or
+        $authorizedDomains -notcontains "kotae-ai.web.app"
+    ) {
+        throw "Firebase Auth does not authorize the reviewed Hosting domain exactly once."
+    }
+}
+
 function Invoke-BinaryUpload {
     param(
         [Parameter(Mandatory)]
@@ -873,11 +898,6 @@ $hostingSnapshot = $hostingRelease.Snapshot
 Assert-BrowserAudioGate `
     -ExpectedManifestSha256 $hostingRelease.ManifestSha256
 Assert-PromotedBackendBoundary
-if ($PreflightOnly) {
-    Write-Output "HOSTING_PREFLIGHT=PASS"
-    return
-}
-
 $token = ((& $gcloud auth print-access-token) | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
     throw "Could not obtain a Google Cloud access token."
@@ -887,6 +907,12 @@ $headers = @{
     Authorization         = "Bearer $token"
     "x-goog-user-project" = $ProjectId
 }
+Assert-FirebaseGuestAuthBoundary -Headers $headers
+if ($PreflightOnly) {
+    Write-Output "HOSTING_PREFLIGHT=PASS"
+    return
+}
+
 $apiRoot = "https://firebasehosting.googleapis.com/v1beta1"
 $versionName = $null
 

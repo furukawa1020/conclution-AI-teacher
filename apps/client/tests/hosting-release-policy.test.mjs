@@ -48,6 +48,26 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$originMain\s+-cne\s+\$ExpectedGitCommit/u);
   assert.match(deploy, /status",\s*"--porcelain=v1",\s*"--untracked-files=all"/u);
   assert.match(deploy, /Hosting artifact does not match its release manifest/u);
+  assert.match(
+    deploy,
+    /identitytoolkit\.googleapis\.com\/admin\/v2\/projects\/\$ProjectId\/config/u,
+  );
+  assert.match(
+    deploy,
+    /\$identityConfig\.signIn\.anonymous\.enabled\s+-cne\s+\$true/u,
+  );
+  assert.match(
+    deploy,
+    /Firebase anonymous authentication is not enabled for the reviewed project/u,
+  );
+  assert.match(
+    deploy,
+    /\$authorizedDomains\s+-notcontains\s+"kotae-ai\.web\.app"/u,
+  );
+  assert.match(
+    deploy,
+    /Assert-FirebaseGuestAuthBoundary\s+-Headers\s+\$headers[\s\S]+if\s*\(\$PreflightOnly\)/u,
+  );
   assert.equal(
     (deploy.match(/"temporal-vad-clock\.mjs"/gu) ?? []).length,
     2,
@@ -140,7 +160,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   );
   assert.match(
     deploy,
-    /Assert-HostingReleaseSource\s+\$hostingRelease\s*=\s*Assert-HostingArtifact\s+-Root\s+\$publicRoot\s+\$hostingSnapshot\s*=\s*\$hostingRelease\.Snapshot\s+Assert-BrowserAudioGate\s+`\s+-ExpectedManifestSha256\s+\$hostingRelease\.ManifestSha256\s+Assert-PromotedBackendBoundary\s+if\s*\(\$PreflightOnly\)/u,
+    /Assert-HostingReleaseSource\s+\$hostingRelease\s*=\s*Assert-HostingArtifact\s+-Root\s+\$publicRoot\s+\$hostingSnapshot\s*=\s*\$hostingRelease\.Snapshot\s+Assert-BrowserAudioGate\s+`\s+-ExpectedManifestSha256\s+\$hostingRelease\.ManifestSha256\s+Assert-PromotedBackendBoundary\s+\$token/u,
   );
   assert.match(deploy, /Get-GzipBytes -Bytes \(\[byte\[\]\] \$hostingSnapshot\[\$relative\]\)/u);
   assert.doesNotMatch(deploy, /Get-GzipBytes -Path/u);

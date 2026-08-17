@@ -77,6 +77,7 @@ export const QUIET_EVIDENCE_FLAGS = Object.freeze({
   stationary: 4,
   inSessionCoverage: 8,
   excitationInvariant: 16,
+  shortUtterance: 32,
 });
 
 // A content-free receipt is a separate UX budget from endpointing and the
@@ -797,6 +798,7 @@ export function createVadState(startedAt, sampleClock = null) {
     lastVoiceAt: null,
     noiseFloor: 0.006,
     sampleVoiced: false,
+    shortUtteranceConfirmed: false,
     softVoiceCandidate: false,
     softVoiceConfirmed: false,
     softVoiceEvidenceAt: null,
@@ -820,6 +822,7 @@ export function shouldCommitHybridEndpoint({
   now,
   providerEndpointAt,
   softVoiceConfirmed = false,
+  shortUtteranceConfirmed = false,
 }) {
   if (
     typeof coachActive !== "boolean" ||
@@ -827,6 +830,7 @@ export function shouldCommitHybridEndpoint({
     typeof hasSpeech !== "boolean" ||
     typeof nativeAudio !== "boolean" ||
     typeof softVoiceConfirmed !== "boolean" ||
+    typeof shortUtteranceConfirmed !== "boolean" ||
     !Number.isFinite(now) ||
     now < 0 ||
     (firstVoiceAt !== null &&
@@ -869,7 +873,7 @@ export function shouldCommitHybridEndpoint({
       : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
   const requiredSilence = monologue
     ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
-    : softVoiceConfirmed
+    : softVoiceConfirmed && !shortUtteranceConfirmed
       ? VOICE_SESSION_LIMITS.hybridSoftVoiceEndpointSilenceMs
       : reflective
         ? VOICE_SESSION_LIMITS.hybridReflectiveEndpointSilenceMs
@@ -952,7 +956,7 @@ export function advanceVad(
       Reflect.ownKeys(acousticEvidence).length !== 2 ||
       !Number.isSafeInteger(acousticEvidence.flags) ||
       acousticEvidence.flags < 0 ||
-      acousticEvidence.flags > 31 ||
+      acousticEvidence.flags > 63 ||
       ((acousticEvidence.flags &
         (QUIET_EVIDENCE_FLAGS.candidate |
           QUIET_EVIDENCE_FLAGS.spectralChange)) !==
@@ -962,6 +966,16 @@ export function advanceVad(
       ((acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.excitationInvariant) !==
         0 &&
         (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.candidate) === 0) ||
+      ((acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.shortUtterance) !== 0 &&
+        (acousticEvidence.flags &
+          (QUIET_EVIDENCE_FLAGS.candidate |
+            QUIET_EVIDENCE_FLAGS.spectralChange |
+            QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+            QUIET_EVIDENCE_FLAGS.excitationInvariant)) !==
+          (QUIET_EVIDENCE_FLAGS.candidate |
+            QUIET_EVIDENCE_FLAGS.spectralChange |
+            QUIET_EVIDENCE_FLAGS.inSessionCoverage |
+            QUIET_EVIDENCE_FLAGS.excitationInvariant)) ||
       !Number.isFinite(acousticEvidence.noiseFloor) ||
       acousticEvidence.noiseFloor < 0.002 ||
       acousticEvidence.noiseFloor > 0.04)
@@ -988,6 +1002,7 @@ export function advanceVad(
     noiseFloor,
     softVoiceCandidate = false,
     softVoiceConfirmed = false,
+    shortUtteranceConfirmed = false,
     softVoiceEvidenceAt = null,
     softVoiceEvidenceStartedAt = null,
     softVoiceMaxRms = 0,
@@ -1020,6 +1035,9 @@ export function advanceVad(
     acousticEvidence === null ||
     (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.candidate) !== 0;
   const soundsSoft = (frameClass & 2) !== 0 && rustQuietCandidate;
+  const shortUtteranceProof =
+    acousticEvidence !== null &&
+    (acousticEvidence.flags & QUIET_EVIDENCE_FLAGS.shortUtterance) !== 0;
   const hasVoiceShapedPeak = rms > 0 && peak >= rms * softVoicePeakToRmsRatio;
   let sampleVoiced = soundsClear || soundsSoft;
 
@@ -1062,6 +1080,7 @@ export function advanceVad(
 
   if (hasSpeech) {
     if (soundsClear) {
+      shortUtteranceConfirmed = false;
       clearVoiceRunMs += effectiveIntervalMs;
       lastVoiceAt = timestamp;
       softVoiceCandidate = false;
@@ -1076,11 +1095,22 @@ export function advanceVad(
         clearVoiceRunMs - effectiveIntervalMs * 0.5,
       );
       if (
+        shortUtteranceConfirmed &&
+        softVoiceRunMs >= softVoiceMinimumMs &&
+        hasSustainedSoftEnvelope
+      ) {
+        // A candidate that continues beyond the finite short-word proof is a
+        // normal quiet utterance. Restore its wider thinking pause rather
+        // than letting the earlier capability shorten a longer answer.
+        shortUtteranceConfirmed = false;
+      }
+      if (
         !softVoiceConfirmed &&
         softVoiceRunMs >= softVoiceMinimumMs &&
         hasSustainedSoftEnvelope
       ) {
         softVoiceConfirmed = true;
+        shortUtteranceConfirmed = false;
       }
       if (
         (softVoiceConfirmed && hasRecentSoftEnvelope) ||
@@ -1162,11 +1192,14 @@ export function advanceVad(
     );
     lastVoiceAt = timestamp;
     if (
-      softVoiceRunMs >= softVoiceMinimumMs &&
-      hasSustainedSoftEnvelope
+      (softVoiceRunMs >= softVoiceMinimumMs &&
+        hasSustainedSoftEnvelope) ||
+      (shortUtteranceProof && softVoiceRunMs >= 80)
     ) {
       hasSpeech = true;
       softVoiceConfirmed = true;
+      shortUtteranceConfirmed =
+        shortUtteranceProof && softVoiceRunMs < softVoiceMinimumMs;
     } else if (
       softVoiceRunMs >= softCandidateCaptureLimitMs &&
       !hasRecentSoftEnvelope
@@ -1225,7 +1258,7 @@ export function advanceVad(
   const trailingSilenceMs =
     speechSpanMs >= monologueSpeechSpanMs
       ? monologueEndOfTurnSilenceMs
-      : softVoiceConfirmed
+      : softVoiceConfirmed && !shortUtteranceConfirmed
         ? softVoiceEndOfTurnSilenceMs
         : speechSpanMs >= reflectiveSpeechSpanMs ||
             (nativeAudio && !coachActive && continuationEvidence)
@@ -1256,6 +1289,7 @@ export function advanceVad(
     lastVoiceAt,
     noiseFloor,
     sampleVoiced,
+    shortUtteranceConfirmed,
     softVoiceCandidate,
     softVoiceConfirmed,
     softVoiceEvidenceAt,

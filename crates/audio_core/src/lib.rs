@@ -18,6 +18,11 @@ pub const QUIET_EVIDENCE_SPECTRAL_CHANGE: u8 = 1 << 1;
 pub const QUIET_EVIDENCE_STATIONARY: u8 = 1 << 2;
 pub const QUIET_EVIDENCE_IN_SESSION_COVERAGE: u8 = 1 << 3;
 pub const QUIET_EVIDENCE_EXCITATION_INVARIANT: u8 = 1 << 4;
+/// A bounded, content-free proof that a low-energy candidate contains the
+/// time-ordered formant transport needed to preserve a brief utterance. This
+/// is not a transcript or speaker feature; it is emitted only on the exact
+/// excitation-invariant onset observation and is never leased forward.
+pub const QUIET_EVIDENCE_SHORT_UTTERANCE: u8 = 1 << 5;
 
 pub const TEMPORAL_VAD_MAXIMUM_TICK_MS: f64 = 40.0;
 
@@ -281,6 +286,9 @@ impl QuietEvidenceTracker {
             && !clipping_invalid
         {
             flags |= QUIET_EVIDENCE_EXCITATION_INVARIANT;
+        }
+        if formant_onset && self.in_session_coverage && !clipping_invalid {
+            flags |= QUIET_EVIDENCE_SHORT_UTTERANCE;
         }
         if self.in_session_coverage && !clipping_invalid {
             flags |= QUIET_EVIDENCE_IN_SESSION_COVERAGE;
@@ -773,8 +781,12 @@ pub fn classify_onset_frame(
         rms >= clear_threshold && peak >= clear_threshold * if has_speech { 1.35 } else { 1.8 };
     let voice_shaped = rms > 0.0 && peak >= rms * 1.6;
     let bootstrap = !has_speech && (bootstrap_eligible || soft_candidate) && rms >= 0.0025;
-    let excitation_invariant = !has_speech
-        && excitation_invariant_candidate
+    // Rust grants this bit only while the bounded formant-transport onset or
+    // its 400 ms low-energy support lease remains valid. Keep using that
+    // capability after onset so the rest of a whispered short phrase is not
+    // mistaken for silence merely because its RMS stays below the legacy
+    // relative-SNR floor.
+    let excitation_invariant = excitation_invariant_candidate
         && rms >= QUIET_FORMANT_MINIMUM_RMS
         && rms >= noise_floor * 0.70;
     let soft =
@@ -1270,6 +1282,7 @@ mod tests {
             .expect("second transport observation");
         assert_ne!(admitted.flags & QUIET_EVIDENCE_CANDIDATE, 0);
         assert_ne!(admitted.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT, 0);
+        assert_ne!(admitted.flags & QUIET_EVIDENCE_SHORT_UTTERANCE, 0);
         assert_eq!(admitted.class, QuietEvidenceClass::ExcitationInvariantOnset);
 
         let onset = classify_onset_frame(
@@ -1439,13 +1452,17 @@ mod tests {
         );
         let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
         let mut false_accepts = 0_u32;
+        let mut false_short_utterances = 0_u32;
         for frame in 1..=100_000_u64 {
             let step = tracker
                 .advance(frame * 640, &stationary)
                 .expect("monotonic stationary observation");
             false_accepts += u32::from(step.flags & QUIET_EVIDENCE_CANDIDATE != 0);
+            false_short_utterances +=
+                u32::from(step.flags & QUIET_EVIDENCE_SHORT_UTTERANCE != 0);
         }
         assert_eq!(false_accepts, 0);
+        assert_eq!(false_short_utterances, 0);
         let one_sided_95_upper = 1.0_f64 - 0.05_f64.powf(1.0 / 100_000.0);
         assert!(one_sided_95_upper < 0.000_03);
     }

@@ -69,8 +69,8 @@ pub fn create_quiet_evidence_tracker_for_js(
 pub fn quiet_subband_evidence_self_test_for_js() -> bool {
     use kotae_audio_core::{
         QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_EXCITATION_INVARIANT,
-        QUIET_EVIDENCE_IN_SESSION_COVERAGE, QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceClass,
-        QuietEvidenceTracker,
+        QUIET_EVIDENCE_IN_SESSION_COVERAGE, QUIET_EVIDENCE_SHORT_UTTERANCE,
+        QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceClass, QuietEvidenceTracker,
     };
 
     let sample_rate = 48_000_u32;
@@ -114,6 +114,7 @@ pub fn quiet_subband_evidence_self_test_for_js() -> bool {
                 && (0.002..=0.04).contains(&voice.noise_floor)
                 && whisper_first.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT == 0
                 && whisper_admitted.flags & QUIET_EVIDENCE_EXCITATION_INVARIANT != 0
+                && whisper_admitted.flags & QUIET_EVIDENCE_SHORT_UTTERANCE != 0
                 && whisper_admitted.class == QuietEvidenceClass::ExcitationInvariantOnset,
         )
     })()

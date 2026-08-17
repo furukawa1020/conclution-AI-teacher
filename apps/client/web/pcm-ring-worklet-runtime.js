@@ -4,6 +4,7 @@ import {
   intentionalFastLaneSelfTest,
   observationAddingSelfTest,
   temporalVadClockSelfTest,
+  turnReferenceBoundarySelfTest,
 } from "/wasm/kotae_pcm_ring.js";
 
 let initialized = false;
@@ -100,6 +101,9 @@ export function createPcmRing(
     }
     if (observationAddingSelfTest() !== true) {
       throw new Error("observation_adding_self_test_failed");
+    }
+    if (turnReferenceBoundarySelfTest() !== true) {
+      throw new Error("turn_reference_boundary_self_test_failed");
     }
     initialized = true;
   }

@@ -446,6 +446,11 @@ try {
         -Boundary "wasm-bindgen PcmRing export"
     $ringGlue = Replace-LiteralExactlyOnce `
         -Text $ringGlue `
+        -Needle "export class TurnReferenceWindow" `
+        -Replacement "class TurnReferenceWindow" `
+        -Boundary "wasm-bindgen turn reference export"
+    $ringGlue = Replace-LiteralExactlyOnce `
+        -Text $ringGlue `
         -Needle "export function temporalVadClockSelfTest" `
         -Replacement "function temporalVadClockSelfTest" `
         -Boundary "wasm-bindgen temporal VAD fixture export"
@@ -459,6 +464,11 @@ try {
         -Needle "export function observationAddingSelfTest" `
         -Replacement "function observationAddingSelfTest" `
         -Boundary "wasm-bindgen observation adding fixture export"
+    $ringGlue = Replace-LiteralExactlyOnce `
+        -Text $ringGlue `
+        -Needle "export function turnReferenceBoundarySelfTest" `
+        -Replacement "function turnReferenceBoundarySelfTest" `
+        -Boundary "wasm-bindgen turn reference fixture export"
     $ringGlue = Remove-RegexExactlyOnce `
         -Text $ringGlue `
         -Pattern '(?s)\nexport function intentionalFastLaneFrameSelfTest\(\) \{.*?\n\}\n' `
@@ -522,7 +532,7 @@ function decodeText(ptr, len) {
         -Replacement "" `
         -Boundary "wasm-bindgen final export"
 
-    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  intentionalFastLaneSelfTest,`n  observationAddingSelfTest,`n  temporalVadClockSelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
+    $runtimeImport = "import {`n  initSync,`n  PcmRing,`n  intentionalFastLaneSelfTest,`n  observationAddingSelfTest,`n  temporalVadClockSelfTest,`n  turnReferenceBoundarySelfTest,`n} from `"/wasm/kotae_pcm_ring.js`";"
     $ringRuntime = Replace-LiteralExactlyOnce `
         -Text $ringRuntime `
         -Needle $runtimeImport `

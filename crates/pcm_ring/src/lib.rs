@@ -7,6 +7,10 @@
 use zeroize::Zeroize;
 
 pub const FRAME_BYTES: usize = 640;
+pub const TURN_REFERENCE_MAXIMUM_FRAMES: usize = 20;
+const TURN_REFERENCE_BANDS_HZ: [f64; 8] = [
+    250.0, 500.0, 750.0, 1_000.0, 1_500.0, 2_000.0, 3_000.0, 4_000.0,
+];
 /// Three minutes and thirty seconds of 20 ms PCM frames. This is the hard
 /// browser voice-turn ceiling; callers may choose a smaller queue.
 pub const MAXIMUM_CAPACITY: usize = 10_500;
@@ -43,6 +47,170 @@ pub enum QuietPhaseIntegrity {
     NonCausalOnset = 3,
     ExcessGroupDelay = 4,
     TemporalSmear = 5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum TurnReferencePhase {
+    Collecting = 0,
+    Ready = 1,
+    Unresolved = 2,
+    Cleared = 3,
+}
+
+/// Owns at most 400 ms of non-exported, turn-local reference features.
+///
+/// This is the capability boundary for a future embedding-free cross-attention
+/// model. It deliberately exposes neither PCM nor feature values and cannot be
+/// reused across a generation. Any ambiguity wipes all retained support.
+pub struct TurnReferenceWindow {
+    generation: u64,
+    context_sample_rate_hz: u32,
+    last_context_frame: Option<u64>,
+    features: [[i16; 8]; TURN_REFERENCE_MAXIMUM_FRAMES],
+    count: usize,
+    phase: TurnReferencePhase,
+}
+
+impl TurnReferenceWindow {
+    pub fn new(generation: u64, context_sample_rate_hz: u32) -> Result<Self, &'static str> {
+        if generation == 0 || !(16_000..=192_000).contains(&context_sample_rate_hz) {
+            return Err("invalid_turn_reference");
+        }
+        Ok(Self {
+            generation,
+            context_sample_rate_hz,
+            last_context_frame: None,
+            features: [[0_i16; 8]; TURN_REFERENCE_MAXIMUM_FRAMES],
+            count: 0,
+            phase: TurnReferencePhase::Collecting,
+        })
+    }
+
+    pub fn phase(&self, generation: u64) -> TurnReferencePhase {
+        if generation == self.generation {
+            self.phase
+        } else {
+            TurnReferencePhase::Unresolved
+        }
+    }
+
+    pub fn count(&self, generation: u64) -> Option<usize> {
+        (generation == self.generation).then_some(self.count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance(
+        &mut self,
+        generation: u64,
+        context_frame: u64,
+        pcm: &[u8],
+        quiet_confirmed: bool,
+        aec_verified: bool,
+        output_active: bool,
+        overlap: bool,
+    ) -> TurnReferencePhase {
+        let maximum_gap = u64::from(self.context_sample_rate_hz) / 10;
+        let invalid = generation != self.generation
+            || self.phase != TurnReferencePhase::Collecting
+            || pcm.len() != FRAME_BYTES
+            || !quiet_confirmed
+            || !aec_verified
+            || output_active
+            || overlap
+            || self.last_context_frame.is_some_and(|previous| {
+                context_frame <= previous || context_frame - previous > maximum_gap
+            });
+        if invalid {
+            self.resolve_as_unresolved();
+            return self.phase;
+        }
+
+        let Some(feature) = turn_reference_feature(pcm) else {
+            self.resolve_as_unresolved();
+            return self.phase;
+        };
+        self.features[self.count] = feature;
+        self.count += 1;
+        self.last_context_frame = Some(context_frame);
+        if self.count == TURN_REFERENCE_MAXIMUM_FRAMES {
+            self.phase = TurnReferencePhase::Ready;
+        }
+        self.phase
+    }
+
+    pub fn clear(&mut self, generation: u64) -> bool {
+        if generation != self.generation {
+            self.resolve_as_unresolved();
+            return false;
+        }
+        self.wipe();
+        self.phase = TurnReferencePhase::Cleared;
+        true
+    }
+
+    fn resolve_as_unresolved(&mut self) {
+        self.wipe();
+        self.phase = TurnReferencePhase::Unresolved;
+    }
+
+    fn wipe(&mut self) {
+        self.features.zeroize();
+        self.count = 0;
+        self.last_context_frame = None;
+    }
+}
+
+impl Drop for TurnReferenceWindow {
+    fn drop(&mut self) {
+        self.wipe();
+        self.generation = 0;
+        self.context_sample_rate_hz = 0;
+        self.phase = TurnReferencePhase::Cleared;
+    }
+}
+
+fn turn_reference_feature(pcm: &[u8]) -> Option<[i16; 8]> {
+    if pcm.len() != FRAME_BYTES {
+        return None;
+    }
+    let mut samples = [0.0_f64; FRAME_BYTES / 2];
+    let mut total_energy = 0.0_f64;
+    for (target, bytes) in samples.iter_mut().zip(pcm.chunks_exact(2)) {
+        *target = f64::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32_768.0;
+        total_energy += *target * *target;
+    }
+    if !total_energy.is_finite() || total_energy <= 1.0e-12 {
+        samples.zeroize();
+        return None;
+    }
+    let mut energy = [0.0_f64; 8];
+    for (band, frequency) in TURN_REFERENCE_BANDS_HZ.iter().enumerate() {
+        let omega = core::f64::consts::TAU * frequency / 16_000.0;
+        let mut real = 0.0_f64;
+        let mut imaginary = 0.0_f64;
+        for (index, sample) in samples.iter().enumerate() {
+            let angle = omega * index as f64;
+            real += sample * angle.cos();
+            imaginary -= sample * angle.sin();
+        }
+        energy[band] = real.mul_add(real, imaginary * imaginary).max(0.0);
+    }
+    let supported = energy.iter().sum::<f64>();
+    if !supported.is_finite() || supported <= 1.0e-12 {
+        samples.zeroize();
+        energy.zeroize();
+        return None;
+    }
+    let mut feature = [0_i16; 8];
+    for (target, value) in feature.iter_mut().zip(energy.iter()) {
+        *target = ((*value / supported).sqrt() * f64::from(i16::MAX))
+            .round()
+            .clamp(0.0, f64::from(i16::MAX)) as i16;
+    }
+    samples.zeroize();
+    energy.zeroize();
+    Some(feature)
 }
 
 const QUIET_TARGET_RMS: f64 = 0.055;
@@ -571,8 +739,8 @@ mod wasm_boundary {
 
     use super::{
         FRAME_BYTES, OBSERVATION_MAXIMUM_MIX, OBSERVATION_MINIMUM_MIX, OverflowPolicy, PcmRing,
-        PushResult, QuietCompensationResult, QuietPhaseIntegrity, parse_context_frame,
-        verify_quiet_phase_integrity,
+        PushResult, QuietCompensationResult, QuietPhaseIntegrity, TURN_REFERENCE_MAXIMUM_FRAMES,
+        TurnReferencePhase, TurnReferenceWindow, parse_context_frame, verify_quiet_phase_integrity,
     };
 
     /// Browser release fixture for the same audio-core clock transition used
@@ -728,6 +896,138 @@ mod wasm_boundary {
         raw_onset.zeroize();
         advanced.zeroize();
         preserved
+    }
+
+    #[wasm_bindgen(js_name = turnReferenceBoundarySelfTest)]
+    pub fn turn_reference_boundary_self_test() -> bool {
+        let generation = 117_u64;
+        let mut pcm = [0_u8; FRAME_BYTES];
+        for (index, bytes) in pcm.chunks_exact_mut(2).enumerate() {
+            let sample = 0.006 * (core::f64::consts::TAU * 1_000.0 * index as f64 / 16_000.0).sin();
+            bytes.copy_from_slice(&((sample * 32_768.0) as i16).to_le_bytes());
+        }
+        let valid = (|| {
+            let mut reference = TurnReferenceWindow::new(generation, 48_000).ok()?;
+            for frame in 1..=TURN_REFERENCE_MAXIMUM_FRAMES {
+                let phase = reference.advance(
+                    generation,
+                    frame as u64 * 960,
+                    &pcm,
+                    true,
+                    true,
+                    false,
+                    false,
+                );
+                if frame < TURN_REFERENCE_MAXIMUM_FRAMES && phase != TurnReferencePhase::Collecting
+                {
+                    return None;
+                }
+            }
+            let ready = reference.phase(generation) == TurnReferencePhase::Ready
+                && reference.count(generation) == Some(TURN_REFERENCE_MAXIMUM_FRAMES);
+            let stale = reference.advance(generation + 1, 21 * 960, &pcm, true, true, false, false);
+            Some(
+                ready
+                    && stale == TurnReferencePhase::Unresolved
+                    && reference.count(generation) == Some(0),
+            )
+        })()
+        .unwrap_or(false);
+        pcm.zeroize();
+        valid
+    }
+
+    #[wasm_bindgen(js_name = TurnReferenceWindow)]
+    pub struct WasmTurnReferenceWindow {
+        inner: Option<TurnReferenceWindow>,
+    }
+
+    #[wasm_bindgen(js_class = TurnReferenceWindow)]
+    impl WasmTurnReferenceWindow {
+        #[wasm_bindgen(constructor)]
+        pub fn new(generation: f64, context_sample_rate_hz: u32) -> WasmTurnReferenceWindow {
+            Self {
+                inner: parse_context_frame(generation)
+                    .filter(|generation| *generation > 0)
+                    .and_then(|generation| {
+                        TurnReferenceWindow::new(generation, context_sample_rate_hz).ok()
+                    }),
+            }
+        }
+
+        pub fn phase(&self, generation: f64) -> i8 {
+            let Some(generation) = parse_context_frame(generation) else {
+                return -1;
+            };
+            self.inner
+                .as_ref()
+                .map_or(-1, |inner| inner.phase(generation) as i8)
+        }
+
+        pub fn count(&self, generation: f64) -> i8 {
+            let Some(generation) = parse_context_frame(generation) else {
+                return -1;
+            };
+            self.inner
+                .as_ref()
+                .and_then(|inner| inner.count(generation))
+                .map_or(-1, |count| count as i8)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn advance(
+            &mut self,
+            generation: f64,
+            context_frame: f64,
+            pcm: &Uint8Array,
+            quiet_confirmed: bool,
+            aec_verified: bool,
+            output_active: bool,
+            overlap: bool,
+        ) -> i8 {
+            let Some(inner) = self.inner.as_mut() else {
+                return -1;
+            };
+            let Some(generation) = parse_context_frame(generation) else {
+                return -1;
+            };
+            let Some(context_frame) = parse_context_frame(context_frame) else {
+                return -1;
+            };
+            if pcm.length() as usize != FRAME_BYTES {
+                return inner.advance(
+                    generation,
+                    context_frame,
+                    &[],
+                    quiet_confirmed,
+                    aec_verified,
+                    output_active,
+                    overlap,
+                ) as i8;
+            }
+            let mut frame = [0_u8; FRAME_BYTES];
+            pcm.copy_to(&mut frame);
+            let phase = inner.advance(
+                generation,
+                context_frame,
+                &frame,
+                quiet_confirmed,
+                aec_verified,
+                output_active,
+                overlap,
+            ) as i8;
+            frame.zeroize();
+            phase
+        }
+
+        pub fn clear(&mut self, generation: f64) -> bool {
+            let Some(generation) = parse_context_frame(generation) else {
+                return false;
+            };
+            self.inner
+                .as_mut()
+                .is_some_and(|inner| inner.clear(generation))
+        }
     }
 
     #[wasm_bindgen(js_name = PcmRing)]
@@ -897,6 +1197,74 @@ mod tests {
             })
             .sum::<f64>()
             .abs()
+    }
+
+    #[test]
+    fn turn_reference_becomes_ready_at_four_hundred_ms_only() {
+        let generation = 71_u64;
+        let mut reference = TurnReferenceWindow::new(generation, 48_000).expect("reference");
+        let voice = tonal_frame(0.006);
+        for frame in 1..TURN_REFERENCE_MAXIMUM_FRAMES {
+            assert_eq!(
+                reference.advance(
+                    generation,
+                    frame as u64 * 960,
+                    &voice,
+                    true,
+                    true,
+                    false,
+                    false,
+                ),
+                TurnReferencePhase::Collecting
+            );
+        }
+        assert_eq!(reference.count(generation), Some(19));
+        assert_eq!(
+            reference.advance(generation, 20 * 960, &voice, true, true, false, false,),
+            TurnReferencePhase::Ready
+        );
+        assert_eq!(reference.count(generation), Some(20));
+
+        // Ready is terminal: a twenty-first frame cannot extend the reference.
+        assert_eq!(
+            reference.advance(generation, 21 * 960, &voice, true, true, false, false,),
+            TurnReferencePhase::Unresolved
+        );
+        assert_eq!(reference.count(generation), Some(0));
+    }
+
+    #[test]
+    fn ambiguous_or_stale_turn_reference_zeroizes_all_support() {
+        let voice = tonal_frame(0.006);
+        for fault in 0..5 {
+            let mut reference = TurnReferenceWindow::new(81, 48_000).expect("reference");
+            assert_eq!(
+                reference.advance(81, 960, &voice, true, true, false, false),
+                TurnReferencePhase::Collecting
+            );
+            let phase = match fault {
+                0 => reference.advance(82, 1_920, &voice, true, true, false, false),
+                1 => reference.advance(81, 1_920, &voice, true, false, false, false),
+                2 => reference.advance(81, 1_920, &voice, true, true, true, false),
+                3 => reference.advance(81, 1_920, &voice, true, true, false, true),
+                _ => reference.advance(81, 960, &voice, true, true, false, false),
+            };
+            assert_eq!(phase, TurnReferencePhase::Unresolved);
+            assert_eq!(reference.count(81), Some(0));
+        }
+    }
+
+    #[test]
+    fn unresolved_h0_never_reaches_ready_in_one_hundred_thousand_windows() {
+        let voice = tonal_frame(0.006);
+        let mut false_ready = 0_u32;
+        for generation in 1..=100_000_u64 {
+            let mut reference = TurnReferenceWindow::new(generation, 48_000).expect("reference");
+            let phase = reference.advance(generation, 960, &voice, true, false, false, false);
+            false_ready += u32::from(phase == TurnReferencePhase::Ready);
+            assert_eq!(reference.count(generation), Some(0));
+        }
+        assert_eq!(false_ready, 0);
     }
 
     #[test]

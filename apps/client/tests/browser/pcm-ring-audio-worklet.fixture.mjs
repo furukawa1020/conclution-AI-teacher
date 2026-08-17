@@ -138,7 +138,32 @@ function validateObservationAdding(pcmRingModule) {
   }
   const instance = new WebAssembly.Instance(pcmRingModule, imports);
   const validate = instance.exports.observationAddingSelfTest;
+  const validateTurnReference = instance.exports.turnReferenceBoundarySelfTest;
   invariant(typeof validate === "function", "observation_adding_export_missing");
+  invariant(
+    typeof validateTurnReference === "function",
+    "turn_reference_boundary_export_missing",
+  );
+  for (let warmup = 0; warmup < 4; warmup += 1) {
+    invariant(
+      validateTurnReference() === 1,
+      "turn_reference_boundary_warmup_failed",
+    );
+  }
+  const referenceDurations = [];
+  for (let sample = 0; sample < 64; sample += 1) {
+    const startedAt = performance.now();
+    invariant(
+      validateTurnReference() === 1,
+      "turn_reference_boundary_self_test_failed",
+    );
+    referenceDurations.push(performance.now() - startedAt);
+  }
+  referenceDurations.sort((left, right) => left - right);
+  invariant(
+    referenceDurations[Math.floor(referenceDurations.length * 0.95)] <= 20,
+    "turn_reference_wasm_p95_exceeded",
+  );
   for (let warmup = 0; warmup < 16; warmup += 1) {
     invariant(validate() === 1, "observation_adding_warmup_failed");
   }

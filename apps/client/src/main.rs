@@ -36,9 +36,10 @@ impl QuietEvidenceTrackerForJs {
             .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()));
         samples.fill(0.0);
         let step = step?;
-        let result = js_sys::Float64Array::new_with_length(2);
+        let result = js_sys::Float64Array::new_with_length(3);
         result.set_index(0, f64::from(step.flags));
         result.set_index(1, step.noise_floor);
+        result.set_index(2, f64::from(step.class as u8));
         Ok(result)
     }
 }
@@ -68,7 +69,7 @@ pub fn create_quiet_evidence_tracker_for_js(
 pub fn quiet_subband_evidence_self_test_for_js() -> bool {
     use kotae_audio_core::{
         QUIET_EVIDENCE_CANDIDATE, QUIET_EVIDENCE_IN_SESSION_COVERAGE,
-        QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceTracker,
+        QUIET_EVIDENCE_SPECTRAL_CHANGE, QuietEvidenceClass, QuietEvidenceTracker,
     };
 
     let sample_rate = 48_000_u32;
@@ -95,10 +96,13 @@ pub fn quiet_subband_evidence_self_test_for_js() -> bool {
         let voice = tracker.advance(5_760, &changing).ok()?;
         Some(
             room.flags & QUIET_EVIDENCE_CANDIDATE == 0
+                && room.class == QuietEvidenceClass::Bootstrap
                 && room_again.flags & QUIET_EVIDENCE_CANDIDATE == 0
                 && room_again.flags & QUIET_EVIDENCE_IN_SESSION_COVERAGE != 0
+                && room_again.class == QuietEvidenceClass::StationaryRoom
                 && voice.flags & QUIET_EVIDENCE_CANDIDATE != 0
                 && voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE != 0
+                && voice.class == QuietEvidenceClass::QuietOnset
                 && (0.002..=0.04).contains(&voice.noise_floor),
         )
     })()

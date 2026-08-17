@@ -44,6 +44,8 @@ test("小声の帯域証拠はRustの二時間尺度floorからproduction VADへ
   );
   assert.match(bridge, /acousticEvidence: Object\.freeze/u);
   assert.match(bridge, /rustEvidence\[0\] > 15/u);
+  assert.match(bridge, /rustEvidence\.length !== 3/u);
+  assert.match(bridge, /rustEvidence\[2\] > 7/u);
   assert.match(
     bridge,
     /\(rustEvidence\[0\] & 3\) !== 0 && \(rustEvidence\[0\] & 8\) === 0/u,

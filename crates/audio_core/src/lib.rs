@@ -31,6 +31,22 @@ const QUIET_COVERAGE_FLOOR_SHIFT_RATIO: f64 = 8.0;
 pub struct QuietEvidenceStep {
     pub flags: u8,
     pub noise_floor: f64,
+    pub class: QuietEvidenceClass,
+}
+
+/// Content-free finite acoustic class owned by the Rust sample-clock state.
+/// It is never a speaker trait and carries no PCM or reconstructable spectrum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum QuietEvidenceClass {
+    Bootstrap = 0,
+    StationaryRoom = 1,
+    StationaryMechanical = 2,
+    ImpulsiveTransient = 3,
+    FloorShift = 4,
+    QuietOnset = 5,
+    CandidateCooldown = 6,
+    CoverageRevoked = 7,
 }
 
 /// Owns bounded, content-free acoustic history for normal-turn quiet speech.
@@ -95,6 +111,7 @@ impl QuietEvidenceTracker {
 
         let frame_delta = current_frame - self.last_frame;
         let mut square_sum = 0.0_f64;
+        let mut peak = 0.0_f64;
         let mut clipped_samples = 0_usize;
         for sample in pcm {
             if !sample.is_finite() {
@@ -102,6 +119,7 @@ impl QuietEvidenceTracker {
             }
             let bounded = f64::from(sample.clamp(-1.0, 1.0));
             square_sum += bounded * bounded;
+            peak = peak.max(bounded.abs());
             if bounded.abs() >= 0.999 {
                 clipped_samples = clipped_samples.saturating_add(1);
             }
@@ -124,6 +142,7 @@ impl QuietEvidenceTracker {
             return Ok(QuietEvidenceStep {
                 flags: QUIET_EVIDENCE_STATIONARY,
                 noise_floor: self.slow_rms_floor,
+                class: QuietEvidenceClass::Bootstrap,
             });
         }
 
@@ -146,9 +165,13 @@ impl QuietEvidenceTracker {
         let total_energy: f64 = band_energy.iter().sum();
         let speech_shaped = total_energy > QUIET_EVIDENCE_MINIMUM_ENERGY
             && speech_band_energy / total_energy >= 0.30;
-        let changed = active_bands >= 2 && positive_flux >= 0.20 && speech_shaped;
-        let lease_active =
-            current_frame <= self.freeze_until_frame && active_bands >= 2 && speech_shaped;
+        let impulsive =
+            rms > 0.0 && peak / rms >= 8.0 && rms >= self.slow_rms_floor.max(0.002) * 1.20;
+        let changed = active_bands >= 2 && positive_flux >= 0.20 && speech_shaped && !impulsive;
+        let lease_active = current_frame <= self.freeze_until_frame
+            && active_bands >= 2
+            && speech_shaped
+            && !impulsive;
         let candidate = changed || lease_active;
         if changed {
             let lease_frames = u64::from(self.sample_rate_hz) * 400 / 1_000;
@@ -161,6 +184,7 @@ impl QuietEvidenceTracker {
             >= pcm
                 .len()
                 .saturating_mul(QUIET_COVERAGE_MAXIMUM_CLIPPED_PER_MILLE);
+        let mut floor_shift_detected = false;
         if clipping_invalid || frame_delta > clock_gap_limit {
             self.coverage_stable_observations = 0;
             self.coverage_shift_observations = 0;
@@ -170,6 +194,7 @@ impl QuietEvidenceTracker {
             let floor_shift = rms > floor * QUIET_COVERAGE_FLOOR_SHIFT_RATIO
                 || rms * QUIET_COVERAGE_FLOOR_SHIFT_RATIO < floor;
             if floor_shift {
+                floor_shift_detected = true;
                 self.coverage_shift_observations =
                     self.coverage_shift_observations.saturating_add(1);
                 if self.coverage_shift_observations >= 2 {
@@ -213,9 +238,28 @@ impl QuietEvidenceTracker {
         if self.in_session_coverage && !clipping_invalid {
             flags |= QUIET_EVIDENCE_IN_SESSION_COVERAGE;
         }
+        let low_band_energy = band_energy[0] + band_energy[1];
+        let class = if clipping_invalid || frame_delta > clock_gap_limit {
+            QuietEvidenceClass::CoverageRevoked
+        } else if impulsive {
+            QuietEvidenceClass::ImpulsiveTransient
+        } else if changed {
+            QuietEvidenceClass::QuietOnset
+        } else if lease_active {
+            QuietEvidenceClass::CandidateCooldown
+        } else if floor_shift_detected {
+            QuietEvidenceClass::FloorShift
+        } else if total_energy > QUIET_EVIDENCE_MINIMUM_ENERGY
+            && low_band_energy / total_energy >= 0.75
+        {
+            QuietEvidenceClass::StationaryMechanical
+        } else {
+            QuietEvidenceClass::StationaryRoom
+        };
         Ok(QuietEvidenceStep {
             flags,
             noise_floor: self.slow_rms_floor.clamp(0.002, 0.04),
+            class,
         })
     }
 }
@@ -1094,6 +1138,7 @@ mod tests {
         let stationary = tone_frame(frame_samples, sample_rate, &[(1_000.0, 0.002)]);
         let first = tracker.advance(1_920, &stationary).expect("calibrate");
         assert_eq!(first.flags, QUIET_EVIDENCE_STATIONARY);
+        assert_eq!(first.class, QuietEvidenceClass::Bootstrap);
         for frame in 2..=20_u64 {
             let step = tracker
                 .advance(frame * 1_920, &stationary)
@@ -1109,7 +1154,62 @@ mod tests {
         let voice = tracker.advance(21 * 1_920, &changing).expect("quiet voice");
         assert_ne!(voice.flags & QUIET_EVIDENCE_CANDIDATE, 0);
         assert_ne!(voice.flags & QUIET_EVIDENCE_SPECTRAL_CHANGE, 0);
+        assert_eq!(voice.class, QuietEvidenceClass::QuietOnset);
         assert!((0.002..=0.04).contains(&voice.noise_floor));
+    }
+
+    #[test]
+    fn quiet_acoustic_class_separates_mechanical_impulse_shift_and_cooldown() {
+        let sample_rate = 48_000_u32;
+        let frame_samples = 1_024_usize;
+        let mechanical = tone_frame(
+            frame_samples,
+            sample_rate,
+            &[(250.0, 0.002), (500.0, 0.0015)],
+        );
+        let mut tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("tracker");
+        let bootstrap = tracker.advance(1_920, &mechanical).expect("bootstrap");
+        assert_eq!(bootstrap.class, QuietEvidenceClass::Bootstrap);
+        let stable = tracker.advance(3_840, &mechanical).expect("mechanical");
+        assert_eq!(stable.class, QuietEvidenceClass::StationaryMechanical);
+
+        let shifted_room = tone_frame(
+            frame_samples,
+            sample_rate,
+            &[(250.0, 0.000_08), (500.0, 0.000_06)],
+        );
+        let mut shift_tracker = QuietEvidenceTracker::new(sample_rate, 0).expect("shift tracker");
+        shift_tracker
+            .advance(1_920, &mechanical)
+            .expect("shift bootstrap");
+        shift_tracker
+            .advance(3_840, &mechanical)
+            .expect("shift coverage");
+        let shifted = shift_tracker
+            .advance(5_760, &shifted_room)
+            .expect("floor shift");
+        assert_eq!(shifted.class, QuietEvidenceClass::FloorShift);
+
+        let mut keyboard = vec![0.0_f32; frame_samples];
+        keyboard[frame_samples / 2] = 0.20;
+        let transient = tracker.advance(5_760, &keyboard).expect("keyboard impulse");
+        assert_eq!(transient.class, QuietEvidenceClass::ImpulsiveTransient);
+        assert_eq!(transient.flags & QUIET_EVIDENCE_CANDIDATE, 0);
+
+        let voice = tone_frame(
+            frame_samples,
+            sample_rate,
+            &[(500.0, 0.007), (1_800.0, 0.005), (2_800.0, 0.004)],
+        );
+        let onset = tracker.advance(7_680, &voice).expect("quiet onset");
+        assert_eq!(onset.class, QuietEvidenceClass::QuietOnset);
+        let cooldown = tracker.advance(9_600, &voice).expect("candidate cooldown");
+        assert_eq!(cooldown.class, QuietEvidenceClass::CandidateCooldown);
+
+        let clipped = vec![1.0_f32; frame_samples];
+        let revoked = tracker.advance(11_520, &clipped).expect("coverage revoke");
+        assert_eq!(revoked.class, QuietEvidenceClass::CoverageRevoked);
+        assert_eq!(revoked.flags & QUIET_EVIDENCE_CANDIDATE, 0);
     }
 
     #[test]

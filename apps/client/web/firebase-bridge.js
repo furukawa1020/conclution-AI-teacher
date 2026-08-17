@@ -2352,14 +2352,17 @@ function armVad(recording) {
       );
       if (
         !(rustEvidence instanceof Float64Array) ||
-        rustEvidence.length !== 2 ||
+        rustEvidence.length !== 3 ||
         !Number.isSafeInteger(rustEvidence[0]) ||
         rustEvidence[0] < 0 ||
         rustEvidence[0] > 15 ||
         ((rustEvidence[0] & 3) !== 0 && (rustEvidence[0] & 8) === 0) ||
         !Number.isFinite(rustEvidence[1]) ||
         rustEvidence[1] < 0.002 ||
-        rustEvidence[1] > 0.04
+        rustEvidence[1] > 0.04 ||
+        !Number.isSafeInteger(rustEvidence[2]) ||
+        rustEvidence[2] < 0 ||
+        rustEvidence[2] > 7
       ) {
         throw new TypeError("quiet_evidence_result_invalid");
       }

@@ -13,9 +13,11 @@
 
 ## ゲスト開始の認証境界
 
+ゲスト匿名認証は、パスキーアカウント用の既定 Firebase App/Auth とは別の、名前付き Firebase App `kotae-guest` とメモリ内 Auth に隔離する。既存アカウントへログイン済みでもゲスト開始を拒否せず、そのアカウントを匿名利用者で上書きしたり sign-out したりしない。ゲストの ID token と App Check token は必ず同じ名前付き App から取得し、アカウント側の資格情報と混在させない。
+
 fresh browserの初回statusはFirebase AppとローカルAuthだけを初期化し、Auth状態が空なら`identity-required`を返す。この経路ではApp Checkオブジェクト自体を作らない。reCAPTCHA Enterprise評価は「30秒で違いを試す」という明示gestureの後、匿名Authより前に一度だけ開始する。これにより、gesture前の低スコアがSDKの長いthrottleへ入り、後のクリックを無効化する経路を持たない。
 
-開始attemptはpositive safe integer generationへ束縛し、App Check、Auth初期化、persistence切替、匿名sign-inの各`await`後に同じgenerationを検証する。12秒を越えたattempt、pagehide、二重開始、別attemptへ差し替わった完了はguest sessionを有効化しない。匿名sign-inだけが遅れて完了した場合は、そのidentityをsign-outして破棄する。App Check enforcementと匿名利用者専用rate limitは維持する。
+開始attemptはpositive safe integer generationへ束縛し、名前付きApp Check/Auth初期化、匿名sign-inの各`await`後に同じgenerationを検証する。12秒を越えたattempt、pagehide、二重開始、別attemptへ差し替わった完了はguest sessionを有効化しない。匿名sign-inだけが遅れて完了した場合は、そのidentityをsign-outして破棄する。App Check enforcementと匿名利用者専用rate limitは維持する。
 
 ## 反例
 

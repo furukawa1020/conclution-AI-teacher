@@ -5,7 +5,6 @@ import {
   getIdTokenResult,
   inMemoryPersistence,
   initializeAuth,
-  setPersistence,
   signInAnonymously,
   signInWithCustomToken,
   signOut,
@@ -100,6 +99,7 @@ const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
 const EXPECTED_AUTH_DOMAIN = "kotae-ai-u22-2026.firebaseapp.com";
 const EXPECTED_MESSAGING_SENDER_ID = "551920539470";
+const GUEST_FIREBASE_APP_NAME = "kotae-guest";
 // reCAPTCHA Enterprise site keys are public identifiers. The matching secret
 // configuration and verification remain in Firebase App Check.
 const RECAPTCHA_SITE_KEY = "6Le4EmotAAAAAPEp5sfcmDtCAeaKd4y9er6KA71U";
@@ -169,6 +169,8 @@ const ALLOWED_CONFIG_KEYS = Object.freeze([
 ]);
 
 let authInstance;
+let guestAppCheckInstance;
+let guestAuthInstance;
 let verifiedAccountUid;
 let mediaStream;
 let mediaStreamLossBinding;
@@ -720,6 +722,36 @@ async function initializeFirebaseAuth() {
 }
 
 const firebaseAuth = createRetryableInitializer(initializeFirebaseAuth);
+
+async function initializeFirebaseGuestServices() {
+  if (!siteKeyConfigured()) fail("app_check_not_configured");
+  const { app: primaryApp } = await firebaseApp();
+  const guestApp = getApps().some(
+    (candidate) => candidate.name === GUEST_FIREBASE_APP_NAME,
+  )
+    ? getApp(GUEST_FIREBASE_APP_NAME)
+    : initializeApp(primaryApp.options, GUEST_FIREBASE_APP_NAME);
+  if (
+    guestApp.options.projectId !== EXPECTED_PROJECT_ID ||
+    guestApp.options.appId !== EXPECTED_APP_ID
+  ) {
+    fail("firebase_project_mismatch");
+  }
+  guestAppCheckInstance ??= initializeAppCheck(guestApp, {
+    provider: new ReCaptchaEnterpriseProvider(RECAPTCHA_SITE_KEY),
+    isTokenAutoRefreshEnabled: true,
+  });
+  guestAuthInstance ??= initializeAuth(guestApp, {
+    persistence: inMemoryPersistence,
+  });
+  const auth = guestAuthInstance;
+  await auth.authStateReady();
+  return Object.freeze({ appCheck: guestAppCheckInstance, auth });
+}
+
+const firebaseGuestServices = createRetryableInitializer(
+  initializeFirebaseGuestServices,
+);
 let guestModeActive = false;
 let guestVoiceComparisonRequested = false;
 const guestVoiceComparison = createGuestVoiceComparison();
@@ -1277,10 +1309,9 @@ async function registerPasskeyAccount() {
 
 async function secureCredentials(interactive = false) {
   try {
-    const { appCheck } = await appServices();
-    const { auth } = await firebaseAuth();
-    const appCheckResult = await getAppCheckToken(appCheck, false);
     if (guestModeActive) {
+      const { appCheck, auth } = await firebaseGuestServices();
+      const appCheckResult = await getAppCheckToken(appCheck, false);
       const guest = auth.currentUser;
       if (!guest || guest.isAnonymous !== true || typeof guest.uid !== "string") {
         fail("guest_session_expired");
@@ -1290,6 +1321,9 @@ async function secureCredentials(interactive = false) {
         idToken: await getIdToken(guest, false),
       });
     }
+    const { appCheck } = await appServices();
+    const { auth } = await firebaseAuth();
+    const appCheckResult = await getAppCheckToken(appCheck, false);
     const registrationRecoveryPending =
       passkeyRegistrationRecovery.isPending();
     let user;
@@ -1399,18 +1433,14 @@ async function startGuestMode() {
     let auth;
     let signedIn;
     try {
-      const { appCheck } = await appServices();
-      if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
-      ({ auth } = await firebaseAuth());
+      const guestServices = await firebaseGuestServices();
+      const { appCheck } = guestServices;
+      auth = guestServices.auth;
       if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
       await getAppCheckToken(appCheck, false);
       if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
-      if (auth.currentUser && auth.currentUser.isAnonymous !== true) {
-        fail("guest_start_failed");
-      }
-      // A guest identity is a page-lifetime capability, not an account session.
-      await setPersistence(auth, inMemoryPersistence);
-      if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
+      // This named Firebase app owns only an in-memory guest identity. The
+      // primary passkey Auth session is neither replaced nor signed out.
       signedIn = auth.currentUser
         ? { user: auth.currentUser }
         : await signInAnonymously(auth);
@@ -7159,9 +7189,12 @@ globalThis.addEventListener("pagehide", () => {
   ) {
     stopSession("pagehide");
   }
-  if (guestModeActive && authInstance?.currentUser?.isAnonymous === true) {
+  if (
+    guestModeActive &&
+    guestAuthInstance?.currentUser?.isAnonymous === true
+  ) {
     guestModeActive = false;
-    void signOut(authInstance).catch(() => {});
+    void signOut(guestAuthInstance).catch(() => {});
   }
 });
 

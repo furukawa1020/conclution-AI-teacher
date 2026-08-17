@@ -1581,7 +1581,10 @@ function primeVoiceTransportConnection() {
     cache: "no-store",
     credentials: "omit",
     mode: "no-cors",
-    redirect: "error",
+    // The request carries no body or credentials and its opaque response is
+    // never read. Follow an edge redirect so warmup cannot create a noisy,
+    // caught Fetch error before the real authenticated voice transport.
+    redirect: "follow",
     referrerPolicy: "no-referrer",
   }).catch(() => {});
 }

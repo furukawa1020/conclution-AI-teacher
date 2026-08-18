@@ -1402,6 +1402,7 @@ outcomeReady:
 		return
 	}
 	s.observeSemanticShadow(liveCtx, outcome.result)
+	s.enqueueLongTermMemory(principal, outcome.result)
 	s.logVoiceLiveSession(
 		liveCtx,
 		started,

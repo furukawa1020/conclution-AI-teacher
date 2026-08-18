@@ -33,6 +33,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(build, /sourceCommit\s*=\s*\$ExpectedGitCommit/u);
   assert.match(build, /"voice-prepare-slo-policy\.mjs"/u);
   assert.match(build, /"voice-start-slo-policy\.mjs"/u);
+  assert.equal(
+    (build.match(/long-memory-session-policy\.mjs/gu) ?? []).length,
+    4,
+  );
   assert.match(
     build,
     /from "\.\/voice-start-slo-policy\.mjs";/u,
@@ -71,6 +75,22 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.equal(
     (deploy.match(/"temporal-vad-clock\.mjs"/gu) ?? []).length,
     2,
+  );
+  assert.equal(
+    (deploy.match(/long-memory-session-policy\.mjs/gu) ?? []).length,
+    3,
+  );
+  assert.match(
+    deploy,
+    /conversation-memory\/context:begin[\s\S]*authorization,x-firebase-appcheck/u,
+  );
+  assert.match(
+    deploy,
+    /conversation-memory\/context:consume[\s\S]*authorization,content-type,x-firebase-appcheck/u,
+  );
+  assert.match(
+    deploy,
+    /Access-Control-Allow-Origin[\s\S]*Cross-Origin-Resource-Policy[\s\S]*Access-Control-Allow-Methods/u,
   );
   assert.match(deploy, /\$manifestBytes\s*=\s*\[System\.IO\.File\]::ReadAllBytes/u);
   assert.match(

@@ -94,6 +94,7 @@ import {
   isPasskeyCancellation,
   parsePasskeyFinish,
 } from "./passkey-policy.mjs";
+import { createLongMemorySessionController } from "./long-memory-session-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
@@ -113,6 +114,8 @@ const PCM_RING_WASM_MAX_BYTES = 256 * 1024;
 const PCM_RING_FETCH_TIMEOUT_MS = 3_000;
 const PCM_CAPTURE_WORKLET_LOAD_TIMEOUT_MS = 3_500;
 const VOICE_ORIGIN = new URL(VOICE_ENDPOINT).origin;
+const LONG_MEMORY_CONTEXT_BEGIN_ENDPOINT = `${VOICE_ORIGIN}/api/v1/conversation-memory/context:begin`;
+const LONG_MEMORY_CONTEXT_CONSUME_ENDPOINT = `${VOICE_ORIGIN}/api/v1/conversation-memory/context:consume`;
 const PASSKEY_REGISTRATION_BEGIN_ENDPOINT =
   "/api/v1/passkeys/registration:begin";
 const PASSKEY_REGISTRATION_FINISH_ENDPOINT =
@@ -203,6 +206,7 @@ const stoppedSessionCodes = new Map();
 const beginGate = createTurnGate();
 const finishGate = createTurnGate();
 const passkeyGate = createTurnGate();
+const longMemorySession = createLongMemorySessionController();
 let activePasskeyController;
 const sessionClock = createSessionClock({
   now: () => performance.now(),
@@ -2756,6 +2760,20 @@ async function beginTurn(
         const credentials = await secureCredentials(true);
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
+        }
+        // Deliberately do not await this work. Long-memory availability must
+        // never move the microphone, AudioContext, or provider-ready clock.
+        try {
+          longMemorySession.start({
+            ...credentials,
+            beginEndpoint: LONG_MEMORY_CONTEXT_BEGIN_ENDPOINT,
+            consumeEndpoint: LONG_MEMORY_CONTEXT_CONSUME_ENDPOINT,
+            guest: guestModeActive,
+            isStillCurrent: () => expectedEpoch === sessionEpoch,
+            voiceGeneration: expectedEpoch,
+          });
+        } catch {
+          // This optional preparation never owns voice-start availability.
         }
         const stream = await ensureMediaStream(
           expectedEpoch,
@@ -7063,6 +7081,7 @@ function stopSession(reason = "request_cancelled") {
   const stoppedEpoch = sessionEpoch;
   rememberStoppedSession(stoppedEpoch, stopCode);
   sessionEpoch += 1;
+  longMemorySession.clear();
   documentEpoch += 1;
   finishGate.reset();
   sessionExpiryWatchdog.disarm();
@@ -7164,6 +7183,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 globalThis.addEventListener("pagehide", () => {
+  longMemorySession.clear();
   if (typeof silenceReceiptGate !== "undefined") {
     silenceReceiptGate.clear();
   }

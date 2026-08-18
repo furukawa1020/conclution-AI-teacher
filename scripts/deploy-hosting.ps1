@@ -638,6 +638,56 @@ function Assert-PromotedBackendBoundary {
         throw "The promoted Cloud Run health boundary did not validate."
     }
 
+    foreach ($preflight in @(
+            [pscustomobject]@{
+                Path = "/api/v1/conversation-memory/context:begin"
+                Headers = "authorization,x-firebase-appcheck"
+            },
+            [pscustomobject]@{
+                Path = "/api/v1/conversation-memory/context:consume"
+                Headers = "authorization,content-type,x-firebase-appcheck"
+            }
+        )) {
+        $preflightClient = [System.Net.Http.HttpClient]::new()
+        $preflightRequest = [System.Net.Http.HttpRequestMessage]::new(
+            [System.Net.Http.HttpMethod]::Options,
+            "$expectedRunUrl$($preflight.Path)"
+        )
+        $preflightResponse = $null
+        try {
+            $preflightClient.Timeout = [System.TimeSpan]::FromSeconds(20)
+            $null = $preflightRequest.Headers.TryAddWithoutValidation("Origin", $expectedDefaultUrl)
+            $null = $preflightRequest.Headers.TryAddWithoutValidation(
+                "Access-Control-Request-Method",
+                "POST"
+            )
+            $null = $preflightRequest.Headers.TryAddWithoutValidation(
+                "Access-Control-Request-Headers",
+                [string] $preflight.Headers
+            )
+            $preflightResponse = $preflightClient.SendAsync(
+                $preflightRequest
+            ).GetAwaiter().GetResult()
+            $allowOrigin = @($preflightResponse.Headers.GetValues("Access-Control-Allow-Origin"))
+            $resourcePolicy = @($preflightResponse.Headers.GetValues("Cross-Origin-Resource-Policy"))
+            $allowMethods = @($preflightResponse.Headers.GetValues("Access-Control-Allow-Methods"))
+            if (
+                $preflightResponse.StatusCode -ne [System.Net.HttpStatusCode]::NoContent -or
+                ($allowOrigin -join ",") -cne $expectedDefaultUrl -or
+                ($resourcePolicy -join ",") -cne "cross-origin" -or
+                ($allowMethods -join ",") -cne "POST"
+            ) {
+                throw "The long-memory browser preflight boundary did not validate."
+            }
+        } finally {
+            if ($null -ne $preflightResponse) {
+                $preflightResponse.Dispose()
+            }
+            $preflightRequest.Dispose()
+            $preflightClient.Dispose()
+        }
+    }
+
     $boundaryClient = [System.Net.Http.HttpClient]::new()
     $boundaryResponse = $null
     try {
@@ -699,6 +749,7 @@ function Assert-HostingArtifact {
         "bootstrap.js",
         "firebase-bridge.js",
         "guest-a-first-slo-policy.mjs",
+        "long-memory-session-policy.mjs",
         "passkey-policy.mjs",
         "temporal-vad-clock.mjs",
         "pcm-capture-worklet.js",
@@ -773,6 +824,7 @@ function Assert-HostingArtifact {
                 "bootstrap.js",
                 "firebase-bridge.js",
                 "guest-a-first-slo-policy.mjs",
+                "long-memory-session-policy.mjs",
                 "passkey-policy.mjs",
                 "temporal-vad-clock.mjs",
                 "pcm-capture-worklet.js",
@@ -848,6 +900,9 @@ function Assert-HostingArtifact {
     }
     if ($bridge -notmatch [regex]::Escape('from "./guest-a-first-slo-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited guest A-first SLO policy module."
+    }
+    if ($bridge -notmatch [regex]::Escape('from "./long-memory-session-policy.mjs";')) {
+        throw "firebase-bridge.js must import the audited long-memory session policy module."
     }
     if ($bridge -notmatch [regex]::Escape('from "./passkey-policy.mjs";')) {
         throw "firebase-bridge.js must import the audited passkey policy module."

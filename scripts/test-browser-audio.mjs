@@ -38,6 +38,7 @@ const REQUIRED_ARTIFACTS = Object.freeze([
   "bootstrap.js",
   "firebase-bridge.js",
   "guest-a-first-slo-policy.mjs",
+  "long-memory-session-policy.mjs",
   "passkey-policy.mjs",
   "temporal-vad-clock.mjs",
   "pcm-capture-worklet.js",

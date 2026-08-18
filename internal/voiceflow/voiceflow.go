@@ -1797,12 +1797,14 @@ func conversationTurn(
 		inputOrigin = conversation.InputOriginProvisionalVoice
 	}
 	turn := conversation.VoiceTurn{
-		SchemaVersion: conversation.SchemaVersion,
-		Utterance:     transcript,
-		StateToken:    input.StateToken,
-		RequestID:     input.RequestID,
-		Ambient:       input.Ambient,
-		Foreground:    input.Foreground,
+		SchemaVersion:    conversation.SchemaVersion,
+		Utterance:        transcript,
+		StateToken:       input.StateToken,
+		Memory:           input.Memory,
+		MemoryGeneration: input.MemoryGeneration,
+		RequestID:        input.RequestID,
+		Ambient:          input.Ambient,
+		Foreground:       input.Foreground,
 		ExtendedSpeech: !speculative &&
 			utf8.RuneCountInString(transcript) >= extendedSpeechMinRunes,
 		GuestExperience:  input.GuestExperience,

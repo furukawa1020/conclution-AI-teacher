@@ -2060,6 +2060,7 @@ function rejectRecording(recording, code) {
   if (recording.settled) return;
   recording.settled = true;
   recording.discard = true;
+  recording.sessionContext = undefined;
   if (!recording.stopLatch.isRequested()) {
     recording.stopLatch.request("failed");
   }
@@ -2599,10 +2600,16 @@ function createRecordingState(
   stream,
   nativeAudio = false,
   coachActive = false,
+  sessionContext,
 ) {
   if (
     typeof nativeAudio !== "boolean" ||
-    typeof coachActive !== "boolean"
+    typeof coachActive !== "boolean" ||
+    (sessionContext !== undefined &&
+      (typeof sessionContext !== "string" ||
+        !sessionContext.startsWith("kms1.") ||
+        sessionContext.length > 4096 ||
+        /\s/u.test(sessionContext)))
   ) {
     fail("voice_turn_invalid");
   }
@@ -2635,6 +2642,7 @@ function createRecordingState(
     liveSpeechStartedAt: null,
     nativeAudio,
     coachActive,
+    sessionContext,
     providerEndpointAt: null,
     resolveEnd,
     resolveTurnEnded,
@@ -2663,12 +2671,14 @@ function createRecording(
   stream,
   nativeAudio = false,
   coachActive = false,
+  sessionContext,
 ) {
   setVoiceReceiptVisible(false);
   const recording = createRecordingState(
     stream,
     nativeAudio,
     coachActive,
+    sessionContext,
   );
   armVad(recording);
   return recording;
@@ -2795,11 +2805,16 @@ async function beginTurn(
         // server must publish the exact authenticated checkpoint before response PCM.
         const nativeAudio =
           !strictCloudMinimization && !pendingDocument;
+        const memoryBinding = strictCloudMinimization
+          ? undefined
+          : longMemorySession.voiceBinding(expectedEpoch);
+        const sessionContext = memoryBinding?.sessionContext;
         const liveSession = await startVoiceLiveSession({
           ...credentials,
           coachActive,
           expectedEpoch,
           nativeAudio,
+          sessionContext,
           sessionState: serializedSessionState,
           stream,
           strictCloudMinimization,
@@ -2823,6 +2838,7 @@ async function beginTurn(
           stream,
           nativeAudio,
           coachActive,
+          sessionContext,
         );
         activeRecording = recording;
         if (guestModeActive && typeof guestAFirstSprintSlo !== "undefined") {
@@ -3431,6 +3447,7 @@ async function startVoiceLiveSession({
   expectedEpoch,
   idToken,
   nativeAudio,
+  sessionContext,
   sessionState,
   stream,
   strictCloudMinimization,
@@ -3443,6 +3460,11 @@ async function startVoiceLiveSession({
     !liveCredential(idToken) ||
     typeof sessionState !== "string" ||
     sessionState.length > SESSION_STATE_MAX_CHARS ||
+    (sessionContext !== undefined &&
+      (typeof sessionContext !== "string" ||
+        !sessionContext.startsWith("kms1.") ||
+        sessionContext.length > 4096 ||
+        /\s/u.test(sessionContext))) ||
     typeof strictCloudMinimization !== "boolean" ||
     typeof nativeAudio !== "boolean" ||
     typeof coachActive !== "boolean" ||
@@ -3480,6 +3502,7 @@ async function startVoiceLiveSession({
       nativeAudio,
       ...(nativeAudio ? { nativeCoachControl: true } : {}),
       sessionState,
+      ...(sessionContext === undefined ? {} : { sessionContext }),
       strictCloudMinimization,
       turnMode,
       sampleRateHz: VOICE_LIVE_LIMITS.inputSampleRateHz,
@@ -4410,6 +4433,7 @@ async function startVoiceLiveSession({
         idToken,
         nativeAudio,
         sessionState,
+        sessionContext,
         stream: nextStream,
         strictCloudMinimization,
         turnMode: "foreground",
@@ -6908,6 +6932,9 @@ async function finishTurn(
       ...(usesQuietHttpPcm ? { baselineAudioBase64 } : {}),
       mimeType: httpAudioMimeType,
       sessionState: serializedSessionState,
+      ...(recording.sessionContext === undefined
+        ? {}
+        : { sessionContext: recording.sessionContext }),
       strictCloudMinimization,
       turnMode,
     };
@@ -7044,6 +7071,7 @@ async function finishTurn(
     }
     finishGate.release(finishToken);
     audioBase64 = "";
+    recording.sessionContext = undefined;
     if (activeRequestController === requestController) {
       activeRequestController = undefined;
     }

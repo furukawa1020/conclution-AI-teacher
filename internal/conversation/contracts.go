@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 )
 
@@ -59,12 +60,14 @@ var (
 // while retaining all ambient authority restrictions.
 // Process consumes PDF.Data and clears the caller-provided byte slice before returning.
 type VoiceTurn struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Utterance     string `json:"utterance"`
-	StateToken    string `json:"stateToken,omitempty"`
-	RequestID     string `json:"-"`
-	Ambient       bool   `json:"ambient,omitempty"`
-	Foreground    bool   `json:"foreground,omitempty"`
+	SchemaVersion    int                 `json:"schemaVersion"`
+	Utterance        string              `json:"utterance"`
+	StateToken       string              `json:"stateToken,omitempty"`
+	Memory           *longmemory.Payload `json:"-"`
+	MemoryGeneration int64               `json:"-"`
+	RequestID        string              `json:"-"`
+	Ambient          bool                `json:"ambient,omitempty"`
+	Foreground       bool                `json:"foreground,omitempty"`
 	// ExtendedSpeech is derived only after the server accepts a finalized
 	// transcript. It is model-visible for this turn, never decoded from a client
 	// request, written to state, or interpreted as a trait or skill score.

@@ -251,5 +251,22 @@ export function createLongMemorySessionController({
     return snapshot();
   };
 
-  return Object.freeze({ clear, snapshot, start });
+  const voiceBinding = (voiceGeneration) => {
+    if (
+      !isGeneration(voiceGeneration) ||
+      voiceGeneration !== generation ||
+      state !== LONG_MEMORY_SESSION_STATES.READY ||
+      sessionContext === undefined ||
+      expiresAt === undefined
+    ) {
+      return undefined;
+    }
+    if (now() >= expiresAt) {
+      clear(LONG_MEMORY_SESSION_STATES.EXPIRED);
+      return undefined;
+    }
+    return Object.freeze({ sessionContext });
+  };
+
+  return Object.freeze({ clear, snapshot, start, voiceBinding });
 }

@@ -174,6 +174,28 @@ test("900秒でsession context参照を期限切れにする", async () => {
   assert.equal(controller.snapshot().state, LONG_MEMORY_SESSION_STATES.EXPIRED);
 });
 
+test("準備済みcontextは同じ音声世代だけへ束縛し期限後は渡さない", async () => {
+  let now = 10_000;
+  const responses = [
+    jsonResponse({ available: true, capability: "kmc1.valid" }),
+    jsonResponse({ expiresInSeconds: 900, sessionContext: "kms1.valid" }),
+  ];
+  const controller = createLongMemorySessionController({
+    now: () => now,
+    request: async () => responses.shift(),
+    setTimer: () => 1,
+  });
+  controller.start({ ...credentials, voiceGeneration: 7 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(controller.voiceBinding(7), {
+    sessionContext: "kms1.valid",
+  });
+  assert.equal(controller.voiceBinding(6), undefined);
+  now += 900_000;
+  assert.equal(controller.voiceBinding(7), undefined);
+  assert.equal(controller.snapshot().state, LONG_MEMORY_SESSION_STATES.EXPIRED);
+});
+
 test("bridgeは認証後に非awaitで開始し、停止とpagehideで破棄する", async () => {
   const [bridge, browserGate] = await Promise.all([
     readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8"),
@@ -191,7 +213,12 @@ test("bridgeは認証後に非awaitで開始し、停止とpagehideで破棄す�
   assert.match(bridge, /guest: guestModeActive/u);
   assert.match(bridge, /function stopSession[\s\S]*?longMemorySession\.clear\(\);/u);
   assert.match(bridge, /addEventListener\("pagehide"[\s\S]*?longMemorySession\.clear\(\);/u);
-  assert.doesNotMatch(bridge, /sessionContext\s*:/u);
+  assert.match(bridge, /longMemorySession\.voiceBinding\(expectedEpoch\)/u);
+  assert.match(bridge, /recording\.sessionContext = undefined/u);
+  assert.doesNotMatch(
+    bridge,
+    /(?:console\.|dispatchEvent|CustomEvent|localStorage|sessionStorage)[^\n]*sessionContext/iu,
+  );
   const policy = await readFile(
     new URL("../web/long-memory-session-policy.mjs", import.meta.url),
     "utf8",

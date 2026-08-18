@@ -44,9 +44,11 @@ func TestSessionContextIsOpaquePrincipalBoundAndDatabaseFree(t *testing.T) {
 		}
 	}
 	store.statusCalls, store.getCalls, store.getCurrentCalls = 0, 0, 0
-	got, generation, err := manager.OpenSessionContext("uid-a", "app-a", session)
-	if err != nil || generation != consent.Generation || got.Topics[0] != want.Topics[0] {
-		t.Fatalf("payload=%+v generation=%d err=%v", got, generation, err)
+	for turn := range 1000 {
+		got, generation, err := manager.OpenSessionContext("uid-a", "app-a", session)
+		if err != nil || generation != consent.Generation || got.Topics[0] != want.Topics[0] {
+			t.Fatalf("turn=%d payload=%+v generation=%d err=%v", turn, got, generation, err)
+		}
 	}
 	if store.statusCalls != 0 || store.getCalls != 0 || store.getCurrentCalls != 0 {
 		t.Fatalf("session validation reached store: status=%d get=%d current=%d", store.statusCalls, store.getCalls, store.getCurrentCalls)

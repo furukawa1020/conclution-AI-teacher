@@ -22,6 +22,13 @@ type SessionContextIssuer interface {
 	ConsumeSessionContext(context.Context, string, string, string) (string, int64, error)
 }
 
+// SessionContextOpener validates and decrypts one opaque context locally. It
+// deliberately has no context.Context because opening must never perform a
+// database, storage, or network lookup.
+type SessionContextOpener interface {
+	OpenSessionContext(string, string, string) (Payload, int64, error)
+}
+
 type sessionContextEnvelope struct {
 	Version     int     `json:"v"`
 	UIDDigest   string  `json:"u"`

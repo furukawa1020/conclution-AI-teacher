@@ -48,11 +48,13 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	if !s.consumeVoiceQuota(w, ctx, principal, started.UTC()) {
 		return
 	}
-	input, ok := s.decodeVoiceStreamRequest(w, r, ctx)
+	input, sessionContext, ok := s.decodeVoiceStreamRequest(w, r, ctx)
 	if !ok {
 		return
 	}
 	input.GuestExperience = principal.IsGuest()
+	s.attachVoiceMemory(principal, &input, sessionContext)
+	sessionContext = ""
 	defer clearVoiceInput(&input)
 
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -246,11 +248,11 @@ func (s *Server) decodeVoiceStreamRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	ctx context.Context,
-) (VoiceTurnInput, bool) {
+) (VoiceTurnInput, string, bool) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeProblem(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json.")
-		return VoiceTurnInput{}, false
+		return VoiceTurnInput{}, "", false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.voice.MaxRequestBytes)
 	decoder := json.NewDecoder(r.Body)
@@ -258,19 +260,21 @@ func (s *Server) decodeVoiceStreamRequest(
 	var request voiceTurnRequest
 	if err := decoder.Decode(&request); err != nil {
 		writeProblem(w, http.StatusBadRequest, "invalid_request", "The voice request is invalid.")
-		return VoiceTurnInput{}, false
+		return VoiceTurnInput{}, "", false
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeProblem(w, http.StatusBadRequest, "invalid_request", "Only one JSON value is allowed.")
-		return VoiceTurnInput{}, false
+		return VoiceTurnInput{}, "", false
 	}
 	input, err := decodeVoiceTurn(request)
 	if err != nil {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid_voice_turn", "The voice turn could not be accepted.")
-		return VoiceTurnInput{}, false
+		return VoiceTurnInput{}, "", false
 	}
 	input.RequestID = requestIDFromContext(ctx)
-	return input, true
+	sessionContext := request.SessionContext
+	request.SessionContext = ""
+	return input, sessionContext, true
 }
 
 func validateStreamedVoiceResult(result VoiceTurnResult, spoke bool) error {

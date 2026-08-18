@@ -11,6 +11,7 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
@@ -171,6 +172,21 @@ func TestConversationTurnMarksOnlyFinalizedExtendedSpeech(t *testing.T) {
 	live := conversationTurn(input, "live", false)
 	if !live.OutputCancelable {
 		t.Fatal("live server-authored commit signal did not grant output cancellation")
+	}
+}
+
+func TestConversationTurnReceivesMemoryAsTypedData(t *testing.T) {
+	t.Parallel()
+	memory := &longmemory.Payload{
+		Topics:      []string{"quiet voice"},
+		Preferences: []string{"brief answer"},
+		OpenLoops:   []string{"continue"},
+	}
+	turn := conversationTurn(httpapi.VoiceTurnInput{
+		Memory: memory, MemoryGeneration: 7,
+	}, "hello", false)
+	if turn.Memory != memory || turn.MemoryGeneration != 7 || turn.Utterance != "hello" {
+		t.Fatalf("typed memory boundary was not preserved: %+v", turn)
 	}
 }
 

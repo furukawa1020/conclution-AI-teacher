@@ -93,6 +93,9 @@ type VoiceTurnInput struct {
 	SchemaVersion           int
 	StrictCloudMinimization bool
 	GuestExperience         bool
+	Memory                  *longmemory.Payload
+	MemoryGeneration        int64
+	MemoryStatus            VoiceMemoryStatus
 	// NativeAudio is an authenticated, client-selected live-only fast lane.
 	// It is mutually exclusive with strict cloud minimization and is never
 	// inferred for buffered HTTP turns.
@@ -392,6 +395,7 @@ type VoiceOptions struct {
 	LongTermMemoryQueue  longmemory.Enqueuer
 	MemoryContext        longmemory.ContextIssuer
 	SessionContext       longmemory.SessionContextIssuer
+	SessionContextOpener longmemory.SessionContextOpener
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -600,6 +604,7 @@ type voiceTurnRequest struct {
 	BaselineAudioBase64     string                `json:"baselineAudioBase64,omitempty"`
 	MIMEType                string                `json:"mimeType"`
 	SessionState            string                `json:"sessionState"`
+	SessionContext          string                `json:"sessionContext,omitempty"`
 	TurnMode                VoiceTurnMode         `json:"turnMode"`
 	StrictCloudMinimization bool                  `json:"strictCloudMinimization"`
 	Document                *voiceDocumentRequest `json:"document,omitempty"`
@@ -656,6 +661,8 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.GuestExperience = principal.IsGuest()
+	s.attachVoiceMemory(principal, &input, request.SessionContext)
+	request.SessionContext = ""
 	// RequestID is minted by the server middleware and never accepted from the
 	// client JSON. Downstream capability leases bind privileged actions to this
 	// exact authenticated request.
@@ -1224,6 +1231,7 @@ func clearVoiceInput(input *VoiceTurnInput) {
 		input.Document.Data = nil
 	}
 	input.OnInputReady = nil
+	clearVoiceMemory(input)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

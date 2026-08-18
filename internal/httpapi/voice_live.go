@@ -108,6 +108,7 @@ type voiceLiveStartFrame struct {
 	AppCheckToken           string        `json:"appCheckToken"`
 	NativeCoachControl      bool          `json:"nativeCoachControl,omitempty"`
 	SessionState            string        `json:"sessionState"`
+	SessionContext          string        `json:"sessionContext,omitempty"`
 	TurnMode                VoiceTurnMode `json:"turnMode"`
 	SampleRateHz            int           `json:"sampleRateHz"`
 	StrictCloudMinimization bool          `json:"strictCloudMinimization"`
@@ -648,6 +649,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		ProcessingCommitted:   processingCommittedSignal,
 		ProcessingCommittedAt: processingCommittedAtSignal,
 	}
+	s.attachVoiceMemory(principal, &input, start.SessionContext)
+	start.SessionContext = ""
 	var nativeInputReady <-chan struct{}
 	if input.NativeAudio {
 		input.OnNativeWaterfall = outputMetrics.markNativeBoundary
@@ -676,8 +679,15 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	endpointChannel := make(chan struct{}, 1)
 	pipelineDoneSignal := make(chan struct{})
 	pipelineDone = pipelineDoneSignal
+	// Transfer the decrypted memory pointer to the pipeline copy. The handler
+	// must not zero it while a provider still reads the turn after disconnect;
+	// the pipeline owns destruction when its goroutine actually exits.
+	pipelineInput := input
+	input.Memory = nil
+	input.MemoryGeneration = 0
 	go func() {
 		defer close(pipelineDoneSignal)
+		defer clearVoiceInput(&pipelineInput)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				outcomeChannel <- voiceLiveOutcome{
@@ -706,7 +716,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			if rejected || checkpointInFlight {
 				return errors.New("voice coach control state was rejected")
 			}
-			if input.StrictCloudMinimization {
+			if pipelineInput.StrictCloudMinimization {
 				return strictOutput.append(audio)
 			}
 			return outputMetrics.deliver(
@@ -716,18 +726,18 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 		selectedLiveService := liveService
-		if input.NativeAudio && s.voice.NativeLiveService != nil {
+		if pipelineInput.NativeAudio && s.voice.NativeLiveService != nil {
 			selectedLiveService = s.voice.NativeLiveService
 		}
 		var result VoiceTurnResult
 		var processErr error
 		if controlService, supportsControl :=
-			selectedLiveService.(VoiceTurnLiveControlService); input.NativeAudio &&
+			selectedLiveService.(VoiceTurnLiveControlService); pipelineInput.NativeAudio &&
 			start.NativeCoachControl && supportsControl {
 			result, processErr = controlService.ProcessLiveWithControl(
 				liveCtx,
 				principal.UID,
-				input,
+				pipelineInput,
 				audioInput,
 				onAudio,
 				func() {
@@ -758,10 +768,10 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 						s.voice.CoachStateValidator.
 							ValidateRespondentCheckpointTransition(
 								principal.UID,
-								input.StateToken,
+								pipelineInput.StateToken,
 								transition.PreviousSessionState,
 								checkpoint.SessionState,
-								input.RequestID,
+								pipelineInput.RequestID,
 								checkpoint.AssistanceTarget,
 								checkpoint.RespondentStage,
 								checkpoint.CoachPhase,
@@ -827,7 +837,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			result, processErr = endpointService.ProcessLiveWithEndpoint(
 				liveCtx,
 				principal.UID,
-				input,
+				pipelineInput,
 				audioInput,
 				onAudio,
 				func() {
@@ -841,7 +851,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			result, processErr = selectedLiveService.ProcessLive(
 				liveCtx,
 				principal.UID,
-				input,
+				pipelineInput,
 				audioInput,
 				onAudio,
 			)
@@ -1426,6 +1436,7 @@ func validVoiceLiveStart(start voiceLiveStartFrame) bool {
 		!validVoiceLiveJWT(start.IDToken) ||
 		!validVoiceLiveJWT(start.AppCheckToken) ||
 		len(start.SessionState) > maxStateBytes ||
+		len(start.SessionContext) > maxSessionContextBytes ||
 		!utf8.ValidString(start.SessionState) ||
 		strings.TrimSpace(start.SessionState) != start.SessionState ||
 		(start.StrictCloudMinimization && start.SessionState != "") ||

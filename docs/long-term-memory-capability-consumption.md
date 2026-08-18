@@ -1,0 +1,9 @@
+# 長期会話メモリcapabilityの単回消費
+
+Issue #173 は、#171で発行する15分capabilityを回答経路へ接続する前に、並行replayを含めて一度だけ成功させる内部境界を追加する。capabilityはAES-256-GCMの認証後にだけ解釈し、raw UID、raw App ID、memory内容、caption、発話全文、AI応答をreplay防止storeへ渡さない。
+
+消費IDは、capability内の128-bit ID、HMAC化UID、HMAC化App IDを、保存鍵による別purposeのHMAC-SHA-256へ入力した64桁digestである。Firestoreは現行同意documentと消費documentを同一transactionで読み、同意が有効かつgenerationが一致し、消費documentが存在しない時だけ`conversation_memory_capability_uses_v1`へ`tombstone`を作る。MemoryStoreは同じ遷移を単一lockで行う。同時要求は一件だけ成功し、残りは有限な`ErrReplay`となる。
+
+tombstoneはschema、generation、消費時刻、capability期限だけを持ち、`expiresAt`のFirestore TTLを必須化する。期限切れ、改ざん、別principal、opt-out、generation差替えはtombstoneもmemory返却も発生させない。
+
+このPRは内部の単回消費契約までで、HTTP route、browser prefetch、voice transport、会話agentへのmemory反映は行わない。したがって各voice turnのFirestore往復と応答latencyは変わらない。次の小さいIssueでセッション開始前の一回だけこの境界を呼び、voice hot pathへ永続store読取を入れずに受け渡す。

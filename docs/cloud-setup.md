@@ -319,6 +319,8 @@ barge-in候補は開始済みsessionの端末内VAD、bounded MediaRecorder、�
 
 ## FirestoreとTTL
 
+長期memory基盤の追加後、必須TTL policyは従来9個に`conversation_memories_v1`を加えた10個です。前節に残る「必須9」の表記もこの10個を指します。
+
 ブラウザからFirestoreへ直接アクセスさせません。`firestore.rules`はdeny-allを維持し、Cloud RunのruntimeだけがAdmin SDKで次を扱います。
 
 | collection | 内容 | TTL field |
@@ -333,6 +335,8 @@ barge-in候補は開始済みsessionの端末内VAD、bounded MediaRecorder、�
 | `passkey_account_deletions_v1` | raw UIDを含まないdigest-keyと固定状態だけを持つFirebase Auth削除再試行墓標 | `expiresAt`、24時間 |
 | `passkey_users_v1` / `passkey_handles_v1` / `passkey_credentials_v1` | 仮名UID、user handle、public credential、sign counter等。秘密鍵は含まない。一覧・追加・失効・完全削除は5分以内のパスキー再認証とprincipal UIDへ束縛する | TTLなし。回復は未実装。詳細は[`passkey-credential-lifecycle.md`](passkey-credential-lifecycle.md) |
 | `voiceLiveLeases` | SHA-256化UIDとランダム所有者だけを持つlive同時接続lease。音声・文字起こし・raw UIDは保存しない | `expiresAt`、最長7分 |
+| `conversation_memories_v1` | 明示opt-inしたパスキーprincipalの有限semantic memory暗号文。HMAC化UID document key、generation、nonceだけを持ち、raw UID・captionは平文保存しない | `expiresAt`、30日 |
+| `conversation_memory_settings_v1` | 既定OFFの同意、generation tombstone。opt-outと同時writeを原子的に競合させる | TTLなし |
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/configure-firestore-ttl.ps1 `

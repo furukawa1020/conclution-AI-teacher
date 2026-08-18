@@ -18,6 +18,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/nativeflow"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/nativevoice"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/passkey"
@@ -80,6 +81,7 @@ func main() {
 	var closeSpeech func() error
 	closeNative := func() error { return nil }
 	var semanticDispatcher *semanticshadow.Dispatcher
+	var longTermMemory *longmemory.Manager
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
@@ -114,6 +116,11 @@ func main() {
 			os.Exit(1)
 		}
 		voiceLiveLeaseManager = guard.NewMemoryVoiceLiveLeaseManager()
+		longTermMemory, err = longmemory.New(cfg.StateKey, longmemory.NewMemoryStore())
+		if err != nil {
+			logger.Error("initialize development long-term memory", "error_class", "conversation_memory_configuration_failure")
+			os.Exit(1)
+		}
 		closeFirestore = func() error { return nil }
 		closeSpeech = func() error { return nil }
 	} else {
@@ -172,6 +179,16 @@ func main() {
 		firestoreClient, err := app.Firestore(ctx)
 		if err != nil {
 			logger.Error("initialize Firestore client", "error", err)
+			os.Exit(1)
+		}
+		longMemoryStore, memoryErr := longmemory.NewFirestoreStore(firestoreClient)
+		if memoryErr != nil {
+			logger.Error("initialize long-term memory store", "error_class", "conversation_memory_configuration_failure")
+			os.Exit(1)
+		}
+		longTermMemory, memoryErr = longmemory.New(cfg.StateKey, longMemoryStore)
+		if memoryErr != nil {
+			logger.Error("initialize long-term memory encryption", "error_class", "conversation_memory_configuration_failure")
 			os.Exit(1)
 		}
 
@@ -419,6 +436,7 @@ func main() {
 			GuestModeEnabled:     cfg.GuestModeEnabled,
 			SemanticShadow:       semanticDispatcher,
 			SemanticShadowKey:    cfg.StateKey,
+			LongTermMemory:       longTermMemory,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,

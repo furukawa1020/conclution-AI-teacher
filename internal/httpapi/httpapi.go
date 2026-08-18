@@ -24,6 +24,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/semanticshadow"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/store"
@@ -387,6 +388,7 @@ type VoiceOptions struct {
 	GuestModeEnabled     bool
 	SemanticShadow       *semanticshadow.Dispatcher
 	SemanticShadowKey    []byte
+	LongTermMemory       longmemory.Control
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -432,6 +434,7 @@ type Server struct {
 	appVerifier              identity.AppVerifier
 	passkeyClientRateLimiter guard.Limiter
 	passkeyAppCircuitBreaker guard.Limiter
+	longTermMemory           longmemory.Control
 }
 
 func New(
@@ -524,6 +527,7 @@ func NewWithVoiceAndPasskeys(
 		appVerifier:              appVerifier,
 		passkeyClientRateLimiter: passkeyClientRateLimiter,
 		passkeyAppCircuitBreaker: passkeyAppCircuitBreaker,
+		longTermMemory:           voice.LongTermMemory,
 	}
 
 	mux := http.NewServeMux()
@@ -552,6 +556,9 @@ func NewWithVoiceAndPasskeys(
 	mux.Handle("GET "+passkeyCredentialsPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.listPasskeyCredentials)))
 	mux.Handle("POST "+passkeyCredentialRevokePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.revokePasskeyCredential)))
 	mux.Handle("POST "+passkeyAccountDeletePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.deletePasskeyAccount)))
+	mux.Handle("GET "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.longTermMemoryStatus)))
+	mux.Handle("PUT "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.enableLongTermMemory)))
+	mux.Handle("DELETE "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.disableLongTermMemory)))
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(

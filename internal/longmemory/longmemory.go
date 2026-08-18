@@ -77,6 +77,7 @@ type Manager struct {
 	store       Store
 	aead        cipher.AEAD
 	contextAEAD cipher.AEAD
+	sessionAEAD cipher.AEAD
 	key         []byte
 	now         func() time.Time
 	rand        io.Reader
@@ -106,7 +107,17 @@ func New(key []byte, store Store) (*Manager, error) {
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	return &Manager{store: store, aead: aead, contextAEAD: contextAEAD, key: append([]byte(nil), key...), now: time.Now, rand: rand.Reader}, nil
+	sessionEncryptionKey := deriveKey(key, "kotae-long-memory-session-context-aead-v1")
+	defer clear(sessionEncryptionKey)
+	sessionBlock, err := aes.NewCipher(sessionEncryptionKey)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	sessionAEAD, err := cipher.NewGCM(sessionBlock)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	return &Manager{store: store, aead: aead, contextAEAD: contextAEAD, sessionAEAD: sessionAEAD, key: append([]byte(nil), key...), now: time.Now, rand: rand.Reader}, nil
 }
 
 func deriveKey(root []byte, purpose string) []byte {

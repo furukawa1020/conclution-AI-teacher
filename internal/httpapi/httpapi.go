@@ -391,6 +391,7 @@ type VoiceOptions struct {
 	LongTermMemory       longmemory.Control
 	LongTermMemoryQueue  longmemory.Enqueuer
 	MemoryContext        longmemory.ContextIssuer
+	SessionContext       longmemory.SessionContextIssuer
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -451,6 +452,7 @@ type Server struct {
 	passkeyAppCircuitBreaker guard.Limiter
 	longTermMemory           longmemory.Control
 	memoryContext            longmemory.ContextIssuer
+	sessionContext           longmemory.SessionContextIssuer
 }
 
 func New(
@@ -545,6 +547,7 @@ func NewWithVoiceAndPasskeys(
 		passkeyAppCircuitBreaker: passkeyAppCircuitBreaker,
 		longTermMemory:           voice.LongTermMemory,
 		memoryContext:            voice.MemoryContext,
+		sessionContext:           voice.SessionContext,
 	}
 
 	mux := http.NewServeMux()
@@ -577,6 +580,9 @@ func NewWithVoiceAndPasskeys(
 	mux.Handle("PUT "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.enableLongTermMemory)))
 	mux.Handle("DELETE "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.disableLongTermMemory)))
 	mux.Handle("POST "+longTermMemoryContextBeginPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.beginLongTermMemoryContext)))
+	mux.Handle("POST "+longTermMemoryContextConsumePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.consumeLongTermMemoryContext)))
+	mux.HandleFunc("OPTIONS "+longTermMemoryContextBeginPath, server.memoryContextPreflight)
+	mux.HandleFunc("OPTIONS "+longTermMemoryContextConsumePath, server.memoryContextPreflight)
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(
@@ -1434,7 +1440,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		resourcePolicy := "same-origin"
 		if (r.URL.Path == voiceStreamPath ||
-			r.URL.Path == voiceLivePath) &&
+			r.URL.Path == voiceLivePath ||
+			r.URL.Path == longTermMemoryContextBeginPath ||
+			r.URL.Path == longTermMemoryContextConsumePath) &&
 			r.Header.Get("Origin") == allowedWebOrigin {
 			resourcePolicy = "cross-origin"
 		}

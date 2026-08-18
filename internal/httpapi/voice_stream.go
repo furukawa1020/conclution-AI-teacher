@@ -341,7 +341,9 @@ func validVoiceStreamPreflightHeaders(value string) bool {
 
 func (s *Server) voiceStreamCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == voiceStreamPath &&
+		if (r.URL.Path == voiceStreamPath ||
+			r.URL.Path == longTermMemoryContextBeginPath ||
+			r.URL.Path == longTermMemoryContextConsumePath) &&
 			r.Header.Get("Origin") == allowedWebOrigin {
 			w.Header().Set("Access-Control-Allow-Origin", allowedWebOrigin)
 			w.Header().Add("Vary", "Origin")

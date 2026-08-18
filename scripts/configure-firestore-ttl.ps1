@@ -28,7 +28,8 @@ $requiredCollectionGroups = @(
     "passkey_ceremonies_v1",
     "passkeyClientRateLimits",
     "passkeyAppRateLimits",
-    "conversation_memories_v1"
+    "conversation_memories_v1",
+    "conversation_memory_capability_uses_v1"
 )
 
 $workspace = Split-Path -Parent $PSScriptRoot

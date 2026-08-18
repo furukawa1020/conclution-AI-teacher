@@ -93,35 +93,9 @@ func (m *Manager) BeginContext(ctx context.Context, uid, appID string) (string, 
 }
 
 func (m *Manager) OpenContext(ctx context.Context, uid, appID, token string) (Payload, int64, error) {
-	if m == nil || m.contextAEAD == nil || !validAppID(appID) ||
-		!strings.HasPrefix(token, contextCapabilityPrefix) || len(token) > maxContextCapabilityBytes {
-		return Payload{}, 0, ErrInvalid
-	}
-	uidDigest, err := m.principalKey(uid)
+	envelope, err := m.decryptContextEnvelope(uid, appID, token, m.now().UTC())
 	if err != nil {
 		return Payload{}, 0, err
-	}
-	appDigest := m.appIDKey(appID)
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, contextCapabilityPrefix))
-	if err != nil {
-		clear(raw)
-		return Payload{}, 0, ErrInvalid
-	}
-	defer clear(raw)
-	nonceSize := m.contextAEAD.NonceSize()
-	if len(raw) < nonceSize+m.contextAEAD.Overhead()+2 {
-		return Payload{}, 0, ErrInvalid
-	}
-	plaintext, err := m.contextAEAD.Open(nil, raw[:nonceSize], raw[nonceSize:], contextAAD(uidDigest, appDigest))
-	if err != nil || len(plaintext) > maxContextPlaintext {
-		clear(plaintext)
-		return Payload{}, 0, ErrInvalid
-	}
-	defer clear(plaintext)
-	var envelope contextEnvelope
-	if json.Unmarshal(plaintext, &envelope) != nil ||
-		validateContextEnvelope(envelope, uidDigest, appDigest, m.now().UTC()) != nil {
-		return Payload{}, 0, ErrInvalid
 	}
 	consent, err := m.Status(ctx, uid)
 	if err != nil {
@@ -134,6 +108,57 @@ func (m *Manager) OpenContext(ctx context.Context, uid, appID, token string) (Pa
 		return Payload{}, 0, ErrStale
 	}
 	return envelope.Memory, envelope.Generation, nil
+}
+
+func (m *Manager) ConsumeContext(ctx context.Context, uid, appID, token string) (Payload, int64, error) {
+	now := m.now().UTC()
+	envelope, err := m.decryptContextEnvelope(uid, appID, token, now)
+	if err != nil {
+		return Payload{}, 0, err
+	}
+	uidDigest, err := m.principalKey(uid)
+	if err != nil {
+		return Payload{}, 0, err
+	}
+	useDigest := m.capabilityUseKey(envelope.CapabilityID, uidDigest, envelope.AppIDDigest)
+	if err := m.store.ConsumeCapability(ctx, uidDigest, envelope.Generation, useDigest, time.Unix(envelope.ExpiresAt, 0).UTC(), now); err != nil {
+		return Payload{}, 0, err
+	}
+	return envelope.Memory, envelope.Generation, nil
+}
+
+func (m *Manager) decryptContextEnvelope(uid, appID, token string, now time.Time) (contextEnvelope, error) {
+	if m == nil || m.contextAEAD == nil || !validAppID(appID) ||
+		!strings.HasPrefix(token, contextCapabilityPrefix) || len(token) > maxContextCapabilityBytes {
+		return contextEnvelope{}, ErrInvalid
+	}
+	uidDigest, err := m.principalKey(uid)
+	if err != nil {
+		return contextEnvelope{}, err
+	}
+	appDigest := m.appIDKey(appID)
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, contextCapabilityPrefix))
+	if err != nil {
+		clear(raw)
+		return contextEnvelope{}, ErrInvalid
+	}
+	defer clear(raw)
+	nonceSize := m.contextAEAD.NonceSize()
+	if len(raw) < nonceSize+m.contextAEAD.Overhead()+2 {
+		return contextEnvelope{}, ErrInvalid
+	}
+	plaintext, err := m.contextAEAD.Open(nil, raw[:nonceSize], raw[nonceSize:], contextAAD(uidDigest, appDigest))
+	if err != nil || len(plaintext) > maxContextPlaintext {
+		clear(plaintext)
+		return contextEnvelope{}, ErrInvalid
+	}
+	defer clear(plaintext)
+	var envelope contextEnvelope
+	if json.Unmarshal(plaintext, &envelope) != nil ||
+		validateContextEnvelope(envelope, uidDigest, appDigest, now) != nil {
+		return contextEnvelope{}, ErrInvalid
+	}
+	return envelope, nil
 }
 
 func (m *Manager) openRecord(key string, generation int64, record Record, now time.Time) (Payload, error) {
@@ -173,6 +198,19 @@ func (m *Manager) appIDKey(appID string) string {
 	_, _ = mac.Write([]byte("kotae-long-memory-app-id-v1\x00"))
 	_, _ = mac.Write([]byte(strings.TrimSpace(appID)))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (m *Manager) capabilityUseKey(capabilityID, uidDigest, appDigest string) string {
+	mac := hmac.New(sha256.New, m.key)
+	_, _ = mac.Write([]byte("kotae-long-memory-capability-use-v1\x00"))
+	_, _ = mac.Write([]byte(capabilityID + "\x00" + uidDigest + "\x00" + appDigest))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func validUseDigest(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	defer clear(decoded)
+	return err == nil && len(decoded) == sha256.Size && len(value) == sha256.Size*2
 }
 
 func contextAAD(uidDigest, appDigest string) []byte {

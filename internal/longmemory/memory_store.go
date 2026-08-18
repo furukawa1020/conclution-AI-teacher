@@ -14,10 +14,34 @@ type memoryEntry struct {
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]memoryEntry
+	uses    map[string]time.Time
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{entries: make(map[string]memoryEntry)}
+	return &MemoryStore{entries: make(map[string]memoryEntry), uses: make(map[string]time.Time)}
+}
+
+func (s *MemoryStore) ConsumeCapability(ctx context.Context, key string, generation int64, useDigest string, expiresAt, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if key == "" || generation < 1 || !validUseDigest(useDigest) || !expiresAt.After(now.UTC()) || expiresAt.After(now.UTC().Add(ContextCapabilityTTL)) {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.entries[key]
+	if !entry.consent.Enabled {
+		return ErrDisabled
+	}
+	if entry.consent.Generation != generation {
+		return ErrStale
+	}
+	if _, exists := s.uses[useDigest]; exists {
+		return ErrReplay
+	}
+	s.uses[useDigest] = expiresAt.UTC()
+	return nil
 }
 
 func (s *MemoryStore) Status(ctx context.Context, key string) (Consent, error) {

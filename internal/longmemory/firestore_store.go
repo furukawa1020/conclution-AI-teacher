@@ -12,6 +12,7 @@ import (
 const (
 	settingsCollection = "conversation_memory_settings_v1"
 	recordsCollection  = "conversation_memories_v1"
+	usesCollection     = "conversation_memory_capability_uses_v1"
 )
 
 type FirestoreStore struct{ client *firestore.Client }
@@ -30,6 +31,48 @@ type recordDocument struct {
 	Nonce         []byte    `firestore:"nonce"`
 	ExpiresAt     time.Time `firestore:"expiresAt"`
 	UpdatedAt     time.Time `firestore:"updatedAt"`
+}
+
+type capabilityUseDocument struct {
+	SchemaVersion int       `firestore:"schemaVersion"`
+	Generation    int64     `firestore:"generation"`
+	ExpiresAt     time.Time `firestore:"expiresAt"`
+	ConsumedAt    time.Time `firestore:"consumedAt"`
+}
+
+func (s *FirestoreStore) ConsumeCapability(ctx context.Context, key string, generation int64, useDigest string, expiresAt, now time.Time) error {
+	if key == "" || generation < 1 || !validUseDigest(useDigest) || !expiresAt.After(now.UTC()) || expiresAt.After(now.UTC().Add(ContextCapabilityTTL)) {
+		return ErrInvalid
+	}
+	settings, _ := s.refs(key)
+	use := s.client.Collection(usesCollection).Doc(useDigest)
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		settingSnapshot, err := tx.Get(settings)
+		if status.Code(err) == codes.NotFound {
+			return ErrDisabled
+		}
+		if err != nil {
+			return err
+		}
+		var setting settingDocument
+		if settingSnapshot.DataTo(&setting) != nil || validateSetting(setting) != nil {
+			return ErrInvalid
+		}
+		if !setting.Enabled {
+			return ErrDisabled
+		}
+		if setting.Generation != generation {
+			return ErrStale
+		}
+		_, err = tx.Get(use)
+		if err == nil {
+			return ErrReplay
+		}
+		if status.Code(err) != codes.NotFound {
+			return err
+		}
+		return tx.Create(use, capabilityUseDocument{SchemaVersion: SchemaVersion, Generation: generation, ExpiresAt: expiresAt.UTC(), ConsumedAt: now.UTC()})
+	})
 }
 
 func NewFirestoreStore(client *firestore.Client) (*FirestoreStore, error) {

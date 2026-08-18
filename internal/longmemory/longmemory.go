@@ -35,6 +35,7 @@ var (
 	ErrDisabled = errors.New("long memory is disabled")
 	ErrStale    = errors.New("long memory generation is stale")
 	ErrNotFound = errors.New("long memory was not found")
+	ErrReplay   = errors.New("long memory capability was already consumed")
 )
 
 type Consent struct {
@@ -63,6 +64,7 @@ type Store interface {
 	Put(context.Context, string, int64, Record, time.Time) error
 	Get(context.Context, string, int64, time.Time) (Record, error)
 	GetCurrent(context.Context, string, time.Time) (Consent, Record, error)
+	ConsumeCapability(context.Context, string, int64, string, time.Time, time.Time) error
 }
 
 type Control interface {

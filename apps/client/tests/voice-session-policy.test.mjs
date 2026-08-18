@@ -668,6 +668,7 @@ async function createExecutablePlaybackHarness({
     clearedCandidateDeadlines: 0,
     clearedDocuments: [],
     latencyEvents: [],
+    longMemoryClears: 0,
     startLatencyEvents: [],
     micEnabled: false,
     pauseEvents: [],
@@ -728,8 +729,9 @@ const dispatchVoiceStartLatency = dependencies.dispatchVoiceStartLatency;
 const estimateAudiblePerformanceTime = dependencies.estimateAudiblePerformanceTime;
 const fail = dependencies.fail;
 const finishGate = dependencies.finishGate;
-const globalThis = dependencies.eventTarget;
-const pcm16AudioBuffer = dependencies.pcm16AudioBuffer;
+  const globalThis = dependencies.eventTarget;
+  const longMemorySession = dependencies.longMemorySession;
+  const pcm16AudioBuffer = dependencies.pcm16AudioBuffer;
 const pcm16BytesAudioBuffer = dependencies.pcm16BytesAudioBuffer;
 const performance = dependencies.performance;
 const markSessionSpeech = dependencies.markSessionSpeech;
@@ -857,6 +859,11 @@ return Object.freeze({
     markSessionSpeech() {
       return true;
     },
+    longMemorySession: Object.freeze({
+      clear() {
+        state.longMemoryClears += 1;
+      },
+    }),
     mediaStream: Object.freeze({}),
     pcm16AudioBuffer(_audioBase64, decodedBytes, sampleRateHz) {
       return pcmBuffer(decodedBytes, sampleRateHz);
@@ -2523,6 +2530,7 @@ test("expiry and pagehide cancel an executable playback drain", async (t) => {
       assert.deepEqual(preparationCancellations, [scenario.stopCode]);
       assert.equal(context.sources[0].stopped, true);
       assert.equal(state.micEnabled, false);
+      assert.equal(state.longMemoryClears, 1);
       assert.deepEqual(state.releasedCodes, [scenario.stopCode]);
       const pauseEvent = state.pauseEvents.find(
         (event) => event.type === "kotae:voice-session-paused",

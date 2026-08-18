@@ -389,6 +389,7 @@ type VoiceOptions struct {
 	SemanticShadow       *semanticshadow.Dispatcher
 	SemanticShadowKey    []byte
 	LongTermMemory       longmemory.Control
+	LongTermMemoryQueue  longmemory.Enqueuer
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -419,6 +420,19 @@ func (s *Server) observeSemanticShadow(ctx context.Context, result VoiceTurnResu
 		AnswerTransitionProof: normalizedAnswerTransitionProof(result.AnswerTransitionProof),
 		GuestAFirstOutcome:    normalizedGuestAFirstOutcome(result.GuestAFirstOutcome),
 	})
+}
+
+func (s *Server) enqueueLongTermMemory(
+	principal identity.Principal,
+	result VoiceTurnResult,
+) {
+	if s.voice.LongTermMemoryQueue == nil || result.StateToken == "" ||
+		principal.UID == "" || principal.AppID == "" ||
+		!principal.AccountVerified || principal.Provider != "custom" ||
+		principal.AuthMethod != "passkey-v1" {
+		return
+	}
+	_ = s.voice.LongTermMemoryQueue.Enqueue(principal.UID, result.StateToken)
 }
 
 type Server struct {
@@ -703,6 +717,7 @@ func (s *Server) voiceTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.observeSemanticShadow(ctx, result)
+	s.enqueueLongTermMemory(principal, result)
 	s.logger.InfoContext(ctx, "voice turn completed",
 		"request_id", requestIDFromContext(ctx),
 		"route", result.Route,

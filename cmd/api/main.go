@@ -82,6 +82,7 @@ func main() {
 	closeNative := func() error { return nil }
 	var semanticDispatcher *semanticshadow.Dispatcher
 	var longTermMemory *longmemory.Manager
+	var longTermMemoryDispatcher *longmemory.Dispatcher
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
@@ -294,6 +295,28 @@ func main() {
 			logger.Error("initialize conversation agent", "error", err)
 			os.Exit(1)
 		}
+		memorySource, ok := conversationAgent.(longmemory.CandidateSource)
+		if !ok {
+			logger.Error("initialize long-term memory candidate boundary")
+			os.Exit(1)
+		}
+		longTermMemoryDispatcher, err = longmemory.NewDispatcher(
+			longTermMemory,
+			memorySource,
+			longmemory.DispatcherOptions{
+				Observer: func(outcome longmemory.Outcome, latency time.Duration) {
+					logger.Info(
+						"conversation memory asynchronous outcome",
+						"outcome", string(outcome),
+						"latency_ms", latency.Milliseconds(),
+					)
+				},
+			},
+		)
+		if err != nil {
+			logger.Error("initialize long-term memory dispatcher", "error_class", "conversation_memory_configuration_failure")
+			os.Exit(1)
+		}
 		if cfg.NativeAudioEnabled {
 			validator, ok := conversationAgent.(httpapi.VoiceRespondentCheckpointValidator)
 			if !ok {
@@ -383,6 +406,15 @@ func main() {
 			logger.Error("close Firestore client", "error", err)
 		}
 	}()
+	defer func() {
+		if longTermMemoryDispatcher != nil {
+			closeContext, cancelClose := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancelClose()
+			if err := longTermMemoryDispatcher.Close(closeContext); err != nil {
+				logger.Warn("close long-term memory dispatcher", "error_class", "conversation_memory_shutdown_timeout")
+			}
+		}
+	}()
 	if cfg.SemanticaShadowEnabled {
 		authenticatedClient, clientErr := idtoken.NewClient(ctx, cfg.SemanticaShadowURL)
 		if clientErr != nil {
@@ -437,6 +469,7 @@ func main() {
 			SemanticShadow:       semanticDispatcher,
 			SemanticShadowKey:    cfg.StateKey,
 			LongTermMemory:       longTermMemory,
+			LongTermMemoryQueue:  longTermMemoryDispatcher,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,

@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +20,92 @@ type fakeLongTermMemory struct {
 	enableCalls  int
 	disableCalls int
 	uid          string
+}
+
+type fakeLongTermMemoryQueue struct {
+	calls atomic.Int32
+	uid   string
+	token string
+}
+
+type commitCheckingMemoryQueue struct {
+	response  *httptest.ResponseRecorder
+	committed bool
+}
+
+func (q *commitCheckingMemoryQueue) Enqueue(string, string) bool {
+	q.committed = q.response.Code == http.StatusCreated &&
+		strings.Contains(q.response.Body.String(), `"sessionState":"opaque-state"`)
+	return true
+}
+
+func (f *fakeLongTermMemoryQueue) Enqueue(uid string, token string) bool {
+	f.calls.Add(1)
+	f.uid = uid
+	f.token = token
+	return true
+}
+
+func TestLongTermMemoryQueueAcceptsOnlyVerifiedPasskeyPrincipal(t *testing.T) {
+	queue := &fakeLongTermMemoryQueue{}
+	server := &Server{voice: VoiceOptions{LongTermMemoryQueue: queue}}
+	verified := identity.Principal{UID: "account-uid", AppID: "app-123", Provider: "custom", AuthMethod: "passkey-v1", AccountVerified: true}
+	server.enqueueLongTermMemory(verified, VoiceTurnResult{StateToken: "opaque-state"})
+	if queue.calls.Load() != 1 || queue.uid != verified.UID || queue.token != "opaque-state" {
+		t.Fatalf("verified enqueue=%d uid=%q token=%q", queue.calls.Load(), queue.uid, queue.token)
+	}
+	guestsAndInvalid := []identity.Principal{
+		{UID: "guest", AppID: "app-123", Provider: "anonymous", AuthMethod: "guest-v1"},
+		{UID: "account-uid", AppID: "app-123", Provider: "custom", AuthMethod: "passkey-v1"},
+		{UID: "account-uid", AppID: "app-123", Provider: "google.com", AuthMethod: "google.com", AccountVerified: true},
+	}
+	for _, principal := range guestsAndInvalid {
+		server.enqueueLongTermMemory(principal, VoiceTurnResult{StateToken: "must-not-cross"})
+	}
+	server.enqueueLongTermMemory(verified, VoiceTurnResult{})
+	if queue.calls.Load() != 1 {
+		t.Fatalf("ineligible principals crossed queue boundary: %d", queue.calls.Load())
+	}
+}
+
+func TestVoiceTurnEnqueuesLongTermMemoryOnlyAfterResponseCommit(t *testing.T) {
+	response := httptest.NewRecorder()
+	queue := &commitCheckingMemoryQueue{response: response}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler := NewWithVoice(
+		logger,
+		fakeVerifier{principal: identity.Principal{
+			UID: "user-123", AppID: "app-123", Provider: "custom",
+			AuthMethod: "passkey-v1", AccountVerified: true,
+		}},
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		2*time.Second,
+		4*1024,
+		VoiceOptions{
+			Service: &fakeVoiceService{result: VoiceTurnResult{
+				Audio: []byte("mp3"), AudioMIMEType: "audio/mpeg",
+				Caption: "safe", StateToken: "opaque-state", DetectedDomain: "casual",
+				AssistanceTarget: "respondent", RespondentStage: "restructure",
+				CoachPhase: "awaiting_restatement", CoachAction: "restate",
+				ResearchStatus: "none", ResearchRecords: []ResearchRecord{}, Route: "fast",
+			}},
+			RateLimiter: &fakeLimiter{}, AppRateLimiter: &fakeLimiter{wantKey: "app:app-123"},
+			RequestTimeout: 2 * time.Second, MaxRequestBytes: 13 * 1024 * 1024,
+			LongTermMemoryQueue: queue,
+		},
+	)
+	request := authenticatedRequest(
+		http.MethodPost,
+		"/api/v1/voice/turns",
+		`{"audioBase64":"YXVkaW8=","mimeType":"audio/webm","sessionState":"","turnMode":"intentional"}`,
+	)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || !queue.committed {
+		t.Fatalf("status=%d enqueue observed committed response=%v body=%s", response.Code, queue.committed, response.Body.String())
+	}
 }
 
 func (f *fakeLongTermMemory) Status(context.Context, string) (longmemory.Consent, error) {

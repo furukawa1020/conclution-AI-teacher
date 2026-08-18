@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -20,6 +21,22 @@ type fakeLongTermMemory struct {
 	enableCalls  int
 	disableCalls int
 	uid          string
+}
+
+type fakeLongTermMemoryContext struct {
+	calls      int
+	uid        string
+	appID      string
+	capability string
+	available  bool
+	err        error
+}
+
+func (f *fakeLongTermMemoryContext) BeginContext(_ context.Context, uid, appID string) (string, bool, error) {
+	f.calls++
+	f.uid = uid
+	f.appID = appID
+	return f.capability, f.available, f.err
 }
 
 type fakeLongTermMemoryQueue struct {
@@ -161,6 +178,100 @@ func TestLongTermMemoryManagementIsPrincipalBoundAndContentFree(t *testing.T) {
 	}
 	if memory.uid != "account-uid" || memory.enableCalls != 1 || memory.disableCalls != 1 {
 		t.Fatalf("memory calls=%+v", memory)
+	}
+}
+
+func TestLongTermMemoryContextBeginIsPrincipalBoundAndOpaque(t *testing.T) {
+	issuer := &fakeLongTermMemoryContext{capability: "kmc1.opaque", available: true}
+	principal := identity.Principal{UID: "account-uid", AppID: "app-123", Provider: "custom", AuthMethod: "passkey-v1", AccountVerified: true, PasskeyAt: time.Now().UTC()}
+	var logs bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewJSONHandler(&logs, nil)), verifier: fakeVerifier{principal: principal}, memoryContext: issuer}
+	request := httptest.NewRequest(http.MethodPost, longTermMemoryContextBeginPath, nil)
+	request.Header.Set("Authorization", "Bearer id-token")
+	request.Header.Set("X-Firebase-AppCheck", "app-check-token")
+	response := httptest.NewRecorder()
+	server.requirePasskeyManagementIdentity(http.HandlerFunc(server.beginLongTermMemoryContext)).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || issuer.calls != 1 || issuer.uid != principal.UID || issuer.appID != principal.AppID {
+		t.Fatalf("status=%d calls=%d uid=%q app=%q body=%s", response.Code, issuer.calls, issuer.uid, issuer.appID, response.Body.String())
+	}
+	if response.Body.String() != "{\"available\":true,\"capability\":\"kmc1.opaque\"}\n" ||
+		strings.Contains(response.Body.String(), principal.UID) || strings.Contains(response.Body.String(), principal.AppID) {
+		t.Fatalf("context response was not exact and opaque: %s", response.Body.String())
+	}
+	if !strings.Contains(logs.String(), `"outcome":"issued"`) {
+		t.Fatalf("finite outcome missing: %s", logs.String())
+	}
+	for _, forbidden := range []string{principal.UID, principal.AppID, issuer.capability} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("context log exposed %q: %s", forbidden, logs.String())
+		}
+	}
+}
+
+func TestLongTermMemoryContextUnavailableHasOneContentFreeShape(t *testing.T) {
+	issuer := &fakeLongTermMemoryContext{}
+	server := &Server{memoryContext: issuer}
+	request := httptest.NewRequest(http.MethodPost, longTermMemoryContextBeginPath, nil)
+	request = request.WithContext(context.WithValue(request.Context(), principalContextKey{}, identity.Principal{UID: "account-uid", AppID: "app-123"}))
+	response := httptest.NewRecorder()
+	server.beginLongTermMemoryContext(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"available\":false}\n" {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestLongTermMemoryContextRejectsInconsistentIssuerResult(t *testing.T) {
+	for _, issuer := range []*fakeLongTermMemoryContext{
+		{capability: "kmc1.unexpected", available: false},
+		{capability: "", available: true},
+	} {
+		server := &Server{memoryContext: issuer}
+		request := httptest.NewRequest(http.MethodPost, longTermMemoryContextBeginPath, nil)
+		request = request.WithContext(context.WithValue(request.Context(), principalContextKey{}, identity.Principal{UID: "account-uid", AppID: "app-123"}))
+		response := httptest.NewRecorder()
+		server.beginLongTermMemoryContext(response, request)
+		if response.Code != http.StatusServiceUnavailable ||
+			(issuer.capability != "" && strings.Contains(response.Body.String(), issuer.capability)) {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestGuestAndStalePasskeyCannotReachLongTermMemoryContext(t *testing.T) {
+	for name, principal := range map[string]identity.Principal{
+		"guest": {UID: "guest-uid", AppID: "app-123", Provider: "anonymous", AuthMethod: "guest-v1"},
+		"stale": {UID: "account-uid", AppID: "app-123", Provider: "custom", AuthMethod: "passkey-v1", AccountVerified: true, PasskeyAt: time.Now().UTC().Add(-6 * time.Minute)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			issuer := &fakeLongTermMemoryContext{capability: "must-not-issue", available: true}
+			server := &Server{verifier: fakeVerifier{principal: principal}, memoryContext: issuer}
+			request := httptest.NewRequest(http.MethodPost, longTermMemoryContextBeginPath, nil)
+			request.Header.Set("Authorization", "Bearer id-token")
+			request.Header.Set("X-Firebase-AppCheck", "app-check-token")
+			response := httptest.NewRecorder()
+			server.requirePasskeyManagementIdentity(http.HandlerFunc(server.beginLongTermMemoryContext)).ServeHTTP(response, request)
+			if response.Code != http.StatusUnauthorized || issuer.calls != 0 {
+				t.Fatalf("status=%d calls=%d body=%s", response.Code, issuer.calls, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestLongTermMemoryContextRejectsBodyAndQueryBeforeIssuer(t *testing.T) {
+	for _, target := range []string{longTermMemoryContextBeginPath + "?uid=foreign", longTermMemoryContextBeginPath} {
+		issuer := &fakeLongTermMemoryContext{capability: "must-not-issue", available: true}
+		server := &Server{memoryContext: issuer}
+		body := ""
+		if target == longTermMemoryContextBeginPath {
+			body = `{}`
+		}
+		request := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		request = request.WithContext(context.WithValue(request.Context(), principalContextKey{}, identity.Principal{UID: "account-uid", AppID: "app-123"}))
+		response := httptest.NewRecorder()
+		server.beginLongTermMemoryContext(response, request)
+		if response.Code != http.StatusServiceUnavailable || issuer.calls != 0 || !strings.Contains(response.Body.String(), "conversation_memory_context_failed") {
+			t.Fatalf("target=%q status=%d calls=%d body=%s", target, response.Code, issuer.calls, response.Body.String())
+		}
 	}
 }
 

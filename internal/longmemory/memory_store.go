@@ -86,25 +86,33 @@ func (s *MemoryStore) Put(ctx context.Context, key string, generation int64, rec
 }
 
 func (s *MemoryStore) Get(ctx context.Context, key string, generation int64, now time.Time) (Record, error) {
-	if err := ctx.Err(); err != nil {
+	consent, record, err := s.GetCurrent(ctx, key, now)
+	if err != nil {
 		return Record{}, err
+	}
+	if consent.Generation != generation {
+		return Record{}, ErrStale
+	}
+	return record, nil
+}
+
+func (s *MemoryStore) GetCurrent(ctx context.Context, key string, now time.Time) (Consent, Record, error) {
+	if err := ctx.Err(); err != nil {
+		return Consent{}, Record{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.entries[key]
 	if !entry.consent.Enabled {
-		return Record{}, ErrDisabled
-	}
-	if entry.consent.Generation != generation {
-		return Record{}, ErrStale
+		return Consent{}, Record{}, ErrDisabled
 	}
 	if entry.record == nil || !entry.record.ExpiresAt.After(now.UTC()) {
-		return Record{}, ErrNotFound
+		return Consent{}, Record{}, ErrNotFound
 	}
-	if validateRecord(*entry.record, generation, now) != nil {
-		return Record{}, ErrInvalid
+	if validateRecord(*entry.record, entry.consent.Generation, now) != nil {
+		return Consent{}, Record{}, ErrInvalid
 	}
-	return cloneRecord(*entry.record), nil
+	return entry.consent, cloneRecord(*entry.record), nil
 }
 
 func validateRecord(record Record, generation int64, now time.Time) error {

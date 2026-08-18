@@ -138,6 +138,17 @@ func (s *FirestoreStore) Put(ctx context.Context, key string, generation int64, 
 }
 
 func (s *FirestoreStore) Get(ctx context.Context, key string, generation int64, now time.Time) (result Record, err error) {
+	consent, result, err := s.GetCurrent(ctx, key, now)
+	if err != nil {
+		return Record{}, err
+	}
+	if consent.Generation != generation {
+		return Record{}, ErrStale
+	}
+	return result, nil
+}
+
+func (s *FirestoreStore) GetCurrent(ctx context.Context, key string, now time.Time) (consent Consent, result Record, err error) {
 	settings, records := s.refs(key)
 	err = s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
 		settingSnapshot, getErr := tx.Get(settings)
@@ -154,9 +165,7 @@ func (s *FirestoreStore) Get(ctx context.Context, key string, generation int64, 
 		if !setting.Enabled {
 			return ErrDisabled
 		}
-		if setting.Generation != generation {
-			return ErrStale
-		}
+		consent = Consent{Enabled: true, Generation: setting.Generation}
 		recordSnapshot, getErr := tx.Get(records)
 		if status.Code(getErr) == codes.NotFound {
 			return ErrNotFound
@@ -169,12 +178,12 @@ func (s *FirestoreStore) Get(ctx context.Context, key string, generation int64, 
 			return ErrInvalid
 		}
 		result = Record{SchemaVersion: document.SchemaVersion, Generation: document.Generation, Ciphertext: append([]byte(nil), document.Ciphertext...), Nonce: append([]byte(nil), document.Nonce...), ExpiresAt: document.ExpiresAt}
-		if validateRecord(result, generation, now) != nil {
+		if validateRecord(result, setting.Generation, now) != nil {
 			return ErrInvalid
 		}
 		return nil
 	})
-	return result, err
+	return consent, result, err
 }
 
 func validateSetting(document settingDocument) error {

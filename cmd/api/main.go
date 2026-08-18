@@ -470,6 +470,7 @@ func main() {
 			SemanticShadowKey:    cfg.StateKey,
 			LongTermMemory:       longTermMemory,
 			LongTermMemoryQueue:  longTermMemoryDispatcher,
+			MemoryContext:        longTermMemory,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,

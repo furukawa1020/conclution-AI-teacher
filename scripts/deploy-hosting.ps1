@@ -62,7 +62,8 @@ $requiredTtlCollectionGroups = @(
     "voiceLiveLeases",
     "passkey_ceremonies_v1",
     "passkeyClientRateLimits",
-    "passkeyAppRateLimits"
+    "passkeyAppRateLimits",
+    "conversation_memories_v1"
 )
 
 $workspace = Split-Path -Parent $PSScriptRoot

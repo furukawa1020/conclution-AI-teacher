@@ -7,10 +7,64 @@ import (
 	"net/http"
 )
 
-const longTermMemoryPath = "/api/v1/conversation-memory"
+const (
+	longTermMemoryPath             = "/api/v1/conversation-memory"
+	longTermMemoryContextBeginPath = "/api/v1/conversation-memory/context:begin"
+)
 
 type longTermMemoryResponse struct {
 	Enabled bool `json:"enabled"`
+}
+
+type longTermMemoryContextResponse struct {
+	Available  bool   `json:"available"`
+	Capability string `json:"capability,omitempty"`
+}
+
+type longTermMemoryContextOutcome string
+
+const (
+	longTermMemoryContextIssued      longTermMemoryContextOutcome = "issued"
+	longTermMemoryContextUnavailable longTermMemoryContextOutcome = "unavailable"
+	longTermMemoryContextFailed      longTermMemoryContextOutcome = "failed"
+)
+
+func (s *Server) beginLongTermMemoryContext(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.memoryContext == nil || r.URL.RawQuery != "" || !emptyJSONRequest(r) {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextFailed)
+		writeLongTermMemoryContextFailure(w)
+		return
+	}
+	capability, available, err := s.memoryContext.BeginContext(
+		r.Context(),
+		principal.UID,
+		principal.AppID,
+	)
+	if err != nil || available != (capability != "") {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextFailed)
+		writeLongTermMemoryContextFailure(w)
+		return
+	}
+	if writeJSON(w, http.StatusOK, longTermMemoryContextResponse{
+		Available:  available,
+		Capability: capability,
+	}) != nil {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextFailed)
+		return
+	}
+	if available {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextIssued)
+		return
+	}
+	s.observeLongTermMemoryContext(r, longTermMemoryContextUnavailable)
+}
+
+func (s *Server) observeLongTermMemoryContext(r *http.Request, outcome longTermMemoryContextOutcome) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.InfoContext(r.Context(), "conversation memory context", "outcome", string(outcome))
 }
 
 func (s *Server) longTermMemoryStatus(w http.ResponseWriter, r *http.Request) {
@@ -66,4 +120,8 @@ func (s *Server) disableLongTermMemory(w http.ResponseWriter, r *http.Request) {
 
 func writeLongTermMemoryFailure(w http.ResponseWriter) {
 	writeProblem(w, http.StatusServiceUnavailable, "conversation_memory_management_failed", "Conversation memory management failed.")
+}
+
+func writeLongTermMemoryContextFailure(w http.ResponseWriter) {
+	writeProblem(w, http.StatusServiceUnavailable, "conversation_memory_context_failed", "Conversation memory context could not be prepared.")
 }

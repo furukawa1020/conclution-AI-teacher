@@ -62,6 +62,7 @@ type Store interface {
 	DisableAndDelete(context.Context, string, time.Time) error
 	Put(context.Context, string, int64, Record, time.Time) error
 	Get(context.Context, string, int64, time.Time) (Record, error)
+	GetCurrent(context.Context, string, time.Time) (Consent, Record, error)
 }
 
 type Control interface {
@@ -71,11 +72,12 @@ type Control interface {
 }
 
 type Manager struct {
-	store Store
-	aead  cipher.AEAD
-	key   []byte
-	now   func() time.Time
-	rand  io.Reader
+	store       Store
+	aead        cipher.AEAD
+	contextAEAD cipher.AEAD
+	key         []byte
+	now         func() time.Time
+	rand        io.Reader
 }
 
 func New(key []byte, store Store) (*Manager, error) {
@@ -92,7 +94,17 @@ func New(key []byte, store Store) (*Manager, error) {
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	return &Manager{store: store, aead: aead, key: append([]byte(nil), key...), now: time.Now, rand: rand.Reader}, nil
+	contextEncryptionKey := deriveKey(key, "kotae-long-memory-context-capability-aead-v1")
+	defer clear(contextEncryptionKey)
+	contextBlock, err := aes.NewCipher(contextEncryptionKey)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	contextAEAD, err := cipher.NewGCM(contextBlock)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	return &Manager{store: store, aead: aead, contextAEAD: contextAEAD, key: append([]byte(nil), key...), now: time.Now, rand: rand.Reader}, nil
 }
 
 func deriveKey(root []byte, purpose string) []byte {

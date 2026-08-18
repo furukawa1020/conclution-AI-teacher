@@ -390,6 +390,7 @@ type VoiceOptions struct {
 	SemanticShadowKey    []byte
 	LongTermMemory       longmemory.Control
 	LongTermMemoryQueue  longmemory.Enqueuer
+	MemoryContext        longmemory.ContextIssuer
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -449,6 +450,7 @@ type Server struct {
 	passkeyClientRateLimiter guard.Limiter
 	passkeyAppCircuitBreaker guard.Limiter
 	longTermMemory           longmemory.Control
+	memoryContext            longmemory.ContextIssuer
 }
 
 func New(
@@ -542,6 +544,7 @@ func NewWithVoiceAndPasskeys(
 		passkeyClientRateLimiter: passkeyClientRateLimiter,
 		passkeyAppCircuitBreaker: passkeyAppCircuitBreaker,
 		longTermMemory:           voice.LongTermMemory,
+		memoryContext:            voice.MemoryContext,
 	}
 
 	mux := http.NewServeMux()
@@ -573,6 +576,7 @@ func NewWithVoiceAndPasskeys(
 	mux.Handle("GET "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.longTermMemoryStatus)))
 	mux.Handle("PUT "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.enableLongTermMemory)))
 	mux.Handle("DELETE "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.disableLongTermMemory)))
+	mux.Handle("POST "+longTermMemoryContextBeginPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.beginLongTermMemoryContext)))
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(

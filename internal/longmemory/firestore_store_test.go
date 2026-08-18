@@ -40,6 +40,10 @@ func TestFirestoreStoreOptOutPreventsStaleMemoryResurrection(t *testing.T) {
 	if err := manager.Save(ctx, uid, consent.Generation, Payload{Topics: []string{"暗号化memory"}}); err != nil {
 		t.Fatal(err)
 	}
+	capability, available, err := manager.BeginContext(ctx, uid, "firebase-app-id")
+	if err != nil || !available || capability == "" {
+		t.Fatalf("available=%v capability=%q err=%v", available, capability, err)
+	}
 	if err := manager.DisableAndDelete(ctx, uid); err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +53,9 @@ func TestFirestoreStoreOptOutPreventsStaleMemoryResurrection(t *testing.T) {
 	status, err := manager.Status(ctx, uid)
 	if err != nil || status.Enabled || status.Generation <= consent.Generation {
 		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	if _, _, err := manager.OpenContext(ctx, uid, "firebase-app-id", capability); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("stale capability err=%v", err)
 	}
 	key, _ := manager.principalKey(uid)
 	if _, err := client.Collection(recordsCollection).Doc(key).Get(ctx); err == nil {

@@ -1101,7 +1101,7 @@ test("unfinished respondent coaching keeps Native input when privacy permits", a
   );
   assert.match(
     begin,
-    /coachActive,\s*expectedEpoch,[\s\S]*nativeAudio,\s*sessionState: serializedSessionState/u,
+    /coachActive,\s*expectedEpoch,[\s\S]*nativeAudio,\s*sessionContext,\s*sessionState: serializedSessionState/u,
   );
   assert.match(
     bridge,
@@ -1109,7 +1109,7 @@ test("unfinished respondent coaching keeps Native input when privacy permits", a
   );
   assert.match(
     begin,
-    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*\)/u,
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*\)/u,
   );
 
   const routeStart = client.indexOf("const fn requires_staged_route(self)");
@@ -1236,7 +1236,7 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
   assert.ok(assignmentAt < recordingAt);
   assert.match(
     begin.slice(recordingAt, recordingAt + 180),
-    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*\)/u,
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*\)/u,
   );
   assert.doesNotMatch(begin, /voice_live_capture_late/u);
 });
@@ -3946,6 +3946,27 @@ test("native audio is explicit and cannot weaken strict mode", () => {
       }),
     /voice_live_start_invalid/,
   );
+});
+
+test("live transport binds one opaque memory context and rejects malformed values", () => {
+  const socket = new MockWebSocket();
+  const start = {
+    ...liveStartFrame(),
+    sessionContext: "kms1.opaque",
+  };
+  const transport = createVoiceLiveClientTransport(socket, start);
+  transport.open();
+  assert.deepEqual(JSON.parse(socket.sent[0]), start);
+
+  for (const sessionContext of ["", "wrong.opaque", "kms1.has space", `kms1.${"x".repeat(4092)}`]) {
+    assert.throws(
+      () => createVoiceLiveClientTransport(new MockWebSocket(), {
+        ...liveStartFrame(),
+        sessionContext,
+      }),
+      /voice_live_start_invalid/,
+    );
+  }
 });
 
 test("live commit preserves exact frames and fails on backpressure", () => {

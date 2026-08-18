@@ -472,6 +472,7 @@ func main() {
 			LongTermMemoryQueue:  longTermMemoryDispatcher,
 			MemoryContext:        longTermMemory,
 			SessionContext:       longTermMemory,
+			SessionContextOpener: longTermMemory,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,

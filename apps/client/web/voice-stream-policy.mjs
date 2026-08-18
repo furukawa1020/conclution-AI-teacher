@@ -940,6 +940,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
             "idToken",
             "nativeAudio",
             "sampleRateHz",
+            ...(startFrame.sessionContext === undefined ? [] : ["sessionContext"]),
             "sessionState",
             "strictCloudMinimization",
             "turnMode",
@@ -952,6 +953,7 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
             ...(startFrame.latencyProofVersion === 1 ? ["latencyProofVersion"] : []),
             "nativeAudio",
             "sampleRateHz",
+            ...(startFrame.sessionContext === undefined ? [] : ["sessionContext"]),
             "sessionState",
             "strictCloudMinimization",
             "turnMode",
@@ -971,6 +973,11 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
     (startFrame.nativeAudio && startFrame.nativeCoachControl !== true) ||
     (startFrame.nativeAudio && startFrame.strictCloudMinimization) ||
     typeof startFrame.sessionState !== "string" ||
+    (startFrame.sessionContext !== undefined &&
+      (typeof startFrame.sessionContext !== "string" ||
+        !startFrame.sessionContext.startsWith("kms1.") ||
+        startFrame.sessionContext.length > 4096 ||
+        /\s/u.test(startFrame.sessionContext))) ||
     typeof startFrame.strictCloudMinimization !== "boolean" ||
     !["ambient", "foreground", "intentional"].includes(startFrame.turnMode) ||
     startFrame.sampleRateHz !== VOICE_LIVE_LIMITS.inputSampleRateHz

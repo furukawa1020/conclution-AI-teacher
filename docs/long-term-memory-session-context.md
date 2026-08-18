@@ -14,4 +14,8 @@ Issue #177 では、非ゲストの音声開始で5分以内のパスキー再�
 
 ブラウザは同じvoice session generationで最大一度だけ準備する。capabilityとsession contextは専用moduleのclosureだけに保持し、DOM、CustomEvent、console、Storage、URLへ公開しない。停止、世代差替え、`pagehide`、15分期限でAbortSignalを閉じて参照を破棄する。公開snapshotは `preparing`、`ready`、`unavailable`、`failed`、`cancelled`、`expired` の有限状態とgenerationだけである。ここではsession contextをvoice requestへまだ渡さない。
 
+Issue #178 では、準備済みsession contextを同じvoice session generationのbuffered HTTP、NDJSON stream、WebSocket liveへだけ束縛する。NativeからHTTP fallbackへ移っても、録音開始時に固定した同じopaque tokenを使い、途中で新しいgenerationを混ぜない。ゲスト、strict cloud minimization、期限切れ、foreign principal、改ざん、未知schemaはメモリだけを`rejected`へ閉じ、既存の音声経路は継続する。
+
+サーバーは認証済みUIDとApp IDをAADとしてローカルAES-GCM復号し、`topics`、`preferences`、`openLoops`を命令文へ連結せず、型付き有限payloadとしてconversation境界へ渡す。復号処理には`context.Context`を与えないため、DB、Storage、network lookupを実装上呼べない。session contextなしのturnは復号器も呼ばず、contextありの1000 turn fixtureでも永続Store呼び出しは0である。opaque tokenと復号payloadはresponse、problem、caption、state、telemetry、log、DOM、URL、Storageへ出さず、turn終了またはキャンセル時に参照を破棄する。
+
 release preflightは実Cloud Runの両endpointへFirebase Hosting originからOPTIONSを送り、beginはAuthorizationとApp Check、consumeはそれらにContent-Typeを加えたheader集合だけがHTTP 204、Hosting origin、`cross-origin` resource policy、POST許可になることを検証する。

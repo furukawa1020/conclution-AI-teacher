@@ -5,11 +5,55 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
+	"time"
+
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 )
 
+func (s *Server) memoryContextPreflight(w http.ResponseWriter, r *http.Request) {
+	requireContentType := r.URL.Path == longTermMemoryContextConsumePath
+	if r.Header.Get("Origin") != allowedWebOrigin ||
+		r.Header.Get("Access-Control-Request-Method") != http.MethodPost ||
+		!validMemoryContextPreflightHeaders(r.Header.Get("Access-Control-Request-Headers"), requireContentType) {
+		writeProblem(w, http.StatusForbidden, "cross_site_request", "Cross-site writes are not allowed.")
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Firebase-AppCheck")
+	w.Header().Set("Access-Control-Allow-Methods", http.MethodPost)
+	w.Header().Set("Access-Control-Max-Age", "600")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func validMemoryContextPreflightHeaders(value string, requireContentType bool) bool {
+	required := map[string]bool{"authorization": false, "x-firebase-appcheck": false}
+	if requireContentType {
+		required["content-type"] = false
+	}
+	for _, raw := range strings.Split(value, ",") {
+		header := strings.ToLower(strings.TrimSpace(raw))
+		if header == "" {
+			continue
+		}
+		if header != "authorization" && header != "content-type" && header != "x-firebase-appcheck" {
+			return false
+		}
+		if _, needed := required[header]; needed {
+			required[header] = true
+		}
+	}
+	for _, present := range required {
+		if !present {
+			return false
+		}
+	}
+	return true
+}
+
 const (
-	longTermMemoryPath             = "/api/v1/conversation-memory"
-	longTermMemoryContextBeginPath = "/api/v1/conversation-memory/context:begin"
+	longTermMemoryPath               = "/api/v1/conversation-memory"
+	longTermMemoryContextBeginPath   = "/api/v1/conversation-memory/context:begin"
+	longTermMemoryContextConsumePath = "/api/v1/conversation-memory/context:consume"
 )
 
 type longTermMemoryResponse struct {
@@ -21,13 +65,61 @@ type longTermMemoryContextResponse struct {
 	Capability string `json:"capability,omitempty"`
 }
 
+type longTermMemoryContextConsumeRequest struct {
+	Capability string `json:"capability"`
+}
+
+type longTermMemorySessionResponse struct {
+	SessionContext   string `json:"sessionContext"`
+	ExpiresInSeconds int64  `json:"expiresInSeconds"`
+}
+
 type longTermMemoryContextOutcome string
 
 const (
 	longTermMemoryContextIssued      longTermMemoryContextOutcome = "issued"
 	longTermMemoryContextUnavailable longTermMemoryContextOutcome = "unavailable"
 	longTermMemoryContextFailed      longTermMemoryContextOutcome = "failed"
+	longTermMemoryContextReplay      longTermMemoryContextOutcome = "replay_rejected"
 )
+
+func (s *Server) consumeLongTermMemoryContext(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.sessionContext == nil || r.URL.RawQuery != "" || !isJSONContentType(r) {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextFailed)
+		writeLongTermMemoryContextConsumeFailure(w, http.StatusBadRequest)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4608)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var body longTermMemoryContextConsumeRequest
+	if decoder.Decode(&body) != nil || len(body.Capability) < 6 || len(body.Capability) > 4096 ||
+		!errors.Is(decoder.Decode(&struct{}{}), io.EOF) {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextFailed)
+		writeLongTermMemoryContextConsumeFailure(w, http.StatusBadRequest)
+		return
+	}
+	sessionContext, expiresInSeconds, err := s.sessionContext.ConsumeSessionContext(
+		r.Context(), principal.UID, principal.AppID, body.Capability,
+	)
+	if err != nil || sessionContext == "" || expiresInSeconds != int64(longmemory.SessionContextTTL/time.Second) {
+		outcome := longTermMemoryContextFailed
+		if errors.Is(err, longmemory.ErrReplay) {
+			outcome = longTermMemoryContextReplay
+		}
+		s.observeLongTermMemoryContext(r, outcome)
+		writeLongTermMemoryContextConsumeFailure(w, http.StatusConflict)
+		return
+	}
+	if writeJSON(w, http.StatusOK, longTermMemorySessionResponse{
+		SessionContext: sessionContext, ExpiresInSeconds: expiresInSeconds,
+	}) != nil {
+		s.observeLongTermMemoryContext(r, longTermMemoryContextFailed)
+		return
+	}
+	s.observeLongTermMemoryContext(r, longTermMemoryContextIssued)
+}
 
 func (s *Server) beginLongTermMemoryContext(w http.ResponseWriter, r *http.Request) {
 	principal, ok := principalFromContext(r.Context())
@@ -124,4 +216,8 @@ func writeLongTermMemoryFailure(w http.ResponseWriter) {
 
 func writeLongTermMemoryContextFailure(w http.ResponseWriter) {
 	writeProblem(w, http.StatusServiceUnavailable, "conversation_memory_context_failed", "Conversation memory context could not be prepared.")
+}
+
+func writeLongTermMemoryContextConsumeFailure(w http.ResponseWriter, status int) {
+	writeProblem(w, status, "conversation_memory_context_consume_failed", "Conversation memory context could not be consumed.")
 }

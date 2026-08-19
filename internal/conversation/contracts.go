@@ -333,6 +333,20 @@ func normalizeTurn(turn VoiceTurn) (VoiceTurn, error) {
 		turn.RequestID != strings.TrimSpace(turn.RequestID) {
 		return VoiceTurn{}, ErrInvalidTurn
 	}
+	if (turn.Memory == nil) != (turn.MemoryGeneration == 0) ||
+		turn.MemoryGeneration < 0 ||
+		(turn.Memory != nil &&
+			(turn.GuestExperience || longmemory.ValidatePayload(*turn.Memory) != nil)) {
+		return VoiceTurn{}, ErrInvalidTurn
+	}
+	if turn.Memory != nil {
+		memory := longmemory.Payload{
+			Topics:      append([]string(nil), turn.Memory.Topics...),
+			Preferences: append([]string(nil), turn.Memory.Preferences...),
+			OpenLoops:   append([]string(nil), turn.Memory.OpenLoops...),
+		}
+		turn.Memory = &memory
+	}
 
 	if turn.PDF == nil {
 		return turn, nil

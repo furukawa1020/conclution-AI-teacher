@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/answercontract"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 	"google.golang.org/genai"
 )
@@ -244,6 +245,85 @@ func TestAgentFastPathAndInitialState(t *testing.T) {
 	}
 	if state.Turn != 1 || len(state.Graph.Claims) != 1 {
 		t.Fatalf("unexpected initial state: %#v", state)
+	}
+}
+
+func TestAgentCarriesOneTypedMemoryGenerationAcrossSession(t *testing.T) {
+	plan := validModelPlan()
+	fake := &fakeGenerator{generations: []fakeGeneration{
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+		{body: encodePlan(t, plan)},
+		{body: encodeContract(t, validCriticContract(plan.SpokenReply))},
+	}}
+	agent := newTestAgent(t, fake)
+	memory := &longmemory.Payload{
+		Topics:      []string{"quiet conversation"},
+		Preferences: []string{"brief response"},
+		OpenLoops:   []string{"continue next time"},
+	}
+	first, err := agent.Process(context.Background(), "uid-1", VoiceTurn{
+		SchemaVersion:    SchemaVersion,
+		Utterance:        "continue our previous topic",
+		Memory:           memory,
+		MemoryGeneration: 7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPromptMemory := func(t *testing.T, prompt string, wantTopic string) {
+		t.Helper()
+		const startMarker = "<conversation_data>\n"
+		const endMarker = "\n</conversation_data>"
+		start := strings.Index(prompt, startMarker)
+		end := strings.Index(prompt, endMarker)
+		if start < 0 || end <= start {
+			t.Fatal("conversation payload not found")
+		}
+		var payload struct {
+			SessionMemory *longmemory.Payload `json:"session_memory"`
+		}
+		if err := json.Unmarshal([]byte(prompt[start+len(startMarker):end]), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.SessionMemory == nil || len(payload.SessionMemory.Topics) != 1 ||
+			payload.SessionMemory.Topics[0] != wantTopic {
+			t.Fatalf("typed session memory missing: %+v", payload.SessionMemory)
+		}
+	}
+	assertPromptMemory(t, fake.calls[0].prompt, "quiet conversation")
+	if strings.Contains(fake.calls[1].prompt, "session_memory") {
+		t.Fatal("session memory must not become critic evidence")
+	}
+	if strings.Contains(first.StateToken, "quiet conversation") {
+		t.Fatal("plaintext memory leaked into opaque state token")
+	}
+	state, err := agent.codec.open("uid-1", first.StateToken)
+	if err != nil || state.MemoryGeneration != 7 || state.SessionMemory == nil ||
+		state.SessionMemory.OpenLoops[0] != "continue next time" {
+		t.Fatalf("encrypted state did not retain memory: state=%+v err=%v", state, err)
+	}
+
+	second, err := agent.Process(context.Background(), "uid-1", VoiceTurn{
+		SchemaVersion: SchemaVersion,
+		Utterance:     "keep going",
+		StateToken:    first.StateToken,
+		Memory: &longmemory.Payload{
+			Topics: []string{"must not replace"},
+		},
+		MemoryGeneration: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPromptMemory(t, fake.calls[2].prompt, "quiet conversation")
+	if strings.Contains(fake.calls[3].prompt, "session_memory") {
+		t.Fatal("session memory must not become critic evidence")
+	}
+	state, err = agent.codec.open("uid-1", second.StateToken)
+	if err != nil || state.MemoryGeneration != 7 ||
+		state.SessionMemory == nil || state.SessionMemory.Topics[0] != "quiet conversation" {
+		t.Fatalf("a later generation replaced session memory: state=%+v err=%v", state, err)
 	}
 }
 

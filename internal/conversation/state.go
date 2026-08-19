@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 )
 
 const (
@@ -40,6 +42,8 @@ type conversationState struct {
 	ExpiresAt               int64                `json:"exp"`
 	SessionID               string               `json:"sid,omitempty"`
 	Turn                    int                  `json:"turn"`
+	MemoryGeneration        int64                `json:"memory_generation,omitempty"`
+	SessionMemory           *longmemory.Payload  `json:"session_memory,omitempty"`
 	VoiceCheckpointTag      string               `json:"voice_checkpoint_tag,omitempty"`
 	VoiceCheckpointScopeTag string               `json:"voice_checkpoint_scope_tag,omitempty"`
 	Graph                   ThoughtStateGraph    `json:"thought_state_graph"`
@@ -205,6 +209,11 @@ func normalizeConversationState(state conversationState) (conversationState, err
 		(state.VoiceCheckpointTag != "" &&
 			(!validCoachControlTag(state.VoiceCheckpointTag) ||
 				!validCoachControlTag(state.VoiceCheckpointScopeTag))) {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	if (state.SessionMemory == nil) != (state.MemoryGeneration == 0) ||
+		state.MemoryGeneration < 0 ||
+		(state.SessionMemory != nil && longmemory.ValidatePayload(*state.SessionMemory) != nil) {
 		return conversationState{}, ErrInvalidStateToken
 	}
 	graph, err := normalizeGraph(state.Graph)

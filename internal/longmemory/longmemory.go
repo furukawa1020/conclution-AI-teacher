@@ -243,3 +243,9 @@ func validatePayload(payload Payload) error {
 	}
 	return nil
 }
+
+// ValidatePayload applies the same finite, privacy-screened schema at package
+// boundaries that is used before encrypted persistence and session issuance.
+func ValidatePayload(payload Payload) error {
+	return validatePayload(payload)
+}

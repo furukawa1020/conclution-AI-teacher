@@ -2,8 +2,10 @@ package passkey
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,21 +21,64 @@ type memoryCredential struct {
 	UpdatedAt  time.Time
 }
 
+type memoryRecoveryCode struct {
+	Digest    [sha256.Size]byte
+	ExpiresAt time.Time
+	IssuedAt  time.Time
+}
+
 type MemoryStore struct {
-	mu          sync.Mutex
-	ceremonies  map[string]Ceremony
-	users       map[string]*User
-	credentials map[string]memoryCredential
-	deleted     map[string]time.Time
+	mu             sync.Mutex
+	ceremonies     map[string]Ceremony
+	users          map[string]*User
+	credentials    map[string]memoryCredential
+	deleted        map[string]time.Time
+	recovery       map[string]memoryRecoveryCode
+	recoveryByCode map[string]string
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		ceremonies:  make(map[string]Ceremony),
-		users:       make(map[string]*User),
-		credentials: make(map[string]memoryCredential),
-		deleted:     make(map[string]time.Time),
+		ceremonies:     make(map[string]Ceremony),
+		users:          make(map[string]*User),
+		credentials:    make(map[string]memoryCredential),
+		deleted:        make(map[string]time.Time),
+		recovery:       make(map[string]memoryRecoveryCode),
+		recoveryByCode: make(map[string]string),
 	}
+}
+
+func (s *MemoryStore) ReplaceRecoveryCode(
+	_ context.Context,
+	uid string,
+	digest [sha256.Size]byte,
+	expiresAt, now time.Time,
+) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" || now.IsZero() || !expiresAt.After(now.UTC()) ||
+		expiresAt.After(now.UTC().Add(RecoveryCodeTTL)) {
+		return ErrRecoveryCode
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accountKey := documentID([]byte(uid))
+	user := s.users[accountKey]
+	if user == nil || user.UID != uid {
+		return ErrCredentialNotFound
+	}
+	if _, err := s.validateCredentialStateLocked(user, now.UTC()); err != nil {
+		return err
+	}
+	codeKey := recoveryCodeDocumentID(digest)
+	if owner, exists := s.recoveryByCode[codeKey]; exists && owner != accountKey {
+		return ErrCredentialConflict
+	}
+	if previous, exists := s.recovery[accountKey]; exists {
+		delete(s.recoveryByCode, recoveryCodeDocumentID(previous.Digest))
+	}
+	s.recovery[accountKey] = memoryRecoveryCode{Digest: digest, ExpiresAt: expiresAt.UTC(), IssuedAt: now.UTC()}
+	s.recoveryByCode[codeKey] = accountKey
+	return nil
 }
 
 func (s *MemoryStore) DeleteAccountData(_ context.Context, uid string, now time.Time) error {
@@ -53,6 +98,10 @@ func (s *MemoryStore) DeleteAccountData(_ context.Context, uid string, now time.
 	references, err := s.validateCredentialStateLocked(user, now.UTC())
 	if err != nil {
 		return err
+	}
+	if recovery, exists := s.recovery[key]; exists {
+		delete(s.recoveryByCode, recoveryCodeDocumentID(recovery.Digest))
+		delete(s.recovery, key)
 	}
 	for _, reference := range references {
 		delete(s.credentials, reference.String())

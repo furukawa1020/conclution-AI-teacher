@@ -28,6 +28,7 @@ const (
 	passkeyCredentialsPath            = "/api/v1/passkeys/credentials"
 	passkeyCredentialRevokePath       = "/api/v1/passkeys/credentials:revoke"
 	passkeyAccountDeletePath          = "/api/v1/passkeys/account:delete"
+	passkeyRecoveryCodeIssuePath      = "/api/v1/passkeys/recovery-code:issue"
 	passkeyVoiceAuthorizationAge      = 5 * time.Minute
 	passkeyManagementAuthorizationAge = 5 * time.Minute
 	passkeyMaxCredentialBody          = 256 * 1024
@@ -43,6 +44,7 @@ type PasskeyService interface {
 	ListCredentials(context.Context, string) ([]passkey.CredentialSummary, error)
 	RevokeCredential(context.Context, string, passkey.CredentialReference) error
 	DeleteAccount(context.Context, string) error
+	IssueRecoveryCode(context.Context, string) (passkey.RecoveryCodeResult, error)
 }
 
 const accountDeletionConfirmation = "この仮名アカウントを完全に削除する"
@@ -55,6 +57,32 @@ type credentialSummaryResponse struct {
 
 type credentialListResponse struct {
 	Credentials []credentialSummaryResponse `json:"credentials"`
+}
+
+type recoveryCodeResponse struct {
+	RecoveryCode string `json:"recoveryCode"`
+	ExpiresIn    int64  `json:"expiresIn"`
+}
+
+func (s *Server) issuePasskeyRecoveryCode(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || s.passkeys == nil || r.URL.RawQuery != "" {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_recovery_code_failed", "Passkey recovery code operation failed.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, principal.AppID) {
+		return
+	}
+	if !emptyJSONRequest(r) {
+		writeProblem(w, http.StatusBadRequest, "passkey_recovery_code_failed", "Passkey recovery code operation failed.")
+		return
+	}
+	result, err := s.passkeys.IssueRecoveryCode(r.Context(), principal.UID)
+	if err != nil || result.Code == "" || result.ExpiresIn != int64(passkey.RecoveryCodeTTL/time.Second) {
+		writeProblem(w, http.StatusServiceUnavailable, "passkey_recovery_code_failed", "Passkey recovery code operation failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, recoveryCodeResponse{RecoveryCode: result.Code, ExpiresIn: result.ExpiresIn})
 }
 
 func (s *Server) listPasskeyCredentials(w http.ResponseWriter, r *http.Request) {

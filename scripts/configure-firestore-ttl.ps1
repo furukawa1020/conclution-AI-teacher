@@ -24,6 +24,8 @@ $requiredCollectionGroups = @(
     "voiceRateLimits",
     "guestVoiceRateLimits",
     "passkey_account_deletions_v1",
+    "passkey_recovery_accounts_v1",
+    "passkey_recovery_codes_v1",
     "voiceLiveLeases",
     "passkey_ceremonies_v1",
     "passkeyClientRateLimits",

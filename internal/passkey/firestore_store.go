@@ -2,6 +2,7 @@ package passkey
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -16,11 +17,13 @@ import (
 )
 
 const (
-	ceremonyCollection   = "passkey_ceremonies_v1"
-	userCollection       = "passkey_users_v1"
-	handleCollection     = "passkey_handles_v1"
-	credentialCollection = "passkey_credentials_v1"
-	deletionCollection   = "passkey_account_deletions_v1"
+	ceremonyCollection        = "passkey_ceremonies_v1"
+	userCollection            = "passkey_users_v1"
+	handleCollection          = "passkey_handles_v1"
+	credentialCollection      = "passkey_credentials_v1"
+	deletionCollection        = "passkey_account_deletions_v1"
+	recoveryAccountCollection = "passkey_recovery_accounts_v1"
+	recoveryCodeCollection    = "passkey_recovery_codes_v1"
 )
 
 type FirestoreStore struct {
@@ -66,11 +69,139 @@ type deletionDocument struct {
 	ExpiresAt time.Time `firestore:"expiresAt"`
 }
 
+type recoveryAccountDocument struct {
+	SchemaVersion int       `firestore:"schemaVersion"`
+	CodeDigest    []byte    `firestore:"codeDigest"`
+	ExpiresAt     time.Time `firestore:"expiresAt"`
+	IssuedAt      time.Time `firestore:"issuedAt"`
+}
+
+type recoveryCodeDocument struct {
+	SchemaVersion int       `firestore:"schemaVersion"`
+	AccountKey    string    `firestore:"accountKey"`
+	ExpiresAt     time.Time `firestore:"expiresAt"`
+	IssuedAt      time.Time `firestore:"issuedAt"`
+}
+
 func NewFirestoreStore(client *firestore.Client) (*FirestoreStore, error) {
 	if client == nil {
 		return nil, errors.New("Firestore client is required")
 	}
 	return &FirestoreStore{client: client}, nil
+}
+
+func (s *FirestoreStore) ReplaceRecoveryCode(
+	ctx context.Context,
+	uid string,
+	digest [sha256.Size]byte,
+	expiresAt, now time.Time,
+) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" || now.IsZero() || !expiresAt.After(now.UTC()) ||
+		expiresAt.After(now.UTC().Add(RecoveryCodeTTL)) {
+		return ErrRecoveryCode
+	}
+	now = now.UTC()
+	expiresAt = expiresAt.UTC()
+	accountKey := documentID([]byte(uid))
+	userRef := s.client.Collection(userCollection).Doc(accountKey)
+	deletionRef := s.client.Collection(deletionCollection).Doc(accountKey)
+	recoveryRef := s.client.Collection(recoveryAccountCollection).Doc(accountKey)
+	newCodeRef := s.client.Collection(recoveryCodeCollection).Doc(recoveryCodeDocumentID(digest))
+	return normalizeStoreError(s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		if _, err := tx.Get(deletionRef); err == nil || status.Code(err) != codes.NotFound {
+			if err == nil {
+				return ErrCredentialNotFound
+			}
+			return err
+		}
+		userSnapshot, err := tx.Get(userRef)
+		if status.Code(err) == codes.NotFound {
+			return ErrCredentialNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var user userDocument
+		if userSnapshot.DataTo(&user) != nil || user.UID != uid {
+			return ErrCredentialStateInvalid
+		}
+		credentials, references, err := decodeLifecycleCredentials(user)
+		if err != nil {
+			return err
+		}
+		indexes, err := tx.GetAll(lifecycleCredentialDocumentRefs(s.client, references))
+		if err != nil {
+			return err
+		}
+		if err := validateLifecycleCredentialSnapshots(indexes, user, credentials, references, now); err != nil {
+			return err
+		}
+
+		var previous *recoveryAccountDocument
+		recoverySnapshot, err := tx.Get(recoveryRef)
+		if err == nil {
+			var document recoveryAccountDocument
+			if recoverySnapshot.DataTo(&document) != nil || validateRecoveryAccountDocument(document) != nil {
+				return ErrCredentialStateInvalid
+			}
+			previous = &document
+		} else if status.Code(err) != codes.NotFound {
+			return err
+		}
+		if _, err := tx.Get(newCodeRef); err == nil {
+			return ErrCredentialConflict
+		} else if status.Code(err) != codes.NotFound {
+			return err
+		}
+		var previousCodeRef *firestore.DocumentRef
+		if previous != nil {
+			var previousDigest [sha256.Size]byte
+			copy(previousDigest[:], previous.CodeDigest)
+			previousCodeRef = s.client.Collection(recoveryCodeCollection).Doc(recoveryCodeDocumentID(previousDigest))
+			previousIndex, err := tx.Get(previousCodeRef)
+			if status.Code(err) == codes.NotFound && !previous.ExpiresAt.After(now) {
+				// Firestore TTL removes related documents independently. An expired
+				// account-side record may briefly outlive its already-expired index.
+			} else if err != nil {
+				return ErrCredentialStateInvalid
+			} else {
+				var index recoveryCodeDocument
+				if previousIndex.DataTo(&index) != nil || validateRecoveryCodeDocument(index, accountKey, *previous) != nil {
+					return ErrCredentialStateInvalid
+				}
+			}
+		}
+
+		if previousCodeRef != nil {
+			if err := tx.Delete(previousCodeRef); err != nil {
+				return err
+			}
+		}
+		account := recoveryAccountDocument{SchemaVersion: 1, CodeDigest: append([]byte(nil), digest[:]...), ExpiresAt: expiresAt, IssuedAt: now}
+		if err := tx.Set(recoveryRef, account); err != nil {
+			return err
+		}
+		return tx.Create(newCodeRef, recoveryCodeDocument{SchemaVersion: 1, AccountKey: accountKey, ExpiresAt: expiresAt, IssuedAt: now})
+	}))
+}
+
+func validateRecoveryAccountDocument(document recoveryAccountDocument) error {
+	if document.SchemaVersion != 1 || len(document.CodeDigest) != sha256.Size ||
+		document.IssuedAt.IsZero() || document.ExpiresAt.IsZero() ||
+		!document.ExpiresAt.After(document.IssuedAt) ||
+		document.ExpiresAt.After(document.IssuedAt.Add(RecoveryCodeTTL)) {
+		return ErrCredentialStateInvalid
+	}
+	return nil
+}
+
+func validateRecoveryCodeDocument(index recoveryCodeDocument, accountKey string, account recoveryAccountDocument) error {
+	if index.SchemaVersion != 1 || index.AccountKey != accountKey ||
+		!index.IssuedAt.Equal(account.IssuedAt) || !index.ExpiresAt.Equal(account.ExpiresAt) {
+		return ErrCredentialStateInvalid
+	}
+	return nil
 }
 
 func (s *FirestoreStore) PutCeremony(ctx context.Context, id string, record Ceremony) error {
@@ -574,6 +705,7 @@ func (s *FirestoreStore) DeleteAccountData(ctx context.Context, uid string, now 
 	userKey := documentID([]byte(uid))
 	userRef := s.client.Collection(userCollection).Doc(userKey)
 	deletionRef := s.client.Collection(deletionCollection).Doc(userKey)
+	recoveryRef := s.client.Collection(recoveryAccountCollection).Doc(userKey)
 	return normalizeStoreError(s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
 		deletion, deletionErr := tx.Get(deletionRef)
 		if deletionErr == nil {
@@ -607,6 +739,39 @@ func (s *FirestoreStore) DeleteAccountData(ctx context.Context, uid string, now 
 		}
 		if err := validateLifecycleCredentialSnapshots(indexes, user, credentials, references, now); err != nil {
 			return err
+		}
+		var recoveryCodeRef *firestore.DocumentRef
+		recoverySnapshot, recoveryErr := tx.Get(recoveryRef)
+		if recoveryErr == nil {
+			var recovery recoveryAccountDocument
+			if recoverySnapshot.DataTo(&recovery) != nil || validateRecoveryAccountDocument(recovery) != nil {
+				return ErrCredentialStateInvalid
+			}
+			var digest [sha256.Size]byte
+			copy(digest[:], recovery.CodeDigest)
+			recoveryCodeRef = s.client.Collection(recoveryCodeCollection).Doc(recoveryCodeDocumentID(digest))
+			indexSnapshot, err := tx.Get(recoveryCodeRef)
+			if status.Code(err) == codes.NotFound && !recovery.ExpiresAt.After(now) {
+				// See ReplaceRecoveryCode: tolerate only TTL cleanup of an expired
+				// relation. A live relation must always remain complete.
+			} else if err != nil {
+				return ErrCredentialStateInvalid
+			} else {
+				var index recoveryCodeDocument
+				if indexSnapshot.DataTo(&index) != nil || validateRecoveryCodeDocument(index, userKey, recovery) != nil {
+					return ErrCredentialStateInvalid
+				}
+			}
+		} else if status.Code(recoveryErr) != codes.NotFound {
+			return recoveryErr
+		}
+		if recoveryCodeRef != nil {
+			if err := tx.Delete(recoveryCodeRef); err != nil {
+				return err
+			}
+			if err := tx.Delete(recoveryRef); err != nil {
+				return err
+			}
 		}
 		for _, reference := range references {
 			if err := tx.Delete(s.client.Collection(credentialCollection).Doc(reference.String())); err != nil {

@@ -484,6 +484,9 @@ func firestoreLifecycleCleanup(t *testing.T, ctx context.Context, client *firest
 		userCollection,
 		handleCollection,
 		credentialCollection,
+		deletionCollection,
+		recoveryAccountCollection,
+		recoveryCodeCollection,
 		firestoreLifecycleRetryCollection,
 	} {
 		iter := client.Collection(collection).Documents(ctx)

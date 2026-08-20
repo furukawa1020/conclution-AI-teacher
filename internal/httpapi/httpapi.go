@@ -580,6 +580,7 @@ func NewWithVoiceAndPasskeys(
 	mux.Handle("GET "+passkeyCredentialsPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.listPasskeyCredentials)))
 	mux.Handle("POST "+passkeyCredentialRevokePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.revokePasskeyCredential)))
 	mux.Handle("POST "+passkeyAccountDeletePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.deletePasskeyAccount)))
+	mux.Handle("POST "+passkeyRecoveryCodeIssuePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.issuePasskeyRecoveryCode)))
 	mux.Handle("GET "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.longTermMemoryStatus)))
 	mux.Handle("PUT "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.enableLongTermMemory)))
 	mux.Handle("DELETE "+longTermMemoryPath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.disableLongTermMemory)))

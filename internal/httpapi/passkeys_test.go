@@ -63,6 +63,14 @@ type recordingPasskeyHTTPService struct {
 	credentialRevokeCalls       int
 	credentialRevokeReference   passkey.CredentialReference
 	accountDeleteCalls          int
+	recoveryCodeCalls           int
+	recoveryCodeResult          passkey.RecoveryCodeResult
+}
+
+func (s *recordingPasskeyHTTPService) IssueRecoveryCode(_ context.Context, uid string) (passkey.RecoveryCodeResult, error) {
+	s.credentialRegistrationUID = uid
+	s.recoveryCodeCalls++
+	return s.recoveryCodeResult, s.finishErr
 }
 
 func (s *recordingPasskeyHTTPService) DeleteAccount(_ context.Context, uid string) error {
@@ -223,6 +231,36 @@ func TestDeletePasskeyAccountRequiresExactConfirmationAndUsesPrincipalUID(t *tes
 	}
 	if recorder.Header().Get("Clear-Site-Data") == "" {
 		t.Fatal("Clear-Site-Data missing")
+	}
+}
+
+func TestIssuePasskeyRecoveryCodeUsesRecentPrincipalAndReturnsOneSecret(t *testing.T) {
+	now := time.Now().UTC()
+	principal := identity.Principal{UID: "private-firebase-uid", AppID: "firebase-app-id", Provider: "custom", AuthMethod: "passkey-v1", PasskeyAt: now, AccountVerified: true}
+	service := &recordingPasskeyHTTPService{recoveryCodeResult: passkey.RecoveryCodeResult{
+		Code: "krc1_" + strings.Repeat("A", 43), ExpiresIn: int64(passkey.RecoveryCodeTTL / time.Second),
+	}}
+	handler := newPasskeyHTTPHandlerWithVerifier(t, service, &recordingPasskeyQuotaLimiter{}, passkeyHTTPVerifier{principal: principal, appID: principal.AppID})
+	request := passkeyPOST(passkeyRecoveryCodeIssuePath, nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.recoveryCodeCalls != 1 ||
+		service.credentialRegistrationUID != principal.UID ||
+		strings.Contains(response.Body.String(), principal.UID) ||
+		strings.Count(response.Body.String(), service.recoveryCodeResult.Code) != 1 {
+		t.Fatalf("response=%d body=%q calls=%d uid=%q", response.Code, response.Body.String(), service.recoveryCodeCalls, service.credentialRegistrationUID)
+	}
+
+	stale := principal
+	stale.PasskeyAt = now.Add(-passkeyManagementAuthorizationAge - time.Second)
+	staleHandler := newPasskeyHTTPHandlerWithVerifier(t, service, &recordingPasskeyQuotaLimiter{}, passkeyHTTPVerifier{principal: stale, appID: stale.AppID})
+	staleRequest := passkeyPOST(passkeyRecoveryCodeIssuePath, nil)
+	staleRequest.Header.Set("Authorization", "Bearer stale")
+	staleResponse := httptest.NewRecorder()
+	staleHandler.ServeHTTP(staleResponse, staleRequest)
+	if staleResponse.Code == http.StatusOK || service.recoveryCodeCalls != 1 || strings.Contains(staleResponse.Body.String(), service.recoveryCodeResult.Code) {
+		t.Fatalf("stale response=%d body=%q calls=%d", staleResponse.Code, staleResponse.Body.String(), service.recoveryCodeCalls)
 	}
 }
 

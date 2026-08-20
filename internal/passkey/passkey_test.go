@@ -16,6 +16,10 @@ type recordingMinter struct {
 	claims map[string]any
 }
 
+type successfulAccountDataCleaner struct{}
+
+func (successfulAccountDataCleaner) DisableAndDelete(context.Context, string) error { return nil }
+
 func (m *recordingMinter) DeleteAccount(_ context.Context, uid string) error {
 	m.uid = uid
 	return nil
@@ -62,7 +66,7 @@ func TestDeleteAccountRetriesAuthAfterDataDeletionWithoutCredentials(t *testing.
 		t.Fatal(err)
 	}
 	deleter := &retryingAccountDeleter{}
-	service, err := New(Config{RPID: "kotae-ai.web.app", Origin: "https://kotae-ai.web.app", Store: store, TokenMinter: &recordingMinter{}, AccountDeleter: deleter, Now: func() time.Time { return now.Add(time.Minute) }})
+	service, err := New(Config{RPID: "kotae-ai.web.app", Origin: "https://kotae-ai.web.app", Store: store, TokenMinter: &recordingMinter{}, AccountDataCleaner: successfulAccountDataCleaner{}, AccountDeleter: deleter, Now: func() time.Time { return now.Add(time.Minute) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,13 +97,14 @@ func (m *recordingMinter) MintCustomToken(
 func newTestService(t *testing.T, store Store, minter TokenMinter, now time.Time) *Service {
 	t.Helper()
 	service, err := New(Config{
-		RPID:          "kotae-ai.web.app",
-		RPDisplayName: "コタエーAI",
-		Origin:        "https://kotae-ai.web.app",
-		Store:         store,
-		TokenMinter:   minter,
-		Now:           func() time.Time { return now },
-		Random:        bytes.NewReader(bytes.Repeat([]byte{0x5a}, 1024)),
+		RPID:               "kotae-ai.web.app",
+		RPDisplayName:      "コタエーAI",
+		Origin:             "https://kotae-ai.web.app",
+		Store:              store,
+		TokenMinter:        minter,
+		AccountDataCleaner: successfulAccountDataCleaner{},
+		Now:                func() time.Time { return now },
+		Random:             bytes.NewReader(bytes.Repeat([]byte{0x5a}, 1024)),
 	})
 	if err != nil {
 		t.Fatal(err)

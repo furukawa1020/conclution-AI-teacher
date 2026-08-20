@@ -60,14 +60,15 @@ type AccountDeleter interface {
 }
 
 type Config struct {
-	RPID           string
-	RPDisplayName  string
-	Origin         string
-	Store          Store
-	TokenMinter    TokenMinter
-	AccountDeleter AccountDeleter
-	Now            func() time.Time
-	Random         io.Reader
+	RPID               string
+	RPDisplayName      string
+	Origin             string
+	Store              Store
+	TokenMinter        TokenMinter
+	AccountDataCleaner AccountDataCleaner
+	AccountDeleter     AccountDeleter
+	Now                func() time.Time
+	Random             io.Reader
 }
 
 type Service struct {
@@ -75,6 +76,7 @@ type Service struct {
 	registrations registrationCeremonies
 	store         Store
 	minter        TokenMinter
+	cleaner       AccountDataCleaner
 	deleter       AccountDeleter
 	now           func() time.Time
 	random        io.Reader
@@ -147,6 +149,7 @@ func New(cfg Config) (*Service, error) {
 		registrations: wa,
 		store:         cfg.Store,
 		minter:        cfg.TokenMinter,
+		cleaner:       cfg.AccountDataCleaner,
 		deleter:       cfg.AccountDeleter,
 		now:           cfg.Now,
 		random:        cfg.Random,
@@ -377,7 +380,10 @@ func (s *Service) RevokeCredential(ctx context.Context, principalUID string, ref
 
 func (s *Service) DeleteAccount(ctx context.Context, principalUID string) error {
 	principalUID = strings.TrimSpace(principalUID)
-	if principalUID == "" || s.deleter == nil {
+	if principalUID == "" || s.cleaner == nil || s.deleter == nil {
+		return ErrAccountDeletion
+	}
+	if err := s.cleaner.DisableAndDelete(ctx, principalUID); err != nil {
 		return ErrAccountDeletion
 	}
 	if err := s.store.DeleteAccountData(ctx, principalUID, s.now().UTC()); err != nil {

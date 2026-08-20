@@ -90,7 +90,7 @@ func TestFirestoreCapabilityConsumeIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	var successes atomic.Int32
-	var replays atomic.Int32
+	var rejected atomic.Int32
 	var wait sync.WaitGroup
 	start := make(chan struct{})
 	for range 100 {
@@ -101,14 +101,82 @@ func TestFirestoreCapabilityConsumeIsAtomic(t *testing.T) {
 			_, _, err := manager.ConsumeContext(ctx, uid, "firebase-app-id", token)
 			if err == nil {
 				successes.Add(1)
-			} else if errors.Is(err, ErrReplay) {
-				replays.Add(1)
+			} else {
+				rejected.Add(1)
 			}
 		}()
 	}
 	close(start)
 	wait.Wait()
-	if successes.Load() != 1 || replays.Load() != 99 {
-		t.Fatalf("success=%d replay=%d", successes.Load(), replays.Load())
+	if successes.Load() != 1 || rejected.Load() != 99 {
+		t.Fatalf("success=%d rejected=%d", successes.Load(), rejected.Load())
+	}
+}
+
+func TestFirestoreConcurrentWriteAndAccountDeletionCannotResurrectMemory(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("FIRESTORE_EMULATOR_HOST")) == "" {
+		t.Skip("FIRESTORE_EMULATOR_HOST is not configured")
+	}
+	ctx := context.Background()
+	client, err := firestore.NewClient(ctx, "kotae-long-memory-delete-race-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	store, err := NewFirestoreStore(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := New(bytes.Repeat([]byte{0x39}, 32), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := "delete-race-" + strings.ReplaceAll(t.Name(), "/", "-")
+	consent, err := manager.Enable(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errorsSeen := make(chan error, 65)
+	var wait sync.WaitGroup
+	for range 64 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			err := manager.Save(ctx, uid, consent.Generation, Payload{
+				Topics: []string{"late encrypted memory"},
+			})
+			if err != nil && !errors.Is(err, ErrDisabled) && !errors.Is(err, ErrStale) {
+				errorsSeen <- err
+			}
+		}()
+	}
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		<-start
+		errorsSeen <- manager.DisableAndDelete(ctx, uid)
+	}()
+	close(start)
+	wait.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatalf("concurrent operation: %v", err)
+		}
+	}
+
+	status, err := manager.Status(ctx, uid)
+	if err != nil || status.Enabled || status.Generation <= consent.Generation {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	key, _ := manager.principalKey(uid)
+	if _, err := client.Collection(recordsCollection).Doc(key).Get(ctx); err == nil {
+		t.Fatal("account deletion race resurrected a memory record")
+	}
+	if _, err := manager.Load(ctx, uid, status.Generation); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("deleted memory load err=%v", err)
 	}
 }

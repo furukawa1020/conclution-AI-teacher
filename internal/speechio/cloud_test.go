@@ -46,10 +46,11 @@ func pairedFinalStream(text string, confidence float32) *fakeStreamingRecognizeC
 
 func TestPairedPCM16AcceptsOnlyExactIndependentAgreement(t *testing.T) {
 	baselineStream := pairedFinalStream(" 小さな 声です ", .91)
+	weakStream := pairedFinalStream("小さな 声です", .89)
 	enhancedStream := pairedFinalStream("小さな 声です", .87)
-	service := pairedStreamingService(baselineStream, enhancedStream)
+	service := pairedStreamingService(baselineStream, weakStream, enhancedStream)
 	baseline := bytes.Repeat([]byte{1, 0}, 320)
-	enhanced := bytes.Repeat([]byte{2, 0}, 320)
+	enhanced := bytes.Repeat([]byte{5, 0}, 320)
 	text, confidence, err := service.TranscribePairedPCM16(
 		context.Background(),
 		baseline,
@@ -59,14 +60,14 @@ func TestPairedPCM16AcceptsOnlyExactIndependentAgreement(t *testing.T) {
 		t.Fatalf("result=(%q,%f,%v)", text, confidence, err)
 	}
 	observed := map[byte]bool{}
-	for _, stream := range []*fakeStreamingRecognizeClient{baselineStream, enhancedStream} {
+	for _, stream := range []*fakeStreamingRecognizeClient{baselineStream, weakStream, enhancedStream} {
 		if len(stream.sent) != 2 || len(stream.sent[1].GetAudio()) != 640 {
 			t.Fatalf("stream requests = %#v", stream.sent)
 		}
 		observed[stream.sent[1].GetAudio()[0]] = true
 	}
-	if !observed[1] || !observed[2] {
-		t.Fatalf("independent inputs were not both decoded: %#v", observed)
+	if !observed[0] || !observed[1] || !observed[5] {
+		t.Fatalf("baseline/strong views or zeroized weak view missing: %#v", observed)
 	}
 }
 
@@ -74,21 +75,24 @@ func TestPairedPCM16RejectsSubstitutionAndOneSidedSpeech(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		baseline *fakeStreamingRecognizeClient
+		weak     *fakeStreamingRecognizeClient
 		enhanced *fakeStreamingRecognizeClient
 	}{
 		{
 			name:     "substitution",
 			baseline: pairedFinalStream("今日は休みます", .9),
+			weak:     &fakeStreamingRecognizeClient{},
 			enhanced: pairedFinalStream("今日は走ります", .99),
 		},
 		{
 			name:     "enhanced only",
 			baseline: &fakeStreamingRecognizeClient{},
+			weak:     &fakeStreamingRecognizeClient{},
 			enhanced: pairedFinalStream("補完された文", .99),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service := pairedStreamingService(test.baseline, test.enhanced)
+			service := pairedStreamingService(test.baseline, test.weak, test.enhanced)
 			_, _, err := service.TranscribePairedPCM16(
 				context.Background(),
 				make([]byte, 640),
@@ -101,6 +105,75 @@ func TestPairedPCM16RejectsSubstitutionAndOneSidedSpeech(t *testing.T) {
 	}
 }
 
+func TestPairedPCM16AcceptsEveryTwoOfThreeExactAgreement(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		transcript [3]string
+		confidence [3]float32
+		want       float32
+	}{
+		{name: "baseline and weak", transcript: [3]string{"こんにちは", "こんにちは", "こんちは"}, confidence: [3]float32{.82, .79, .99}, want: .79},
+		{name: "weak and enhanced", transcript: [3]string{"", "うん", "うん"}, confidence: [3]float32{0, .76, .91}, want: .76},
+		{name: "baseline and enhanced", transcript: [3]string{"いや", "いま", "いや"}, confidence: [3]float32{.88, .95, .81}, want: .81},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			streams := make([]*fakeStreamingRecognizeClient, 3)
+			for index := range streams {
+				if test.transcript[index] == "" {
+					streams[index] = &fakeStreamingRecognizeClient{}
+				} else {
+					streams[index] = pairedFinalStream(test.transcript[index], test.confidence[index])
+				}
+			}
+			service := pairedStreamingService(streams...)
+			text, confidence, err := service.TranscribePairedPCM16(
+				context.Background(),
+				bytes.Repeat([]byte{1, 0}, 320),
+				bytes.Repeat([]byte{3, 0}, 320),
+			)
+			if err != nil || text == "" || confidence != test.want {
+				t.Fatalf("result=(%q,%f,%v)", text, confidence, err)
+			}
+		})
+	}
+}
+
+func TestPairedPCM16RejectsProviderFailureEvenWhenOtherViewsAgree(t *testing.T) {
+	failed := &fakeStreamingRecognizeClient{recv: []streamingRecognizeReceive{{
+		err: status.Error(codes.Unavailable, "provider unavailable"),
+	}}}
+	service := pairedStreamingService(
+		pairedFinalStream("こんにちは", .8),
+		failed,
+		pairedFinalStream("こんにちは", .9),
+	)
+	_, _, err := service.TranscribePairedPCM16(
+		context.Background(),
+		bytes.Repeat([]byte{1, 0}, 320),
+		bytes.Repeat([]byte{2, 0}, 320),
+	)
+	if !errors.Is(err, ErrPairedRecognitionUnresolved) {
+		t.Fatalf("provider failure escaped: %v", err)
+	}
+}
+
+func TestWeakPCM16IsBoundedSampleAlignedObservationMix(t *testing.T) {
+	baseline := []byte{0x00, 0x80, 0xff, 0x7f, 0xe8, 0x03}
+	enhanced := []byte{0xff, 0x7f, 0x00, 0x80, 0xd0, 0x07}
+	weak, err := deriveWeakPCM16(baseline, enhanced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int16{-16384, 16383, 1250}
+	for index := range want {
+		offset := index * 2
+		got := int16(uint16(weak[offset]) | uint16(weak[offset+1])<<8)
+		if got != want[index] {
+			t.Fatalf("sample %d = %d; want %d", index, got, want[index])
+		}
+	}
+}
+
 func TestPairedAgreementRejectsOneHundredThousandTokenCounterexamples(t *testing.T) {
 	for index := 0; index < 100_000; index++ {
 		baseline := "token-" + string(rune(0x3041+(index%80)))
@@ -109,6 +182,9 @@ func TestPairedAgreementRejectsOneHundredThousandTokenCounterexamples(t *testing
 			pairedTranscriptsAgree(baseline, "deletion") ||
 			pairedTranscriptsAgree(baseline, "substitution") {
 			t.Fatalf("counterexample %d was accepted", index)
+		}
+		if text, agreed := threeViewTranscriptConsensus(baseline, enhanced, "substitution"); text != "" || len(agreed) != 0 {
+			t.Fatalf("three-view counterexample %d was accepted", index)
 		}
 	}
 }

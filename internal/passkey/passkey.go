@@ -26,15 +26,16 @@ import (
 )
 
 const (
-	ceremonyTTL           = 5 * time.Minute
-	registrationUse       = "registration-v1"
-	credentialAdditionUse = "credential-addition-v1"
-	authenticationUse     = "authentication-v1"
-	passkeyAuthMethod     = "passkey-v1"
-	passkeyAtClaim        = "kotae_passkey_at"
-	maxExactJSONInteger   = int64(1<<53 - 1)
-	maxCredentialBody     = 256 * 1024
-	maxCredentials        = 8
+	ceremonyTTL             = 5 * time.Minute
+	registrationUse         = "registration-v1"
+	credentialAdditionUse   = "credential-addition-v1"
+	recoveryRegistrationUse = "recovery-registration-v1"
+	authenticationUse       = "authentication-v1"
+	passkeyAuthMethod       = "passkey-v1"
+	passkeyAtClaim          = "kotae_passkey_at"
+	maxExactJSONInteger     = int64(1<<53 - 1)
+	maxCredentialBody       = 256 * 1024
+	maxCredentials          = 8
 )
 
 var (

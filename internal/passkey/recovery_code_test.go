@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -102,5 +103,67 @@ func TestRecoveryCodeParserRequiresCanonicalFiniteCode(t *testing.T) {
 		if _, err := recoveryCodeDigest(invalid); !errors.Is(err, ErrRecoveryCode) {
 			t.Fatalf("invalid code accepted: %q err=%v", invalid, err)
 		}
+	}
+}
+
+func TestBeginRecoveryRegistrationBindsCodeAppAccountAndFiveMinuteCeremony(t *testing.T) {
+	service, store, uid, issuedAt := recoveryCodeService(t)
+	code, err := service.IssueRecoveryCode(context.Background(), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrations := &recordingRegistrationCeremonies{}
+	service.registrations = registrations
+	result, err := service.BeginRecoveryRegistration(context.Background(), "firebase-app-id", code.Code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CeremonyID == "" || result.Options == nil || registrations.beginCalls != 1 {
+		t.Fatalf("result=%+v beginCalls=%d", result, registrations.beginCalls)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(uid)) || bytes.Contains(encoded, []byte(code.Code)) {
+		t.Fatalf("recovery begin exposed account capability: %s", encoded)
+	}
+	digest, _ := recoveryCodeDigest(code.Code)
+	store.mu.Lock()
+	record := cloneCeremony(store.ceremonies[documentID([]byte(result.CeremonyID))])
+	store.mu.Unlock()
+	if record.Purpose != recoveryRegistrationUse || record.TargetUID != "" ||
+		!constantTimeEqual(record.AppIDDigest, digestString("firebase-app-id")) ||
+		!constantTimeEqual(record.PrincipalDigest, digestString(uid)) ||
+		!constantTimeEqual(record.RecoveryCodeDigest, digest[:]) ||
+		!record.ExpiresAt.Equal(issuedAt.Add(ceremonyTTL)) {
+		t.Fatalf("recovery ceremony binding = %+v", record)
+	}
+}
+
+func TestBeginRecoveryRegistrationRejectsExpiredReissuedAndMalformedCodes(t *testing.T) {
+	service, store, uid, issuedAt := recoveryCodeService(t)
+	old, err := service.IssueRecoveryCode(context.Background(), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCode, err := service.IssueRecoveryCode(context.Background(), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.registrations = &recordingRegistrationCeremonies{}
+	for _, code := range []string{"", old.Code, newCode.Code + "="} {
+		if _, err := service.BeginRecoveryRegistration(context.Background(), "firebase-app-id", code); !errors.Is(err, ErrRecoveryCode) {
+			t.Fatalf("invalid recovery code accepted: err=%v", err)
+		}
+	}
+	accountKey := documentID([]byte(uid))
+	store.mu.Lock()
+	recovery := store.recovery[accountKey]
+	recovery.ExpiresAt = issuedAt
+	store.recovery[accountKey] = recovery
+	store.mu.Unlock()
+	if _, err := service.BeginRecoveryRegistration(context.Background(), "firebase-app-id", newCode.Code); !errors.Is(err, ErrRecoveryCode) {
+		t.Fatalf("expired recovery code accepted: %v", err)
 	}
 }

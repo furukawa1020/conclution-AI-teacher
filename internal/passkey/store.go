@@ -34,11 +34,14 @@ type Ceremony struct {
 	// verified principal without persisting the raw Firebase UID in the
 	// short-lived ceremony document.
 	PrincipalDigest []byte
-	TargetUID       string
-	UserHandle      []byte
-	SessionJSON     []byte
-	ExpiresAt       time.Time
-	CreatedAt       time.Time
+	// RecoveryCodeDigest binds a recovery registration ceremony to one
+	// pre-issued capability without storing its raw code.
+	RecoveryCodeDigest []byte
+	TargetUID          string
+	UserHandle         []byte
+	SessionJSON        []byte
+	ExpiresAt          time.Time
+	CreatedAt          time.Time
 }
 
 type StoredCredential struct {

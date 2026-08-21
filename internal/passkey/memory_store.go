@@ -81,6 +81,38 @@ func (s *MemoryStore) ReplaceRecoveryCode(
 	return nil
 }
 
+func (s *MemoryStore) LoadRecoveryUser(
+	_ context.Context,
+	digest [sha256.Size]byte,
+	now time.Time,
+) (*User, error) {
+	if now.IsZero() {
+		return nil, ErrRecoveryCode
+	}
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	codeKey := recoveryCodeDocumentID(digest)
+	accountKey, exists := s.recoveryByCode[codeKey]
+	if !exists {
+		return nil, ErrRecoveryCode
+	}
+	recovery, exists := s.recovery[accountKey]
+	if !exists || subtle.ConstantTimeCompare(recovery.Digest[:], digest[:]) != 1 ||
+		!recovery.ExpiresAt.After(now) || recovery.IssuedAt.IsZero() ||
+		!recovery.ExpiresAt.After(recovery.IssuedAt) {
+		return nil, ErrRecoveryCode
+	}
+	user := s.users[accountKey]
+	if user == nil {
+		return nil, ErrRecoveryCode
+	}
+	if _, err := s.validateCredentialStateLocked(user, now); err != nil {
+		return nil, ErrRecoveryCode
+	}
+	return cloneUser(user), nil
+}
+
 func (s *MemoryStore) DeleteAccountData(_ context.Context, uid string, now time.Time) error {
 	if uid == "" || now.IsZero() {
 		return ErrCredentialStateInvalid
@@ -383,6 +415,7 @@ func (s *MemoryStore) validateCredentialStateLocked(
 func cloneCeremony(record Ceremony) Ceremony {
 	record.AppIDDigest = append([]byte(nil), record.AppIDDigest...)
 	record.PrincipalDigest = append([]byte(nil), record.PrincipalDigest...)
+	record.RecoveryCodeDigest = append([]byte(nil), record.RecoveryCodeDigest...)
 	record.UserHandle = append([]byte(nil), record.UserHandle...)
 	record.SessionJSON = append([]byte(nil), record.SessionJSON...)
 	return record

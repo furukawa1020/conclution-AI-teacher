@@ -16,6 +16,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/passkey"
+	"github.com/go-webauthn/webauthn/protocol"
 )
 
 type passkeyHTTPVerifier struct {
@@ -65,6 +66,16 @@ type recordingPasskeyHTTPService struct {
 	accountDeleteCalls          int
 	recoveryCodeCalls           int
 	recoveryCodeResult          passkey.RecoveryCodeResult
+	recoveryBeginCalls          int
+	recoveryBeginAppID          string
+	recoveryBeginCode           string
+}
+
+func (s *recordingPasskeyHTTPService) BeginRecoveryRegistration(_ context.Context, appID, code string) (passkey.BeginRegistrationResult, error) {
+	s.recoveryBeginCalls++
+	s.recoveryBeginAppID = appID
+	s.recoveryBeginCode = code
+	return passkey.BeginRegistrationResult{CeremonyID: "recovery-registration-ceremony", Options: &protocol.CredentialCreation{}}, s.finishErr
 }
 
 func (s *recordingPasskeyHTTPService) IssueRecoveryCode(_ context.Context, uid string) (passkey.RecoveryCodeResult, error) {
@@ -261,6 +272,30 @@ func TestIssuePasskeyRecoveryCodeUsesRecentPrincipalAndReturnsOneSecret(t *testi
 	staleHandler.ServeHTTP(staleResponse, staleRequest)
 	if staleResponse.Code == http.StatusOK || service.recoveryCodeCalls != 1 || strings.Contains(staleResponse.Body.String(), service.recoveryCodeResult.Code) {
 		t.Fatalf("stale response=%d body=%q calls=%d", staleResponse.Code, staleResponse.Body.String(), service.recoveryCodeCalls)
+	}
+}
+
+func TestBeginPasskeyRecoveryUsesAppCheckCodeAndNeverEchoesCapability(t *testing.T) {
+	service := &recordingPasskeyHTTPService{}
+	handler := newPasskeyHTTPHandler(t, service, &recordingPasskeyQuotaLimiter{})
+	code := "krc1_" + strings.Repeat("B", 43)
+	request := passkeyPOST(passkeyRecoveryRegistrationBeginPath, strings.NewReader(`{"recoveryCode":"`+code+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.recoveryBeginCalls != 1 ||
+		service.recoveryBeginAppID != "firebase-app-id" || service.recoveryBeginCode != code ||
+		strings.Contains(response.Body.String(), code) ||
+		!strings.Contains(response.Body.String(), "recovery-registration-ceremony") {
+		t.Fatalf("response=%d body=%q calls=%d app=%q", response.Code, response.Body.String(), service.recoveryBeginCalls, service.recoveryBeginAppID)
+	}
+
+	bad := passkeyPOST(passkeyRecoveryRegistrationBeginPath, strings.NewReader(`{"recoveryCode":"`+code+`","uid":"foreign"}`))
+	bad.Header.Set("Content-Type", "application/json")
+	badResponse := httptest.NewRecorder()
+	handler.ServeHTTP(badResponse, bad)
+	if badResponse.Code != http.StatusBadRequest || service.recoveryBeginCalls != 1 || strings.Contains(badResponse.Body.String(), code) {
+		t.Fatalf("bad response=%d body=%q calls=%d", badResponse.Code, badResponse.Body.String(), service.recoveryBeginCalls)
 	}
 }
 

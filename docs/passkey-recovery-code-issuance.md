@@ -15,7 +15,16 @@ fail-closedにする。
 再発行によって削除済みコードを復活させない。両collectionの `expiresAt` は
 Firestore TTL必須policyへ追加する。
 
-この段階ではコードによる回復begin/finishをまだ公開しない。発行routeは既存の
+発行routeは既存の
 App Check、verified principal、5分以内のpasskey proof、二段rate limitをそのまま
 要求する。raw code、raw UID、credential ID、音声、文字起こしをlog・監査eventへ
 出さない。
+
+回復begin routeはApp Checkと二段rate limitを通した後、受け取ったcanonical codeを
+直ちにpurpose分離digestへ変換する。Firestore transactionで未削除account、期限内の
+account/code相互参照、既存credential index全体を検証し、同じopaque userHandleの
+WebAuthn registrationを開始する。5分ceremonyにはApp ID digest、UID digest、code
+digest、userHandle、sessionだけを束縛し、raw codeとraw UIDを保存・応答しない。
+
+beginはコードを消費しない。WebAuthn検証済みcredentialの追加とコード消費を同じ
+transactionにするfinish境界が公開されるまでは、ブラウザUIから回復フローを開始しない。

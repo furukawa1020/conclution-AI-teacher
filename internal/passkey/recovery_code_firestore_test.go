@@ -47,8 +47,11 @@ func TestFirestoreRecoveryCodeReissueAndAccountDeletionAreAtomic(t *testing.T) {
 		TokenMinter: &recordingMinter{},
 		Now:         func() time.Time { return now.Add(time.Minute) },
 		Random: bytes.NewReader(append(
-			bytes.Repeat([]byte{0x61}, recoveryCodeBytes),
-			bytes.Repeat([]byte{0x62}, recoveryCodeBytes)...,
+			append(
+				bytes.Repeat([]byte{0x61}, recoveryCodeBytes),
+				bytes.Repeat([]byte{0x62}, recoveryCodeBytes)...,
+			),
+			bytes.Repeat([]byte{0x63}, 32)...,
 		)),
 	})
 	if err != nil {
@@ -61,6 +64,11 @@ func TestFirestoreRecoveryCodeReissueAndAccountDeletionAreAtomic(t *testing.T) {
 	second, err := service.IssueRecoveryCode(ctx, uid)
 	if err != nil {
 		t.Fatal(err)
+	}
+	service.registrations = &recordingRegistrationCeremonies{}
+	begin, err := service.BeginRecoveryRegistration(ctx, "firebase-app-id", second.Code)
+	if err != nil || begin.CeremonyID == "" || begin.Options == nil {
+		t.Fatalf("begin=%+v err=%v", begin, err)
 	}
 	firstDigest, _ := recoveryCodeDigest(first.Code)
 	secondDigest, _ := recoveryCodeDigest(second.Code)
@@ -76,7 +84,11 @@ func TestFirestoreRecoveryCodeReissueAndAccountDeletionAreAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serialized := fmt.Sprint(accountSnapshot.Data(), indexSnapshot.Data())
+	ceremonySnapshot, err := client.Collection(ceremonyCollection).Doc(documentID([]byte(begin.CeremonyID))).Get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := fmt.Sprint(accountSnapshot.Data(), indexSnapshot.Data(), ceremonySnapshot.Data())
 	for _, forbidden := range []string{uid, first.Code, second.Code} {
 		if strings.Contains(serialized, forbidden) {
 			t.Fatalf("recovery documents exposed forbidden value %q", forbidden)

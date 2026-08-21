@@ -31,14 +31,15 @@ type FirestoreStore struct {
 }
 
 type ceremonyDocument struct {
-	Purpose         string    `firestore:"purpose"`
-	AppIDDigest     []byte    `firestore:"appIdDigest"`
-	PrincipalDigest []byte    `firestore:"principalDigest,omitempty"`
-	TargetUID       string    `firestore:"targetUid,omitempty"`
-	UserHandle      []byte    `firestore:"userHandle,omitempty"`
-	SessionJSON     []byte    `firestore:"session"`
-	ExpiresAt       time.Time `firestore:"expiresAt"`
-	CreatedAt       time.Time `firestore:"createdAt"`
+	Purpose            string    `firestore:"purpose"`
+	AppIDDigest        []byte    `firestore:"appIdDigest"`
+	PrincipalDigest    []byte    `firestore:"principalDigest,omitempty"`
+	RecoveryCodeDigest []byte    `firestore:"recoveryCodeDigest,omitempty"`
+	TargetUID          string    `firestore:"targetUid,omitempty"`
+	UserHandle         []byte    `firestore:"userHandle,omitempty"`
+	SessionJSON        []byte    `firestore:"session"`
+	ExpiresAt          time.Time `firestore:"expiresAt"`
+	CreatedAt          time.Time `firestore:"createdAt"`
 }
 
 type userDocument struct {
@@ -184,6 +185,73 @@ func (s *FirestoreStore) ReplaceRecoveryCode(
 		}
 		return tx.Create(newCodeRef, recoveryCodeDocument{SchemaVersion: 1, AccountKey: accountKey, ExpiresAt: expiresAt, IssuedAt: now})
 	}))
+}
+
+func (s *FirestoreStore) LoadRecoveryUser(
+	ctx context.Context,
+	digest [sha256.Size]byte,
+	now time.Time,
+) (user *User, err error) {
+	if now.IsZero() {
+		return nil, ErrRecoveryCode
+	}
+	now = now.UTC()
+	codeRef := s.client.Collection(recoveryCodeCollection).Doc(recoveryCodeDocumentID(digest))
+	err = s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		user = nil
+		codeSnapshot, getErr := tx.Get(codeRef)
+		if getErr != nil {
+			return ErrRecoveryCode
+		}
+		var index recoveryCodeDocument
+		if codeSnapshot.DataTo(&index) != nil || index.SchemaVersion != 1 ||
+			index.AccountKey == "" || !index.ExpiresAt.After(now) {
+			return ErrRecoveryCode
+		}
+		recoveryRef := s.client.Collection(recoveryAccountCollection).Doc(index.AccountKey)
+		recoverySnapshot, getErr := tx.Get(recoveryRef)
+		if getErr != nil {
+			return ErrRecoveryCode
+		}
+		var recovery recoveryAccountDocument
+		if recoverySnapshot.DataTo(&recovery) != nil || validateRecoveryAccountDocument(recovery) != nil ||
+			validateRecoveryCodeDocument(index, index.AccountKey, recovery) != nil ||
+			subtle.ConstantTimeCompare(recovery.CodeDigest, digest[:]) != 1 ||
+			!recovery.ExpiresAt.After(now) {
+			return ErrRecoveryCode
+		}
+		deletionRef := s.client.Collection(deletionCollection).Doc(index.AccountKey)
+		if _, deletionErr := tx.Get(deletionRef); deletionErr == nil || status.Code(deletionErr) != codes.NotFound {
+			return ErrRecoveryCode
+		}
+		userRef := s.client.Collection(userCollection).Doc(index.AccountKey)
+		userSnapshot, getErr := tx.Get(userRef)
+		if getErr != nil {
+			return ErrRecoveryCode
+		}
+		var document userDocument
+		if userSnapshot.DataTo(&document) != nil || documentID([]byte(document.UID)) != index.AccountKey {
+			return ErrRecoveryCode
+		}
+		credentials, references, decodeErr := decodeLifecycleCredentials(document)
+		if decodeErr != nil {
+			return ErrRecoveryCode
+		}
+		indexes, getErr := tx.GetAll(lifecycleCredentialDocumentRefs(s.client, references))
+		if getErr != nil || validateLifecycleCredentialSnapshots(indexes, document, credentials, references, now) != nil {
+			return ErrRecoveryCode
+		}
+		decoded, decodeErr := decodeUser(document)
+		if decodeErr != nil {
+			return ErrRecoveryCode
+		}
+		user = decoded
+		return nil
+	})
+	if err != nil || user == nil {
+		return nil, ErrRecoveryCode
+	}
+	return user, nil
 }
 
 func validateRecoveryAccountDocument(document recoveryAccountDocument) error {
@@ -790,27 +858,29 @@ func (s *FirestoreStore) DeleteAccountData(ctx context.Context, uid string, now 
 
 func ceremonyDocumentFrom(record Ceremony) ceremonyDocument {
 	return ceremonyDocument{
-		Purpose:         record.Purpose,
-		AppIDDigest:     append([]byte(nil), record.AppIDDigest...),
-		PrincipalDigest: append([]byte(nil), record.PrincipalDigest...),
-		TargetUID:       record.TargetUID,
-		UserHandle:      append([]byte(nil), record.UserHandle...),
-		SessionJSON:     append([]byte(nil), record.SessionJSON...),
-		ExpiresAt:       record.ExpiresAt,
-		CreatedAt:       record.CreatedAt,
+		Purpose:            record.Purpose,
+		AppIDDigest:        append([]byte(nil), record.AppIDDigest...),
+		PrincipalDigest:    append([]byte(nil), record.PrincipalDigest...),
+		RecoveryCodeDigest: append([]byte(nil), record.RecoveryCodeDigest...),
+		TargetUID:          record.TargetUID,
+		UserHandle:         append([]byte(nil), record.UserHandle...),
+		SessionJSON:        append([]byte(nil), record.SessionJSON...),
+		ExpiresAt:          record.ExpiresAt,
+		CreatedAt:          record.CreatedAt,
 	}
 }
 
 func (document ceremonyDocument) toCeremony() Ceremony {
 	return Ceremony{
-		Purpose:         document.Purpose,
-		AppIDDigest:     append([]byte(nil), document.AppIDDigest...),
-		PrincipalDigest: append([]byte(nil), document.PrincipalDigest...),
-		TargetUID:       document.TargetUID,
-		UserHandle:      append([]byte(nil), document.UserHandle...),
-		SessionJSON:     append([]byte(nil), document.SessionJSON...),
-		ExpiresAt:       document.ExpiresAt,
-		CreatedAt:       document.CreatedAt,
+		Purpose:            document.Purpose,
+		AppIDDigest:        append([]byte(nil), document.AppIDDigest...),
+		PrincipalDigest:    append([]byte(nil), document.PrincipalDigest...),
+		RecoveryCodeDigest: append([]byte(nil), document.RecoveryCodeDigest...),
+		TargetUID:          document.TargetUID,
+		UserHandle:         append([]byte(nil), document.UserHandle...),
+		SessionJSON:        append([]byte(nil), document.SessionJSON...),
+		ExpiresAt:          document.ExpiresAt,
+		CreatedAt:          document.CreatedAt,
 	}
 }
 

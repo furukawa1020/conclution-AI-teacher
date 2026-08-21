@@ -19,19 +19,20 @@ import (
 )
 
 const (
-	passkeyRegistrationBeginPath      = "/api/v1/passkeys/registration:begin"
-	passkeyRegistrationFinishPath     = "/api/v1/passkeys/registration:finish"
-	passkeyAuthenticationBeginPath    = "/api/v1/passkeys/authentication:begin"
-	passkeyAuthenticationFinishPath   = "/api/v1/passkeys/authentication:finish"
-	passkeyCredentialBeginPath        = "/api/v1/passkeys/credentials/registration:begin"
-	passkeyCredentialFinishPath       = "/api/v1/passkeys/credentials/registration:finish"
-	passkeyCredentialsPath            = "/api/v1/passkeys/credentials"
-	passkeyCredentialRevokePath       = "/api/v1/passkeys/credentials:revoke"
-	passkeyAccountDeletePath          = "/api/v1/passkeys/account:delete"
-	passkeyRecoveryCodeIssuePath      = "/api/v1/passkeys/recovery-code:issue"
-	passkeyVoiceAuthorizationAge      = 5 * time.Minute
-	passkeyManagementAuthorizationAge = 5 * time.Minute
-	passkeyMaxCredentialBody          = 256 * 1024
+	passkeyRegistrationBeginPath         = "/api/v1/passkeys/registration:begin"
+	passkeyRegistrationFinishPath        = "/api/v1/passkeys/registration:finish"
+	passkeyAuthenticationBeginPath       = "/api/v1/passkeys/authentication:begin"
+	passkeyAuthenticationFinishPath      = "/api/v1/passkeys/authentication:finish"
+	passkeyCredentialBeginPath           = "/api/v1/passkeys/credentials/registration:begin"
+	passkeyCredentialFinishPath          = "/api/v1/passkeys/credentials/registration:finish"
+	passkeyCredentialsPath               = "/api/v1/passkeys/credentials"
+	passkeyCredentialRevokePath          = "/api/v1/passkeys/credentials:revoke"
+	passkeyAccountDeletePath             = "/api/v1/passkeys/account:delete"
+	passkeyRecoveryCodeIssuePath         = "/api/v1/passkeys/recovery-code:issue"
+	passkeyRecoveryRegistrationBeginPath = "/api/v1/passkeys/recovery/registration:begin"
+	passkeyVoiceAuthorizationAge         = 5 * time.Minute
+	passkeyManagementAuthorizationAge    = 5 * time.Minute
+	passkeyMaxCredentialBody             = 256 * 1024
 )
 
 type PasskeyService interface {
@@ -45,6 +46,7 @@ type PasskeyService interface {
 	RevokeCredential(context.Context, string, passkey.CredentialReference) error
 	DeleteAccount(context.Context, string) error
 	IssueRecoveryCode(context.Context, string) (passkey.RecoveryCodeResult, error)
+	BeginRecoveryRegistration(context.Context, string, string) (passkey.BeginRegistrationResult, error)
 }
 
 const accountDeletionConfirmation = "この仮名アカウントを完全に削除する"
@@ -62,6 +64,34 @@ type credentialListResponse struct {
 type recoveryCodeResponse struct {
 	RecoveryCode string `json:"recoveryCode"`
 	ExpiresIn    int64  `json:"expiresIn"`
+}
+
+func (s *Server) beginPasskeyRecoveryRegistration(w http.ResponseWriter, r *http.Request) {
+	appID, ok := appIDFromContext(r.Context())
+	if !ok || s.passkeys == nil || r.URL.RawQuery != "" || !isJSONContentType(r) {
+		writeProblem(w, http.StatusBadRequest, "passkey_recovery_failed", "Passkey recovery failed.")
+		return
+	}
+	if !s.consumePasskeyQuota(w, r, appID) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 256)
+	var body struct {
+		RecoveryCode string `json:"recoveryCode"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&body) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		writeProblem(w, http.StatusBadRequest, "passkey_recovery_failed", "Passkey recovery failed.")
+		return
+	}
+	result, err := s.passkeys.BeginRecoveryRegistration(r.Context(), appID, body.RecoveryCode)
+	body.RecoveryCode = ""
+	if err != nil || result.CeremonyID == "" || result.Options == nil {
+		writeProblem(w, http.StatusBadRequest, "passkey_recovery_failed", "Passkey recovery failed.")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) issuePasskeyRecoveryCode(w http.ResponseWriter, r *http.Request) {

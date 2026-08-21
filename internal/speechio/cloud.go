@@ -40,7 +40,7 @@ var (
 	ErrStreamingChunkTooLarge      = errors.New("streaming speech synthesis chunk is too large")
 	ErrStreamingAudioTooLarge      = errors.New("streaming speech synthesis audio is too large")
 	ErrPairedRecognitionUnresolved = errors.New(
-		"baseline and enhanced recognition did not establish agreement",
+		"three acoustic views did not establish two-path agreement",
 	)
 )
 
@@ -57,10 +57,10 @@ type ExplicitPCM16Transcriber interface {
 	TranscribePCM16(ctx context.Context, audio []byte) (string, float32, error)
 }
 
-// PairedPCM16Transcriber independently decodes sample-aligned baseline and
-// enhanced PCM. Implementations return text only when both paths establish the
-// exact same canonical observation; a single enhanced hypothesis is never
-// sufficient authority for semantic inference.
+// PairedPCM16Transcriber independently decodes sample-aligned baseline, weak,
+// and enhanced views. The weak view is deterministically derived from both
+// owned inputs. Text is returned only when two views establish the exact same
+// canonical observation; a single hypothesis is never sufficient authority.
 type PairedPCM16Transcriber interface {
 	TranscribePairedPCM16(
 		ctx context.Context,
@@ -263,13 +263,18 @@ func (s *CloudService) TranscribePairedPCM16(
 		len(baseline)%640 != 0 {
 		return "", 0, ErrPairedRecognitionUnresolved
 	}
+	weak, err := deriveWeakPCM16(baseline, enhanced)
+	if err != nil {
+		return "", 0, ErrPairedRecognitionUnresolved
+	}
+	defer clear(weak)
 	type outcome struct {
 		text       string
 		confidence float32
 		err        error
 	}
-	results := make([]outcome, 2)
-	inputs := [][]byte{baseline, enhanced}
+	results := make([]outcome, 3)
+	inputs := [][]byte{baseline, weak, enhanced}
 	var group sync.WaitGroup
 	group.Add(len(inputs))
 	for index := range inputs {
@@ -284,17 +289,71 @@ func (s *CloudService) TranscribePairedPCM16(
 	if ctx.Err() != nil {
 		return "", 0, ctx.Err()
 	}
-	if results[0].err != nil || results[1].err != nil ||
-		!pairedTranscriptsAgree(results[0].text, results[1].text) {
+	for _, result := range results {
+		if result.err != nil && !errors.Is(result.err, ErrNoSpeech) {
+			return "", 0, ErrPairedRecognitionUnresolved
+		}
+	}
+	text, agreed := threeViewTranscriptConsensus(
+		results[0].text,
+		results[1].text,
+		results[2].text,
+	)
+	if len(agreed) < 2 {
 		return "", 0, ErrPairedRecognitionUnresolved
 	}
-	confidence := results[0].confidence
-	if confidence == 0 || results[1].confidence == 0 {
-		confidence = 0
-	} else if results[1].confidence < confidence {
-		confidence = results[1].confidence
+	confidence := results[agreed[0]].confidence
+	for _, index := range agreed[1:] {
+		if confidence == 0 || results[index].confidence == 0 {
+			confidence = 0
+		} else if results[index].confidence < confidence {
+			confidence = results[index].confidence
+		}
 	}
-	return canonicalPairedTranscript(results[0].text), confidence, nil
+	return text, confidence, nil
+}
+
+func deriveWeakPCM16(baseline, enhanced []byte) ([]byte, error) {
+	if len(baseline) == 0 || len(baseline) != len(enhanced) || len(baseline)%2 != 0 {
+		return nil, ErrPairedRecognitionUnresolved
+	}
+	weak := make([]byte, len(baseline))
+	for offset := 0; offset < len(baseline); offset += 2 {
+		raw := int32(int16(uint16(baseline[offset]) | uint16(baseline[offset+1])<<8))
+		strong := int32(int16(uint16(enhanced[offset]) | uint16(enhanced[offset+1])<<8))
+		mixed := (3*raw + strong) / 4
+		weak[offset] = byte(uint16(int16(mixed)))
+		weak[offset+1] = byte(uint16(int16(mixed)) >> 8)
+	}
+	return weak, nil
+}
+
+func threeViewTranscriptConsensus(values ...string) (string, []int) {
+	if len(values) != 3 {
+		return "", nil
+	}
+	canonical := make([]string, len(values))
+	for index, value := range values {
+		if !utf8.ValidString(value) {
+			return "", nil
+		}
+		canonical[index] = canonicalPairedTranscript(value)
+	}
+	for left := 0; left < len(canonical); left++ {
+		if canonical[left] == "" {
+			continue
+		}
+		agreed := []int{left}
+		for right := left + 1; right < len(canonical); right++ {
+			if canonical[right] == canonical[left] {
+				agreed = append(agreed, right)
+			}
+		}
+		if len(agreed) >= 2 {
+			return canonical[left], agreed
+		}
+	}
+	return "", nil
 }
 
 func pairedTranscriptsAgree(baseline string, enhanced string) bool {

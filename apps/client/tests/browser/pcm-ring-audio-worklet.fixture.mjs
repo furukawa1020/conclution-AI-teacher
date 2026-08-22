@@ -74,6 +74,30 @@ function maximumAbsolutePcm16(buffer) {
   return maximum;
 }
 
+function weakObservationMixIsExact(baseline, weak, enhanced) {
+  if (
+    !(baseline instanceof ArrayBuffer) ||
+    !(weak instanceof ArrayBuffer) ||
+    !(enhanced instanceof ArrayBuffer) ||
+    baseline.byteLength === 0 ||
+    baseline.byteLength !== weak.byteLength ||
+    baseline.byteLength !== enhanced.byteLength ||
+    baseline.byteLength % 2 !== 0
+  ) {
+    return false;
+  }
+  const raw = new DataView(baseline);
+  const middle = new DataView(weak);
+  const strong = new DataView(enhanced);
+  for (let offset = 0; offset < baseline.byteLength; offset += 2) {
+    const expected = Math.trunc(
+      (3 * raw.getInt16(offset, true) + strong.getInt16(offset, true)) / 4,
+    );
+    if (middle.getInt16(offset, true) !== expected) return false;
+  }
+  return true;
+}
+
 function spectralProjectionPcm16(buffer, frequencyHz) {
   const view = new DataView(buffer);
   let projection = 0;
@@ -596,6 +620,7 @@ async function runQuietGainScenario(pcmRingModule) {
           "frameCount",
           "pcm",
           "baselinePcm",
+          "weakPcm",
         ]) &&
         message.version === 1 &&
         message.generation === generation &&
@@ -605,8 +630,15 @@ async function runQuietGainScenario(pcmRingModule) {
         message.frameCount <= 50 &&
         message.pcm instanceof ArrayBuffer &&
         message.baselinePcm instanceof ArrayBuffer &&
+        message.weakPcm instanceof ArrayBuffer &&
         message.pcm.byteLength === message.frameCount * FRAME_BYTES &&
-        message.baselinePcm.byteLength === message.pcm.byteLength;
+        message.baselinePcm.byteLength === message.pcm.byteLength &&
+        message.weakPcm.byteLength === message.pcm.byteLength &&
+        weakObservationMixIsExact(
+          message.baselinePcm,
+          message.weakPcm,
+          message.pcm,
+        );
       fallback.frames.push({
         baselineMaximum: valid ? maximumAbsolutePcm16(message.baselinePcm) : -1,
         baselineSpectralRatio: valid
@@ -614,6 +646,10 @@ async function runQuietGainScenario(pcmRingModule) {
           : 0,
         maximum: valid ? maximumAbsolutePcm16(message.pcm) : -1,
         spectralRatio: valid ? highToLowSpectralRatio(message.pcm) : 0,
+        weakMaximum: valid ? maximumAbsolutePcm16(message.weakPcm) : -1,
+        weakSpectralRatio: valid
+          ? highToLowSpectralRatio(message.weakPcm)
+          : 0,
         valid,
       });
       if (message?.pcm instanceof ArrayBuffer) {
@@ -621,6 +657,9 @@ async function runQuietGainScenario(pcmRingModule) {
       }
       if (message?.baselinePcm instanceof ArrayBuffer) {
         new Uint8Array(message.baselinePcm).fill(0);
+      }
+      if (message?.weakPcm instanceof ArrayBuffer) {
+        new Uint8Array(message.weakPcm).fill(0);
       }
       return;
     }
@@ -653,10 +692,14 @@ async function runQuietGainScenario(pcmRingModule) {
       (frame) =>
         frame.valid &&
         frame.baselineMaximum > 0 &&
+        frame.baselineMaximum < frame.weakMaximum &&
+        frame.weakMaximum < frame.maximum &&
         frame.baselineMaximum < frame.maximum &&
         frame.maximum > 500 &&
         frame.maximum <= 26_870 &&
         frame.baselineSpectralRatio * 1.1 < frame.spectralRatio &&
+        frame.baselineSpectralRatio < frame.weakSpectralRatio &&
+        frame.weakSpectralRatio < frame.spectralRatio &&
         frame.spectralRatio > baseline * 1.1,
     ),
     "quiet_fallback_gain_bytes_invalid",

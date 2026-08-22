@@ -1516,14 +1516,17 @@ func (p *Pipeline) prepareTurn(
 	var confidence float32
 	var err error
 	if input.MIMEType == "audio/l16" {
-		if len(input.BaselineAudio) > 0 {
+		if len(input.BaselineAudio) > 0 || len(input.WeakAudio) > 0 {
 			pairedPCM, ok := p.speech.(speechio.PairedPCM16Transcriber)
-			if !ok {
+			if len(input.BaselineAudio) == 0 || len(input.WeakAudio) == 0 {
+				err = errors.New("three-view PCM input is incomplete")
+			} else if !ok {
 				err = errors.New("paired PCM transcriber is unavailable")
 			} else {
 				transcript, confidence, err = pairedPCM.TranscribePairedPCM16(
 					transcriptionCtx,
 					input.BaselineAudio,
+					input.WeakAudio,
 					input.Audio,
 				)
 			}

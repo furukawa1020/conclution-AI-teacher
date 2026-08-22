@@ -30,6 +30,7 @@ class TestPcmRing {
     this.slots = new Array(capacity).fill(null);
     this.head = 0;
     this.lastContextFrame = undefined;
+    this.lastWeakContextFrame = undefined;
     this.size = 0;
     this.overwriteOldest = overwriteOldest === true;
     this.freed = false;
@@ -58,6 +59,7 @@ class TestPcmRing {
     }
     this.head = 0;
     this.lastContextFrame = undefined;
+    this.lastWeakContextFrame = undefined;
     this.size = 0;
     this.phaseIntegrity = 0;
   }
@@ -105,6 +107,36 @@ class TestPcmRing {
 
   quietPhaseIntegrity(generation) {
     return generation === this.ownerGeneration ? this.phaseIntegrity : -1;
+  }
+
+  deriveWeakFrame(generation, contextFrame, baseline, enhanced, destination) {
+    if (
+      generation !== this.ownerGeneration ||
+      !Number.isSafeInteger(contextFrame) ||
+      contextFrame < 0 ||
+      (this.lastWeakContextFrame !== undefined &&
+        contextFrame <= this.lastWeakContextFrame) ||
+      !(baseline instanceof Uint8Array) ||
+      !(enhanced instanceof Uint8Array) ||
+      !(destination instanceof Uint8Array) ||
+      baseline.byteLength !== 640 ||
+      enhanced.byteLength !== 640 ||
+      destination.byteLength !== 640
+    ) {
+      return false;
+    }
+    const raw = new DataView(baseline.buffer, baseline.byteOffset, baseline.byteLength);
+    const strong = new DataView(enhanced.buffer, enhanced.byteOffset, enhanced.byteLength);
+    const weak = new DataView(destination.buffer, destination.byteOffset, destination.byteLength);
+    for (let offset = 0; offset < 640; offset += 2) {
+      weak.setInt16(
+        offset,
+        Math.trunc((3 * raw.getInt16(offset, true) + strong.getInt16(offset, true)) / 4),
+        true,
+      );
+    }
+    this.lastWeakContextFrame = contextFrame;
+    return true;
   }
 
   push(generation, contextFrame, pcm) {
@@ -919,6 +951,10 @@ test("quiet PCM stays in the Rust owner until one HTTP fallback transfer", () =>
     harness.processor.baselineFallbackRing.count(harness.generation),
     2,
   );
+  assert.equal(
+    harness.processor.weakFallbackRing.count(harness.generation),
+    2,
+  );
 
   harness.control({
     type: "take-fallback",
@@ -929,16 +965,21 @@ test("quiet PCM stays in the Rust owner until one HTTP fallback transfer", () =>
     ({ message }) => message.type === "fallback-frame",
   );
   assert.equal(fallback.length, 1);
-  assert.equal(fallback[0].transferCount, 2);
+  assert.equal(fallback[0].transferCount, 3);
   assert.equal(fallback[0].message.frameCount, 2);
   assert.equal(fallback[0].message.pcm.byteLength, 1_280);
   assert.equal(fallback[0].message.baselinePcm.byteLength, 1_280);
+  assert.equal(fallback[0].message.weakPcm.byteLength, 1_280);
   const sample = new DataView(fallback[0].message.pcm).getInt16(640, true);
   const baselineSample = new DataView(
     fallback[0].message.baselinePcm,
   ).getInt16(640, true);
+  const weakSample = new DataView(
+    fallback[0].message.weakPcm,
+  ).getInt16(640, true);
   assert.ok(sample > Math.round(0.002 * 32_767));
   assert.equal(baselineSample, Math.round(0.002 * 32_767));
+  assert.equal(weakSample, Math.trunc((3 * baselineSample + sample) / 4));
   const terminal = harness.output.at(-1).message;
   assert.deepEqual(terminal, {
     type: "fallback-sealed",

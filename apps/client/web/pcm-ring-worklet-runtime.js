@@ -21,6 +21,7 @@ function hasRingContract(value) {
       typeof value.clear === "function" &&
       typeof value.compensateQuietFrame === "function" &&
       typeof value.count === "function" &&
+      typeof value.deriveWeakFrame === "function" &&
       typeof value.free === "function" &&
       typeof value.generation === "function" &&
       typeof value.quietPhaseIntegrity === "function" &&
@@ -36,8 +37,10 @@ function verifyGenerationIsolation(ring, generation) {
       : generation + 1;
   const probe = new Uint8Array(PCM_RING_FRAME_BYTES);
   const destination = new Uint8Array(PCM_RING_FRAME_BYTES);
+  const enhanced = new Uint8Array(PCM_RING_FRAME_BYTES);
   probe.fill(0xa5);
   destination.fill(0x3c);
+  enhanced.fill(0x5a);
   try {
     const stalePush = ring.push(staleGeneration, 0, probe);
     const staleCompensation = ring.compensateQuietFrame(
@@ -45,6 +48,13 @@ function verifyGenerationIsolation(ring, generation) {
       probe,
     );
     const staleCount = ring.count(staleGeneration);
+    const staleWeak = ring.deriveWeakFrame(
+      staleGeneration,
+      1,
+      probe,
+      enhanced,
+      destination,
+    );
     const stalePhaseIntegrity = ring.quietPhaseIntegrity(staleGeneration);
     const staleShift = ring.shiftInto(staleGeneration, destination);
     const staleClear = ring.clear(staleGeneration);
@@ -52,6 +62,7 @@ function verifyGenerationIsolation(ring, generation) {
       stalePush !== RING_PUSH_INVALID ||
       staleCompensation !== RING_QUIET_COMPENSATION_INVALID ||
       staleCount !== -1 ||
+      staleWeak !== false ||
       stalePhaseIntegrity !== -1 ||
       staleShift !== RING_SHIFT_INVALID ||
       staleClear !== false ||
@@ -68,6 +79,7 @@ function verifyGenerationIsolation(ring, generation) {
     }
   } finally {
     probe.fill(0);
+    enhanced.fill(0);
     destination.fill(0);
   }
 }

@@ -297,6 +297,7 @@ pub struct PcmRing {
     head: usize,
     count: usize,
     last_context_frame: Option<u64>,
+    last_weak_context_frame: Option<u64>,
     overflow_policy: OverflowPolicy,
     quiet_spectral: QuietSpectralState,
 }
@@ -319,6 +320,7 @@ impl PcmRing {
             head: 0,
             count: 0,
             last_context_frame: None,
+            last_weak_context_frame: None,
             overflow_policy,
             quiet_spectral: QuietSpectralState::new(),
         })
@@ -404,6 +406,47 @@ impl PcmRing {
         Some(context_frame)
     }
 
+    /// Derive the weak observation for three-view ASR while binding it to the
+    /// same turn generation and strictly increasing browser sample clock.
+    ///
+    /// Invalid or stale input leaves the destination and binding clock intact.
+    pub fn derive_weak_frame(
+        &mut self,
+        generation: u64,
+        context_frame: u64,
+        baseline: &[u8],
+        enhanced: &[u8],
+        destination: &mut [u8],
+    ) -> bool {
+        if generation != self.generation
+            || baseline.len() != FRAME_BYTES
+            || enhanced.len() != FRAME_BYTES
+            || destination.len() != FRAME_BYTES
+            || self
+                .last_weak_context_frame
+                .is_some_and(|previous| context_frame <= previous)
+        {
+            return false;
+        }
+
+        let mut weak = [0_u8; FRAME_BYTES];
+        for ((raw, strong), output) in baseline
+            .chunks_exact(2)
+            .zip(enhanced.chunks_exact(2))
+            .zip(weak.chunks_exact_mut(2))
+        {
+            let raw = i32::from(i16::from_le_bytes([raw[0], raw[1]]));
+            let strong = i32::from(i16::from_le_bytes([strong[0], strong[1]]));
+            let sample =
+                ((3 * raw + strong) / 4).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            output.copy_from_slice(&sample.to_le_bytes());
+        }
+        destination.copy_from_slice(&weak);
+        weak.zeroize();
+        self.last_weak_context_frame = Some(context_frame);
+        true
+    }
+
     pub fn clear(&mut self, generation: u64) -> bool {
         if generation != self.generation {
             return false;
@@ -417,6 +460,7 @@ impl PcmRing {
         self.head = 0;
         self.count = 0;
         self.last_context_frame = None;
+        self.last_weak_context_frame = None;
         self.quiet_spectral.reset();
     }
 
@@ -1127,6 +1171,46 @@ mod wasm_boundary {
                 .map_or(-1, |integrity| integrity as i8)
         }
 
+        #[wasm_bindgen(js_name = deriveWeakFrame)]
+        pub fn derive_weak_frame(
+            &mut self,
+            generation: f64,
+            context_frame: f64,
+            baseline: &Uint8Array,
+            enhanced: &Uint8Array,
+            destination: &Uint8Array,
+        ) -> bool {
+            let Some(inner) = self.inner.as_mut() else {
+                return false;
+            };
+            let (Some(generation), Some(context_frame)) = (
+                parse_context_frame(generation),
+                parse_context_frame(context_frame),
+            ) else {
+                return false;
+            };
+            if baseline.length() as usize != FRAME_BYTES
+                || enhanced.length() as usize != FRAME_BYTES
+                || destination.length() as usize != FRAME_BYTES
+            {
+                return false;
+            }
+            let mut raw = [0_u8; FRAME_BYTES];
+            let mut strong = [0_u8; FRAME_BYTES];
+            let mut weak = [0_u8; FRAME_BYTES];
+            baseline.copy_to(&mut raw);
+            enhanced.copy_to(&mut strong);
+            let result =
+                inner.derive_weak_frame(generation, context_frame, &raw, &strong, &mut weak);
+            if result {
+                destination.copy_from(&weak);
+            }
+            raw.zeroize();
+            strong.zeroize();
+            weak.zeroize();
+            result
+        }
+
         #[wasm_bindgen(js_name = shiftInto)]
         pub fn shift_into(&mut self, generation: f64, destination: &Uint8Array) -> f64 {
             let Some(inner) = self.inner.as_mut() else {
@@ -1394,6 +1478,26 @@ mod tests {
         let mut owner_output = [0_u8; FRAME_BYTES];
         assert_eq!(ring.shift_into(41, &mut owner_output), Some(10));
         assert_eq!(owner_output, frame(0xa5));
+    }
+
+    #[test]
+    fn weak_view_is_generation_and_sample_clock_bound() {
+        let mut ring = PcmRing::new(45, 2, OverflowPolicy::Reject).unwrap();
+        let baseline = [0_u8; FRAME_BYTES];
+        let enhanced = frame(4);
+        let mut weak = frame(0x3c);
+        assert!(!ring.derive_weak_frame(46, 100, &baseline, &enhanced, &mut weak));
+        assert_eq!(weak, frame(0x3c));
+        assert!(ring.derive_weak_frame(45, 100, &baseline, &enhanced, &mut weak));
+        assert_eq!(&weak[..4], &[1, 1, 1, 1]);
+
+        let unchanged = weak;
+        assert!(!ring.derive_weak_frame(45, 100, &baseline, &enhanced, &mut weak));
+        assert_eq!(weak, unchanged);
+        assert!(!ring.derive_weak_frame(45, 99, &baseline, &enhanced, &mut weak));
+        assert_eq!(weak, unchanged);
+        assert!(ring.clear(45));
+        assert!(ring.derive_weak_frame(45, 99, &baseline, &enhanced, &mut weak));
     }
 
     #[test]

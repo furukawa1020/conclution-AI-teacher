@@ -50,10 +50,12 @@ func TestPairedPCM16AcceptsOnlyExactIndependentAgreement(t *testing.T) {
 	enhancedStream := pairedFinalStream("小さな 声です", .87)
 	service := pairedStreamingService(baselineStream, weakStream, enhancedStream)
 	baseline := bytes.Repeat([]byte{1, 0}, 320)
+	weak := bytes.Repeat([]byte{2, 0}, 320)
 	enhanced := bytes.Repeat([]byte{5, 0}, 320)
 	text, confidence, err := service.TranscribePairedPCM16(
 		context.Background(),
 		baseline,
+		weak,
 		enhanced,
 	)
 	if err != nil || text != "小さな 声です" || confidence != .87 {
@@ -66,8 +68,8 @@ func TestPairedPCM16AcceptsOnlyExactIndependentAgreement(t *testing.T) {
 		}
 		observed[stream.sent[1].GetAudio()[0]] = true
 	}
-	if !observed[0] || !observed[1] || !observed[5] {
-		t.Fatalf("baseline/strong views or zeroized weak view missing: %#v", observed)
+	if !observed[1] || !observed[2] || !observed[5] {
+		t.Fatalf("three owned views missing: %#v", observed)
 	}
 }
 
@@ -95,6 +97,7 @@ func TestPairedPCM16RejectsSubstitutionAndOneSidedSpeech(t *testing.T) {
 			service := pairedStreamingService(test.baseline, test.weak, test.enhanced)
 			_, _, err := service.TranscribePairedPCM16(
 				context.Background(),
+				make([]byte, 640),
 				make([]byte, 640),
 				make([]byte, 640),
 			)
@@ -129,6 +132,7 @@ func TestPairedPCM16AcceptsEveryTwoOfThreeExactAgreement(t *testing.T) {
 			text, confidence, err := service.TranscribePairedPCM16(
 				context.Background(),
 				bytes.Repeat([]byte{1, 0}, 320),
+				bytes.Repeat([]byte{1, 0}, 320),
 				bytes.Repeat([]byte{3, 0}, 320),
 			)
 			if err != nil || text == "" || confidence != test.want {
@@ -150,6 +154,7 @@ func TestPairedPCM16RejectsProviderFailureEvenWhenOtherViewsAgree(t *testing.T) 
 	_, _, err := service.TranscribePairedPCM16(
 		context.Background(),
 		bytes.Repeat([]byte{1, 0}, 320),
+		bytes.Repeat([]byte{1, 0}, 320),
 		bytes.Repeat([]byte{2, 0}, 320),
 	)
 	if !errors.Is(err, ErrPairedRecognitionUnresolved) {
@@ -157,20 +162,34 @@ func TestPairedPCM16RejectsProviderFailureEvenWhenOtherViewsAgree(t *testing.T) 
 	}
 }
 
-func TestWeakPCM16IsBoundedSampleAlignedObservationMix(t *testing.T) {
-	baseline := []byte{0x00, 0x80, 0xff, 0x7f, 0xe8, 0x03}
-	enhanced := []byte{0xff, 0x7f, 0x00, 0x80, 0xd0, 0x07}
-	weak, err := deriveWeakPCM16(baseline, enhanced)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []int16{-16384, 16383, 1250}
-	for index := range want {
-		offset := index * 2
-		got := int16(uint16(weak[offset]) | uint16(weak[offset+1])<<8)
-		if got != want[index] {
-			t.Fatalf("sample %d = %d; want %d", index, got, want[index])
+func TestPairedPCM16RejectsMissingOrMisalignedOwnedWeakView(t *testing.T) {
+	service := &CloudService{}
+	baseline := make([]byte, 640)
+	enhanced := make([]byte, 640)
+	for _, weak := range [][]byte{nil, make([]byte, 638), make([]byte, 1_280)} {
+		_, _, err := service.TranscribePairedPCM16(
+			context.Background(), baseline, weak, enhanced,
+		)
+		if !errors.Is(err, ErrPairedRecognitionUnresolved) {
+			t.Fatalf("weak length %d escaped: %v", len(weak), err)
 		}
+	}
+}
+
+func TestOwnedWeakViewValidationRejectsOneHundredThousandMutations(t *testing.T) {
+	baseline := bytes.Repeat([]byte{1, 0}, 320)
+	enhanced := bytes.Repeat([]byte{5, 0}, 320)
+	weak := bytes.Repeat([]byte{2, 0}, 320)
+	if !weakPCM16MatchesObservationMix(baseline, weak, enhanced) {
+		t.Fatal("valid Rust observation mix was rejected")
+	}
+	for trace := 0; trace < 100_000; trace++ {
+		offset := (trace % 320) * 2
+		weak[offset] ^= byte(1 + trace%255)
+		if weakPCM16MatchesObservationMix(baseline, weak, enhanced) {
+			t.Fatalf("mutation %d was accepted", trace)
+		}
+		weak[offset] ^= byte(1 + trace%255)
 	}
 }
 

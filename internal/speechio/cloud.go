@@ -58,13 +58,14 @@ type ExplicitPCM16Transcriber interface {
 }
 
 // PairedPCM16Transcriber independently decodes sample-aligned baseline, weak,
-// and enhanced views. The weak view is deterministically derived from both
-// owned inputs. Text is returned only when two views establish the exact same
+// and enhanced views, all derived and sample-clock-bound by the browser's
+// Rust/Wasm owner. Text is returned only when two views establish the exact same
 // canonical observation; a single hypothesis is never sufficient authority.
 type PairedPCM16Transcriber interface {
 	TranscribePairedPCM16(
 		ctx context.Context,
 		baseline []byte,
+		weak []byte,
 		enhanced []byte,
 	) (string, float32, error)
 }
@@ -257,17 +258,13 @@ func (s *CloudService) TranscribePCM16(
 func (s *CloudService) TranscribePairedPCM16(
 	ctx context.Context,
 	baseline []byte,
+	weak []byte,
 	enhanced []byte,
 ) (string, float32, error) {
-	if len(baseline) == 0 || len(baseline) != len(enhanced) ||
-		len(baseline)%640 != 0 {
+	if len(baseline) == 0 || len(baseline) != len(weak) || len(baseline) != len(enhanced) ||
+		len(baseline)%640 != 0 || !weakPCM16MatchesObservationMix(baseline, weak, enhanced) {
 		return "", 0, ErrPairedRecognitionUnresolved
 	}
-	weak, err := deriveWeakPCM16(baseline, enhanced)
-	if err != nil {
-		return "", 0, ErrPairedRecognitionUnresolved
-	}
-	defer clear(weak)
 	type outcome struct {
 		text       string
 		confidence float32
@@ -313,19 +310,24 @@ func (s *CloudService) TranscribePairedPCM16(
 	return text, confidence, nil
 }
 
-func deriveWeakPCM16(baseline, enhanced []byte) ([]byte, error) {
-	if len(baseline) == 0 || len(baseline) != len(enhanced) || len(baseline)%2 != 0 {
-		return nil, ErrPairedRecognitionUnresolved
+// weakPCM16MatchesObservationMix validates the browser-owned third view
+// without creating a server-side replacement. This prevents an untrusted
+// caller from turning two identical arbitrary payloads into false consensus.
+func weakPCM16MatchesObservationMix(baseline, weak, enhanced []byte) bool {
+	if len(baseline) == 0 || len(baseline) != len(weak) ||
+		len(baseline) != len(enhanced) || len(baseline)%2 != 0 {
+		return false
 	}
-	weak := make([]byte, len(baseline))
 	for offset := 0; offset < len(baseline); offset += 2 {
 		raw := int32(int16(uint16(baseline[offset]) | uint16(baseline[offset+1])<<8))
 		strong := int32(int16(uint16(enhanced[offset]) | uint16(enhanced[offset+1])<<8))
-		mixed := (3*raw + strong) / 4
-		weak[offset] = byte(uint16(int16(mixed)))
-		weak[offset+1] = byte(uint16(int16(mixed)) >> 8)
+		want := int16((3*raw + strong) / 4)
+		got := int16(uint16(weak[offset]) | uint16(weak[offset+1])<<8)
+		if got != want {
+			return false
+		}
 	}
-	return weak, nil
+	return true
 }
 
 func threeViewTranscriptConsensus(values ...string) (string, []int) {

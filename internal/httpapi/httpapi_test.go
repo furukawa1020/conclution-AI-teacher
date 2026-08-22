@@ -1364,10 +1364,12 @@ func TestVoiceTurnRawPCMHasItsExactThreeMinuteThirtySecondCeiling(t *testing.T) 
 func TestVoiceTurnAcceptsOnlyCompleteAlignedPairedPCM(t *testing.T) {
 	t.Parallel()
 	baseline := bytes.Repeat([]byte{1, 0}, 320)
+	weak := bytes.Repeat([]byte{1, 0}, 320)
 	enhanced := bytes.Repeat([]byte{2, 0}, 320)
 	input, err := decodeVoiceTurn(voiceTurnRequest{
 		AudioBase64:         base64.StdEncoding.EncodeToString(enhanced),
 		BaselineAudioBase64: base64.StdEncoding.EncodeToString(baseline),
+		WeakAudioBase64:     base64.StdEncoding.EncodeToString(weak),
 		MIMEType:            "audio/l16",
 		TurnMode:            VoiceTurnIntentional,
 	})
@@ -1376,20 +1378,36 @@ func TestVoiceTurnAcceptsOnlyCompleteAlignedPairedPCM(t *testing.T) {
 	}
 	defer clearVoiceInput(&input)
 	if !bytes.Equal(input.Audio, enhanced) ||
-		!bytes.Equal(input.BaselineAudio, baseline) {
+		!bytes.Equal(input.BaselineAudio, baseline) ||
+		!bytes.Equal(input.WeakAudio, weak) {
 		t.Fatalf("paired input was not preserved")
 	}
 
 	for _, test := range []voiceTurnRequest{
 		{
 			AudioBase64:         base64.StdEncoding.EncodeToString(enhanced),
+			BaselineAudioBase64: base64.StdEncoding.EncodeToString(baseline),
+			MIMEType:            "audio/l16",
+			TurnMode:            VoiceTurnIntentional,
+		},
+		{
+			AudioBase64:         base64.StdEncoding.EncodeToString(enhanced),
 			BaselineAudioBase64: base64.StdEncoding.EncodeToString(baseline[:638]),
+			WeakAudioBase64:     base64.StdEncoding.EncodeToString(weak),
+			MIMEType:            "audio/l16",
+			TurnMode:            VoiceTurnIntentional,
+		},
+		{
+			AudioBase64:         base64.StdEncoding.EncodeToString(enhanced),
+			BaselineAudioBase64: base64.StdEncoding.EncodeToString(baseline),
+			WeakAudioBase64:     base64.StdEncoding.EncodeToString(weak[:638]),
 			MIMEType:            "audio/l16",
 			TurnMode:            VoiceTurnIntentional,
 		},
 		{
 			AudioBase64:         "YXVkaW8=",
 			BaselineAudioBase64: "YXVkaW8=",
+			WeakAudioBase64:     "YXVkaW8=",
 			MIMEType:            "audio/webm",
 			TurnMode:            VoiceTurnIntentional,
 		},
@@ -1411,6 +1429,7 @@ func TestVoiceTurnPairedPCMHasThirtySecondPerPathCeiling(t *testing.T) {
 	input, err := decodeVoiceTurn(voiceTurnRequest{
 		AudioBase64:         maximum,
 		BaselineAudioBase64: maximum,
+		WeakAudioBase64:     maximum,
 		MIMEType:            "audio/l16",
 		TurnMode:            VoiceTurnIntentional,
 	})
@@ -1422,6 +1441,7 @@ func TestVoiceTurnPairedPCMHasThirtySecondPerPathCeiling(t *testing.T) {
 	input, err = decodeVoiceTurn(voiceTurnRequest{
 		AudioBase64:         over,
 		BaselineAudioBase64: over,
+		WeakAudioBase64:     over,
 		MIMEType:            "audio/l16",
 		TurnMode:            VoiceTurnIntentional,
 	})

@@ -34,6 +34,7 @@ type explicitPCMSpeech struct {
 type pairedPCMSpeech struct {
 	fakeSpeech
 	baseline    []byte
+	weak        []byte
 	enhanced    []byte
 	pairedCalls int
 	pairedErr   error
@@ -42,10 +43,12 @@ type pairedPCMSpeech struct {
 func (s *pairedPCMSpeech) TranscribePairedPCM16(
 	_ context.Context,
 	baseline []byte,
+	weak []byte,
 	enhanced []byte,
 ) (string, float32, error) {
 	s.pairedCalls++
 	s.baseline = append([]byte(nil), baseline...)
+	s.weak = append([]byte(nil), weak...)
 	s.enhanced = append([]byte(nil), enhanced...)
 	return s.transcript, s.confidence, s.pairedErr
 }
@@ -70,6 +73,7 @@ func (s *explicitPCMSpeech) TranscribePCM16(
 func TestPipelineUsesPairedPCMWithoutSinglePathFallback(t *testing.T) {
 	t.Parallel()
 	baseline := make([]byte, 640)
+	weak := bytes.Repeat([]byte{1, 0}, 320)
 	enhanced := bytes.Repeat([]byte{1, 0}, 320)
 	speech := &pairedPCMSpeech{fakeSpeech: fakeSpeech{
 		transcript: "小さな声です",
@@ -85,13 +89,14 @@ func TestPipelineUsesPairedPCMWithoutSinglePathFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
-		Audio: enhanced, BaselineAudio: baseline, MIMEType: "audio/l16",
+		Audio: enhanced, BaselineAudio: baseline, WeakAudio: weak, MIMEType: "audio/l16",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if speech.pairedCalls != 1 || agent.calls != 1 ||
 		!bytes.Equal(speech.baseline, baseline) ||
+		!bytes.Equal(speech.weak, weak) ||
 		!bytes.Equal(speech.enhanced, enhanced) {
 		t.Fatalf("paired boundary was bypassed: speech=%+v agent=%d", speech, agent.calls)
 	}
@@ -106,13 +111,28 @@ func TestPipelineTreatsPairedDisagreementAsRecognitionMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
-		Audio: make([]byte, 640), BaselineAudio: make([]byte, 640), MIMEType: "audio/l16",
+		Audio: make([]byte, 640), BaselineAudio: make([]byte, 640), WeakAudio: make([]byte, 640), MIMEType: "audio/l16",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent.calls != 0 || result.Route != routeClarifyNoSpeech {
 		t.Fatalf("disagreement escaped: result=%+v agent=%d", result, agent.calls)
+	}
+}
+
+func TestPipelineRejectsIncompleteThreeViewPCMWithoutSinglePathFallback(t *testing.T) {
+	t.Parallel()
+	speech := &pairedPCMSpeech{fakeSpeech: fakeSpeech{}}
+	pipeline, err := New(speech, &fakeAgent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pipeline.Process(context.Background(), "uid", httpapi.VoiceTurnInput{
+		Audio: make([]byte, 640), BaselineAudio: make([]byte, 640), MIMEType: "audio/l16",
+	})
+	if err == nil || speech.pairedCalls != 0 {
+		t.Fatalf("incomplete three-view input escaped: err=%v speech=%+v", err, speech)
 	}
 }
 

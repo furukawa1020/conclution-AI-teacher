@@ -82,6 +82,7 @@ const (
 type VoiceTurnInput struct {
 	Audio                   []byte
 	BaselineAudio           []byte
+	WeakAudio               []byte
 	MIMEType                string
 	StateToken              string
 	RequestID               string
@@ -604,6 +605,7 @@ func NewWithVoiceAndPasskeys(
 type voiceTurnRequest struct {
 	AudioBase64             string                `json:"audioBase64"`
 	BaselineAudioBase64     string                `json:"baselineAudioBase64,omitempty"`
+	WeakAudioBase64         string                `json:"weakAudioBase64,omitempty"`
 	MIMEType                string                `json:"mimeType"`
 	SessionState            string                `json:"sessionState"`
 	SessionContext          string                `json:"sessionContext,omitempty"`
@@ -836,7 +838,7 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 	}
 	audioMaximum := maxAudioBytes
 	if mimeType == "audio/l16" {
-		if request.BaselineAudioBase64 != "" {
+		if request.BaselineAudioBase64 != "" || request.WeakAudioBase64 != "" {
 			audioMaximum = maxPairedPCM16Bytes
 		} else {
 			audioMaximum = maxRawPCM16Bytes
@@ -849,10 +851,15 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 		return VoiceTurnInput{}, errors.New("invalid audio")
 	}
 	var baselineAudio []byte
-	if request.BaselineAudioBase64 != "" {
+	var weakAudio []byte
+	if request.BaselineAudioBase64 != "" || request.WeakAudioBase64 != "" {
 		if mimeType != "audio/l16" || len(audio)%640 != 0 {
 			clear(audio)
 			return VoiceTurnInput{}, errors.New("invalid paired audio metadata")
+		}
+		if request.BaselineAudioBase64 == "" || request.WeakAudioBase64 == "" {
+			clear(audio)
+			return VoiceTurnInput{}, errors.New("incomplete three-view audio metadata")
 		}
 		baselineAudio, err = decodeBoundedBase64(
 			request.BaselineAudioBase64,
@@ -863,11 +870,22 @@ func decodeVoiceTurn(request voiceTurnRequest) (VoiceTurnInput, error) {
 			clear(baselineAudio)
 			return VoiceTurnInput{}, errors.New("invalid paired audio")
 		}
+		weakAudio, err = decodeBoundedBase64(
+			request.WeakAudioBase64,
+			maxPairedPCM16Bytes,
+		)
+		if err != nil || len(weakAudio) != len(audio) || len(weakAudio)%640 != 0 {
+			clear(audio)
+			clear(baselineAudio)
+			clear(weakAudio)
+			return VoiceTurnInput{}, errors.New("invalid three-view audio")
+		}
 	}
 
 	input := VoiceTurnInput{
 		Audio:                   audio,
 		BaselineAudio:           baselineAudio,
+		WeakAudio:               weakAudio,
 		MIMEType:                mimeType,
 		StateToken:              request.SessionState,
 		TurnMode:                request.TurnMode,
@@ -1228,6 +1246,8 @@ func clearVoiceInput(input *VoiceTurnInput) {
 	input.Audio = nil
 	clear(input.BaselineAudio)
 	input.BaselineAudio = nil
+	clear(input.WeakAudio)
+	input.WeakAudio = nil
 	if input.Document != nil {
 		clear(input.Document.Data)
 		input.Document.Data = nil

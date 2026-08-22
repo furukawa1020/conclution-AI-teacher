@@ -41,6 +41,9 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(rust, /self\.slots\.iter_mut\(\)\.for_each\(Slot::wipe\)/u);
   assert.match(rust, /context_frame <= previous/u);
   assert.match(rust, /pub fn compensate_quiet_frame/u);
+  assert.match(rust, /pub fn derive_weak_frame/u);
+  assert.match(rust, /last_weak_context_frame/u);
+  assert.match(rust, /3 \* raw \+ strong/u);
   assert.match(rust, /const QUIET_PRE_EMPHASIS: f64 = 0\.28/u);
   assert.match(rust, /const DC_BLOCK_POLE: f64 = 0\.995/u);
   assert.match(rust, /filtered\.zeroize\(\)/u);
@@ -56,6 +59,7 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   assert.match(runtime, /verifyGenerationIsolation\(ring, generation\)/u);
   assert.match(runtime, /ring\.push\(staleGeneration, 0, probe\)/u);
   assert.match(runtime, /ring\.compensateQuietFrame\([\s\S]*staleGeneration/u);
+  assert.match(runtime, /ring\.deriveWeakFrame\([\s\S]*staleGeneration/u);
   assert.match(runtime, /ring\.quietPhaseIntegrity\(staleGeneration\)/u);
   assert.match(runtime, /observationAddingSelfTest\(\)\s*!==\s*true/u);
   assert.match(runtime, /turnReferenceBoundarySelfTest\(\)\s*!==\s*true/u);
@@ -76,6 +80,12 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
     worklet,
     /this\.confirmedQueue\.quietPhaseIntegrity\(\s*this\.generation/u,
   );
+  assert.match(
+    worklet,
+    /this\.confirmedQueue\.deriveWeakFrame\([\s\S]*entry\.contextFrame/u,
+  );
+  assert.match(worklet, /this\.weakFallbackRing = createPcmRing/u);
+  assert.match(worklet, /weakContextFrame !== contextFrame/u);
   assert.match(worklet, /control\.quietConfirmed && control\.aecVerified/u);
   assert.match(bridge, /aecVerified: hasVerifiedEchoCancellation\(stream\)/u);
   assert.doesNotMatch(worklet, /QUIET_GAIN_TARGET_RMS|sample \* applied/u);

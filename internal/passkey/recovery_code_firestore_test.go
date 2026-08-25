@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -92,6 +93,30 @@ func TestFirestoreRecoveryCodeReissueAndAccountDeletionAreAtomic(t *testing.T) {
 	for _, forbidden := range []string{uid, first.Code, second.Code} {
 		if strings.Contains(serialized, forbidden) {
 			t.Fatalf("recovery documents exposed forbidden value %q", forbidden)
+		}
+	}
+	finishRequest, err := http.NewRequest(http.MethodPost, "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishRequest.Header.Set("X-Test-Credential-ID", "recovery-secondary")
+	if _, err := service.FinishRegistration(ctx, "firebase-app-id", begin.CeremonyID, finishRequest); err != nil {
+		t.Fatalf("finish recovery registration: %v", err)
+	}
+	recovered, err := store.LoadUserByUID(ctx, uid)
+	if err != nil || recovered == nil || len(recovered.Credentials) != 2 {
+		count := 0
+		if recovered != nil {
+			count = len(recovered.Credentials)
+		}
+		t.Fatalf("recovered credentials=%d err=%v", count, err)
+	}
+	for _, ref := range []*firestore.DocumentRef{
+		client.Collection(recoveryAccountCollection).Doc(accountKey),
+		client.Collection(recoveryCodeCollection).Doc(recoveryCodeDocumentID(secondDigest)),
+	} {
+		if _, err := ref.Get(ctx); status.Code(err) != codes.NotFound {
+			t.Fatalf("successful recovery retained %s: %v", ref.Path, err)
 		}
 	}
 	if err := store.DeleteAccountData(ctx, uid, now.Add(2*time.Minute)); err != nil {

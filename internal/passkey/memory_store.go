@@ -113,6 +113,29 @@ func (s *MemoryStore) LoadRecoveryUser(
 	return cloneUser(user), nil
 }
 
+func (s *MemoryStore) LoadRecoveryUserByHandle(
+	_ context.Context,
+	userHandle, principalDigest []byte,
+	now time.Time,
+) (*User, error) {
+	if len(userHandle) == 0 || len(principalDigest) != sha256.Size || now.IsZero() {
+		return nil, ErrRecoveryCode
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, user := range s.users {
+		if subtle.ConstantTimeCompare(user.UserHandle, userHandle) != 1 ||
+			subtle.ConstantTimeCompare(digestString(user.UID), principalDigest) != 1 {
+			continue
+		}
+		if _, err := s.validateCredentialStateLocked(user, now.UTC()); err != nil {
+			return nil, ErrRecoveryCode
+		}
+		return cloneUser(user), nil
+	}
+	return nil, ErrRecoveryCode
+}
+
 func (s *MemoryStore) DeleteAccountData(_ context.Context, uid string, now time.Time) error {
 	if uid == "" || now.IsZero() {
 		return ErrCredentialStateInvalid
@@ -174,6 +197,27 @@ func (s *MemoryStore) ConsumeCeremony(
 	return cloneCeremony(record), nil
 }
 
+func (s *MemoryStore) ConsumeRegistrationCeremony(
+	_ context.Context,
+	id string,
+	appIDDigest []byte,
+	now time.Time,
+) (Ceremony, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := documentID([]byte(id))
+	record, exists := s.ceremonies[key]
+	if !exists {
+		return Ceremony{}, ErrCeremonyInvalid
+	}
+	delete(s.ceremonies, key)
+	if (record.Purpose != registrationUse && record.Purpose != recoveryRegistrationUse) ||
+		!ceremonyMatches(record, record.Purpose, appIDDigest, now) {
+		return Ceremony{}, ErrCeremonyInvalid
+	}
+	return cloneCeremony(record), nil
+}
+
 func (s *MemoryStore) LoadUserByUID(_ context.Context, uid string) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -196,6 +240,45 @@ func (s *MemoryStore) CreateCredential(
 	now = now.UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.createCredentialLocked(user, credential, now)
+}
+
+func (s *MemoryStore) CreateRecoveryCredential(
+	_ context.Context,
+	user *User,
+	credential webauthn.Credential,
+	digest [sha256.Size]byte,
+	now time.Time,
+) error {
+	if err := validateCredentialCreation(user, credential, now); err != nil {
+		return ErrRecoveryCode
+	}
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	userKey := documentID([]byte(user.UID))
+	codeKey := recoveryCodeDocumentID(digest)
+	recovery, exists := s.recovery[userKey]
+	owner, indexed := s.recoveryByCode[codeKey]
+	if !exists || !indexed || owner != userKey ||
+		subtle.ConstantTimeCompare(recovery.Digest[:], digest[:]) != 1 ||
+		!recovery.ExpiresAt.After(now) || recovery.IssuedAt.IsZero() ||
+		!recovery.ExpiresAt.After(recovery.IssuedAt) {
+		return ErrRecoveryCode
+	}
+	if err := s.createCredentialLocked(user, credential, now); err != nil {
+		return ErrRecoveryCode
+	}
+	delete(s.recoveryByCode, codeKey)
+	delete(s.recovery, userKey)
+	return nil
+}
+
+func (s *MemoryStore) createCredentialLocked(
+	user *User,
+	credential webauthn.Credential,
+	now time.Time,
+) error {
 	credentialKey := documentID(credential.ID)
 	if _, exists := s.credentials[credentialKey]; exists {
 		return ErrCredentialConflict

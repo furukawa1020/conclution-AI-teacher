@@ -219,10 +219,9 @@ func (s *Service) FinishRegistration(
 	if response == nil || strings.TrimSpace(appID) == "" {
 		return FinishResult{}, ErrRegistration
 	}
-	record, err := s.store.ConsumeCeremony(
+	record, err := s.store.ConsumeRegistrationCeremony(
 		ctx,
 		strings.TrimSpace(ceremonyID),
-		registrationUse,
 		digestString(appID),
 		s.now().UTC(),
 	)
@@ -244,7 +243,21 @@ func (s *Service) FinishRegistration(
 		return FinishResult{}, ErrRegistration
 	}
 	verifiedAt := s.now().UTC()
-	if err := s.store.CreateCredential(ctx, user, *credential, verifiedAt); err != nil {
+	if record.Purpose == recoveryRegistrationUse {
+		recoveryStore, ok := s.store.(RecoveryCodeStore)
+		if !ok || len(record.RecoveryCodeDigest) != sha256.Size {
+			return FinishResult{}, ErrRegistration
+		}
+		var recoveryDigest [sha256.Size]byte
+		copy(recoveryDigest[:], record.RecoveryCodeDigest)
+		if err := recoveryStore.CreateRecoveryCredential(ctx, user, *credential, recoveryDigest, verifiedAt); err != nil {
+			return FinishResult{}, ErrRegistration
+		}
+	} else if record.Purpose == registrationUse {
+		if err := s.store.CreateCredential(ctx, user, *credential, verifiedAt); err != nil {
+			return FinishResult{}, ErrRegistration
+		}
+	} else {
 		return FinishResult{}, ErrRegistration
 	}
 	return s.mint(ctx, user.UID, verifiedAt)
@@ -508,6 +521,22 @@ func (s *Service) FinishAuthentication(
 }
 
 func (s *Service) registrationUser(ctx context.Context, record Ceremony) (*User, error) {
+	if record.Purpose == recoveryRegistrationUse {
+		recoveryStore, ok := s.store.(RecoveryCodeStore)
+		if !ok || len(record.UserHandle) == 0 || len(record.PrincipalDigest) != sha256.Size {
+			return nil, ErrRegistration
+		}
+		user, err := recoveryStore.LoadRecoveryUserByHandle(
+			ctx,
+			record.UserHandle,
+			record.PrincipalDigest,
+			s.now().UTC(),
+		)
+		if err != nil || user == nil {
+			return nil, ErrRegistration
+		}
+		return user, nil
+	}
 	stored, err := s.store.LoadUserByUID(ctx, record.TargetUID)
 	if err == nil {
 		if subtle.ConstantTimeCompare(stored.UserHandle, record.UserHandle) != 1 {

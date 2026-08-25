@@ -97,6 +97,12 @@ type Store interface {
 		appIDDigest []byte,
 		now time.Time,
 	) (Ceremony, error)
+	ConsumeRegistrationCeremony(
+		ctx context.Context,
+		ceremonyID string,
+		appIDDigest []byte,
+		now time.Time,
+	) (Ceremony, error)
 	LoadUserByUID(context.Context, string) (*User, error)
 	CreateCredential(context.Context, *User, webauthn.Credential, time.Time) error
 	FindCredential(context.Context, []byte, []byte) (*StoredCredential, error)

@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -165,5 +167,60 @@ func TestBeginRecoveryRegistrationRejectsExpiredReissuedAndMalformedCodes(t *tes
 	store.mu.Unlock()
 	if _, err := service.BeginRecoveryRegistration(context.Background(), "firebase-app-id", newCode.Code); !errors.Is(err, ErrRecoveryCode) {
 		t.Fatalf("expired recovery code accepted: %v", err)
+	}
+}
+
+func TestFinishRecoveryRegistrationAtomicallyConsumesCodeAndAllowsOneWinner(t *testing.T) {
+	service, store, uid, _ := recoveryCodeService(t)
+	code, err := service.IssueRecoveryCode(context.Background(), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.registrations = &recordingRegistrationCeremonies{}
+	begin, err := service.BeginRecoveryRegistration(context.Background(), "firebase-app-id", code.Code)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, credentialID := range []string{"recovery-winner-a", "recovery-winner-b"} {
+		wait.Add(1)
+		go func(id string) {
+			defer wait.Done()
+			request, requestErr := http.NewRequest(http.MethodPost, "/", nil)
+			if requestErr != nil {
+				results <- requestErr
+				return
+			}
+			request.Header.Set("X-Test-Credential-ID", id)
+			<-start
+			_, finishErr := service.FinishRegistration(context.Background(), "firebase-app-id", begin.CeremonyID, request)
+			results <- finishErr
+		}(credentialID)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	successes := 0
+	for finishErr := range results {
+		if finishErr == nil {
+			successes++
+		} else if !errors.Is(finishErr, ErrRegistration) {
+			t.Fatalf("unexpected finish error: %v", finishErr)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent finishes = %d, want 1", successes)
+	}
+	accountKey := documentID([]byte(uid))
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, exists := store.recovery[accountKey]; exists || len(store.recoveryByCode) != 0 {
+		t.Fatal("successful recovery retained reusable code state")
+	}
+	if credentials := store.users[accountKey].Credentials; len(credentials) != 2 {
+		t.Fatalf("credentials after recovery = %d, want original plus one", len(credentials))
 	}
 }

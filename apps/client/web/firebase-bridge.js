@@ -128,6 +128,10 @@ const PASSKEY_CREDENTIALS_ENDPOINT = "/api/v1/passkeys/credentials";
 const PASSKEY_CREDENTIAL_REVOKE_ENDPOINT =
   "/api/v1/passkeys/credentials:revoke";
 const PASSKEY_ACCOUNT_DELETE_ENDPOINT = "/api/v1/passkeys/account:delete";
+const PASSKEY_RECOVERY_CODE_ISSUE_ENDPOINT =
+  "/api/v1/passkeys/recovery-code:issue";
+const PASSKEY_RECOVERY_REGISTRATION_BEGIN_ENDPOINT =
+  "/api/v1/passkeys/recovery/registration:begin";
 const PASSKEY_ACCOUNT_DELETE_CONFIRMATION = "この仮名アカウントを完全に削除する";
 // The server caps finish bodies at 256 KiB. JSON produced here is ASCII-only,
 // so a character limit is also a byte-safe upper bound before fetch.
@@ -1310,6 +1314,90 @@ async function registerPasskeyAccount() {
   }
 }
 
+async function recoverPasskeyAccount(code) {
+  let recoveryCode = code;
+  code = undefined;
+  if (
+    typeof recoveryCode !== "string" ||
+    !/^krc1_[A-Za-z0-9_-]{43}$/u.test(recoveryCode) ||
+    document.hidden ||
+    guestModeActive ||
+    hasActiveVoiceSession() ||
+    passkeyGate.isBusy()
+  ) {
+    recoveryCode = undefined;
+    fail("passkey_recovery_failed");
+  }
+  try {
+    const { appCheck } = await appServices();
+    const { auth } = await firebaseAuth();
+    if (currentAccountUser(auth)) fail("passkey_account_exists");
+    const appCheckResult = await getAppCheckToken(appCheck, false);
+    requirePasskeySupport("registration");
+    const recoveredUser = await runPasskeyOperation(
+      "passkey_recovery_failed",
+      async (signal) => {
+        let credential;
+        let encodedCredential;
+        try {
+          const begin = decodeRegistrationBegin(
+            await passkeyJSON(PASSKEY_RECOVERY_REGISTRATION_BEGIN_ENDPOINT, {
+              appCheckToken: appCheckResult.token,
+              body: Object.freeze({ recoveryCode }),
+              failureCode: "passkey_recovery_failed",
+              signal,
+            }),
+          );
+          recoveryCode = undefined;
+          try {
+            credential = await navigator.credentials.create({
+              ...begin.options,
+              signal,
+            });
+          } catch (error) {
+            if (isPasskeyCancellation(error)) fail("passkey_registration_cancelled");
+            throw error;
+          }
+          if (!credential) fail("passkey_recovery_failed");
+          encodedCredential = encodeRegistrationCredential(credential);
+          const finish = parsePasskeyFinish(
+            await passkeyJSON(
+              finishEndpoint(PASSKEY_REGISTRATION_FINISH_ENDPOINT, begin.ceremonyId),
+              {
+                appCheckToken: appCheckResult.token,
+                body: encodedCredential,
+                failureCode: "passkey_recovery_failed",
+                signal,
+              },
+            ),
+          );
+          const signedIn = await signInWithCustomToken(auth, finish.customToken);
+          return verifyFreshCustomPasskeyUser(
+            signedIn.user,
+            "passkey_recovery_failed",
+          );
+        } finally {
+          credential = undefined;
+          encodedCredential = undefined;
+        }
+      },
+    );
+    verifiedAccountUid = passkeyAccountUid(recoveredUser);
+    return Object.freeze({ state: "ready" });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message === "passkey_account_exists" ||
+        error.message === "passkey_registration_cancelled")
+    ) {
+      throw error;
+    }
+    fail("passkey_recovery_failed");
+  } finally {
+    recoveryCode = undefined;
+  }
+}
+
 async function secureCredentials(interactive = false) {
   try {
     if (guestModeActive) {
@@ -1564,6 +1652,39 @@ async function revokePasskeyCredential(reference) {
   if (response.status === 409) fail("passkey_last_credential");
   if (!response.ok) fail("passkey_credential_management_failed");
   return Object.freeze({ state: "revoked" });
+}
+
+async function issuePasskeyRecoveryCode() {
+  const credentials = await secureCredentials(true);
+  const response = await fetch(PASSKEY_RECOVERY_CODE_ISSUE_ENDPOINT, {
+    method: "POST",
+    body: "{}",
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+    headers: Object.freeze({
+      Accept: "application/json",
+      Authorization: `Bearer ${credentials.idToken}`,
+      "Content-Type": "application/json",
+      "X-Firebase-AppCheck": credentials.appCheckToken,
+    }),
+  });
+  if (!response.ok) fail("passkey_recovery_code_failed");
+  const value = await response.json();
+  if (
+    !isPlainRecord(value) ||
+    Reflect.ownKeys(value).length !== 2 ||
+    typeof value.recoveryCode !== "string" ||
+    !/^krc1_[A-Za-z0-9_-]{43}$/u.test(value.recoveryCode) ||
+    value.expiresIn !== 30 * 24 * 60 * 60
+  ) {
+    fail("passkey_recovery_code_failed");
+  }
+  return Object.freeze({
+    recoveryCode: value.recoveryCode,
+    expiresIn: value.expiresIn,
+  });
 }
 
 function primeVoiceTransportConnection() {
@@ -7283,9 +7404,11 @@ const publicBridge = Object.freeze({
   endTurn,
   finishTurn,
   getStatus,
+  issuePasskeyRecoveryCode,
   listPasskeyCredentials,
   playGuestVoiceComparison,
   registerPasskeyAccount,
+  recoverPasskeyAccount,
   revokePasskeyCredential,
   setGuestVoiceComparisonOptIn,
   startGuestMode,

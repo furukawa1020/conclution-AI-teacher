@@ -1206,13 +1206,13 @@ mod cloud {
         PASSKEY_REQUIRED_COPY, PASSKEY_UNSUPPORTED_COPY, PasskeyCredentialSummary,
         PasskeyRecoveryCode, PasskeySetupFeedback, ResearchRecord, ResearchStatus,
         STRICT_PRIVACY_BLOCKED_COPY, TurnEnd, VoiceReceipt, VoiceState, VoiceTurnMode,
-        VoiceTurnResult, WaitTurnError,
-        coach_action_from_checkpoint, coach_phase_from_checkpoint, confirmed_voice_input_state,
-        interrupted_voice_state, interruption_ready_voice_state, recoverable_finish_turn_code,
-        recoverable_wait_turn_code, session_stop_pauses, valid_coach_checkpoint_keys,
-        valid_coach_checkpoint_metadata, valid_legacy_voice_start_latency_clear,
-        valid_voice_pause_metadata, valid_voice_prepare_slo_clear, valid_voice_receipt_metadata,
-        validated_voice_prepare_slo, validated_voice_start_slo,
+        VoiceTurnResult, WaitTurnError, coach_action_from_checkpoint, coach_phase_from_checkpoint,
+        confirmed_voice_input_state, interrupted_voice_state, interruption_ready_voice_state,
+        recoverable_finish_turn_code, recoverable_wait_turn_code, session_stop_pauses,
+        valid_coach_checkpoint_keys, valid_coach_checkpoint_metadata,
+        valid_legacy_voice_start_latency_clear, valid_voice_pause_metadata,
+        valid_voice_prepare_slo_clear, valid_voice_receipt_metadata, validated_voice_prepare_slo,
+        validated_voice_start_slo,
     };
     use dioxus::prelude::{ReadableExt, Signal, WritableExt};
     use std::rc::Rc;
@@ -1439,6 +1439,9 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = listPasskeyCredentials)]
         async fn list_passkey_credentials_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = addPasskeyCredential)]
+        async fn add_passkey_credential_js() -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = issuePasskeyRecoveryCode)]
         async fn issue_passkey_recovery_code_js() -> Result<JsValue, JsValue>;
 
@@ -1540,6 +1543,13 @@ mod cloud {
         let value = list_passkey_credentials_js().await.map_err(user_message)?;
         serde_wasm_bindgen::from_value(value)
             .map_err(|_| "パスキー一覧を安全に確認できませんでした")
+    }
+
+    pub async fn add_passkey_credential() -> Result<(), &'static str> {
+        add_passkey_credential_js()
+            .await
+            .map(|_| ())
+            .map_err(user_message)
     }
 
     pub async fn issue_passkey_recovery_code() -> Result<PasskeyRecoveryCode, &'static str> {
@@ -2647,6 +2657,10 @@ mod cloud {
 
     pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
         Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn add_passkey_credential() -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってください")
     }
 
     pub async fn issue_passkey_recovery_code() -> Result<PasskeyRecoveryCode, &'static str> {
@@ -5252,6 +5266,33 @@ fn App() -> Element {
                             }
                             div { class: "privacy-fold__body",
                                 p { "端末名やcredential IDは表示しません。登録時刻と最終利用時刻だけを確認できます。最後の1件はアカウントへ戻れなくなるため失効できません。" }
+                                p { "追加するパスキーは、いま本人確認した同じ仮名アカウントだけへ登録します。新しい別アカウントは作りません。" }
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    disabled: *passkey_management_busy.read(),
+                                    onclick: move |_| {
+                                        if *passkey_management_busy.peek() { return; }
+                                        passkey_management_busy.set(true);
+                                        passkey_setup_feedback.set(None);
+                                        spawn(async move {
+                                            match cloud::add_passkey_credential().await {
+                                                Ok(()) => {
+                                                    match cloud::list_passkey_credentials().await {
+                                                        Ok(items) => {
+                                                            passkey_credentials.set(items);
+                                                            passkey_setup_feedback.set(Some(PasskeySetupFeedback::Success("同じ仮名アカウントへ新しいパスキーを追加しました")));
+                                                        }
+                                                        Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                                    }
+                                                }
+                                                Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                            }
+                                            passkey_management_busy.set(false);
+                                        });
+                                    },
+                                    "本人確認して新しいパスキーを追加する"
+                                }
                                 button {
                                     class: "control-button",
                                     r#type: "button",

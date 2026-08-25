@@ -125,6 +125,10 @@ const PASSKEY_AUTHENTICATION_BEGIN_ENDPOINT =
 const PASSKEY_AUTHENTICATION_FINISH_ENDPOINT =
   "/api/v1/passkeys/authentication:finish";
 const PASSKEY_CREDENTIALS_ENDPOINT = "/api/v1/passkeys/credentials";
+const PASSKEY_CREDENTIAL_REGISTRATION_BEGIN_ENDPOINT =
+  "/api/v1/passkeys/credentials/registration:begin";
+const PASSKEY_CREDENTIAL_REGISTRATION_FINISH_ENDPOINT =
+  "/api/v1/passkeys/credentials/registration:finish";
 const PASSKEY_CREDENTIAL_REVOKE_ENDPOINT =
   "/api/v1/passkeys/credentials:revoke";
 const PASSKEY_ACCOUNT_DELETE_ENDPOINT = "/api/v1/passkeys/account:delete";
@@ -1630,6 +1634,115 @@ async function listPasskeyCredentials() {
     });
   });
   return Object.freeze(summaries);
+}
+
+async function addPasskeyCredential() {
+  if (document.hidden || hasActiveVoiceSession() || passkeyGate.isBusy()) {
+    fail("passkey_credential_management_failed");
+  }
+  const credentials = await secureCredentials(true);
+  requirePasskeySupport("registration");
+  return runPasskeyOperation(
+    "passkey_credential_management_failed",
+    async (signal) => {
+      let credential;
+      let encodedCredential;
+      let serializedCredential;
+      try {
+        const beginResponse = await fetch(
+          PASSKEY_CREDENTIAL_REGISTRATION_BEGIN_ENDPOINT,
+          {
+            method: "POST",
+            body: "{}",
+            cache: "no-store",
+            credentials: "same-origin",
+            redirect: "error",
+            referrerPolicy: "no-referrer",
+            signal,
+            headers: Object.freeze({
+              Accept: "application/json",
+              Authorization: `Bearer ${credentials.idToken}`,
+              "Content-Type": "application/json",
+              "X-Firebase-AppCheck": credentials.appCheckToken,
+            }),
+          },
+        );
+        if (!beginResponse.ok) fail("passkey_credential_management_failed");
+        if (
+          !/^application\/json(?:\s*;|$)/iu.test(
+            beginResponse.headers.get("Content-Type") ?? "",
+          )
+        ) {
+          fail("passkey_credential_management_failed");
+        }
+        const beginText = await beginResponse.text();
+        if (beginText.length === 0 || beginText.length > PASSKEY_JSON_MAX_CHARS) {
+          fail("passkey_credential_management_failed");
+        }
+        let beginValue;
+        try {
+          beginValue = JSON.parse(beginText);
+        } catch {
+          fail("passkey_credential_management_failed");
+        }
+        const begin = decodeRegistrationBegin(beginValue);
+        try {
+          credential = await navigator.credentials.create({
+            ...begin.options,
+            signal,
+          });
+        } catch (error) {
+          if (isPasskeyCancellation(error)) fail("passkey_registration_cancelled");
+          throw error;
+        }
+        if (!credential) fail("passkey_credential_management_failed");
+        encodedCredential = encodeRegistrationCredential(credential);
+        serializedCredential = JSON.stringify(encodedCredential);
+        if (
+          serializedCredential.length === 0 ||
+          serializedCredential.length > PASSKEY_JSON_MAX_CHARS
+        ) {
+          fail("passkey_credential_management_failed");
+        }
+        const finishResponse = await fetch(
+          finishEndpoint(
+            PASSKEY_CREDENTIAL_REGISTRATION_FINISH_ENDPOINT,
+            begin.ceremonyId,
+          ),
+          {
+            method: "POST",
+            body: serializedCredential,
+            cache: "no-store",
+            credentials: "same-origin",
+            redirect: "error",
+            referrerPolicy: "no-referrer",
+            signal,
+            headers: Object.freeze({
+              Authorization: `Bearer ${credentials.idToken}`,
+              "Content-Type": "application/json",
+              "X-Firebase-AppCheck": credentials.appCheckToken,
+            }),
+          },
+        );
+        if (finishResponse.status !== 204) {
+          fail("passkey_credential_management_failed");
+        }
+        return Object.freeze({ state: "added" });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "passkey_registration_cancelled"
+        ) {
+          throw error;
+        }
+        fail("passkey_credential_management_failed");
+      } finally {
+        credential = undefined;
+        encodedCredential = undefined;
+        serializedCredential = undefined;
+      }
+    },
+  );
 }
 
 async function revokePasskeyCredential(reference) {
@@ -7398,6 +7511,7 @@ async function deletePasskeyAccount(confirmation) {
 }
 
 const publicBridge = Object.freeze({
+  addPasskeyCredential,
   attachDocument,
   beginTurn,
   deletePasskeyAccount,

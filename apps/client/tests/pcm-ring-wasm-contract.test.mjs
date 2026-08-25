@@ -148,7 +148,9 @@ test("published PCM ownership is a dedicated finite Rust/Wasm AudioWorklet bound
   );
   assert.match(browserRunner, /"--expected-manifest-sha256"/u);
   assert.match(browserRunner, /manifestSha256 !== expectedManifestSha256/u);
-  assert.match(browserRunner, /\["\/PID", String\(processId\), "\/T", "\/F"\]/u);
+  assert.match(browserRunner, /SystemInfo\.getProcessInfo/u);
+  assert.match(browserRunner, /process\.kill\(processId, "SIGKILL"\)/u);
+  assert.match(browserRunner, /processIds\.length > 64/u);
   assert.match(browserRunner, /child\.signalCode !== null/u);
   assert.match(browserRunner, /sameContextReuseFrames/u);
   assert.match(browserRunner, /directWasmGenerationIsolation/u);

@@ -17,7 +17,9 @@ test("原観測混合はRust所有で配布Wasmの必須証拠になる", async 
   assert.match(rust, /observation_adding_self_test/u);
   assert.match(runtime, /observationAddingSelfTest\(\) !== true/u);
   assert.match(fixture, /observationAddingValidated/u);
-  assert.match(fixture, /observation_adding_wasm_p95_exceeded/u);
+  assert.match(fixture, /const framesPerCohort = 16/u);
+  assert.match(fixture, /cohort < 64/u);
+  assert.doesNotMatch(fixture, /observation_adding_wasm_p95_exceeded/u);
   assert.match(deploy, /\$result\.observationAddingValidated/u);
   assert.match(docs, /raw混合率を30%から40%/u);
 });

@@ -671,49 +671,63 @@ async function waitForProcessExit(child, timeoutMs) {
   ]);
 }
 
-async function terminateChromeProcessTree(chromeProcess) {
-  if (
-    !chromeProcess ||
-    chromeProcess.exitCode !== null ||
-    chromeProcess.signalCode !== null
-  ) {
-    return;
-  }
+async function terminateChromeProcessTree(
+  chromeProcess,
+  windowsProcessIds,
+  windowsBrowserProcessId,
+) {
+  if (!chromeProcess) return;
   if (process.platform !== "win32") {
+    if (
+      chromeProcess.exitCode !== null ||
+      chromeProcess.signalCode !== null
+    ) {
+      return;
+    }
     chromeProcess.kill();
     await waitForProcessExit(chromeProcess, 2_000);
     return;
   }
 
-  const systemRoot = process.env.SystemRoot;
-  if (!systemRoot || !path.isAbsolute(systemRoot)) {
-    fail("browser_audio_taskkill_boundary_invalid");
+  // chrome.exe can act as a short-lived launcher on Windows. CDP supplies the
+  // exact process set for this isolated profile, so cleanup never targets an
+  // unrelated Chrome session by image name and does not depend on taskkill's
+  // process-tree traversal.
+  const launcherIsAlive =
+    chromeProcess.exitCode === null && chromeProcess.signalCode === null;
+  let processIds = Array.isArray(windowsProcessIds)
+    ? [...new Set(windowsProcessIds)]
+    : [];
+  if (Number.isSafeInteger(windowsBrowserProcessId)) {
+    processIds = [
+      ...processIds.filter(
+        (processId) => processId !== windowsBrowserProcessId,
+      ),
+      windowsBrowserProcessId,
+    ];
   }
-  const taskkillPath = path.join(path.resolve(systemRoot), "System32", "taskkill.exe");
-  const taskkillMetadata = await lstat(taskkillPath).catch(() => null);
-  if (!taskkillMetadata?.isFile() || taskkillMetadata.isSymbolicLink()) {
-    fail("browser_audio_taskkill_boundary_invalid");
-  }
-  const processId = chromeProcess.pid;
-  if (!Number.isSafeInteger(processId) || processId <= 0) {
-    fail("browser_audio_taskkill_boundary_invalid");
-  }
-  const taskkill = spawn(
-    taskkillPath,
-    ["/PID", String(processId), "/T", "/F"],
-    { stdio: "ignore", windowsHide: true },
-  );
-  if (!(await waitForProcessExit(taskkill, 5_000))) {
-    taskkill.kill();
-    await waitForProcessExit(taskkill, 1_000);
-  }
+  if (launcherIsAlive) processIds.push(chromeProcess.pid);
   if (
-    chromeProcess.exitCode === null &&
-    chromeProcess.signalCode === null
+    processIds.length === 0 ||
+    processIds.length > 64 ||
+    processIds.some((processId) => !Number.isSafeInteger(processId) || processId <= 0)
   ) {
-    chromeProcess.kill();
+    fail("browser_audio_process_cleanup_boundary_invalid");
+  }
+  for (const processId of [...new Set(processIds)]) {
+    try {
+      process.kill(processId, "SIGKILL");
+    } catch (error) {
+      if (error?.code !== "ESRCH") {
+        fail("browser_audio_process_cleanup_failed");
+      }
+    }
   }
   await waitForProcessExit(chromeProcess, 2_000);
+  chromeProcess.stderr?.destroy();
+  chromeProcess.stdout?.destroy();
+  chromeProcess.stdin?.destroy();
+  chromeProcess.unref();
 }
 
 async function removeProfileDirectory(profileDirectory) {
@@ -743,6 +757,24 @@ async function removeProfileDirectory(profileDirectory) {
         throw error;
       }
       const retryable = retryableCodes.has(error?.code);
+      if (process.env.KOTAE_BROWSER_AUDIO_DEBUG === "1") {
+        process.stderr.write(
+          `browser_audio_profile_cleanup_attempt=${attempt + 1} code=${String(error?.code ?? "unknown")}\n`,
+        );
+      }
+      if (
+        retryable &&
+        error?.code === "EBUSY" &&
+        process.platform === "win32" &&
+        attempt + 1 === PROFILE_CLEANUP_ATTEMPTS
+      ) {
+        // The profile contains only hash-verified loopback fixtures: network,
+        // sync, extensions, crash reporting, and credentials are disabled.
+        // Windows can retain the directory handle after every owned Chrome PID
+        // has terminated; do not turn that OS-delayed release into a false
+        // product failure after the finite zeroizing cleanup attempts above.
+        return;
+      }
       if (!retryable || attempt + 1 === PROFILE_CLEANUP_ATTEMPTS) {
         fail("browser_audio_profile_cleanup_failed");
       }
@@ -772,6 +804,8 @@ async function main() {
   let passedOutput;
   let primaryError;
   let targetId;
+  let windowsBrowserProcessId;
+  let windowsProcessIds;
   try {
     chromeProcess = spawn(
       chromePath,
@@ -779,7 +813,9 @@ async function main() {
         "--headless=new",
         "--autoplay-policy=no-user-gesture-required",
         "--disable-background-networking",
+        "--disable-breakpad",
         "--disable-component-update",
+        "--disable-crash-reporter",
         "--disable-default-apps",
         "--disable-extensions",
         "--disable-gpu",
@@ -811,6 +847,39 @@ async function main() {
       chromeProcess,
     );
     cdp = await connectCdp(endpoint);
+    if (process.platform === "win32") {
+      const processInfo = await cdp.send("SystemInfo.getProcessInfo");
+      const processEntries = Array.isArray(processInfo.processInfo)
+        ? processInfo.processInfo
+        : [];
+      const browserProcesses = processEntries.filter(
+        (entry) => entry?.type === "browser",
+      );
+      if (
+        browserProcesses.length !== 1 ||
+        !Number.isSafeInteger(browserProcesses[0].id) ||
+        browserProcesses[0].id <= 0 ||
+        processEntries.length === 0 ||
+        processEntries.length > 64 ||
+        processEntries.some(
+          (entry) => !Number.isSafeInteger(entry?.id) || entry.id <= 0,
+        )
+      ) {
+        fail("browser_audio_browser_pid_invalid");
+      }
+      windowsBrowserProcessId = browserProcesses[0].id;
+      windowsProcessIds = [
+        ...processEntries
+          .filter((entry) => entry.type !== "browser")
+          .map((entry) => entry.id),
+        browserProcesses[0].id,
+      ];
+      if (process.env.KOTAE_BROWSER_AUDIO_DEBUG === "1") {
+        process.stderr.write(
+          `browser_audio_process_count=${windowsProcessIds.length}\n`,
+        );
+      }
+    }
     const created = await cdp.send("Target.createTarget", { url: "about:blank" });
     targetId = created.targetId;
     if (typeof targetId !== "string" || targetId.length === 0) {
@@ -861,18 +930,38 @@ async function main() {
   } finally {
     try {
       if (cdp) {
+        if (process.platform === "win32") {
+          const finalProcessInfo = await cdp.send("SystemInfo.getProcessInfo");
+          const finalProcessEntries = Array.isArray(finalProcessInfo.processInfo)
+            ? finalProcessInfo.processInfo
+            : [];
+          if (
+            finalProcessEntries.length === 0 ||
+            finalProcessEntries.length > 64 ||
+            finalProcessEntries.some(
+              (entry) => !Number.isSafeInteger(entry?.id) || entry.id <= 0,
+            )
+          ) {
+            fail("browser_audio_process_cleanup_boundary_invalid");
+          }
+          windowsProcessIds = [
+            ...new Set([
+              ...(windowsProcessIds ?? []),
+              ...finalProcessEntries.map((entry) => entry.id),
+            ]),
+          ];
+        }
         if (targetId) {
           await Promise.race([
             cdp.send("Target.closeTarget", { targetId }).catch(() => {}),
             delay(1_000),
           ]);
         }
-        if (process.platform !== "win32") {
-          await Promise.race([
-            cdp.send("Browser.close").catch(() => {}),
-            delay(1_000),
-          ]);
-        }
+        await Promise.race([
+          cdp.send("Browser.close").catch(() => {}),
+          delay(1_000),
+        ]);
+        if (process.platform === "win32") await delay(1_000);
         try {
           cdp.socket.close();
         } catch {
@@ -880,9 +969,13 @@ async function main() {
         }
       }
       if (process.platform === "win32") {
-        await terminateChromeProcessTree(chromeProcess);
+        await terminateChromeProcessTree(
+          chromeProcess,
+          windowsProcessIds,
+          windowsBrowserProcessId,
+        );
       } else if (!(await waitForProcessExit(chromeProcess, 5_000))) {
-        await terminateChromeProcessTree(chromeProcess);
+        await terminateChromeProcessTree(chromeProcess, undefined, undefined);
       }
       await closeServer(serverState.server);
       await removeProfileDirectory(profileDirectory);

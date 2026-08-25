@@ -1149,6 +1149,13 @@ struct PasskeyCredentialSummary {
     last_used_at: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasskeyRecoveryCode {
+    recovery_code: String,
+    expires_in: i64,
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1416,6 +1423,9 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = registerPasskeyAccount)]
         async fn register_passkey_account_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = recoverPasskeyAccount)]
+        async fn recover_passkey_account_js(code: &str) -> Result<JsValue, JsValue>;
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = startGuestMode)]
         async fn start_guest_mode_js() -> Result<JsValue, JsValue>;
 
@@ -1427,6 +1437,9 @@ mod cloud {
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = listPasskeyCredentials)]
         async fn list_passkey_credentials_js() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = issuePasskeyRecoveryCode)]
+        async fn issue_passkey_recovery_code_js() -> Result<JsValue, JsValue>;
 
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = revokePasskeyCredential)]
         async fn revoke_passkey_credential_js(reference: &str) -> Result<JsValue, JsValue>;
@@ -1486,6 +1499,13 @@ mod cloud {
             .map_err(user_message)
     }
 
+    pub async fn recover_passkey_account(code: &str) -> Result<(), &'static str> {
+        recover_passkey_account_js(code)
+            .await
+            .map(|_| ())
+            .map_err(user_message)
+    }
+
     pub async fn start_guest_mode() -> Result<(), &'static str> {
         start_guest_mode_js()
             .await
@@ -1519,6 +1539,21 @@ mod cloud {
         let value = list_passkey_credentials_js().await.map_err(user_message)?;
         serde_wasm_bindgen::from_value(value)
             .map_err(|_| "パスキー一覧を安全に確認できませんでした")
+    }
+
+    pub async fn issue_passkey_recovery_code() -> Result<PasskeyRecoveryCode, &'static str> {
+        let value = issue_passkey_recovery_code_js()
+            .await
+            .map_err(user_message)?;
+        let result: PasskeyRecoveryCode = serde_wasm_bindgen::from_value(value)
+            .map_err(|_| "回復コードを安全に確認できませんでした")?;
+        if result.expires_in != 30 * 24 * 60 * 60
+            || !result.recovery_code.starts_with("krc1_")
+            || result.recovery_code.len() != 48
+        {
+            return Err("回復コードを安全に確認できませんでした");
+        }
+        Ok(result)
     }
 
     pub async fn revoke_passkey_credential(reference: &str) -> Result<(), &'static str> {
@@ -2433,6 +2468,12 @@ mod cloud {
             Some("passkey_account_deletion_failed") => {
                 "仮名アカウントを削除できませんでした　もう一度本人確認して再試行してください"
             }
+            Some("passkey_recovery_failed") => {
+                "回復コードを確認できないか、新しいパスキーを登録できませんでした　コードを見直してもう一度ためしてください"
+            }
+            Some("passkey_recovery_code_failed") => {
+                "回復コードを安全に発行できませんでした　もう一度パスキーで本人確認してください"
+            }
             Some("account_boundary_changed") => ACCOUNT_BOUNDARY_CHANGED_COPY,
             Some("identity_required") | Some("identity_verification_failed") => {
                 "アカウント状態を安全に確認できませんでした　マイクは開いていません"
@@ -2570,8 +2611,9 @@ const fn cloud_state_for_display(
 mod cloud {
     use super::{
         CloudState, CoachState, DocumentInfo, FinishTurnError, PasskeyCredentialSummary,
-        PasskeySetupFeedback, ResearchRecord, ResearchStatus, VoicePrepareLatency, VoiceReceipt,
-        VoiceStartLatency, VoiceState, VoiceTurnMode, VoiceTurnResult, WaitTurnError,
+        PasskeyRecoveryCode, PasskeySetupFeedback, ResearchRecord, ResearchStatus,
+        VoicePrepareLatency, VoiceReceipt, VoiceStartLatency, VoiceState, VoiceTurnMode,
+        VoiceTurnResult, WaitTurnError,
     };
     use dioxus::prelude::Signal;
 
@@ -2584,6 +2626,10 @@ mod cloud {
 
     pub async fn register_passkey_account() -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn recover_passkey_account(_code: &str) -> Result<(), &'static str> {
+        Err("WebAssembly版で使ってください")
     }
 
     pub async fn start_guest_mode() -> Result<(), &'static str> {
@@ -2600,6 +2646,10 @@ mod cloud {
 
     pub async fn list_passkey_credentials() -> Result<Vec<PasskeyCredentialSummary>, &'static str> {
         Err("WebAssembly版で使ってみて")
+    }
+
+    pub async fn issue_passkey_recovery_code() -> Result<PasskeyRecoveryCode, &'static str> {
+        Err("WebAssembly版で使ってください")
     }
 
     pub async fn revoke_passkey_credential(_reference: &str) -> Result<(), &'static str> {
@@ -4175,6 +4225,9 @@ fn App() -> Element {
     let mut passkey_management_busy = use_signal(|| false);
     let mut passkey_revoke_confirmation = use_signal(|| None::<String>);
     let mut account_delete_confirmation = use_signal(|| false);
+    let mut recovery_code_input = use_signal(String::new);
+    let mut recovery_code_open = use_signal(|| false);
+    let mut issued_recovery_code = use_signal(|| None::<String>);
     let _document_clear_listener =
         use_hook(|| cloud::install_document_clear_listener(document_info));
     let _account_access_refresh_listener =
@@ -4726,6 +4779,52 @@ fn App() -> Element {
                                         {RETURNING_PASSKEY_ACTION}
                                     }
                                 }
+                                details {
+                                    class: "privacy-fold",
+                                    open: *recovery_code_open.read(),
+                                    ontoggle: move |_| recovery_code_open.toggle(),
+                                    summary { "保存した回復コードで既存アカウントへ戻る" }
+                                    div { class: "privacy-fold__body",
+                                        p { "回復コードを持っていることだけを確認します。氏名や自然人としての本人性を証明するものではありません。成功すると、このコードは一度で無効になります。" }
+                                        label {
+                                            "回復コード"
+                                            input {
+                                                r#type: "password",
+                                                autocomplete: "off",
+                                                spellcheck: "false",
+                                                value: "{recovery_code_input}",
+                                                disabled: passkey_setup_is_busy,
+                                                oninput: move |event| recovery_code_input.set(event.value()),
+                                            }
+                                        }
+                                        button {
+                                            class: "control-button",
+                                            r#type: "button",
+                                            disabled: passkey_setup_is_busy || recovery_code_input.read().trim().is_empty(),
+                                            onclick: move |_| {
+                                                if *passkey_setup_busy.peek() { return; }
+                                                let code = recovery_code_input.peek().trim().to_string();
+                                                recovery_code_input.set(String::new());
+                                                passkey_setup_busy.set(true);
+                                                passkey_setup_feedback.set(None);
+                                                spawn(async move {
+                                                    let result = cloud::recover_passkey_account(&code).await;
+                                                    drop(code);
+                                                    passkey_setup_busy.set(false);
+                                                    match result {
+                                                        Ok(()) => {
+                                                            recovery_code_open.set(false);
+                                                            passkey_setup_feedback.set(Some(PasskeySetupFeedback::Success("既存の仮名アカウントへ戻り、新しいパスキーを登録しました")));
+                                                            cloud_status.restart();
+                                                        }
+                                                        Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                                    }
+                                                });
+                                            },
+                                            "このコードを一度だけ使って戻る"
+                                        }
+                                    }
+                                }
                                 p {
                                     id: "guest-mode-promise",
                                     class: "passkey-entry__warning",
@@ -5212,6 +5311,48 @@ fn App() -> Element {
                                                 "失効する"
                                             }
                                             button { class: "control-button", r#type: "button", onclick: move |_| passkey_revoke_confirmation.set(None), "やめる" }
+                                        }
+                                    }
+                                }
+                                hr {}
+                                h3 { "単回回復コード" }
+                                p { "すべてのパスキーを失った時だけ使う、30日間有効・1回限りのコードです。コードの所持は氏名や自然人としての本人性を証明しません。コードと全パスキーを失うと、この仮名アカウントは回復できません。" }
+                                p { "発行し直すと以前のコードは直ちに無効になります。サーバーはコード本文を保存せず、画面にもこの一度だけ表示します。" }
+                                button {
+                                    class: "control-button",
+                                    r#type: "button",
+                                    disabled: *passkey_management_busy.read(),
+                                    onclick: move |_| {
+                                        if *passkey_management_busy.peek() { return; }
+                                        issued_recovery_code.set(None);
+                                        passkey_management_busy.set(true);
+                                        spawn(async move {
+                                            match cloud::issue_passkey_recovery_code().await {
+                                                Ok(result) => {
+                                                    let _expires_in = result.expires_in;
+                                                    issued_recovery_code.set(Some(result.recovery_code));
+                                                }
+                                                Err(message) => passkey_setup_feedback.set(Some(PasskeySetupFeedback::Error(message))),
+                                            }
+                                            passkey_management_busy.set(false);
+                                        });
+                                    },
+                                    if issued_recovery_code.read().is_some() {
+                                        "以前のコードを無効にして発行し直す"
+                                    } else {
+                                        "パスキーで確認して回復コードを発行する"
+                                    }
+                                }
+                                if let Some(code) = issued_recovery_code.read().as_ref() {
+                                    div { class: "research-card", role: "status", aria_live: "polite",
+                                        strong { "今だけ表示しています" }
+                                        code { {code.clone()} }
+                                        p { "安全な場所へ保存したら、この表示を消してください。" }
+                                        button {
+                                            class: "control-button",
+                                            r#type: "button",
+                                            onclick: move |_| issued_recovery_code.set(None),
+                                            "保存したので表示を消す"
                                         }
                                     }
                                 }

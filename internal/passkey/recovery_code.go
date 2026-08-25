@@ -36,6 +36,14 @@ type RecoveryCodeStore interface {
 		time.Time,
 	) error
 	LoadRecoveryUser(context.Context, [sha256.Size]byte, time.Time) (*User, error)
+	LoadRecoveryUserByHandle(context.Context, []byte, []byte, time.Time) (*User, error)
+	CreateRecoveryCredential(
+		context.Context,
+		*User,
+		webauthn.Credential,
+		[sha256.Size]byte,
+		time.Time,
+	) error
 }
 
 func (s *Service) IssueRecoveryCode(ctx context.Context, principalUID string) (RecoveryCodeResult, error) {

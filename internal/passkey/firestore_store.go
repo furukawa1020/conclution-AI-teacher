@@ -254,6 +254,39 @@ func (s *FirestoreStore) LoadRecoveryUser(
 	return user, nil
 }
 
+func (s *FirestoreStore) LoadRecoveryUserByHandle(
+	ctx context.Context,
+	userHandle, principalDigest []byte,
+	now time.Time,
+) (*User, error) {
+	if len(userHandle) == 0 || len(principalDigest) != sha256.Size || now.IsZero() {
+		return nil, ErrRecoveryCode
+	}
+	handleSnapshot, err := s.client.Collection(handleCollection).Doc(documentID(userHandle)).Get(ctx)
+	if err != nil {
+		return nil, ErrRecoveryCode
+	}
+	var reservation handleDocument
+	if handleSnapshot.DataTo(&reservation) != nil || reservation.UID == "" ||
+		subtle.ConstantTimeCompare(digestString(reservation.UID), principalDigest) != 1 {
+		return nil, ErrRecoveryCode
+	}
+	userSnapshot, err := s.client.Collection(userCollection).Doc(documentID([]byte(reservation.UID))).Get(ctx)
+	if err != nil {
+		return nil, ErrRecoveryCode
+	}
+	var document userDocument
+	if userSnapshot.DataTo(&document) != nil || document.UID != reservation.UID ||
+		subtle.ConstantTimeCompare(document.UserHandle, userHandle) != 1 {
+		return nil, ErrRecoveryCode
+	}
+	user, err := decodeUser(document)
+	if err != nil || len(user.Credentials) == 0 || len(user.Credentials) >= maxCredentials {
+		return nil, ErrRecoveryCode
+	}
+	return user, nil
+}
+
 func validateRecoveryAccountDocument(document recoveryAccountDocument) error {
 	if document.SchemaVersion != 1 || len(document.CodeDigest) != sha256.Size ||
 		document.IssuedAt.IsZero() || document.ExpiresAt.IsZero() ||
@@ -302,6 +335,42 @@ func (s *FirestoreStore) ConsumeCeremony(
 		}
 		record = document.toCeremony()
 		valid = ceremonyMatches(record, purpose, appIDDigest, now)
+		return tx.Delete(ref)
+	})
+	if err != nil {
+		return Ceremony{}, err
+	}
+	if !found || !valid {
+		return Ceremony{}, ErrCeremonyInvalid
+	}
+	return record, nil
+}
+
+func (s *FirestoreStore) ConsumeRegistrationCeremony(
+	ctx context.Context,
+	id string,
+	appIDDigest []byte,
+	now time.Time,
+) (record Ceremony, err error) {
+	ref := s.client.Collection(ceremonyCollection).Doc(documentID([]byte(id)))
+	found := false
+	valid := false
+	err = s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		snapshot, getErr := tx.Get(ref)
+		if getErr != nil {
+			if status.Code(getErr) == codes.NotFound {
+				return nil
+			}
+			return getErr
+		}
+		found = true
+		var document ceremonyDocument
+		if getErr := snapshot.DataTo(&document); getErr != nil {
+			return getErr
+		}
+		record = document.toCeremony()
+		valid = (record.Purpose == registrationUse || record.Purpose == recoveryRegistrationUse) &&
+			ceremonyMatches(record, record.Purpose, appIDDigest, now)
 		return tx.Delete(ref)
 	})
 	if err != nil {
@@ -406,6 +475,26 @@ func (s *FirestoreStore) CreateCredential(
 	credential webauthn.Credential,
 	now time.Time,
 ) error {
+	return s.createCredential(ctx, user, credential, nil, now)
+}
+
+func (s *FirestoreStore) CreateRecoveryCredential(
+	ctx context.Context,
+	user *User,
+	credential webauthn.Credential,
+	digest [sha256.Size]byte,
+	now time.Time,
+) error {
+	return s.createCredential(ctx, user, credential, &digest, now)
+}
+
+func (s *FirestoreStore) createCredential(
+	ctx context.Context,
+	user *User,
+	credential webauthn.Credential,
+	recoveryDigest *[sha256.Size]byte,
+	now time.Time,
+) error {
 	if err := validateCredentialCreation(user, credential, now); err != nil {
 		return err
 	}
@@ -421,6 +510,11 @@ func (s *FirestoreStore) CreateCredential(
 	userRef := s.client.Collection(userCollection).Doc(documentID([]byte(user.UID)))
 	handleRef := s.client.Collection(handleCollection).Doc(documentID(user.UserHandle))
 	credentialRef := s.client.Collection(credentialCollection).Doc(reference.String())
+	var recoveryRef, recoveryCodeRef *firestore.DocumentRef
+	if recoveryDigest != nil {
+		recoveryRef = s.client.Collection(recoveryAccountCollection).Doc(documentID([]byte(user.UID)))
+		recoveryCodeRef = s.client.Collection(recoveryCodeCollection).Doc(recoveryCodeDocumentID(*recoveryDigest))
+	}
 
 	return normalizeStoreError(s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
 		userSnapshot, userErr := tx.Get(userRef)
@@ -489,6 +583,26 @@ func (s *FirestoreStore) CreateCredential(
 				return err
 			}
 		}
+		if recoveryDigest != nil {
+			if newUser {
+				return ErrRecoveryCode
+			}
+			recoverySnapshot, recoveryErr := tx.Get(recoveryRef)
+			codeSnapshot, codeErr := tx.Get(recoveryCodeRef)
+			if recoveryErr != nil || codeErr != nil {
+				return ErrRecoveryCode
+			}
+			var recovery recoveryAccountDocument
+			var index recoveryCodeDocument
+			accountKey := documentID([]byte(user.UID))
+			if recoverySnapshot.DataTo(&recovery) != nil || codeSnapshot.DataTo(&index) != nil ||
+				validateRecoveryAccountDocument(recovery) != nil ||
+				validateRecoveryCodeDocument(index, accountKey, recovery) != nil ||
+				subtle.ConstantTimeCompare(recovery.CodeDigest, recoveryDigest[:]) != 1 ||
+				!recovery.ExpiresAt.After(now) {
+				return ErrRecoveryCode
+			}
+		}
 		if len(document.CredentialsJSON) >= maxCredentials {
 			return ErrCredentialConflict
 		}
@@ -502,14 +616,25 @@ func (s *FirestoreStore) CreateCredential(
 				return err
 			}
 		}
-		return tx.Set(credentialRef, credentialDocument{
+		if err := tx.Set(credentialRef, credentialDocument{
 			UID:            user.UID,
 			UserHandle:     append([]byte(nil), user.UserHandle...),
 			CredentialJSON: credentialJSON,
 			Version:        1,
 			CreatedAt:      now,
 			UpdatedAt:      now,
-		})
+		}); err != nil {
+			return err
+		}
+		if recoveryDigest != nil {
+			if err := tx.Delete(recoveryCodeRef); err != nil {
+				return err
+			}
+			if err := tx.Delete(recoveryRef); err != nil {
+				return err
+			}
+		}
+		return nil
 	}))
 }
 

@@ -378,6 +378,15 @@ func (s *CloudService) recognize(
 	audio []byte,
 	model string,
 ) (*speechpb.RecognizeResponse, error) {
+	return s.recognizeWithAdaptation(ctx, audio, model, nil)
+}
+
+func (s *CloudService) recognizeWithAdaptation(
+	ctx context.Context,
+	audio []byte,
+	model string,
+	adaptation *speechpb.SpeechAdaptation,
+) (*speechpb.RecognizeResponse, error) {
 	return s.recognizeCall(ctx, &speechpb.RecognizeRequest{
 		Recognizer: s.recognizer,
 		Config: &speechpb.RecognitionConfig{
@@ -387,6 +396,7 @@ func (s *CloudService) recognize(
 			Model:         model,
 			LanguageCodes: []string{"ja-JP"},
 			Features:      reviewedJapaneseRecognitionFeatures(),
+			Adaptation:    adaptation,
 		},
 		AudioSource: &speechpb.RecognizeRequest_Content{Content: audio},
 	})

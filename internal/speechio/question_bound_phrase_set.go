@@ -39,6 +39,20 @@ type QuestionBoundPhraseSource struct {
 	UserTerms     []string
 }
 
+// QuestionBoundTranscriber is an optional recognition capability. Callers
+// must construct the one-use set from authenticated conversation state; the
+// ordinary Service interface intentionally cannot accept free-form hints.
+type QuestionBoundTranscriber interface {
+	TranscribeQuestionBound(
+		ctx context.Context,
+		audio []byte,
+		set *QuestionBoundPhraseSet,
+		now time.Time,
+		questionDigest [sha256.Size]byte,
+		turnGeneration string,
+	) (string, float32, error)
+}
+
 // QuestionBoundPhraseSet is a process-local, one-use capability. It contains
 // no UID, question text, transcript or answer and cannot create a persistent
 // Speech PhraseSet resource.

@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -148,6 +149,26 @@ type StateTokenValidator interface {
 	ValidateStateToken(uid string, token string) error
 }
 
+// QuestionBoundPhraseCapabilityIssuer authenticates an encrypted state token
+// and releases only the finite terms that were copied exactly from the last
+// displayed question or from prior user utterances. It never returns the
+// question, a transcript, an expected answer, model hypotheses or a UID.
+type QuestionBoundPhraseCapabilityIssuer interface {
+	IssueQuestionBoundPhraseCapability(
+		uid string,
+		token string,
+		turnGeneration string,
+	) (QuestionBoundPhraseCapability, error)
+}
+
+type QuestionBoundPhraseCapability struct {
+	QuestionDigest [32]byte
+	TurnGeneration string
+	ExpiresAt      time.Time
+	QuestionTerms  []string
+	UserTerms      []string
+}
+
 // RespondentCheckpointTransitionValidator authenticates both sides of the
 // finite voice-control transition. The transport supplies its own request ID;
 // the validator never accepts a merely well-formed output token in isolation.
@@ -239,6 +260,8 @@ type vertexAgent struct {
 	research                *securityflow.CrossrefExecutor
 	security                *securityflow.Guard
 	now                     func() time.Time
+	speechAdaptationMu      sync.Mutex
+	speechAdaptations       map[string]speechAdaptationLease
 }
 
 type modelPlan struct {
@@ -547,6 +570,7 @@ func (agent *vertexAgent) sealState(
 	if !agent.stateV2Writes {
 		state.VoiceCheckpointTag = ""
 		state.VoiceCheckpointScopeTag = ""
+		state.SpeechAdaptation = speechAdaptationFrame{}
 		state.Support = nil
 		if state.PendingAnswer.QuestionInstanceTag != "" ||
 			state.PendingAnswer.QuestionContinuityTag != "" ||
@@ -2032,6 +2056,16 @@ func (agent *vertexAgent) Process(
 		SelfCorrectionGrace: nextSelfCorrectionGrace,
 		LastIntervention:    nextLastIntervention,
 	}
+	nextState.SpeechAdaptation = agent.newSpeechAdaptationFrame(
+		func() string {
+			if normalized.Ambient && !normalized.Foreground {
+				return ""
+			}
+			return normalized.Utterance
+		}(),
+		spokenReply,
+		nextState.Turn,
+	)
 	checkpointScope := voiceCheckpointScopeTag(pendingAnswer)
 	if checkpointScope == "" {
 		checkpointScope = voiceCheckpointScopeTag(coachFrame)

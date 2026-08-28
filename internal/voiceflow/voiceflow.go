@@ -1487,6 +1487,52 @@ func speculationTextsMatch(candidate string, finalTranscript string) bool {
 		canonicalSpeculationText(finalTranscript)
 }
 
+func (p *Pipeline) transcribeBuffered(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+) (string, float32, error) {
+	issuer, issuerOK := p.agent.(conversation.QuestionBoundPhraseCapabilityIssuer)
+	transcriber, transcriberOK := p.speech.(speechio.QuestionBoundTranscriber)
+	if !issuerOK || !transcriberOK || input.StateToken == "" ||
+		input.RequestID == "" || input.StrictCloudMinimization || input.Document != nil {
+		return p.speech.Transcribe(ctx, input.Audio)
+	}
+	capability, err := issuer.IssueQuestionBoundPhraseCapability(
+		uid,
+		input.StateToken,
+		input.RequestID,
+	)
+	if err != nil {
+		// Missing, expired, or pre-rollout state never makes ordinary recognition
+		// unavailable. The conversation agent still authenticates the token before
+		// accepting the resulting transcript.
+		return p.speech.Transcribe(ctx, input.Audio)
+	}
+	now := p.now().UTC()
+	set, err := speechio.NewQuestionBoundPhraseSet(
+		now,
+		capability.ExpiresAt,
+		capability.QuestionDigest,
+		capability.TurnGeneration,
+		speechio.QuestionBoundPhraseSource{
+			QuestionTerms: capability.QuestionTerms,
+			UserTerms:     capability.UserTerms,
+		},
+	)
+	if err != nil {
+		return p.speech.Transcribe(ctx, input.Audio)
+	}
+	return transcriber.TranscribeQuestionBound(
+		ctx,
+		input.Audio,
+		set,
+		now,
+		capability.QuestionDigest,
+		capability.TurnGeneration,
+	)
+}
+
 func (p *Pipeline) prepareTurn(
 	ctx context.Context,
 	uid string,
@@ -1542,9 +1588,8 @@ func (p *Pipeline) prepareTurn(
 			}
 		}
 	} else {
-		transcript, confidence, err = p.speech.Transcribe(
-			transcriptionCtx,
-			input.Audio,
+		transcript, confidence, err = p.transcribeBuffered(
+			transcriptionCtx, uid, input,
 		)
 	}
 	transcriptionContextErr := transcriptionCtx.Err()
@@ -1581,6 +1626,7 @@ func (p *Pipeline) prepareTurn(
 			"recognized", false,
 		)
 		if errors.Is(err, speechio.ErrNoSpeech) ||
+			errors.Is(err, speechio.ErrQuestionBoundPhraseSetUnresolved) ||
 			errors.Is(err, speechio.ErrPairedRecognitionUnresolved) {
 			if !promptOnRecognitionMiss(input) {
 				return p.silentRecognitionResult(

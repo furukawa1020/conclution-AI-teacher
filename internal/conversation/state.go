@@ -37,22 +37,23 @@ type StateCodec struct {
 }
 
 type conversationState struct {
-	Version                 int                  `json:"v"`
-	IssuedAt                int64                `json:"iat"`
-	ExpiresAt               int64                `json:"exp"`
-	SessionID               string               `json:"sid,omitempty"`
-	Turn                    int                  `json:"turn"`
-	MemoryGeneration        int64                `json:"memory_generation,omitempty"`
-	SessionMemory           *longmemory.Payload  `json:"session_memory,omitempty"`
-	VoiceCheckpointTag      string               `json:"voice_checkpoint_tag,omitempty"`
-	VoiceCheckpointScopeTag string               `json:"voice_checkpoint_scope_tag,omitempty"`
-	Graph                   ThoughtStateGraph    `json:"thought_state_graph"`
-	ConversationSummary     string               `json:"conversation_summary,omitempty"`
-	DocumentSummary         string               `json:"document_summary,omitempty"`
-	PendingAnswer           PendingAnswerFrame   `json:"pending_answer"`
-	Support                 *conversationSupport `json:"support,omitempty"`
-	SelfCorrectionGrace     bool                 `json:"self_correction_grace"`
-	LastIntervention        ArbiterDecision      `json:"last_intervention"`
+	Version                 int                   `json:"v"`
+	IssuedAt                int64                 `json:"iat"`
+	ExpiresAt               int64                 `json:"exp"`
+	SessionID               string                `json:"sid,omitempty"`
+	Turn                    int                   `json:"turn"`
+	MemoryGeneration        int64                 `json:"memory_generation,omitempty"`
+	SessionMemory           *longmemory.Payload   `json:"session_memory,omitempty"`
+	VoiceCheckpointTag      string                `json:"voice_checkpoint_tag,omitempty"`
+	VoiceCheckpointScopeTag string                `json:"voice_checkpoint_scope_tag,omitempty"`
+	Graph                   ThoughtStateGraph     `json:"thought_state_graph"`
+	ConversationSummary     string                `json:"conversation_summary,omitempty"`
+	DocumentSummary         string                `json:"document_summary,omitempty"`
+	PendingAnswer           PendingAnswerFrame    `json:"pending_answer"`
+	SpeechAdaptation        speechAdaptationFrame `json:"speech_adaptation,omitempty"`
+	Support                 *conversationSupport  `json:"support,omitempty"`
+	SelfCorrectionGrace     bool                  `json:"self_correction_grace"`
+	LastIntervention        ArbiterDecision       `json:"last_intervention"`
 }
 
 func NewStateCodec(key []byte) (*StateCodec, error) {
@@ -232,6 +233,13 @@ func normalizeConversationState(state conversationState) (conversationState, err
 		return conversationState{}, ErrInvalidStateToken
 	}
 	state.PendingAnswer, err = normalizePendingAnswer(state.PendingAnswer)
+	if err != nil {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	state.SpeechAdaptation, err = normalizeSpeechAdaptationFrame(
+		state.SpeechAdaptation,
+		state.Turn,
+	)
 	if err != nil {
 		return conversationState{}, ErrInvalidStateToken
 	}

@@ -12,4 +12,6 @@ Issue #102 の第一境界は、Cloud Speech-to-Text V2へ永続PhraseSet resour
 4. adaptedも0.65未満なら認識missへ倒す。
 5. baselineとadaptedがどちらも非空なのに異なる場合は、どちらも選ばず`question_bound_phrase_set_unresolved`へ倒す。
 
-本文、phrase、question digest、generation、認識仮説をlog、telemetry、永続stateへ出しません。この段階はprovider requestの安全境界であり、production voice経路への接続は、現在質問と本人由来語彙を発行する認証済みcapabilityをreader-firstで導入した後に行います。
+質問本文とphraseは、暗号化stateにも永続ストアにも入れません。stateが持つのは質問・turnをHMACで束縛した復元不能digest、発行時刻、5分の期限だけです。実語はCloud Run process内の最大256件の短命leaseに置き、認証済みstateとserver発行request IDの照合後、取得と同時に消去します。別instance、再起動、期限切れ、reader-first前のstateでは適応を使わずbaselineへ戻ります。
+
+productionのbuffered音声経路はこのcapabilityに接続済みです。厳格クラウド最小化、PDF、raw PCM、live streamingはこの経路を共有せず、従来境界を維持します。本文、phrase、question digest、generation、認識仮説をlogやtelemetryへ出しません。

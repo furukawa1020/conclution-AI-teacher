@@ -600,6 +600,7 @@ function validateBrowserResult(result) {
     "acousticExchangeabilityValidated",
     "acousticCoverageWireValidated",
     "guestAFirstSprintSloValidated",
+    "guestAFirstFivePathValidated",
     "guestQuietOnsetValidated",
     "quietSubbandEvidenceValidated",
     "quietSpectralCompensationValidated",
@@ -629,6 +630,7 @@ function validateBrowserResult(result) {
     result.acousticExchangeabilityValidated !== true ||
     result.acousticCoverageWireValidated !== true ||
     result.guestAFirstSprintSloValidated !== true ||
+    result.guestAFirstFivePathValidated !== true ||
     result.guestQuietOnsetValidated !== true ||
     result.quietSubbandEvidenceValidated !== true ||
     result.quietSpectralCompensationValidated !== true ||
@@ -914,6 +916,7 @@ async function main() {
         result.acousticExchangeabilityValidated,
       acousticCoverageWireValidated: result.acousticCoverageWireValidated,
       guestAFirstSprintSloValidated: result.guestAFirstSprintSloValidated,
+      guestAFirstFivePathValidated: result.guestAFirstFivePathValidated,
       guestQuietOnsetValidated: result.guestQuietOnsetValidated,
       quietSubbandEvidenceValidated: result.quietSubbandEvidenceValidated,
       quietSpectralCompensationValidated:

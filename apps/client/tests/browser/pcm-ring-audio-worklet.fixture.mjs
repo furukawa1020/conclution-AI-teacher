@@ -200,6 +200,10 @@ function validateObservationAdding(pcmRingModule) {
 
 function guestAFirstObservation({
   aiOutputBeforeAnswer = false,
+  answerProof = "question_bound_input_answer_first",
+  coachAction = "complete",
+  coachPhase = "complete",
+  guestAFirstOutcome = "changed_to_answer_first",
   listeningAt = 1_000,
   responseAt = 11_000,
   transitionProof = "question_bound_input_clause_later_to_first",
@@ -211,12 +215,86 @@ function guestAFirstObservation({
   invariant(slo.markResponseStarted(responseAt), "guest_a_first_response_rejected");
   return slo.finish(30_000, {
     aiOutputBeforeAnswer,
-    answerProof: "question_bound_input_answer_first",
-    coachAction: "complete",
-    coachPhase: "complete",
-    guestAFirstOutcome: "changed_to_answer_first",
+    answerProof,
+    coachAction,
+    coachPhase,
+    guestAFirstOutcome,
     transitionProof,
   });
+}
+
+function verifiedGuestAFirstObservation(value) {
+  return (
+    value.aiSubstitution === "zero" &&
+    value.completion === "within_target" &&
+    value.counterexample === "verified_run" &&
+    value.listeningStart === "on_target" &&
+    value.responseStart === "on_target"
+  );
+}
+
+function validateGuestAFirstFivePathGate() {
+  currentPhase = "guest_a_first_five_path";
+  const quietWord = guestAFirstObservation({
+    listeningAt: 1_000,
+    responseAt: 11_000,
+  });
+  const normalWord = guestAFirstObservation({
+    guestAFirstOutcome: "stayed_answer_first",
+    listeningAt: 250,
+    responseAt: 10_250,
+    transitionProof: "none",
+  });
+  const noAnswer = guestAFirstObservation({
+    answerProof: "none",
+    listeningAt: 900,
+    responseAt: 10_900,
+  });
+  const correction = guestAFirstObservation({
+    listeningAt: 800,
+    responseAt: 10_800,
+  });
+  const mutter = guestAFirstObservation({
+    guestAFirstOutcome: "stayed_answer_first",
+    listeningAt: 950,
+    responseAt: 10_950,
+    transitionProof: "none",
+  });
+  invariant(
+    verifiedGuestAFirstObservation(quietWord),
+    "guest_a_first_quiet_word_not_verified",
+  );
+  invariant(
+    verifiedGuestAFirstObservation(normalWord),
+    "guest_a_first_normal_word_not_verified",
+  );
+  invariant(
+    noAnswer.aiSubstitution === "zero" &&
+      noAnswer.completion === "not_verified" &&
+      noAnswer.counterexample === "rejected",
+    "guest_a_first_no_answer_accepted",
+  );
+  invariant(
+    verifiedGuestAFirstObservation(correction),
+    "guest_a_first_correction_not_verified",
+  );
+  invariant(
+    verifiedGuestAFirstObservation(mutter),
+    "guest_a_first_mutter_not_verified",
+  );
+
+  const proxyAnswer = guestAFirstObservation({ aiOutputBeforeAnswer: true });
+  const differentQuestion = guestAFirstObservation({
+    transitionProof: "question_bound_input_clause_first_to_later",
+  });
+  invariant(
+    proxyAnswer.aiSubstitution === "detected" &&
+      proxyAnswer.counterexample === "rejected" &&
+      differentQuestion.completion === "not_verified" &&
+      differentQuestion.counterexample === "rejected",
+    "guest_a_first_counterexample_accepted",
+  );
+  return true;
 }
 
 function validateGuestAFirstSprintSlo() {
@@ -1007,6 +1085,7 @@ async function run() {
     validateAcousticExchangeability(clientModule);
   const acousticCoverageWireValidated = validateAcousticCoverageWire();
   const guestAFirstSprintSloValidated = validateGuestAFirstSprintSlo();
+  const guestAFirstFivePathValidated = validateGuestAFirstFivePathGate();
 
   currentPhase = "wrapped";
   const wrapState = await runWrappedRingScenario(pcmRingModule);
@@ -1038,6 +1117,7 @@ async function run() {
     acousticExchangeabilityValidated,
     acousticCoverageWireValidated,
     guestAFirstSprintSloValidated,
+    guestAFirstFivePathValidated,
     guestQuietOnsetValidated:
       rustGuestQuietOnsetValidated && quietGainValidated,
     quietSubbandEvidenceValidated,

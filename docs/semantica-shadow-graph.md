@@ -16,6 +16,10 @@ Issue #105 の第一段階では、Semantica を音声の同期経路へ入れ�
 
 HTTP・NDJSON・WebSocket は正常な最終応答を書き終えた後、容量64の process-local queue へ non-blocking enqueue する。queue が満杯なら shadow 観測を捨てる。worker の外部通信 timeout は250msで、失敗・timeout・未知enumは音声応答、state、表示を一切変更しない。
 
+## 本文なしのoffline比較
+
+現行QBA証明のrelationとshadow graphのrelationは、4種類の有限値だけを入力として比較する。一致は`match`、不一致は方向を含む12種類の固定enumへ変換し、集計結果も総数を含む固定14 fieldだけで表す。未知relationや自由文は集計前に拒否し、件数を変えない。これにより、回答本文や不一致理由の自由文をlog・trace・評価artifactへ残さず、同じ有限traceから同一のcanonical JSONを再現できる。
+
 ## 供給元固定
 
 - upstream: `semantica-agi/semantica`

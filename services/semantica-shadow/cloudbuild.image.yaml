@@ -1,0 +1,29 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=Dockerfile
+      - --tag=asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - --rm
+      - --entrypoint=python
+      - asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
+      - -c
+      - import semantica; from semantica.context import ContextGraph; import app; assert semantica.__version__ == '0.6.5'; assert app.SEMANTICA_WHEEL_SHA256 == '5bc33a5529aaa496dfdbca6d0bfc8301cb8f795b127e360d93ecb5b16a6a5fc0'; ContextGraph()
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
+
+images:
+  - asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+
+timeout: 3600s

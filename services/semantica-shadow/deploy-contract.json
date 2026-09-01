@@ -3,7 +3,7 @@
   "service": "kotae-semantica-shadow",
   "callerService": "kotae-api",
   "region": "asia-northeast1",
-  "ingress": "internal",
+  "ingress": "all",
   "allowUnauthenticated": false,
   "port": 8080,
   "cpu": "2",
@@ -15,7 +15,6 @@
   "containerEnvironment": {
     "PYTHONHASHSEED": "0"
   },
-  "requiredCallerEgress": "all-traffic",
   "requiredInvokerAccount": "kotae-api-runtime",
   "runtimeAccount": "kotae-semantica-shadow-runtime"
 }

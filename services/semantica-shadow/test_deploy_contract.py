@@ -13,9 +13,8 @@ class DeploymentContractTest(unittest.TestCase):
         self.assertEqual(contract["service"], "kotae-semantica-shadow")
         self.assertEqual(contract["callerService"], "kotae-api")
         self.assertEqual(contract["region"], "asia-northeast1")
-        self.assertEqual(contract["ingress"], "internal")
+        self.assertEqual(contract["ingress"], "all")
         self.assertIs(contract["allowUnauthenticated"], False)
-        self.assertEqual(contract["requiredCallerEgress"], "all-traffic")
         self.assertEqual(contract["minInstances"], 0)
         self.assertLessEqual(contract["maxInstances"], 2)
         self.assertLessEqual(contract["concurrency"], 8)
@@ -25,11 +24,11 @@ class DeploymentContractTest(unittest.TestCase):
         script = (ROOT / "deploy.ps1").read_text(encoding="utf-8")
         required = (
             "@sha256:[0-9a-f]{64}",
-            "--ingress internal",
+            ".tools/gcloud-577.0.0/google-cloud-sdk/bin/gcloud.cmd",
+            "--ingress all",
             "--no-allow-unauthenticated",
             "roles/run.invoker",
-            "run.googleapis.com/vpc-access-connector",
-            "run.googleapis.com/vpc-access-egress",
+            "caller Cloud Run service does not use the required invoker identity",
             "get-iam-policy",
             "deployed image is not the requested immutable digest",
         )

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "service": "kotae-semantica-shadow",
+  "callerService": "kotae-api",
+  "region": "asia-northeast1",
+  "ingress": "internal",
+  "allowUnauthenticated": false,
+  "port": 8080,
+  "cpu": "2",
+  "memory": "4Gi",
+  "concurrency": 8,
+  "minInstances": 0,
+  "maxInstances": 2,
+  "timeoutSeconds": 5,
+  "containerEnvironment": {
+    "PYTHONHASHSEED": "0"
+  },
+  "requiredCallerEgress": "all-traffic",
+  "requiredInvokerAccount": "kotae-api-runtime",
+  "runtimeAccount": "kotae-semantica-shadow-runtime"
+}

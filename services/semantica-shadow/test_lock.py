@@ -43,6 +43,11 @@ class LockFileTest(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\s*(?:-e|--editable)\s")
         self.assertNotRegex(text, r"(?m)^[A-Za-z0-9_.-]+\s*@\s*https?://")
 
+    def test_build_requirements_are_pinned_for_hash_mode(self):
+        text = LOCK.read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^setuptools==[0-9]", "setuptools must be pinned")
+        self.assertNotIn("packages were not pinned", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,12 +10,14 @@ steps:
         python -m pip install --no-cache-dir pip-tools==7.6.1
         python -m piptools compile \
           --generate-hashes \
+          --allow-unsafe \
           --resolver=backtracking \
           --strip-extras \
           --output-file=requirements.lock \
           requirements.in
         grep -F "semantica==0.6.5" requirements.lock >/dev/null
         grep -F "5bc33a5529aaa496dfdbca6d0bfc8301cb8f795b127e360d93ecb5b16a6a5fc0" requirements.lock >/dev/null
+        grep -F "setuptools==" requirements.lock >/dev/null
 
 artifacts:
   objects:

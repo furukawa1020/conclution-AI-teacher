@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 
 MAX_BODY_BYTES = 4096
+HEALTH_PATH = "/health"
 SCHEMA_VERSION = 1
 QUESTION_SCHEMA = "qba.v1"
 SEMANTICA_VERSION = "0.6.5"
@@ -171,7 +172,7 @@ class ShadowHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        if self.path != "/healthz":
+        if self.path != HEALTH_PATH:
             self._problem(404, "not_found")
             return
         self.send_response(204)

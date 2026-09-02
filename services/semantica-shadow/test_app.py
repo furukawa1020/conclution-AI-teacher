@@ -48,6 +48,9 @@ class FakeGraph:
 
 
 class ReceiverBoundaryTest(unittest.TestCase):
+    def test_health_path_avoids_cloud_run_reserved_healthz(self):
+        self.assertEqual(app.HEALTH_PATH, "/health")
+
     def test_reconstructs_only_four_nodes_and_three_edges_without_content(self):
         graph, digest = app.reconstruct_graph(valid_payload(), FakeGraph)
         self.assertEqual(len(graph.nodes), 4)

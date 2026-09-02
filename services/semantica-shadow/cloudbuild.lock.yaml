@@ -1,0 +1,31 @@
+steps:
+  - name: python:3.11.9-slim-bookworm@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050
+    entrypoint: bash
+    env:
+      - PIP_DISABLE_PIP_VERSION_CHECK=1
+      - PIP_NO_INPUT=1
+    args:
+      - -euc
+      - |
+        python -m pip install --no-cache-dir pip-tools==7.6.1
+        python -m piptools compile \
+          --generate-hashes \
+          --allow-unsafe \
+          --resolver=backtracking \
+          --strip-extras \
+          --output-file=requirements.lock \
+          requirements.in
+        grep -F "semantica==0.6.5" requirements.lock >/dev/null
+        grep -F "5bc33a5529aaa496dfdbca6d0bfc8301cb8f795b127e360d93ecb5b16a6a5fc0" requirements.lock >/dev/null
+        grep -F "setuptools==" requirements.lock >/dev/null
+
+artifacts:
+  objects:
+    location: gs://kotae-ai-u22-2026_cloudbuild/semantica-shadow-locks/$BUILD_ID/
+    paths:
+      - requirements.lock
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 3600s

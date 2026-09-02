@@ -1,0 +1,8 @@
+**
+!.gcloudignore
+!app.py
+!requirements.in
+!requirements.lock
+!Dockerfile
+!cloudbuild.lock.yaml
+!cloudbuild.image.yaml

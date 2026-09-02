@@ -1,4 +1,5 @@
 import hashlib
+import json
 import pathlib
 import unittest
 
@@ -6,6 +7,7 @@ import inventory
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
+CONFIG = ROOT.parents[1] / "config"
 
 
 class InventoryTest(unittest.TestCase):
@@ -46,6 +48,51 @@ class InventoryTest(unittest.TestCase):
         first = hashlib.sha256((ROOT / "requirements.lock").read_bytes()).hexdigest()
         second = hashlib.sha256((ROOT / "requirements.lock").read_bytes()).hexdigest()
         self.assertEqual(first, second)
+
+    def test_checked_in_inventory_matches_the_complete_lock(self):
+        lock = inventory.parse_lock(ROOT / "requirements.lock")
+        sbom = json.loads(
+            (CONFIG / "semantica-shadow-sbom.cdx.json").read_text(encoding="utf-8")
+        )
+        licenses = json.loads(
+            (CONFIG / "semantica-shadow-licenses.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(sbom["bomFormat"], "CycloneDX")
+        self.assertEqual(sbom["specVersion"], "1.6")
+        components = {item["name"]: item for item in sbom["components"]}
+        self.assertEqual(set(components), set(lock))
+        self.assertEqual(
+            {name: item["version"] for name, item in components.items()},
+            {name: item.version for name, item in lock.items()},
+        )
+        license_versions = {
+            item["name"]: item["version"] for item in licenses["packages"]
+        }
+        self.assertEqual(license_versions, {name: item.version for name, item in lock.items()})
+        self.assertEqual(licenses["packageCount"], len(lock))
+        lock_digest = hashlib.sha256((ROOT / "requirements.lock").read_bytes()).hexdigest()
+        self.assertEqual(licenses["requirementsLockSha256"], lock_digest)
+        metadata_properties = {
+            item["name"]: item["value"] for item in sbom["metadata"]["properties"]
+        }
+        self.assertEqual(metadata_properties["kotae:requirements-lock-sha256"], lock_digest)
+        semantica_hashes = {
+            item["content"] for item in components["semantica"]["hashes"]
+        }
+        self.assertIn(
+            "5bc33a5529aaa496dfdbca6d0bfc8301cb8f795b127e360d93ecb5b16a6a5fc0",
+            semantica_hashes,
+        )
+
+    def test_unknown_licenses_remain_explicit_instead_of_being_guessed(self):
+        licenses = json.loads(
+            (CONFIG / "semantica-shadow-licenses.json").read_text(encoding="utf-8")
+        )
+        unknown = {
+            item["name"] for item in licenses["packages"] if item["concluded"] == "NOASSERTION"
+        }
+        self.assertEqual(unknown, {"cuda-toolkit", "py-rust-stemmers"})
+        self.assertEqual(licenses["noAssertionCount"], len(unknown))
 
 
 if __name__ == "__main__":

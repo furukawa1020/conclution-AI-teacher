@@ -29,6 +29,7 @@ class DeploymentContractTest(unittest.TestCase):
             "--no-allow-unauthenticated",
             "roles/run.invoker",
             "caller Cloud Run service does not use the required invoker identity",
+            "$authExitCode = $LASTEXITCODE",
             "get-iam-policy",
             "deployed image is not the requested immutable digest",
         )
@@ -37,6 +38,7 @@ class DeploymentContractTest(unittest.TestCase):
                 self.assertIn(marker, script)
         self.assertNotIn("allUsers", script)
         self.assertNotIn("allAuthenticatedUsers", script)
+        self.assertNotIn("auth list --filter=status:ACTIVE --format='value(account)' |", script)
 
 
 if __name__ == "__main__":

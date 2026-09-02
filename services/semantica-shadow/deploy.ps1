@@ -45,8 +45,10 @@ if ($contract.schemaVersion -ne 1 -or
     throw 'deployment contract is invalid'
 }
 
-$activeAccount = (& $gcloud auth list --filter=status:ACTIVE --format='value(account)' | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($activeAccount)) {
+$activeAccounts = @(& $gcloud auth list --filter=status:ACTIVE --format='value(account)')
+$authExitCode = $LASTEXITCODE
+$activeAccount = $activeAccounts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
+if ($authExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($activeAccount)) {
     throw 'an active gcloud account is required'
 }
 

@@ -1,0 +1,88 @@
+{
+    "schemaVersion":  1,
+    "provenance":  {
+                       "projectId":  "kotae-ai-u22-2026",
+                       "region":  "asia-northeast1",
+                       "service":  "kotae-semantica-shadow",
+                       "revision":  "kotae-semantica-shadow-00003-n4k",
+                       "sourceCommit":  "d8ccd3e604a660daa8a7051c46716bb7fa663077",
+                       "cloudBuildId":  "e9060540-6503-44e2-a869-2250b7c4135e",
+                       "workload":  "content-free-fixed-graph-v1",
+                       "expectedSuccessfulRequests":  20,
+                       "imageDigest":  "sha256:09f0570b623b25477df49f08ad0114fcdd98f30354cd898633b2eab3ffb85a26",
+                       "imageSizeBytes":  3351117164,
+                       "intervalStart":  "2026-09-03T06:50:00.0000000Z",
+                       "intervalEnd":  "2026-09-03T07:12:00.0000000Z",
+                       "gcloudVersion":  "577.0.0"
+                   },
+    "metrics":  {
+                    "containerStartupLatency":  {
+                                                    "metricType":  "run.googleapis.com/container/startup_latencies",
+                                                    "unit":  "ms",
+                                                    "responseCode":  null,
+                                                    "distributionPointCount":  1,
+                                                    "observationCount":  1,
+                                                    "weightedMean":  42457.149,
+                                                    "minimumPointMean":  42457.149,
+                                                    "maximumPointMean":  42457.149,
+                                                    "firstPointEndTime":  "2026-09-03T07:06:00.0000000Z",
+                                                    "lastPointEndTime":  "2026-09-03T07:06:00.0000000Z"
+                                                },
+                    "containerMemoryUsage":  {
+                                                 "metricType":  "run.googleapis.com/container/memory/usage",
+                                                 "unit":  "By",
+                                                 "responseCode":  null,
+                                                 "distributionPointCount":  7,
+                                                 "observationCount":  7,
+                                                 "weightedMean":  805041298.28571427,
+                                                 "minimumPointMean":  172032,
+                                                 "maximumPointMean":  939323392,
+                                                 "firstPointEndTime":  "2026-09-03T07:06:00.0000000Z",
+                                                 "lastPointEndTime":  "2026-09-03T07:12:00.0000000Z"
+                                             },
+                    "successfulRequestLatency":  {
+                                                     "metricType":  "run.googleapis.com/request_latencies",
+                                                     "unit":  "ms",
+                                                     "responseCode":  204,
+                                                     "distributionPointCount":  1,
+                                                     "observationCount":  20,
+                                                     "weightedMean":  3.8605129,
+                                                     "minimumPointMean":  3.8605129,
+                                                     "maximumPointMean":  3.8605129,
+                                                     "firstPointEndTime":  "2026-09-03T07:10:00.0000000Z",
+                                                     "lastPointEndTime":  "2026-09-03T07:10:00.0000000Z"
+                                                 },
+                    "successfulEndToEndLatency":  {
+                                                      "metricType":  "run.googleapis.com/request_latency/e2e_latencies",
+                                                      "unit":  "ms",
+                                                      "responseCode":  204,
+                                                      "distributionPointCount":  1,
+                                                      "observationCount":  20,
+                                                      "weightedMean":  10.6272562,
+                                                      "minimumPointMean":  10.6272562,
+                                                      "maximumPointMean":  10.6272562,
+                                                      "firstPointEndTime":  "2026-09-03T07:10:00.0000000Z",
+                                                      "lastPointEndTime":  "2026-09-03T07:10:00.0000000Z"
+                                                  },
+                    "successfulPendingLatency":  {
+                                                     "metricType":  "run.googleapis.com/request_latency/pending",
+                                                     "unit":  "ms",
+                                                     "responseCode":  204,
+                                                     "distributionPointCount":  1,
+                                                     "observationCount":  20,
+                                                     "weightedMean":  0,
+                                                     "minimumPointMean":  0,
+                                                     "maximumPointMean":  0,
+                                                     "firstPointEndTime":  "2026-09-03T07:10:00.0000000Z",
+                                                     "lastPointEndTime":  "2026-09-03T07:10:00.0000000Z"
+                                                 }
+                },
+    "interpretationBoundary":  {
+                                   "percentileClaimed":  false,
+                                   "reason":  "A percentile is not reported because the observed startup and successful request counts are too small.",
+                                   "requestLatencyExcludesStartup":  true,
+                                   "endToEndLatencyIncludesGoogleNetwork":  true,
+                                   "monitoringSamplingSeconds":  60,
+                                   "monitoringVisibilityDelaySeconds":  120
+                               }
+}

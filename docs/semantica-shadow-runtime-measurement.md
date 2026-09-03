@@ -17,7 +17,7 @@ Cloud Run metricは60秒ごとにsampleされ、表示まで最大120秒遅れ�
 ```powershell
 & .\services\semantica-shadow\run-graph-probe.ps1 `
   -ProjectId kotae-ai-u22-2026 `
-  -ImageDigest asia-northeast1-docker.pkg.dev/kotae-ai-u22-2026/cloud-run-source-deploy/semantica-shadow@sha256:6e4693c57b2c26af46ef87ea4dc1863e461241aa8ce38486370c134c5f676ebb `
+  -ImageDigest asia-northeast1-docker.pkg.dev/kotae-ai-u22-2026/cloud-run-source-deploy/semantica-shadow@sha256:09f0570b623b25477df49f08ad0114fcdd98f30354cd898633b2eab3ffb85a26 `
   -TargetUrl https://kotae-semantica-shadow-r6kgkvtrmq-an.a.run.app `
   -RequestCount 20
 ```
@@ -27,13 +27,28 @@ Cloud Monitoringへの反映を120秒以上待ってからsnapshotを再生成�
 ```powershell
 & .\services\semantica-shadow\measure.ps1 `
   -ProjectId kotae-ai-u22-2026 `
-  -Revision kotae-semantica-shadow-00002-jwx `
-  -ImageDigest sha256:6e4693c57b2c26af46ef87ea4dc1863e461241aa8ce38486370c134c5f676ebb `
-  -StartTime 2026-09-02T23:10:00Z `
-  -EndTime 2026-09-02T23:40:00Z `
-  -SourceCommit 6ddd8fe2e50d5e5825a2d055c9eaa9c9f3f222b1 `
-  -BuildId efb7c42b-c4ae-4031-ad2b-60a20f89f507 `
+  -Revision kotae-semantica-shadow-00003-n4k `
+  -ImageDigest sha256:09f0570b623b25477df49f08ad0114fcdd98f30354cd898633b2eab3ffb85a26 `
+  -StartTime 2026-09-03T06:50:00Z `
+  -EndTime 2026-09-03T07:12:00Z `
+  -SourceCommit d8ccd3e604a660daa8a7051c46716bb7fa663077 `
+  -BuildId e9060540-6503-44e2-a869-2250b7c4135e `
+  -ExpectedSuccessCount 20 `
   -OutputPath config\semantica-shadow-runtime-measurement.json
 ```
 
 標本数が少ない時にp50やp95を外挿しない。snapshotはdistributionの非ゼロ標本数、観測数、点平均の加重平均・最小・最大だけを保存する。性能比較を主張するには、独立した複数cold startと十分な成功要求数を追加取得する。
+
+## revision 3 の観測結果
+
+固定graph 20件を `kotae-api-runtime` から送信した結果、20件すべてが204・空本文・`no-store`で完了した。Cloud Run request logでもPOST 204を20件確認した。
+
+| 指標 | 観測数 | 加重平均 | 最大点平均 |
+|---|---:|---:|---:|
+| container startup | 1 | 42,457.149 ms | 42,457.149 ms |
+| container memory usage | 6 | 782,660,949 bytes | 939,323,392 bytes |
+| successful request latency | 20 | 3.861 ms | 15.958 ms |
+| successful end-to-end latency | 20 | 10.627 ms | 45.283 ms |
+| successful pending latency | 20 | 0 ms | 0 ms |
+
+Artifact Registry上のimage sizeは3,351,117,164 bytesだった。起動は重いが、warm後のgraph再構成は短い。したがって、このserviceを音声の同期経路へ同居させず、上限付きnon-blocking shadowとして隔離する設計を維持する。startupは1観測だけなのでp50・p95や一般化したcold-start性能は主張しない。

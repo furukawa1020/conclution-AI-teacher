@@ -11,6 +11,9 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$SourceCommit,
     [Parameter(Mandatory = $true)][string]$BuildId,
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 10000)]
+    [int]$ExpectedSuccessCount,
     [Parameter(Mandatory = $true)][string]$OutputPath,
     [string]$Region = 'asia-northeast1',
     [string]$Service = 'kotae-semantica-shadow',
@@ -121,6 +124,11 @@ $metrics = [ordered]@{
     successfulEndToEndLatency = Get-MetricSummary 'run.googleapis.com/request_latency/e2e_latencies' 'ms' '204'
     successfulPendingLatency = Get-MetricSummary 'run.googleapis.com/request_latency/pending' 'ms' '204'
 }
+foreach ($metricName in @('successfulRequestLatency', 'successfulEndToEndLatency', 'successfulPendingLatency')) {
+    if ($metrics[$metricName].observationCount -ne $ExpectedSuccessCount) {
+        throw "$metricName does not contain exactly $ExpectedSuccessCount successful observations"
+    }
+}
 
 $document = [ordered]@{
     schemaVersion = 1
@@ -131,6 +139,8 @@ $document = [ordered]@{
         revision = $Revision
         sourceCommit = $SourceCommit
         cloudBuildId = $BuildId
+        workload = 'content-free-fixed-graph-v1'
+        expectedSuccessfulRequests = $ExpectedSuccessCount
         imageDigest = $ImageDigest
         imageSizeBytes = [long]$image[0].metadata.imageSizeBytes
         intervalStart = $StartTime.ToUniversalTime().ToString('o')

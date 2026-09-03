@@ -28,6 +28,7 @@ class RuntimeMeasurementTest(unittest.TestCase):
             "run.googleapis.com/request_latency/e2e_latencies",
             "run.googleapis.com/request_latency/pending",
             "no non-zero samples",
+            "does not contain exactly $ExpectedSuccessCount",
         )
         for marker in required:
             with self.subTest(marker=marker):
@@ -40,6 +41,8 @@ class RuntimeMeasurementTest(unittest.TestCase):
         self.assertEqual(provenance["projectId"], "kotae-ai-u22-2026")
         self.assertEqual(provenance["region"], "asia-northeast1")
         self.assertEqual(provenance["service"], "kotae-semantica-shadow")
+        self.assertEqual(provenance["workload"], "content-free-fixed-graph-v1")
+        self.assertEqual(provenance["expectedSuccessfulRequests"], 20)
         self.assertRegex(provenance["imageDigest"], r"^sha256:[0-9a-f]{64}$")
         self.assertGreater(provenance["imageSizeBytes"], 0)
         self.assertFalse(value["interpretationBoundary"]["percentileClaimed"])

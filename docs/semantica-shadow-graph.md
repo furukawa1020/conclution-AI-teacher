@@ -16,6 +16,10 @@ Issue #105 の第一段階では、Semantica を音声の同期経路へ入れ�
 
 HTTP・NDJSON・WebSocket は正常な最終応答を書き終えた後、容量64の process-local queue へ non-blocking enqueue する。queue が満杯なら shadow 観測を捨てる。worker の外部通信 timeout は250msで、失敗・timeout・未知enumは音声応答、state、表示を一切変更しない。
 
+呼び出し側は1分ごとに、`accepted / dropped_full / dropped_closed / invalid_graph / exported / export_failed / export_timed_out` の累積数だけを構造化logへ出す。この有限カウンタにはrequest digest、graph、発話、文字起こし、回答、UID、token、error文字列を含めない。429・500・timeout・queue飽和を注入する回帰テストでは、shadowなしの基準音声応答とstatus・bodyが同一であることを検証する。
+
+shadowが受理する状態語彙は本番の回答者コーチ状態機械と同じ有限集合に固定する。特に通常会話の`none`、言い直し待ちの`awaiting_restatement / restate`、安全停止の`blocked / retry`、発話権返却の`release`を含む。テスト専用の別名へ写像せず、実際に配信される全状態をfixtureで検証する。
+
 ## 本文なしのoffline比較
 
 現行QBA証明のrelationとshadow graphのrelationは、4種類の有限値だけを入力として比較する。一致は`match`、不一致は方向を含む12種類の固定enumへ変換し、集計結果も総数を含む固定14 fieldだけで表す。未知relationや自由文は集計前に拒否し、件数を変えない。これにより、回答本文や不一致理由の自由文をlog・trace・評価artifactへ残さず、同じ有限traceから同一のcanonical JSONを再現できる。

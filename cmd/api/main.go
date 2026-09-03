@@ -435,6 +435,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer semanticDispatcher.Close()
+		go reportSemanticShadowStats(ctx, logger, semanticDispatcher, time.Minute)
 	}
 	defer func() {
 		if err := closeSpeech(); err != nil {
@@ -509,5 +510,35 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+	}
+}
+
+func reportSemanticShadowStats(
+	ctx context.Context,
+	logger *slog.Logger,
+	dispatcher *semanticshadow.Dispatcher,
+	interval time.Duration,
+) {
+	if dispatcher == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats := dispatcher.Snapshot()
+			logger.Info("Semantica shadow boundary counters",
+				"accepted", stats.Accepted,
+				"dropped_full", stats.DroppedFull,
+				"dropped_closed", stats.DroppedClosed,
+				"invalid_graph", stats.InvalidGraph,
+				"exported", stats.Exported,
+				"export_failed", stats.ExportFailed,
+				"export_timed_out", stats.ExportTimedOut,
+			)
+		}
 	}
 }

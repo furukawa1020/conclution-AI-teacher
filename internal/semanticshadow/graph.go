@@ -102,9 +102,9 @@ func CanonicalJSON(graph Graph) ([]byte, error) {
 
 func relationOf(s Signals) (string, error) {
 	if !oneOf(s.AssistanceTarget, "assistant", "respondent") ||
-		!oneOf(s.RespondentStage, "not_applicable", "awaiting_answer", "restructure") ||
-		!oneOf(s.CoachPhase, "none", "awaiting_answer", "restructuring", "expanding", "complete") ||
-		!oneOf(s.CoachAction, "none", "elicit", "restructure", "expand", "complete") ||
+		!oneOf(s.RespondentStage, "none", "awaiting_answer", "restructure") ||
+		!oneOf(s.CoachPhase, "none", "awaiting_answer", "awaiting_restatement", "expanding", "complete", "blocked") ||
+		!oneOf(s.CoachAction, "none", "elicit", "restate", "expand", "complete", "retry", "release") ||
 		!oneOf(s.AnswerProof, "none", "question_bound_input_answer_first") ||
 		!oneOf(s.AnswerTransitionProof, "none", "question_bound_input_clause_later_to_first") ||
 		!oneOf(s.GuestAFirstOutcome, "no_verified_change", "changed_to_answer_first", "stayed_answer_first") {

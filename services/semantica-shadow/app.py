@@ -154,6 +154,14 @@ def reconstruct_graph(
     return graph, canonical_digest(value)
 
 
+def load_graph_factory() -> Callable[[], Any]:
+    """Import and warm Semantica before the HTTP socket starts accepting requests."""
+    from semantica.context import ContextGraph
+
+    ContextGraph()
+    return ContextGraph
+
+
 class ShadowHandler(BaseHTTPRequestHandler):
     server_version = "kotae-semantica-shadow"
     sys_version = ""
@@ -199,7 +207,10 @@ class ShadowHandler(BaseHTTPRequestHandler):
             self._problem(400, "invalid_request")
             return
         try:
-            reconstruct_graph(decode_payload(raw))
+            graph_factory = getattr(self.server, "graph_factory", None)
+            if graph_factory is None:
+                raise RuntimeError("server graph factory missing")
+            reconstruct_graph(decode_payload(raw), graph_factory)
         except RequestRejected:
             self._problem(400, "invalid_request")
             return
@@ -213,7 +224,9 @@ class ShadowHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     port = int(os.environ.get("PORT", "8080"))
+    graph_factory = load_graph_factory()
     server = ThreadingHTTPServer(("0.0.0.0", port), ShadowHandler)
+    server.graph_factory = graph_factory  # type: ignore[attr-defined]
     server.daemon_threads = True
     server.serve_forever()
 

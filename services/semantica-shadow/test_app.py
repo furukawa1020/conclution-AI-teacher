@@ -1,6 +1,9 @@
 import copy
 import json
+import sys
+import types
 import unittest
+from unittest import mock
 
 import app
 
@@ -48,6 +51,25 @@ class FakeGraph:
 
 
 class ReceiverBoundaryTest(unittest.TestCase):
+    def test_semantica_is_warmed_before_the_server_accepts_requests(self):
+        calls = []
+
+        class WarmGraph:
+            def __init__(self):
+                calls.append("constructed")
+
+        semantica = types.ModuleType("semantica")
+        context = types.ModuleType("semantica.context")
+        context.ContextGraph = WarmGraph
+        semantica.context = context
+        with mock.patch.dict(
+            sys.modules,
+            {"semantica": semantica, "semantica.context": context},
+        ):
+            factory = app.load_graph_factory()
+        self.assertIs(factory, WarmGraph)
+        self.assertEqual(calls, ["constructed"])
+
     def test_health_path_avoids_cloud_run_reserved_healthz(self):
         self.assertEqual(app.HEALTH_PATH, "/health")
 

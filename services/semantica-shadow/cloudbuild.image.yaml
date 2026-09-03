@@ -15,11 +15,36 @@ steps:
       - import semantica; from semantica.context import ContextGraph; import app; assert semantica.__version__ == '0.6.5'; assert app.SEMANTICA_WHEEL_SHA256 == '5bc33a5529aaa496dfdbca6d0bfc8301cb8f795b127e360d93ecb5b16a6a5fc0'; ContextGraph()
   - name: gcr.io/cloud-builders/docker
     args:
+      - run
+      - --rm
+      - --user=0:0
+      - --volume=/workspace:/out
+      - --entrypoint=python
+      - asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
+      - /app/inventory.py
+      - --lock=/app/requirements.lock
+      - --sbom=/out/semantica-shadow-sbom.cdx.json
+      - --licenses=/out/semantica-shadow-licenses.json
+      - --source-commit=${_SOURCE_COMMIT}
+  - name: python:3.11.9-slim-bookworm@sha256:2856e6af199e8128161abd320575eb9b341f3b76f017b5d0c9cd364f60d8a050
+    entrypoint: python
+    args:
+      - -c
+      - import json; s=json.load(open('semantica-shadow-sbom.cdx.json', encoding='utf-8')); l=json.load(open('semantica-shadow-licenses.json', encoding='utf-8')); assert s['bomFormat']=='CycloneDX'; assert s['specVersion']=='1.6'; assert len(s['components'])==l['packageCount']>100; assert any(c['name']=='semantica' and c['version']=='0.6.5' for c in s['components'])
+  - name: gcr.io/cloud-builders/docker
+    args:
       - push
       - asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
 
 images:
   - asia-northeast1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/semantica-shadow:${_SOURCE_COMMIT}
+
+artifacts:
+  objects:
+    location: gs://kotae-ai-u22-2026_cloudbuild/semantica-shadow-inventory/$BUILD_ID/
+    paths:
+      - semantica-shadow-sbom.cdx.json
+      - semantica-shadow-licenses.json
 
 options:
   logging: CLOUD_LOGGING_ONLY

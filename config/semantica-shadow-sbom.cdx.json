@@ -1,23 +1,3236 @@
 {
   "bomFormat": "CycloneDX",
-  "specVersion": "1.6",
-  "serialNumber": "urn:uuid:897f83ae-a2af-4d60-b6b8-83f18f491680",
-  "version": 1,
-  "metadata": {
-    "component": {
-      "type": "application",
-      "name": "kotae-semantica-shadow",
-      "version": "1"
-    }
-  },
   "components": [
     {
+      "bom-ref": "pkg:pypi/annotated-doc@0.0.5",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "annotated-doc",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "19f4a933a7634b0377f3f0bf3a3745e1bffa191d83ff2cc2549b319e488f5a56"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "11b664db9b447b346b69d233ece75e5da21a59a2c87ae29a98e49043c5fc23a3"
+        }
+      ],
+      "purl": "pkg:pypi/annotated-doc@0.0.5",
       "type": "library",
+      "version": "0.0.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/annotated-types@0.8.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "annotated-types",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2614c043be449aa0b84653093f5f850cbd51a35518ab318b6772a5b69554cfa1"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "70dc431395cdb0024a63d5a00e94c5fdc510a9384f0723a3a1f287cc184f6b63"
+        }
+      ],
+      "purl": "pkg:pypi/annotated-types@0.8.0",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/anyio@4.14.2",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "anyio",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d0ae5e1b52f09190dfa837317bffa1555e474c1120b22ebbbe0e80304b1e0ca9"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6f475f811a70294d20fb3ef49c8282c8c18c0a47f980afdbc19c7b178fceafb7"
+        }
+      ],
+      "purl": "pkg:pypi/anyio@4.14.2",
+      "type": "library",
+      "version": "4.14.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/asttokens@3.0.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "asttokens",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "cff87cf1237a1b9a2b9262356f65e2433d6eb366513ffff949736aa6a4c0ccdd"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "742ac2de2f237c4753f6dd1eadfb5465dbc043eb5188a1cc4c22b26ba0ca75a7"
+        }
+      ],
+      "purl": "pkg:pypi/asttokens@3.0.2",
+      "type": "library",
+      "version": "3.0.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/audioread@3.1.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "audioread",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "852b3b385459b0835fd33659f8b2b8551cc6a56f996c052370675d93337f9a99"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "fe5aae7ccdd1fa1b46a7553d16d50aca4fd69725fa8cc1f85f45c1a7408eb0ec"
+        }
+      ],
+      "purl": "pkg:pypi/audioread@3.1.0",
+      "type": "library",
+      "version": "3.1.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/beautifulsoup4@4.15.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT License"
+          }
+        }
+      ],
+      "name": "beautifulsoup4",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2670bc0ad9d2fbe9f198f9802b44adf97ca47112bf143c2ab5647be580a1f08a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b7c2a98e254de9511b848dacd4b2cbdf496c477f1f7f7cf6104e55e136f9062e"
+        }
+      ],
+      "purl": "pkg:pypi/beautifulsoup4@4.15.0",
+      "type": "library",
+      "version": "4.15.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/blis@1.3.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD"
+          }
+        }
+      ],
+      "name": "blis",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "36"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8e8a608fc8956d3c43f611e5b2760223d6d4dfed2747b755212bbb23ae92ed25"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9ef23b752de592dc331548fca05797ed0836f1dd9bbe6a90c52010405b3e00d5"
+        }
+      ],
+      "purl": "pkg:pypi/blis@1.3.3",
+      "type": "library",
+      "version": "1.3.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/catalogue@2.0.10",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "catalogue",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "ee71e354e3fb2c046a1641f0e1761985e1924de293ce6c1ca919c25c77f346b4"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "0b4fd77961e89397879bf7f8fc50a8c248209b1b74863557f144dd14fd35ef04"
+        }
+      ],
+      "purl": "pkg:pypi/catalogue@2.0.10",
+      "type": "library",
+      "version": "2.0.10"
+    },
+    {
+      "bom-ref": "pkg:pypi/certifi@2026.7.22",
+      "licenses": [
+        {
+          "license": {
+            "name": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "certifi",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f89146fc298e777e971aa836b8547f099d323430f1387dc04b699ff87426115b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "676c99673e31b1b7c574b509749d70b237113db08b89e858384168dbcf54c684"
+        }
+      ],
+      "purl": "pkg:pypi/certifi@2026.7.22",
+      "type": "library",
+      "version": "2026.7.22"
+    },
+    {
+      "bom-ref": "pkg:pypi/cffi@2.1.1",
+      "licenses": [
+        {
+          "expression": "MIT-0"
+        }
+      ],
+      "name": "cffi",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "100"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "6a9f4d9a7d0d3fadcd31b2df11cc611bce0b9c685686aca5befd2b898cc9d40e"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "d7f69a1ea6f435b2c8ebaa49beebb9abf0a3c9c45f663b650d91960644ff4167"
+        }
+      ],
+      "purl": "pkg:pypi/cffi@2.1.1",
+      "type": "library",
+      "version": "2.1.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/chardet@7.6.0",
+      "licenses": [
+        {
+          "expression": "0BSD"
+        }
+      ],
+      "name": "chardet",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "46"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "a1b3648fd519d380ff318e88af9040cd59005282bd6352797ea18815f5035704"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "03f2a47b30e335cde06d40c839a13110d7653273afbf26badec8e4ca5ae3ce1e"
+        }
+      ],
+      "purl": "pkg:pypi/chardet@7.6.0",
+      "type": "library",
+      "version": "7.6.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/charset-normalizer@3.5.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "charset-normalizer",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "172"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "97b171943bf1f9667f67709d45261e75e062da8e0b739c69c147a6816bb3faed"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "8dd839ae4bba1fbc689bf94c70d15994e7221cbc6fb841bbe2ead6e5f7d56d1a"
+        }
+      ],
+      "purl": "pkg:pypi/charset-normalizer@3.5.1",
+      "type": "library",
+      "version": "3.5.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/click@8.5.0",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "click",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "493b1975785c6e15fdac6a563ef67aac59daaf290add297c6c2480b00b66af01"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "144c5ffdb5c907862fa8f7661c76505184b0bcd832bf15e73a73b22ce97ab89c"
+        }
+      ],
+      "purl": "pkg:pypi/click@8.5.0",
+      "type": "library",
+      "version": "8.5.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/cloudpathlib@0.25.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "cloudpathlib",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "538e651642cf88fe87e123439f94706b2fe3007b4c52f7695f5c370dbb486a8f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "329fbcd0c307bc8835f330535ca13f82678aa72ea66a3445aa2aa7819f15131b"
+        }
+      ],
+      "purl": "pkg:pypi/cloudpathlib@0.25.0",
+      "type": "library",
+      "version": "0.25.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/cloudpickle@3.1.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "cloudpickle",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0217c63f7daaf7794283e3eec41138cf8db92261c91b0a92acce520683983f7d"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "15b76478b5933ead276a428a327cf79d3e281f02991a68980b3649932cc7c4f2"
+        }
+      ],
+      "purl": "pkg:pypi/cloudpickle@3.1.2",
+      "type": "library",
+      "version": "3.1.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/comm@0.2.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "comm",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5eec5a9569f11d1c940a12fb4b01d4ddf1936ce65177dee51261be4f81eacf36"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "096352a703d5711750616a21eb725d50b2b9834b4230aed1c4067c308171ab85"
+        }
+      ],
+      "purl": "pkg:pypi/comm@0.2.3",
+      "type": "library",
+      "version": "0.2.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/confection@1.3.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "confection",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d16f3834140e712b4a71f35915b0ba922749822a9e9b9fab9f301273fd352827"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "ef47f03ea27553528bf508e7a3748871b8b8b54e222456fbbedd09364d0fb894"
+        }
+      ],
+      "purl": "pkg:pypi/confection@1.3.3",
+      "type": "library",
+      "version": "1.3.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/contourpy@1.3.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "contourpy",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "72"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f5c234b1b6027e9584f29194f848eda13b488c41086a4177f105f212bc823415"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "691c32a64d0683fb5d914135721a6039a40891f16337c24d34432123f0376fd1"
+        }
+      ],
+      "purl": "pkg:pypi/contourpy@1.3.3",
+      "type": "library",
+      "version": "1.3.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/cuda-bindings@13.3.1",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-SOFTWARE-LICENSE"
+        }
+      ],
+      "name": "cuda-bindings",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "18"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0b0c9eb9ff506aaa1311e940706c0f98d409c33eca1472542b56aa636089982f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "56022e7cd59e7e7d9e679ded8d6f3c4f679da2c7628c9fb3c83add900f64af12"
+        }
+      ],
+      "purl": "pkg:pypi/cuda-bindings@13.3.1",
+      "type": "library",
+      "version": "13.3.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/cuda-pathfinder@1.8.0",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "name": "cuda-pathfinder",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "1"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "83a0964ad336ba4741cd5566c2b4a68b25e54f130e0d8228cca7dcda4e6ba750"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6db323e98c8f40203e2b380b8c0131e8acf7306c8d7dbcd1f3ea569af2aa4fb3"
+        }
+      ],
+      "purl": "pkg:pypi/cuda-pathfinder@1.8.0",
+      "type": "library",
+      "version": "1.8.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/cuda-toolkit@13.0.3.0",
+      "name": "cuda-toolkit",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "1"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "dab58f2f0ea1adccb373ca25d1991b78859f08833fe6aefb0684f19b489991a9"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "2543e3c563e010c8dee718193af22164d0d4bac31b1b0505f433d1fae9531923"
+        }
+      ],
+      "purl": "pkg:pypi/cuda-toolkit@13.0.3.0",
+      "type": "library",
+      "version": "13.0.3.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/cycler@0.12.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "cycler",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "aaa1e482d8d3c3c0e6b0e6011e38d38c15dde8e8901e3929bbf49be66427c6a2"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c1ab01c05817a802e02282a038971848f3e4945a36f19112e29853a8f852fa5b"
+        }
+      ],
+      "purl": "pkg:pypi/cycler@0.12.1",
+      "type": "library",
+      "version": "0.12.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/cymem@2.0.13",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "cymem",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "65"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "97ca7eb952d81d1768221c25591366fe9863b6a4137f39ee7bb180c6aba61c3b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "209e9e3224d128b8a96ad99a90ba84009f169ec33b706d0d222fcec6e5dbb4a7"
+        }
+      ],
+      "purl": "pkg:pypi/cymem@2.0.13",
+      "type": "library",
+      "version": "2.0.13"
+    },
+    {
+      "bom-ref": "pkg:pypi/decorator@5.3.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-2-Clause"
+          }
+        }
+      ],
+      "name": "decorator",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "276a96ca514ee0f6280325dc6ab719c22d4f0b7286e99fa22ac0228ef0648c20"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "ed20840cbc78a98e58981ec8f4544866705ec21023a57c21819466818797d234"
+        }
+      ],
+      "purl": "pkg:pypi/decorator@5.3.1",
+      "type": "library",
+      "version": "5.3.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/et-xmlfile@2.0.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "et-xmlfile",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8a9a95f4c137eaa22031bcb4f8aeffaf02b75337f12e93c504bd508a1d0762e7"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "f6010e94972d7814cdebef25570e8e4eaef69d6547bd4296d5a5c25cfb1e5e01"
+        }
+      ],
+      "purl": "pkg:pypi/et-xmlfile@2.0.0",
+      "type": "library",
+      "version": "2.0.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/executing@2.2.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "executing",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5661736d61726957978e1c5e7231e943d6945786f1a20bcb84e69645c3f8b4ba"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "db612f46ee6ab16228043f11e754ce85062f61d257483701adce585282397fcf"
+        }
+      ],
+      "purl": "pkg:pypi/executing@2.2.1",
+      "type": "library",
+      "version": "2.2.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/faiss-cpu@1.15.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "faiss-cpu",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "11"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "c641e5b3facfe4d358eaaf20e8696acbf3f31c7fe70b5ff2e829d354265d8a14"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "af6ed39c1b7cb880d92fc51070e29fc0e894728365f9dcc9af7c6580b4886bf8"
+        }
+      ],
+      "purl": "pkg:pypi/faiss-cpu@1.15.0",
+      "type": "library",
+      "version": "1.15.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/fastembed@0.8.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache License"
+          }
+        }
+      ],
+      "name": "fastembed",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "1d5dfa4f512ea7fcf2d05a9a552800706f89c2448aaaf6908e5d7054541bfd3b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "2d413336e64b59f2f2e7a33106051034e8bffde65b91da119eb6175d435281e3"
+        }
+      ],
+      "purl": "pkg:pypi/fastembed@0.8.0",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/filelock@3.32.5",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "filelock",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "817abe052046906bf5648c3031ddd0eda54e4abe3a290d967175c6c16af80dbe"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "d0402a852115d9774d9508b43e4fb11c3385e3112948476a66ee408f7f607a94"
+        }
+      ],
+      "purl": "pkg:pypi/filelock@3.32.5",
+      "type": "library",
+      "version": "3.32.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/flatbuffers@25.12.19",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "flatbuffers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "1"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2cc99917d40ff6fbb37bf406753dd411cb0942614f07e43890602fb8e29f3f30"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c0ea2b7a3ec982f35a69aa6e261eeca8d548539d5e252c2409cc88dfc814383b"
+        }
+      ],
+      "purl": "pkg:pypi/flatbuffers@25.12.19",
+      "type": "library",
+      "version": "25.12.19"
+    },
+    {
+      "bom-ref": "pkg:pypi/fonttools@4.64.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "fonttools",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "66"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "035f79a91817153ca31fb3c445654870bb3497982b161f2a1dedae5cd1f82323"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "3d46ca6f24a7ee1b93abe3ede935ca1621dd00ef13aa3bc1de7da981a39d87dc"
+        }
+      ],
+      "purl": "pkg:pypi/fonttools@4.64.0",
+      "type": "library",
+      "version": "4.64.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/fsspec@2026.7.0",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "fsspec",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "97cb7f5dcfce2ae8157806124d257a9e2e05d74dfa272fae97bb40882a7f19a3"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e10f75d715e1f0a9eb7da79b217ee1d3dc46b145da36060575d0bd1f21e33076"
+        }
+      ],
+      "purl": "pkg:pypi/fsspec@2026.7.0",
+      "type": "library",
+      "version": "2026.7.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/gensim@4.4.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "LGPL-2.1-only"
+          }
+        }
+      ],
+      "name": "gensim",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "26"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "bcc5b5d2dae3f4c0b69bf53ec3b06d1d9ab98e4c827382f8634260919399ad43"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "3ca43d823e8155ecc492d1d6fea1a4e24bbeccdf52fb4fd7e3411d7cdfd3e91a"
+        }
+      ],
+      "purl": "pkg:pypi/gensim@4.4.0",
+      "type": "library",
+      "version": "4.4.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/gitdb@4.0.12",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD License"
+          }
+        }
+      ],
+      "name": "gitdb",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "1de4884f5e74fff4ba010545d835a8ef8707631133c82f6ee48e7248351e511a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "ce6f17cae26277a0a51e7a2bc89b2e9a2f47909870d8c7625ff5ca5c890dd1a4"
+        }
+      ],
+      "purl": "pkg:pypi/gitdb@4.0.12",
+      "type": "library",
+      "version": "4.0.12"
+    },
+    {
+      "bom-ref": "pkg:pypi/gitpython@3.1.61",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "gitpython",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "ddce33c9edb38273120a38cfadc97eacc1c8cec180a58fd8e98b4be566632774"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "3052d031e31807311b665d6dbaf235b4ef6eda61344e81e2aa646a8ee3cda592"
+        }
+      ],
+      "purl": "pkg:pypi/gitpython@3.1.61",
+      "type": "library",
+      "version": "3.1.61"
+    },
+    {
+      "bom-ref": "pkg:pypi/grpcio@1.83.1",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "name": "grpcio",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "51"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "78cf6ca0e2411ddc6c528bd5c7bdbd476eee53c4c6eb6013e7fea9d979c6be07"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "cb53c6dc33c88ad23eff49df1b348412301bb5ee0ebc68e2842d9bee46cad772"
+        }
+      ],
+      "purl": "pkg:pypi/grpcio@1.83.1",
+      "type": "library",
+      "version": "1.83.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/h11@0.16.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "h11",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "450921a8a8e791d2c8efa58257184345efc0611090f3e054e442c654fb8fd89f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "58e388439e4296deb07edfd11b1965c3cddf6f28cae07d110f273ab4ec22ec74"
+        }
+      ],
+      "purl": "pkg:pypi/h11@0.16.0",
+      "type": "library",
+      "version": "0.16.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/hf-xet@1.6.0",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "name": "hf-xet",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "17"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "ead301942b26b7f17a8f1086507097687adb36f450124aac3d0b1fa19f90de7b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "4de4658e41228ba10c372753ac2309e3c944aa46458854a55e742562475859bd"
+        }
+      ],
+      "purl": "pkg:pypi/hf-xet@1.6.0",
+      "type": "library",
+      "version": "1.6.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/httpcore@1.0.9",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "httpcore",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d29390b31ef579772f4970d0e90a18b1edfa3cc5ec525478b2a7751cd463591f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "22d3232ac4a4d08047e0562ead1abea5f5e2cf996b064980f78058c367384464"
+        }
+      ],
+      "purl": "pkg:pypi/httpcore@1.0.9",
+      "type": "library",
+      "version": "1.0.9"
+    },
+    {
+      "bom-ref": "pkg:pypi/httpx@0.28.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "httpx",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "c0dbef455a6948648ad69b737e9a96e6a710c5d841c67371443c80ae15ed3951"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a364be8fbe67de94f9023ad290b1d4be09c34e73872c170514f6df3fd04daf99"
+        }
+      ],
+      "purl": "pkg:pypi/httpx@0.28.1",
+      "type": "library",
+      "version": "0.28.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/huggingface-hub@1.29.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "huggingface-hub",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f885319fbec3d27023e19a23b325965a8e0a533d9a5747727e3e8e5e2eb82646"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "cddfcad9fb48db6a407e5f61893d79e41377f4852dac37c3de7d99257ac2e46d"
+        }
+      ],
+      "purl": "pkg:pypi/huggingface-hub@1.29.0",
+      "type": "library",
+      "version": "1.29.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/idna@3.19",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "idna",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d6886c18c8f31d9e15b1af3fa97871ca2d6caa7ae51757ba4cb98cc433506518"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "46a33d1b275c7620fab8d601969b4c6a6f08da521bf59ea2c507a268875362f5"
+        }
+      ],
+      "purl": "pkg:pypi/idna@3.19",
+      "type": "library",
+      "version": "3.19"
+    },
+    {
+      "bom-ref": "pkg:pypi/ipython@9.17.1",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "ipython",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "a5783604bc19b87cd4d7fe15cbfd8cff2261e6ca09380cec73df96dd4626ed52"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "cb3d1b992371a8fdd0255232f7a2426a75a7bfad6e9f9978a098697ac01de2fd"
+        }
+      ],
+      "purl": "pkg:pypi/ipython@9.17.1",
+      "type": "library",
+      "version": "9.17.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/ipython-pygments-lexers@1.1.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "ipython-pygments-lexers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "883084913ba6ff32381816dd6bd88d10e1cbb2da9c196bfb3dbbfca1358f0ea2"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "1f80c25bda44c9309f6e2726afc42f29c43f06ff2388a8d7fc140f4c8d7008b5"
+        }
+      ],
+      "purl": "pkg:pypi/ipython-pygments-lexers@1.1.1",
+      "type": "library",
+      "version": "1.1.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/ipywidgets@8.1.9",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD 3-Clause License"
+          }
+        }
+      ],
+      "name": "ipywidgets",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "98bfe4de68cdc2fa4907084c7f57aea23433df0976f0ae517e47c4e11149db37"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "976dc2cf1f81068038c49cb3168f1cf49bdc75e08d3485fc52e5951fbf284b10"
+        }
+      ],
+      "purl": "pkg:pypi/ipywidgets@8.1.9",
+      "type": "library",
+      "version": "8.1.9"
+    },
+    {
+      "bom-ref": "pkg:pypi/jedi@0.20.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "jedi",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "06bed97b6e2f0bb6d6a2ce99ebb1a0a6b8aca191f569c3384952fa534b738371"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a6694dfad98e5522b0ef78e3d9f37ebb72b64f798c0f7858060d31a2ab2f5a35"
+        }
+      ],
+      "purl": "pkg:pypi/jedi@0.20.0",
+      "type": "library",
+      "version": "0.20.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/jinja2@3.1.6",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "jinja2",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "41b7d1f6147170a166f678aa44bd18a2f965c068a819b233e57ea147fc70f264"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a46706a2a36b51fce33891f83bc0b815e050e7f13d89051faee0304776722614"
+        }
+      ],
+      "purl": "pkg:pypi/jinja2@3.1.6",
+      "type": "library",
+      "version": "3.1.6"
+    },
+    {
+      "bom-ref": "pkg:pypi/joblib@1.6.0",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "joblib",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "1ac2d0e221421a30599a2cef382526fb15f7e724bbd7f3adf91d2d76e224f40f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9c65f84476b2860990bc10bb31a19a3894e484fc7744ff5ed0bd52525fa2090b"
+        }
+      ],
+      "purl": "pkg:pypi/joblib@1.6.0",
+      "type": "library",
+      "version": "1.6.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/jupyterlab-widgets@3.0.17",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "jupyterlab-widgets",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "014d8bad65dad2d36a916caeed2825e9164766b0e09cf7098707bcc09cfb21f7"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "2786218ac701d53714f2a87cc98b04f6c43a57575c7873c301240b1e90db23d1"
+        }
+      ],
+      "purl": "pkg:pypi/jupyterlab-widgets@3.0.17",
+      "type": "library",
+      "version": "3.0.17"
+    },
+    {
+      "bom-ref": "pkg:pypi/kiwisolver@1.5.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "kiwisolver",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "141"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d0a4f19d9266f6b9d8fcf61fd0dbc4a94c5e4ead40c99ef403d54d58b8a992ea"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "deb98e03ea84ad6e6e15493c06aa7af6a5d689c5d3bca14721899ccceba0c025"
+        }
+      ],
+      "purl": "pkg:pypi/kiwisolver@1.5.1",
+      "type": "library",
+      "version": "1.5.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/lazy-loader@0.5",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "lazy-loader",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0e60017a3c1f1b498812277c1eefad84d09a3ad013c5e11112827192bd54603f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "21f8be9a5949a70b72921ea9897b004282cbe91ef2b9107a7458d5cca7665ffa"
+        }
+      ],
+      "purl": "pkg:pypi/lazy-loader@0.5",
+      "type": "library",
+      "version": "0.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/librosa@0.11.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "ISC"
+          }
+        }
+      ],
+      "name": "librosa",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d3efe8889451225f9b6eb74bff25ead9268eac14b2cbc2fa46491944707e5901"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "acd41c8acf99d752decfa89c45acc63011c614ef54792e6beb364be07fa8d1f9"
+        }
+      ],
+      "purl": "pkg:pypi/librosa@0.11.0",
+      "type": "library",
+      "version": "0.11.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/llvmlite@0.49.0",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception"
+        }
+      ],
+      "name": "llvmlite",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "26"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "dd83fd5af5162bc18cf87b544f6e625511e3eaa65674ea4e9c5834a645480d02"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "94afef0074da4ed2e7c29d1a43400848ecbd379059ff10b25edddb29a2332aa9"
+        }
+      ],
+      "purl": "pkg:pypi/llvmlite@0.49.0",
+      "type": "library",
+      "version": "0.49.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/loguru@0.7.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "loguru",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "653dcdfa5abbacd02283498f5d8a90f07164b707d3041b5ec338cf5ef2f22c7c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "8bac3d8a0b4dd049159b672ce0903860099f9d38b7be555e772ab766d18eb0b2"
+        }
+      ],
+      "purl": "pkg:pypi/loguru@0.7.3",
+      "type": "library",
+      "version": "0.7.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/lxml@6.1.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "lxml",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "176"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "23f83a0a35d32b97395543600d552a124fd91919a7af113e2dcad968f5a32e0e"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "da7c17a6f0fb5967a8b306981e3afd79e07f2f5aadd34f199c93da5c85188b77"
+        }
+      ],
+      "purl": "pkg:pypi/lxml@6.1.2",
+      "type": "library",
+      "version": "6.1.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/markdown-it-py@4.2.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "markdown-it-py",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "9fe8c55569052d2585ba36f0ece948e468ab1cd6bd1e49b0ea0bdbfdd70e7e92"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "854d36d31d8e6c70231563e5044311bf12d39a3a284baa064808f782a031d1ac"
+        }
+      ],
+      "purl": "pkg:pypi/markdown-it-py@4.2.0",
+      "type": "library",
+      "version": "4.2.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/markupsafe@3.0.3",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "markupsafe",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "89"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0c653f8df9d46be44d5b1b3f988a34e5d6186bc839260c94d618c9f7a6c60746"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "dcc4f27ef6b030b17837b9a2a246a5fb35429fe57702e60f1ebb0b6e31f249aa"
+        }
+      ],
+      "purl": "pkg:pypi/markupsafe@3.0.3",
+      "type": "library",
+      "version": "3.0.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/matplotlib@3.11.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: Python Software Foundation License"
+          }
+        }
+      ],
+      "name": "matplotlib",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "46"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "76f80cff940b095aafa0cfcf85919e598a926c52ca22d8f64a9aad315307ed91"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "0dac7638efbe0050505f3aa0f40b51d34ea29a2dba176f0ec27184234f60d35b"
+        }
+      ],
+      "purl": "pkg:pypi/matplotlib@3.11.1",
+      "type": "library",
+      "version": "3.11.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/matplotlib-inline@0.2.2",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "matplotlib-inline",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "3a28edfda0ffb486a9516a830bf8b535c77b67edd239dcee1748ca850c751a83"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c2336acbda0f5285aa1191c10debc1dc714ddaa25f95d0314fe1fb002478d00c"
+        }
+      ],
+      "purl": "pkg:pypi/matplotlib-inline@0.2.2",
+      "type": "library",
+      "version": "0.2.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/mdurl@0.1.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "mdurl",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "28aa957b794ec117756c78eaa47a734a9435404207f2f1721ba7cefa51f56985"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c514c0a911de4c762a4dba2c4bb34454c3cd6d220dfe79af2686321bcd325dc9"
+        }
+      ],
+      "purl": "pkg:pypi/mdurl@0.1.2",
+      "type": "library",
+      "version": "0.1.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/mmh3@5.3.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "mmh3",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "144"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "ea484e74d7d2d6ec2b2f4acc451a36bcc775617ed22d37d609cfe4125b20e217"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "f52c5e2daf6909beda88d6fe141cb35fb778f49d2b38041e1a472198c94900a4"
+        }
+      ],
+      "purl": "pkg:pypi/mmh3@5.3.0",
+      "type": "library",
+      "version": "5.3.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/mpmath@1.3.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD"
+          }
+        }
+      ],
+      "name": "mpmath",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "235a282517fe424b6092b0913c7ec7e6b156cc4e2d394f78938eb36fa57dc75e"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "5d096f57847844379164da6dfe7b2b5c7f1ba7d57be2e78f0364d930e27a7a23"
+        }
+      ],
+      "purl": "pkg:pypi/mpmath@1.3.0",
+      "type": "library",
+      "version": "1.3.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/msgpack@1.2.2",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "name": "msgpack",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "88"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "d8641bdd1aa07ed04430566202abff0f88920bc2671699546beae812a234ecc2"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e343b68277a6121e5a5dc9fa33bc3bfffa6e0a72e49203de5dbf4a394e20bd61"
+        }
+      ],
+      "purl": "pkg:pypi/msgpack@1.2.2",
+      "type": "library",
+      "version": "1.2.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/murmurhash@1.0.15",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "murmurhash",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "65"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "6debfd79f8e97df89182ca04927b4a24bce3d56b9e3b4534748735cdcdab916b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6a692dc82ffda3a1be479e430c7649fdc20db917c78c1093d4ee8fdfe6f8bb04"
+        }
+      ],
+      "purl": "pkg:pypi/murmurhash@1.0.15",
+      "type": "library",
+      "version": "1.0.15"
+    },
+    {
+      "bom-ref": "pkg:pypi/narwhals@2.25.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "narwhals",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "707230a5d57baca8a9da2d52b7c24dd24fae50cf1619d7e583547d753c50ee58"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "19b31efbe0ff96bc68d24555e123d2c149e3324e74df8d35b837a673e1ffc414"
+        }
+      ],
+      "purl": "pkg:pypi/narwhals@2.25.0",
+      "type": "library",
+      "version": "2.25.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/networkx@3.6.1",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "networkx",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "faebfb7f911083ec8939de582191f745e779bfd3a600f37d909a2d30d89a96a3"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9076a9050233be345d2bfdec9540c6c69a0c7f605999cf65af168e26131e1994"
+        }
+      ],
+      "purl": "pkg:pypi/networkx@3.6.1",
+      "type": "library",
+      "version": "3.6.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/numba@0.67.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD"
+          }
+        }
+      ],
+      "name": "numba",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "26"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2098a3740baec2c5cb686b7d56848409089ae144d84a3ed62601d0bb12a14039"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "01bd37c70d46b9a037da8b18618c122c9dd91fef945a2137df4ae17cb3f00d9c"
+        }
+      ],
+      "purl": "pkg:pypi/numba@0.67.0",
+      "type": "library",
+      "version": "0.67.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/numpy@2.4.6",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+        }
+      ],
+      "name": "numpy",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "72"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "1942fec4ee847edc13d7c88872d142c62b81063b8756383117b8a05c91b0f5dd"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a76f5bc85e2e87faab873baef48bbbfb8975d02302614574a59560ea52470d6e"
+        }
+      ],
+      "purl": "pkg:pypi/numpy@2.4.6",
+      "type": "library",
+      "version": "2.4.6"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cublas@13.1.1.3",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-Proprietary"
+        }
+      ],
+      "name": "nvidia-cublas",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "6acca677d22c755d547a9d8f628c7c5f4d52bbdb3213a708683189db3bb1afd1"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "bab017bd535446ece63926a7d907de9c1abba3252c92f01d56bd0fe6e3bebee5"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cublas@13.1.1.3",
+      "type": "library",
+      "version": "13.1.1.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cuda-cupti@13.0.85",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-cuda-cupti",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "fdef03d2071df337e01dd9c0513aa70239d6fb119272b912a84672ddf94b805d"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "272f6d5e03dbcb25d6dcab4b1c8c96be5cd975e33a5fac62bbdbb7539fb02311"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cuda-cupti@13.0.85",
+      "type": "library",
+      "version": "13.0.85"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cuda-nvrtc@13.0.88",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-cuda-nvrtc",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8e7b385ef238c4fd59051b9dd9f44be85140b686a11ea1e70c0cdd577d79f32e"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e0bd8207040b3c021a179a0225226e744f12f20d59fe9851f4b736113a2eb7bf"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cuda-nvrtc@13.0.88",
+      "type": "library",
+      "version": "13.0.88"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cuda-runtime@13.0.96",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-Proprietary"
+        }
+      ],
+      "name": "nvidia-cuda-runtime",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f91800439cf17106f39c3ef70dbd358af8bdaea766142ef735b05d7606ea5825"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "73683d0f6c982cc9e804c1552b24c641774445cf92fe05e26aee882a1bbd27ba"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cuda-runtime@13.0.96",
+      "type": "library",
+      "version": "13.0.96"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cudnn-cu13@9.20.0.48",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-Proprietary"
+        }
+      ],
+      "name": "nvidia-cudnn-cu13",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f1f16ec18844ac34a6bfc87887f3efacad9a2e1cb9d5e01f0f46841b8fc9b51a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a71e1b6bb0f0710f14ba94b4183f1899a7fe4e1cc0bd70bd8f095ffb2750445e"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cudnn-cu13@9.20.0.48",
+      "type": "library",
+      "version": "9.20.0.48"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cufft@12.0.0.61",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-cufft",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "4c9ac0a8cfd5143e1c9c117e385f7fa37d88399a7648626c823c9ed9da9fa5fd"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "96d52d34d868e97e86cdc8c41fae7173f8555a2f87e7562e9bc38e7b02021b58"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cufft@12.0.0.61",
+      "type": "library",
+      "version": "12.0.0.61"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cufile@1.15.1.6",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-cufile",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "68d3e3b1409d5e17c89a87fc14af398583fff2d51227d3e190f4ad6c913c5d74"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "24544a1216e32a30ebff659b90ba22d81c529e4df19fc08b471b2e36f2b92c72"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cufile@1.15.1.6",
+      "type": "library",
+      "version": "1.15.1.6"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-curand@10.4.0.35",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-curand",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5ac10a66852cfabcf938a99743b43717c68819b3d3197eedf8eaac00bb71e7f0"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "d2471b64031a4d23f4d727d60014444b064e930c81e415b190bbb5cb3af86a76"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-curand@10.4.0.35",
+      "type": "library",
+      "version": "10.4.0.35"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cusolver@12.0.4.66",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-cusolver",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "ec5ac573128d0593fc4bbcf4f203ede64c3706a498b347d32b119cae8889520b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7b9d25d1c03fbf5fcbbcfabdd069d5c3c4d83169f635a844678951ae02f1309f"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cusolver@12.0.4.66",
+      "type": "library",
+      "version": "12.0.4.66"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cusparse@12.6.3.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "LicenseRef-NVIDIA-Proprietary"
+          }
+        }
+      ],
+      "name": "nvidia-cusparse",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "fa4421bcdd2c563a467970c60876db80c7d4bfba44128d346dddc2ec6f08b3c4"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c50e2575e8cd1c1f86fa4f8fc51016868f4d9999727c29756fb81db2f9bbf408"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cusparse@12.6.3.3",
+      "type": "library",
+      "version": "12.6.3.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-cusparselt-cu13@0.8.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cusparselt-cu13",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2cad9a75d4c0ba712c2c6fd6696960f4f74bb9595ed6f0538557b4c0bfc4319e"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e5cc228f77294007f742c66c1646ff074862b438b126bc0d143e18654e01cd39"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cusparselt-cu13@0.8.1",
+      "type": "library",
+      "version": "0.8.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-nccl-cu13@2.29.7",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-Proprietary"
+        }
+      ],
+      "name": "nvidia-nccl-cu13",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5b015ea7112dbd89c9f88874ec79e1a555af6056bcc6a496ae11dce5e9566f0c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9e9e14fe28d930f51119b8e290ae523c8509c9fc8e239e7a5d8a5178828f40f4"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nccl-cu13@2.29.7",
+      "type": "library",
+      "version": "2.29.7"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-nvjitlink@13.3.33",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-Proprietary"
+        }
+      ],
+      "name": "nvidia-nvjitlink",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "fa4914ff9f95a361cde20de58640f58cc12082818545dda9b155bc0f9d708df5"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "1bb23df4692d4d318a4e755efe3379781f8f9e3607fa849fdb21dbf726cd066c"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nvjitlink@13.3.33",
+      "type": "library",
+      "version": "13.3.33"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-nvshmem-cu13@3.4.5",
+      "licenses": [
+        {
+          "expression": "LicenseRef-NVIDIA-Proprietary"
+        }
+      ],
+      "name": "nvidia-nvshmem-cu13",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0e846da1ad65b31a99843cabfa7f54db5c7a4c744f09c91c53b4d493485fb33b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "0ec4e57a4847d17da374377da03e549e4ec918d7bd7b8b65687a209b7b076a5c"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nvshmem-cu13@3.4.5",
+      "type": "library",
+      "version": "3.4.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/nvidia-nvtx@13.0.85",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "nvidia-nvtx",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "3"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "04380033611b58195482d1c7ca8b16d53b67054c9be9ca7c2c1efefaca089f0f"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6de0bcd6549278ed642ba3cb759ebeb4f4994d3ceacf9f260e285ebc81a01802"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nvtx@13.0.85",
+      "type": "library",
+      "version": "13.0.85"
+    },
+    {
+      "bom-ref": "pkg:pypi/onnxruntime@1.29.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT License"
+          }
+        }
+      ],
+      "name": "onnxruntime",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "24"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8977eb4a9e1f060f377f0cc719b809792f7299ecdd730d92e065254cba6821f4"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9f26ecba25f27a75452f0c118c8440423f64286af86f6fa01a07f897e92af202"
+        }
+      ],
+      "purl": "pkg:pypi/onnxruntime@1.29.0",
+      "type": "library",
+      "version": "1.29.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/opencv-python@5.0.0.93",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "opencv-python",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "9"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "60068df0ee48cf7f4f285a9014dea1794a2ddf38d206680e37815192ef3e2188"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "00850def6dcaa2f96cab27132dfd64afe8127b42080469163bcccf9fa938f5ae"
+        }
+      ],
+      "purl": "pkg:pypi/opencv-python@5.0.0.93",
+      "type": "library",
+      "version": "5.0.0.93"
+    },
+    {
+      "bom-ref": "pkg:pypi/openpyxl@3.1.5",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "openpyxl",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5fed231472a6e09e5fcb2263e380640c4ed40a7e920e894f32e337ad56978275"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "2b7f886697d3afd17f12a98eb9386fad66d98f5fece698ce30abb925b74b24bd"
+        }
+      ],
+      "purl": "pkg:pypi/openpyxl@3.1.5",
+      "type": "library",
+      "version": "3.1.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/packaging@26.3",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR BSD-2-Clause"
+        }
+      ],
+      "name": "packaging",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "4be86452d48689f980fe9fe4f8d3d442271cc5c5385dbeb7074c5cf1937deebd"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b349f7a1a2346fdc4a27282d8fbab1c11a2e2ca92b2a8ba572be62493fd00327"
+        }
+      ],
+      "purl": "pkg:pypi/packaging@26.3",
+      "type": "library",
+      "version": "26.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/pandas@3.0.5",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "pandas",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "42"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "b93306d93541c9a6df7e42ad7e2387b0bc8fca21a69dd4d22962669c9a94089c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "0cf9ba06ee2488a8c75425c84415686ef5489a9e72feebb75f40d124bf574e98"
+        }
+      ],
+      "purl": "pkg:pypi/pandas@3.0.5",
+      "type": "library",
+      "version": "3.0.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/parso@0.8.7",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "parso",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5c5caf61b04ae339304c1387e693dc3f69f9ccb66b358347d1eaba087c26f208"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "995afdefcb3aecd66fd1776bdf7ad8f993c437979b123f7e0ba92fd05b3483dc"
+        }
+      ],
+      "purl": "pkg:pypi/parso@0.8.7",
+      "type": "library",
+      "version": "0.8.7"
+    },
+    {
+      "bom-ref": "pkg:pypi/pexpect@4.9.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "ISC license"
+          }
+        }
+      ],
+      "name": "pexpect",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "7af74175a735b4de4f59236770ea5f7084550610b4787a351e02083830229944"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "2d1d5e0f357be47b0f16b6c10e04b284bd743ae2821761bfbd874ba404f49085"
+        }
+      ],
+      "purl": "pkg:pypi/pexpect@4.9.0",
+      "type": "library",
+      "version": "4.9.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/pillow@12.3.0",
+      "licenses": [
+        {
+          "expression": "MIT-CMU"
+        }
+      ],
+      "name": "pillow",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "87"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "aa49fcaf814f9ccfc82ace5ee071f8afecba4797e5fd81b1e945e8a5b346fdf5"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c3845362e01df746f929ca959912c17ce15467f824ceb9d1fd3d3d1456de058d"
+        }
+      ],
+      "purl": "pkg:pypi/pillow@12.3.0",
+      "type": "library",
+      "version": "12.3.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/platformdirs@4.11.7",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "platformdirs",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5973c1ff77cac8e5c511c0d5a45f9cb6ba722a5b0cfeefd8a5986dd147055548"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "59550e533e0f07cc8ce86908e7e79c63d95e56a927e2bfc5292dc0403df73876"
+        }
+      ],
+      "purl": "pkg:pypi/platformdirs@4.11.7",
+      "type": "library",
+      "version": "4.11.7"
+    },
+    {
+      "bom-ref": "pkg:pypi/plotly@7.0.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "plotly",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "285d6c08b0f747345c147d7139ba6a607243f0c6d075ddb9b377605193d7a911"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "954c8b10a7238b9301c58e785a00387b3be37279c7e861aac100aa41fda30763"
+        }
+      ],
+      "purl": "pkg:pypi/plotly@7.0.0",
+      "type": "library",
+      "version": "7.0.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/pooch@1.9.0",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "pooch",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "9031908e21391bc269d41767fc83a82cf33370101f0b23282a3c3f9f8c0397e5"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c4a64d88f4a71731a24c3c4c846c9f92f14f6d199b62b907a5d16bf95783c840"
+        }
+      ],
+      "purl": "pkg:pypi/pooch@1.9.0",
+      "type": "library",
+      "version": "1.9.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/preshed@3.0.13",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "preshed",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "57"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "aa6311bcbdcfd998cb11c061107a84a37a814089d3ff42f8ec52a84645028a82"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "73b1a4a253056c5de353ca27e1c2ad5a725125d5523c8c26033885d2d4a1e7a7"
+        }
+      ],
+      "purl": "pkg:pypi/preshed@3.0.13",
+      "type": "library",
+      "version": "3.0.13"
+    },
+    {
+      "bom-ref": "pkg:pypi/prompt-toolkit@3.0.53",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "prompt-toolkit",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "155e5047eb3162e8395883a38f49adbd4bcf586a6d52a009ebafdb68d1d78b70"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "dc5c4e569a4ffaf00dbb630caddacdba225920454cbaceaade75fbbab3375799"
+        }
+      ],
+      "purl": "pkg:pypi/prompt-toolkit@3.0.53",
+      "type": "library",
+      "version": "3.0.53"
+    },
+    {
+      "bom-ref": "pkg:pypi/protobuf@7.36.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "3-Clause BSD License"
+          }
+        }
+      ],
+      "name": "protobuf",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "8"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8968656d51ad91b47d90a1addbc86c2d198ac5a971a48c183d0e62a5102b4c14"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "5926ab6277b03c12c54cea57088c105fb7be10425804814e16b008d2a50d55b4"
+        }
+      ],
+      "purl": "pkg:pypi/protobuf@7.36.1",
+      "type": "library",
+      "version": "7.36.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/psutil@7.2.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "psutil",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "21"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8638f4e372b82ad5c62e94acda14b6c91df766a13788ed83a19eeebeab972812"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7e0f40ca5946af25fd4e330a28dd4f80b05f1750f1f0ecde4c34ee65707b3ba8"
+        }
+      ],
+      "purl": "pkg:pypi/psutil@7.2.2",
+      "type": "library",
+      "version": "7.2.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/ptyprocess@0.7.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: ISC License (ISCL)"
+          }
+        }
+      ],
+      "name": "ptyprocess",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "e863a23aed5d539361a26e79aa2bfe747aeea57a0cc152e6c100f9d777dddc9c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "14a11f5562024df9a47da27a736beba76d24868c58e438225d5707fab8ecd5af"
+        }
+      ],
+      "purl": "pkg:pypi/ptyprocess@0.7.0",
+      "type": "library",
+      "version": "0.7.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/pure-eval@0.2.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "pure-eval",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "50577e6ac5836c7550e865c05cd733cf540b9dea0ec949e40784ff8871a3726a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "8ea485eb4d09f91b8856aed2b0a7b6e4e237e0d42d96769ea18f6e68a5ef6a37"
+        }
+      ],
+      "purl": "pkg:pypi/pure-eval@0.2.3",
+      "type": "library",
+      "version": "0.2.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/py-rust-stemmers@0.1.8",
+      "name": "py-rust-stemmers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "55"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0234745930a72c4c4a550393e7c218729a2e18c20ca94bd1463dd786fcffe843"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "5c961214a04cea5a2351d581578e11bdf2dee41ba125587a9af1c503d6b19a95"
+        }
+      ],
+      "purl": "pkg:pypi/py-rust-stemmers@0.1.8",
+      "type": "library",
+      "version": "0.1.8"
+    },
+    {
+      "bom-ref": "pkg:pypi/pycparser@3.0",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "pycparser",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f9ae70f8a645fe0942d89b2d5a32f1745e91db8f5ff4e585c4d3d444c094cd14"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "ba8df4a30d2b0756156a2d88a7e3db4627aa43ec7d336f1e4ec4e9332e742511"
+        }
+      ],
+      "purl": "pkg:pypi/pycparser@3.0",
+      "type": "library",
+      "version": "3.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/pydantic@2.13.5",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "pydantic",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f636903d220d1af39b324975ed0986edfa009e22e9dd97225feac35c173013ad"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "daf26afba31a2c26dc110cfd8f2c0b1860f9d4b14fd9d109b7b8fdd1549612d5"
+        }
+      ],
+      "purl": "pkg:pypi/pydantic@2.13.5",
+      "type": "library",
+      "version": "2.13.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/pydantic-core@2.46.5",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "pydantic-core",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "120"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "250ef3c44d728ec722c0cad997eb67f64513b2261ff188b536ded880d58b8647"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b0944e79de1d405bac07a83b8bb32548b79b77e95764e1519bcafab77d38a13b"
+        }
+      ],
+      "purl": "pkg:pypi/pydantic-core@2.46.5",
+      "type": "library",
+      "version": "2.46.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/pygments@2.21.0",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause"
+        }
+      ],
+      "name": "pygments",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "61711781bf5e48731dc93afd258e65117df17bc97e0617cedd427f5aaf7ed84b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6c9fd7b2a326e1256f5ea4463af43b9f5e1ec6c85de8c667b626c973cc8e3c7b"
+        }
+      ],
+      "purl": "pkg:pypi/pygments@2.21.0",
+      "type": "library",
+      "version": "2.21.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/pynndescent@0.6.0",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause"
+        }
+      ],
+      "name": "pynndescent",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "7226ade05023ec257348ade3150549576d8e376caab49a231e492eab72b2c9da"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e77a03029c0fa6557c3e9951ffe20aaae2cb57cd683eef40ff05ca2f29a77562"
+        }
+      ],
+      "purl": "pkg:pypi/pynndescent@0.6.0",
+      "type": "library",
+      "version": "0.6.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/pyparsing@3.3.2",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "pyparsing",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "3423eb1c8d85952d2ba6f3e6b9334f9f3a411c0067221033a504e3e480ce221a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "860bd9e72f16007af65a7ce369193bbc876f80c0a3d529b2236a2c73abf7fedc"
+        }
+      ],
+      "purl": "pkg:pypi/pyparsing@3.3.2",
+      "type": "library",
+      "version": "3.3.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/python-dateutil@2.9.0.post0",
+      "licenses": [
+        {
+          "license": {
+            "name": "Dual License"
+          }
+        }
+      ],
+      "name": "python-dateutil",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "559b84c26007e221d047f2d0b064803f0d3b407ccaa79e11f25e52a3407e85fd"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "5190e63d24d43c67ade3065ab82e02af003d45414b2df835ae33272d18bc99c7"
+        }
+      ],
+      "purl": "pkg:pypi/python-dateutil@2.9.0.post0",
+      "type": "library",
+      "version": "2.9.0.post0"
+    },
+    {
+      "bom-ref": "pkg:pypi/python-docx@1.2.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "python-docx",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "7682494cfd80a2d9c8678ff87adfae55bb36690402da13b4f45ae1b2d35b4eeb"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "ca12343ee31431e54f8462ff47c25166ed4ae2e8d480b1c566bc18691951f05d"
+        }
+      ],
+      "purl": "pkg:pypi/python-docx@1.2.0",
+      "type": "library",
+      "version": "1.2.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/python-dotenv@1.2.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "python-dotenv",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "87c3e52304ae67cff58eb779a2f848901dc977f52a45b67e1fedd45ffc247d9c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "971f267e34eb5fad23702f3d4d1c8f7b79ce76e3d560d0a55a959e0fdab58c84"
+        }
+      ],
+      "purl": "pkg:pypi/python-dotenv@1.2.3",
+      "type": "library",
+      "version": "1.2.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/pyyaml@6.0.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "pyyaml",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "73"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "734884ab612f617355a9db8de1e570fbe0b94f8d5f9575e1d97b7d44b11c8dea"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c6767b180f59be8feab615e58837508a1e923ff856582989688248d0f4a5951f"
+        }
+      ],
+      "purl": "pkg:pypi/pyyaml@6.0.3",
+      "type": "library",
+      "version": "6.0.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/rdflib@7.6.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "rdflib",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5238ae9094b896d1c497ebed6d4b3e332563e24897b2b3d00813389791584bda"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "47f25bcb7c9b3f674e48ee3c9ee9e28cc625308d0d3d8195f0dce9ba1481512d"
+        }
+      ],
+      "purl": "pkg:pypi/rdflib@7.6.0",
+      "type": "library",
+      "version": "7.6.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/regex@2026.9.3",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 AND CNRI-Python"
+        }
+      ],
+      "name": "regex",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "130"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "cbc65394fbee4d5b84474baa525d5b8415cc72cf0d21a9a07105bf955916c385"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "8639021af549fe28d82af590666ae765cf3cd03c932f1b6afc0eacc1a304943f"
+        }
+      ],
+      "purl": "pkg:pypi/regex@2026.9.3",
+      "type": "library",
+      "version": "2026.9.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/requests@2.34.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "requests",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "10b1b5a78b5e8c71110b79ea72f2e1f41ffcc4c450d45ac3efdd13cb08e37f8d"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "db19a1ae1c3cad7a8e819b08b1cc61eed5827e75d0f43c91d91f914cd5e4b71a"
+        }
+      ],
+      "purl": "pkg:pypi/requests@2.34.2",
+      "type": "library",
+      "version": "2.34.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/rich@15.0.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "rich",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0f3c6da547fff7108802c0411e76db843d3d40d1dad6a4d334759cd0707ac085"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b253cb94ac41b7a4eb8952946328587372b1fb2d624b263221218b9bbccb4342"
+        }
+      ],
+      "purl": "pkg:pypi/rich@15.0.0",
+      "type": "library",
+      "version": "15.0.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/safetensors@0.8.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "safetensors",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "17"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "c6a416fbfc2f75d5e81aef0d6923020d699ea6f2af784dd88e6f9677eab92b8a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "10f2848d98209efacbed6c5066befe47df0f68d805e224bf46f468aa86a38e88"
+        }
+      ],
+      "purl": "pkg:pypi/safetensors@0.8.0",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/scikit-learn@1.9.0",
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause"
+        }
+      ],
+      "name": "scikit-learn",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "31"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "c5c25a96f8970d8d628f5c64e644fa31836f46bf455b963c570a85052732a9b9"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "31789c4be2b2cc1b477d479bd19c6e3934ed6977b1888516198fa4cda56c421d"
+        }
+      ],
+      "purl": "pkg:pypi/scikit-learn@1.9.0",
+      "type": "library",
+      "version": "1.9.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/scipy@1.17.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "scipy",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "61"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0d7f88442fa1f42285c3b43a8fc29b793f1be7dc415ae95df157b372c6dadeb1"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b8ea386fea9f83a6696fb52817f71582fb1174192a306225bc87ea13177b1b64"
+        }
+      ],
+      "purl": "pkg:pypi/scipy@1.17.1",
+      "type": "library",
+      "version": "1.17.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/seaborn@0.13.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "seaborn",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "df149ee4c456d7879e0d0fa46ac0ca97da4f4160acb61b9a7eeda62cb77d3e64"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b5cce8a692a943b3e43ef2ff5eb9bc8ba5f385270817460962fb03b8b6c7eab8"
+        }
+      ],
+      "purl": "pkg:pypi/seaborn@0.13.2",
+      "type": "library",
+      "version": "0.13.2"
+    },
+    {
       "bom-ref": "pkg:pypi/semantica@0.6.5",
-      "name": "semantica",
-      "version": "0.6.5",
-      "scope": "optional",
-      "purl": "pkg:pypi/semantica@0.6.5",
       "hashes": [
         {
           "alg": "SHA-256",
@@ -27,20 +3240,2334 @@
       "licenses": [
         {
           "license": {
-            "id": "MIT"
+            "name": "MIT"
           }
         }
       ],
-      "externalReferences": [
+      "name": "semantica",
+      "properties": [
         {
-          "type": "distribution",
-          "url": "https://pypi.org/project/semantica/0.6.5/"
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
         },
         {
-          "type": "vcs",
-          "url": "https://github.com/semantica-agi/semantica/tree/v0.6.5"
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "b22dcf255f61f2f5cb02118e933a73bbeabbd10a37cb810626d8cf9d68451ad7"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "8159fdca33eca3f705e700a0e3a187575a4467993b86bdc2b2b98694f9d7ef01"
         }
-      ]
+      ],
+      "purl": "pkg:pypi/semantica@0.6.5",
+      "type": "library",
+      "version": "0.6.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/sentence-transformers@6.0.1",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "name": "sentence-transformers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "58aad0ad9a7f6eb64ec2919dec01d944fd0ce2fa0d4719dfba1e2526740a4ec1"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7bfc60f16cf831bc15354070880efa8c94aaad892a8733e68feabd31b5c76440"
+        }
+      ],
+      "purl": "pkg:pypi/sentence-transformers@6.0.1",
+      "type": "library",
+      "version": "6.0.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/setuptools@84.0.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "setuptools",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "ac221b5f82d2ef345fab8f38a3c64ce3cc219682ddadc9d989fa7bd36afa5aef"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "d92c77bac0fd1a6bdc6ebbbf19bdb280cb6f8eeed2837b9e8e4aa8d1211d8204"
+        }
+      ],
+      "purl": "pkg:pypi/setuptools@84.0.0",
+      "type": "library",
+      "version": "84.0.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/shellingham@1.5.4",
+      "licenses": [
+        {
+          "license": {
+            "name": "ISC License"
+          }
+        }
+      ],
+      "name": "shellingham",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "7aa32cf5ba821fae6a1092b7ed43faa914a725123e375bdeb522c3790619880a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e283058297b539ced4007513f616edfb73f642d2675c54fbdaa0a35cca7899ea"
+        }
+      ],
+      "purl": "pkg:pypi/shellingham@1.5.4",
+      "type": "library",
+      "version": "1.5.4"
+    },
+    {
+      "bom-ref": "pkg:pypi/six@1.17.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "six",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "47bc3054e4bb0a759c688ab432f1c8f02e27fcf11e13ef9e2bb3359bae692765"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "caac65692987388d4342924919e1a4a70ea39d176d0d5efdd44d8faf0637039d"
+        }
+      ],
+      "purl": "pkg:pypi/six@1.17.0",
+      "type": "library",
+      "version": "1.17.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/smart-open@8.0.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "smart-open",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "e448fa740129170cb0415fa7a375f7718d795aa15ab209bf101cdeb9072f5bfd"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "3b9b9cbf62711f13a41027f4b41b6bdaeeda256bbd6a7e8af09caac70525e2c9"
+        }
+      ],
+      "purl": "pkg:pypi/smart-open@8.0.1",
+      "type": "library",
+      "version": "8.0.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/smmap@5.0.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "smmap",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "6b6aa841090cc03590eee1e711533f10fd6ba333f328a3abac7cd07fadb7d108"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "d50e5ea2fa3c63d1b7e8472ec9a23a2e9367ba34751531e1bde420718bb13593"
+        }
+      ],
+      "purl": "pkg:pypi/smmap@5.0.3",
+      "type": "library",
+      "version": "5.0.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/soundfile@0.14.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD 3-Clause License"
+          }
+        }
+      ],
+      "name": "soundfile",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "9"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "4054f009e130a6bcc1367069058c5f70785ada3263965b72bbe12663bde03262"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "e07a40422ae3e3ee43b652f2fd4b588623f088196265d1dd45c396eed0b6845d"
+        }
+      ],
+      "purl": "pkg:pypi/soundfile@0.14.0",
+      "type": "library",
+      "version": "0.14.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/soupsieve@2.9.2",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "soupsieve",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "14190127fd413adcfe65d9f8dccb510a4cc9856ab5453d790c08c2341a03b913"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "679e8214d64732c7456284e85053e0122bedb93e63ba6cbc6f19b4e512adeffa"
+        }
+      ],
+      "purl": "pkg:pypi/soupsieve@2.9.2",
+      "type": "library",
+      "version": "2.9.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/soxr@1.1.0",
+      "licenses": [
+        {
+          "expression": "LGPL-2.1-or-later"
+        }
+      ],
+      "name": "soxr",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "26"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2f4985962eba0c0364cac1993a10a2082dadd83dfa4a7dbcca8f70b0586fccd8"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "de0791922658465c8a6cfb63f6896e57545aa29316665b8eb2dce2c922bbe944"
+        }
+      ],
+      "purl": "pkg:pypi/soxr@1.1.0",
+      "type": "library",
+      "version": "1.1.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/spacy@3.8.16",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "spacy",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "40"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8378420e8088fcc6e0fa690e2994c7966b9d5cc9e7053ed54d2bffa363924c9d"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9cd14e8a86ebcfd9f384e8194db0dc7accd6f97b8f7d545a886d84007b0faae8"
+        }
+      ],
+      "purl": "pkg:pypi/spacy@3.8.16",
+      "type": "library",
+      "version": "3.8.16"
+    },
+    {
+      "bom-ref": "pkg:pypi/spacy-legacy@3.0.12",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "spacy-legacy",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "fab63ace0660a2736b81ce61ce49c03c2b77fd1fc46112ea98c8788ca68b1329"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "f9d0cab9117deee8011354236110e5694974dc5ab6c2d94d10614e42ec13b98e"
+        }
+      ],
+      "purl": "pkg:pypi/spacy-legacy@3.0.12",
+      "type": "library",
+      "version": "3.0.12"
+    },
+    {
+      "bom-ref": "pkg:pypi/spacy-loggers@1.0.5",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "spacy-loggers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "9544a51ad3a9c2d2138046e2cb1c9059bf3940f36324c172bfbefcbd84be772b"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7aba02d9fb22e0a38dde02dfd351c3678ecb7e79b9a9d5e182beec7322afdd1f"
+        }
+      ],
+      "purl": "pkg:pypi/spacy-loggers@1.0.5",
+      "type": "library",
+      "version": "1.0.5"
+    },
+    {
+      "bom-ref": "pkg:pypi/srsly@2.5.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "srsly",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "57"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "e4a55d347b4777030a23f5bfdde9d64d69535b94f1be35957a94d74020c2490d"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "f229160fde6575b0bc9ee801a939c0f33e0f5676c8c645d26aee76237536473d"
+        }
+      ],
+      "purl": "pkg:pypi/srsly@2.5.3",
+      "type": "library",
+      "version": "2.5.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/stack-data@0.6.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "stack-data",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "a4e33dc2bff3ffd52934307c19486bac561d59c07565c69fe12409b83673e5f8"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7877131c97f84fb93a46841bfbbd4680912f682040293821ffd447f779f3c615"
+        }
+      ],
+      "purl": "pkg:pypi/stack-data@0.6.3",
+      "type": "library",
+      "version": "0.6.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/structlog@26.1.0",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "structlog",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0a86706d34cc85017117579b9fd06d3f92d43fed75038b011da360c99a89e1ae"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a69d83d452672d0f6f1254f73e2582a2ba6480e5abc218d97a38c104d52778aa"
+        }
+      ],
+      "purl": "pkg:pypi/structlog@26.1.0",
+      "type": "library",
+      "version": "26.1.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/sympy@1.14.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD"
+          }
+        }
+      ],
+      "name": "sympy",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "46a7119a19be993258eb586c3270fcb231fa86891f25c7c8c797b6bacc540aab"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "cf653d2bf8b1544931f94107bf5ae78eadd1f69e90cb1a64c48f23db75baef15"
+        }
+      ],
+      "purl": "pkg:pypi/sympy@1.14.0",
+      "type": "library",
+      "version": "1.14.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/thinc@8.3.13",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "thinc",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "40"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5930a5271d9e6416b295b01209e51ca5c6bf1e4f841aa5e06241e24aac97af02"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9f12e6c824cd2bf390f5faa331c3f5ad98e3d1cdf7f3968d22073e5da1499f2c"
+        }
+      ],
+      "purl": "pkg:pypi/thinc@8.3.13",
+      "type": "library",
+      "version": "8.3.13"
+    },
+    {
+      "bom-ref": "pkg:pypi/threadpoolctl@3.6.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "threadpoolctl",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "6400c982b55113526a4da380dbac2dd94548dc9b776571897b3bf494dcabf098"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "998d570bc6246ffbbc3bf048f14fd7602978d2e1d3e654d159782312c9e5e493"
+        }
+      ],
+      "purl": "pkg:pypi/threadpoolctl@3.6.0",
+      "type": "library",
+      "version": "3.6.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/tokenizers@0.23.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: Apache Software License"
+          }
+        }
+      ],
+      "name": "tokenizers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "17"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "66b1f18efcd0fd66b303673966e31fd309e9e2ee70f55a5bff2ddd796ae212ec"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "4ea58c9e4dbadb37744b84c0a5f69b38b2a4c7957a8c17b2e411272e85147c93"
+        }
+      ],
+      "purl": "pkg:pypi/tokenizers@0.23.1",
+      "type": "library",
+      "version": "0.23.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/toml@0.10.2",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "toml",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "bf1feca43657f42efb861dcb18bd57e27553a148a2c3aec5feea1b1ed10e7932"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "221894a2316efce6454501d7da60c0e8ed5151e33f175aeaed56f3d8f1c06611"
+        }
+      ],
+      "purl": "pkg:pypi/toml@0.10.2",
+      "type": "library",
+      "version": "0.10.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/torch@2.13.0",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT"
+        }
+      ],
+      "name": "torch",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "24"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "a8ef5de597da6e3538953008eb621d9b187f6986ed476acf9dbb31e9ab15948a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "48fcac3d561ca864f7ec872a4c85eb0fec6e13af1744c2c4add00df4ffa93487"
+        }
+      ],
+      "purl": "pkg:pypi/torch@2.13.0",
+      "type": "library",
+      "version": "2.13.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/tqdm@4.70.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MPL-2.0 AND MIT"
+          }
+        }
+      ],
+      "name": "tqdm",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "318f54f5cd5d7e1ffc0496232539dc6ed84334d31ef77f3652cfaa060e72e2c4"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "22b6dc9d5d11e7fb810cea2258f72902dc1625c5eb48a534e2b2ed86e77e1eca"
+        }
+      ],
+      "purl": "pkg:pypi/tqdm@4.70.0",
+      "type": "library",
+      "version": "4.70.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/traitlets@5.16.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: BSD License"
+          }
+        }
+      ],
+      "name": "traitlets",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0021d98db36aa1d7ea04ce806a248868784b1d83db52dfcaf45e67ca8f4b14fb"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "8c5801f9fd96dbdeb69e85370df9ff874be5349dd1798fb83974d75399f52259"
+        }
+      ],
+      "purl": "pkg:pypi/traitlets@5.16.1",
+      "type": "library",
+      "version": "5.16.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/transformers@5.16.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0 License"
+          }
+        }
+      ],
+      "name": "transformers",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "974877e9192c278fbe43e01b7f9a3482f6a4e60179d1ea0dd14a612739fe6dde"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "984c12741fc62b266a8b723d5d2b9b323fb462a43e60528d37edcf5b0b65d672"
+        }
+      ],
+      "purl": "pkg:pypi/transformers@5.16.1",
+      "type": "library",
+      "version": "5.16.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/triton@3.7.1",
+      "licenses": [
+        {
+          "license": {
+            "name": "OSI Approved :: MIT License"
+          }
+        }
+      ],
+      "name": "triton",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "12"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "2f0b509294ff13e507bb01cd5c1691bfa91d3784fecf88943ffb19af6afb6526"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "23bd38a2a8d52bf246aa61b73ae132229c5f3aea61c105c74abe71b905fa4021"
+        }
+      ],
+      "purl": "pkg:pypi/triton@3.7.1",
+      "type": "library",
+      "version": "3.7.1"
+    },
+    {
+      "bom-ref": "pkg:pypi/typer@0.27.2",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "typer",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "4d9e65fc3ac1d4a69e4cdb47579d68b3cbd5f3523c87b9d47f23dcd39e4a833c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "a440d3695764501377e9107aa646719ba00b333d464a8f51b70fb3a1071e200e"
+        }
+      ],
+      "purl": "pkg:pypi/typer@0.27.2",
+      "type": "library",
+      "version": "0.27.2"
+    },
+    {
+      "bom-ref": "pkg:pypi/typing-extensions@4.16.0",
+      "licenses": [
+        {
+          "expression": "PSF-2.0"
+        }
+      ],
+      "name": "typing-extensions",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "eed97dac23dac5dcd42d1a192721c2910418cf9ba9d89029c297245b315f8c65"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6451ead96bd907e03ea56d19b0390bc9ba480d17f53cc594e266bfd994ce707a"
+        }
+      ],
+      "purl": "pkg:pypi/typing-extensions@4.16.0",
+      "type": "library",
+      "version": "4.16.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/typing-inspection@0.4.4",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "typing-inspection",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "16297105ca797411dc0e033339b0eac90536720bb1b226b24ad63cf0f99ab9c9"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7af573f666578ebdeb68f904b5290713e7cc72e973ef70d892143069bd6c7dac"
+        }
+      ],
+      "purl": "pkg:pypi/typing-inspection@0.4.4",
+      "type": "library",
+      "version": "0.4.4"
+    },
+    {
+      "bom-ref": "pkg:pypi/umap-learn@0.5.12",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD"
+          }
+        }
+      ],
+      "name": "umap-learn",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "5255bf541335deefb642fc7940c8b08f0d308f9e3e6c474b43244302464f350a"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "9c3b6d4ab85989fda034d85699d3abb59a341dca797d66071902b94b2d43c81f"
+        }
+      ],
+      "purl": "pkg:pypi/umap-learn@0.5.12",
+      "type": "library",
+      "version": "0.5.12"
+    },
+    {
+      "bom-ref": "pkg:pypi/urllib3@2.7.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "urllib3",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "0b77bbed43ded5c8ba8a53d8cbeaec6b609c791d369ca9b75dcdb3ef18cdeb5c"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "c2a814bc09e7497325f6cc02ab97df98353f5c63ce214f500d2c93d3a3044611"
+        }
+      ],
+      "purl": "pkg:pypi/urllib3@2.7.0",
+      "type": "library",
+      "version": "2.7.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/wasabi@1.1.3",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "wasabi",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "468f9f01d0534be6689c7d506951aaf8316ed75427e0aa95cd5ecbd20ee92ab3"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "63e8b82eca8941e8c48c4ecc5070ad8bd12c97eb8bb5e628f3b89645a1b649c6"
+        }
+      ],
+      "purl": "pkg:pypi/wasabi@1.1.3",
+      "type": "library",
+      "version": "1.1.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/wcwidth@0.8.3",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "name": "wcwidth",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "8d13ab536fa2e1dbebad21622fa5588b62c56ad039a9d25a6371ff5c079624c8"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b48dafa9dd573ca0c0fa88c53bd31027ceaaf9450e39cb8d2bbeec0f54a9c24c"
+        }
+      ],
+      "purl": "pkg:pypi/wcwidth@0.8.3",
+      "type": "library",
+      "version": "0.8.3"
+    },
+    {
+      "bom-ref": "pkg:pypi/weasel@1.0.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "weasel",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "f7ea2823d1dec271f7279109a475f52aa8769666a82f9bf0177ad2a8c7946af6"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "6110a3dbf4bfe1aebc5ae7c564ea45e73e2003cd12b123538c3195b0ddf1fef3"
+        }
+      ],
+      "purl": "pkg:pypi/weasel@1.0.0",
+      "type": "library",
+      "version": "1.0.0"
+    },
+    {
+      "bom-ref": "pkg:pypi/widgetsnbextension@4.0.16",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD 3-Clause License"
+          }
+        }
+      ],
+      "name": "widgetsnbextension",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "2"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "1f58fde3448096825d67eda36eb3da872bbd698a183ae4ba99dda437444ea564"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "7c6e5ed82b27919c8c7e1dbdf40ab64e86cec1fb7eaa48cd5eadcba8d8da2973"
+        }
+      ],
+      "purl": "pkg:pypi/widgetsnbextension@4.0.16",
+      "type": "library",
+      "version": "4.0.16"
+    },
+    {
+      "bom-ref": "pkg:pypi/wrapt@2.4.0",
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause"
+        }
+      ],
+      "name": "wrapt",
+      "properties": [
+        {
+          "name": "kotae:allowed-artifact-sha256-count",
+          "value": "101"
+        },
+        {
+          "name": "kotae:allowed-artifact-sha256-set",
+          "value": "19e4dcfdee6e671cdfb4679df22abcc90a22d335107584a557366884c4bffa4d"
+        },
+        {
+          "name": "kotae:installed-record-sha256",
+          "value": "b5ab8642f4309fa635f9dae1c916f08ed2e7d7aeec86ba586e47c8070a4045ba"
+        }
+      ],
+      "purl": "pkg:pypi/wrapt@2.4.0",
+      "type": "library",
+      "version": "2.4.0"
     }
-  ]
+  ],
+  "dependencies": [
+    {
+      "dependsOn": [
+        "pkg:pypi/annotated-doc@0.0.5",
+        "pkg:pypi/annotated-types@0.8.0",
+        "pkg:pypi/anyio@4.14.2",
+        "pkg:pypi/asttokens@3.0.2",
+        "pkg:pypi/audioread@3.1.0",
+        "pkg:pypi/beautifulsoup4@4.15.0",
+        "pkg:pypi/blis@1.3.3",
+        "pkg:pypi/catalogue@2.0.10",
+        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/cffi@2.1.1",
+        "pkg:pypi/chardet@7.6.0",
+        "pkg:pypi/charset-normalizer@3.5.1",
+        "pkg:pypi/click@8.5.0",
+        "pkg:pypi/cloudpathlib@0.25.0",
+        "pkg:pypi/cloudpickle@3.1.2",
+        "pkg:pypi/comm@0.2.3",
+        "pkg:pypi/confection@1.3.3",
+        "pkg:pypi/contourpy@1.3.3",
+        "pkg:pypi/cuda-bindings@13.3.1",
+        "pkg:pypi/cuda-pathfinder@1.8.0",
+        "pkg:pypi/cuda-toolkit@13.0.3.0",
+        "pkg:pypi/cycler@0.12.1",
+        "pkg:pypi/cymem@2.0.13",
+        "pkg:pypi/decorator@5.3.1",
+        "pkg:pypi/et-xmlfile@2.0.0",
+        "pkg:pypi/executing@2.2.1",
+        "pkg:pypi/faiss-cpu@1.15.0",
+        "pkg:pypi/fastembed@0.8.0",
+        "pkg:pypi/filelock@3.32.5",
+        "pkg:pypi/flatbuffers@25.12.19",
+        "pkg:pypi/fonttools@4.64.0",
+        "pkg:pypi/fsspec@2026.7.0",
+        "pkg:pypi/gensim@4.4.0",
+        "pkg:pypi/gitdb@4.0.12",
+        "pkg:pypi/gitpython@3.1.61",
+        "pkg:pypi/grpcio@1.83.1",
+        "pkg:pypi/h11@0.16.0",
+        "pkg:pypi/hf-xet@1.6.0",
+        "pkg:pypi/httpcore@1.0.9",
+        "pkg:pypi/httpx@0.28.1",
+        "pkg:pypi/huggingface-hub@1.29.0",
+        "pkg:pypi/idna@3.19",
+        "pkg:pypi/ipython-pygments-lexers@1.1.1",
+        "pkg:pypi/ipython@9.17.1",
+        "pkg:pypi/ipywidgets@8.1.9",
+        "pkg:pypi/jedi@0.20.0",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/joblib@1.6.0",
+        "pkg:pypi/jupyterlab-widgets@3.0.17",
+        "pkg:pypi/kiwisolver@1.5.1",
+        "pkg:pypi/lazy-loader@0.5",
+        "pkg:pypi/librosa@0.11.0",
+        "pkg:pypi/llvmlite@0.49.0",
+        "pkg:pypi/loguru@0.7.3",
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/markdown-it-py@4.2.0",
+        "pkg:pypi/markupsafe@3.0.3",
+        "pkg:pypi/matplotlib-inline@0.2.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/mdurl@0.1.2",
+        "pkg:pypi/mmh3@5.3.0",
+        "pkg:pypi/mpmath@1.3.0",
+        "pkg:pypi/msgpack@1.2.2",
+        "pkg:pypi/murmurhash@1.0.15",
+        "pkg:pypi/narwhals@2.25.0",
+        "pkg:pypi/networkx@3.6.1",
+        "pkg:pypi/numba@0.67.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/nvidia-cublas@13.1.1.3",
+        "pkg:pypi/nvidia-cuda-cupti@13.0.85",
+        "pkg:pypi/nvidia-cuda-nvrtc@13.0.88",
+        "pkg:pypi/nvidia-cuda-runtime@13.0.96",
+        "pkg:pypi/nvidia-cudnn-cu13@9.20.0.48",
+        "pkg:pypi/nvidia-cufft@12.0.0.61",
+        "pkg:pypi/nvidia-cufile@1.15.1.6",
+        "pkg:pypi/nvidia-curand@10.4.0.35",
+        "pkg:pypi/nvidia-cusolver@12.0.4.66",
+        "pkg:pypi/nvidia-cusparse@12.6.3.3",
+        "pkg:pypi/nvidia-cusparselt-cu13@0.8.1",
+        "pkg:pypi/nvidia-nccl-cu13@2.29.7",
+        "pkg:pypi/nvidia-nvjitlink@13.3.33",
+        "pkg:pypi/nvidia-nvshmem-cu13@3.4.5",
+        "pkg:pypi/nvidia-nvtx@13.0.85",
+        "pkg:pypi/onnxruntime@1.29.0",
+        "pkg:pypi/opencv-python@5.0.0.93",
+        "pkg:pypi/openpyxl@3.1.5",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/parso@0.8.7",
+        "pkg:pypi/pexpect@4.9.0",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/platformdirs@4.11.7",
+        "pkg:pypi/plotly@7.0.0",
+        "pkg:pypi/pooch@1.9.0",
+        "pkg:pypi/preshed@3.0.13",
+        "pkg:pypi/prompt-toolkit@3.0.53",
+        "pkg:pypi/protobuf@7.36.1",
+        "pkg:pypi/psutil@7.2.2",
+        "pkg:pypi/ptyprocess@0.7.0",
+        "pkg:pypi/pure-eval@0.2.3",
+        "pkg:pypi/py-rust-stemmers@0.1.8",
+        "pkg:pypi/pycparser@3.0",
+        "pkg:pypi/pydantic-core@2.46.5",
+        "pkg:pypi/pydantic@2.13.5",
+        "pkg:pypi/pygments@2.21.0",
+        "pkg:pypi/pynndescent@0.6.0",
+        "pkg:pypi/pyparsing@3.3.2",
+        "pkg:pypi/python-dateutil@2.9.0.post0",
+        "pkg:pypi/python-docx@1.2.0",
+        "pkg:pypi/python-dotenv@1.2.3",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/rdflib@7.6.0",
+        "pkg:pypi/regex@2026.9.3",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/rich@15.0.0",
+        "pkg:pypi/safetensors@0.8.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/seaborn@0.13.2",
+        "pkg:pypi/semantica@0.6.5",
+        "pkg:pypi/sentence-transformers@6.0.1",
+        "pkg:pypi/setuptools@84.0.0",
+        "pkg:pypi/shellingham@1.5.4",
+        "pkg:pypi/six@1.17.0",
+        "pkg:pypi/smart-open@8.0.1",
+        "pkg:pypi/smmap@5.0.3",
+        "pkg:pypi/soundfile@0.14.0",
+        "pkg:pypi/soupsieve@2.9.2",
+        "pkg:pypi/soxr@1.1.0",
+        "pkg:pypi/spacy-legacy@3.0.12",
+        "pkg:pypi/spacy-loggers@1.0.5",
+        "pkg:pypi/spacy@3.8.16",
+        "pkg:pypi/srsly@2.5.3",
+        "pkg:pypi/stack-data@0.6.3",
+        "pkg:pypi/structlog@26.1.0",
+        "pkg:pypi/sympy@1.14.0",
+        "pkg:pypi/thinc@8.3.13",
+        "pkg:pypi/threadpoolctl@3.6.0",
+        "pkg:pypi/tokenizers@0.23.1",
+        "pkg:pypi/toml@0.10.2",
+        "pkg:pypi/torch@2.13.0",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/traitlets@5.16.1",
+        "pkg:pypi/transformers@5.16.1",
+        "pkg:pypi/triton@3.7.1",
+        "pkg:pypi/typer@0.27.2",
+        "pkg:pypi/typing-extensions@4.16.0",
+        "pkg:pypi/typing-inspection@0.4.4",
+        "pkg:pypi/umap-learn@0.5.12",
+        "pkg:pypi/urllib3@2.7.0",
+        "pkg:pypi/wasabi@1.1.3",
+        "pkg:pypi/wcwidth@0.8.3",
+        "pkg:pypi/weasel@1.0.0",
+        "pkg:pypi/widgetsnbextension@4.0.16",
+        "pkg:pypi/wrapt@2.4.0"
+      ],
+      "ref": "urn:kotae:semantica-shadow:e046b81c440ba0672e66056bb1e146151195aa14"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/annotated-doc@0.0.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/annotated-types@0.8.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/idna@3.19",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/anyio@4.14.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/asttokens@3.0.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/audioread@3.1.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/chardet@7.6.0",
+        "pkg:pypi/charset-normalizer@3.5.1",
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/soupsieve@2.9.2",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/beautifulsoup4@4.15.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/numpy@2.4.6"
+      ],
+      "ref": "pkg:pypi/blis@1.3.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/catalogue@2.0.10"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/certifi@2026.7.22"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/pycparser@3.0"
+      ],
+      "ref": "pkg:pypi/cffi@2.1.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/chardet@7.6.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/charset-normalizer@3.5.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/click@8.5.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/cloudpathlib@0.25.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/cloudpickle@3.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/comm@0.2.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/confection@1.3.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pillow@12.3.0"
+      ],
+      "ref": "pkg:pypi/contourpy@1.3.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cuda-pathfinder@1.8.0",
+        "pkg:pypi/cuda-toolkit@13.0.3.0"
+      ],
+      "ref": "pkg:pypi/cuda-bindings@13.3.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/cuda-pathfinder@1.8.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/nvidia-cublas@13.1.1.3",
+        "pkg:pypi/nvidia-cuda-cupti@13.0.85",
+        "pkg:pypi/nvidia-cuda-nvrtc@13.0.88",
+        "pkg:pypi/nvidia-cuda-runtime@13.0.96",
+        "pkg:pypi/nvidia-cufft@12.0.0.61",
+        "pkg:pypi/nvidia-cufile@1.15.1.6",
+        "pkg:pypi/nvidia-curand@10.4.0.35",
+        "pkg:pypi/nvidia-cusolver@12.0.4.66",
+        "pkg:pypi/nvidia-cusparse@12.6.3.3",
+        "pkg:pypi/nvidia-nvjitlink@13.3.33",
+        "pkg:pypi/nvidia-nvtx@13.0.85"
+      ],
+      "ref": "pkg:pypi/cuda-toolkit@13.0.3.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/ipython@9.17.1",
+        "pkg:pypi/matplotlib@3.11.1"
+      ],
+      "ref": "pkg:pypi/cycler@0.12.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/cymem@2.0.13"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/decorator@5.3.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/et-xmlfile@2.0.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/asttokens@3.0.2",
+        "pkg:pypi/ipython@9.17.1",
+        "pkg:pypi/rich@15.0.0"
+      ],
+      "ref": "pkg:pypi/executing@2.2.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3"
+      ],
+      "ref": "pkg:pypi/faiss-cpu@1.15.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/huggingface-hub@1.29.0",
+        "pkg:pypi/loguru@0.7.3",
+        "pkg:pypi/mmh3@5.3.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/onnxruntime@1.29.0",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/py-rust-stemmers@0.1.8",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/tokenizers@0.23.1",
+        "pkg:pypi/tqdm@4.70.0"
+      ],
+      "ref": "pkg:pypi/fastembed@0.8.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/filelock@3.32.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/flatbuffers@25.12.19"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/sympy@1.14.0"
+      ],
+      "ref": "pkg:pypi/fonttools@4.64.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cloudpickle@3.1.2",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/urllib3@2.7.0"
+      ],
+      "ref": "pkg:pypi/fsspec@2026.7.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/smart-open@8.0.1"
+      ],
+      "ref": "pkg:pypi/gensim@4.4.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/smmap@5.0.3"
+      ],
+      "ref": "pkg:pypi/gitdb@4.0.12"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/gitdb@4.0.12",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/gitpython@3.1.61"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/grpcio@1.83.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/h11@0.16.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/hf-xet@1.6.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/anyio@4.14.2",
+        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/h11@0.16.0"
+      ],
+      "ref": "pkg:pypi/httpcore@1.0.9"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/anyio@4.14.2",
+        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/click@8.5.0",
+        "pkg:pypi/httpcore@1.0.9",
+        "pkg:pypi/idna@3.19",
+        "pkg:pypi/pygments@2.21.0",
+        "pkg:pypi/rich@15.0.0"
+      ],
+      "ref": "pkg:pypi/httpx@0.28.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/click@8.5.0",
+        "pkg:pypi/filelock@3.32.5",
+        "pkg:pypi/fsspec@2026.7.0",
+        "pkg:pypi/hf-xet@1.6.0",
+        "pkg:pypi/httpx@0.28.1",
+        "pkg:pypi/jedi@0.20.0",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/safetensors@0.8.0",
+        "pkg:pypi/soundfile@0.14.0",
+        "pkg:pypi/toml@0.10.2",
+        "pkg:pypi/torch@2.13.0",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/typing-extensions@4.16.0",
+        "pkg:pypi/urllib3@2.7.0"
+      ],
+      "ref": "pkg:pypi/huggingface-hub@1.29.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/idna@3.19"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/ipython-pygments-lexers@1.1.1",
+        "pkg:pypi/jedi@0.20.0",
+        "pkg:pypi/matplotlib-inline@0.2.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pexpect@4.9.0",
+        "pkg:pypi/prompt-toolkit@3.0.53",
+        "pkg:pypi/psutil@7.2.2",
+        "pkg:pypi/pygments@2.21.0",
+        "pkg:pypi/setuptools@84.0.0",
+        "pkg:pypi/stack-data@0.6.3",
+        "pkg:pypi/traitlets@5.16.1",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/ipython@9.17.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/pygments@2.21.0"
+      ],
+      "ref": "pkg:pypi/ipython-pygments-lexers@1.1.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/comm@0.2.3",
+        "pkg:pypi/ipython@9.17.1",
+        "pkg:pypi/jupyterlab-widgets@3.0.17",
+        "pkg:pypi/traitlets@5.16.1",
+        "pkg:pypi/widgetsnbextension@4.0.16"
+      ],
+      "ref": "pkg:pypi/ipywidgets@8.1.9"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/charset-normalizer@3.5.1",
+        "pkg:pypi/idna@3.19",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/markupsafe@3.0.3",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/parso@0.8.7",
+        "pkg:pypi/pygments@2.21.0",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/typing-extensions@4.16.0",
+        "pkg:pypi/urllib3@2.7.0"
+      ],
+      "ref": "pkg:pypi/jedi@0.20.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/markupsafe@3.0.3"
+      ],
+      "ref": "pkg:pypi/jinja2@3.1.6"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cloudpickle@3.1.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/psutil@7.2.2",
+        "pkg:pypi/threadpoolctl@3.6.0",
+        "pkg:pypi/tqdm@4.70.0"
+      ],
+      "ref": "pkg:pypi/joblib@1.6.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/jupyterlab-widgets@3.0.17"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/kiwisolver@1.5.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/packaging@26.3"
+      ],
+      "ref": "pkg:pypi/lazy-loader@0.5"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/audioread@3.1.0",
+        "pkg:pypi/decorator@5.3.1",
+        "pkg:pypi/ipython@9.17.1",
+        "pkg:pypi/joblib@1.6.0",
+        "pkg:pypi/lazy-loader@0.5",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/msgpack@1.2.2",
+        "pkg:pypi/numba@0.67.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pooch@1.9.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/soundfile@0.14.0",
+        "pkg:pypi/soxr@1.1.0",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/librosa@0.11.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/llvmlite@0.49.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/loguru@0.7.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/beautifulsoup4@4.15.0"
+      ],
+      "ref": "pkg:pypi/lxml@6.1.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/mdurl@0.1.2",
+        "pkg:pypi/psutil@7.2.2",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/requests@2.34.2"
+      ],
+      "ref": "pkg:pypi/markdown-it-py@4.2.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/markupsafe@3.0.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/contourpy@1.3.3",
+        "pkg:pypi/cycler@0.12.1",
+        "pkg:pypi/fonttools@4.64.0",
+        "pkg:pypi/kiwisolver@1.5.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/pyparsing@3.3.2",
+        "pkg:pypi/python-dateutil@2.9.0.post0"
+      ],
+      "ref": "pkg:pypi/matplotlib@3.11.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/traitlets@5.16.1"
+      ],
+      "ref": "pkg:pypi/matplotlib-inline@0.2.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/mdurl@0.1.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/pandas@3.0.5"
+      ],
+      "ref": "pkg:pypi/mmh3@5.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/mpmath@1.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/msgpack@1.2.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/murmurhash@1.0.15"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pandas@3.0.5"
+      ],
+      "ref": "pkg:pypi/narwhals@2.25.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/seaborn@0.13.2",
+        "pkg:pypi/sympy@1.14.0"
+      ],
+      "ref": "pkg:pypi/networkx@3.6.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/llvmlite@0.49.0",
+        "pkg:pypi/numpy@2.4.6"
+      ],
+      "ref": "pkg:pypi/numba@0.67.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/numpy@2.4.6"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/nvidia-cuda-nvrtc@13.0.88"
+      ],
+      "ref": "pkg:pypi/nvidia-cublas@13.1.1.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-cuda-cupti@13.0.85"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-cuda-nvrtc@13.0.88"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-cuda-runtime@13.0.96"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/nvidia-cublas@13.1.1.3"
+      ],
+      "ref": "pkg:pypi/nvidia-cudnn-cu13@9.20.0.48"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/nvidia-nvjitlink@13.3.33"
+      ],
+      "ref": "pkg:pypi/nvidia-cufft@12.0.0.61"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-cufile@1.15.1.6"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-curand@10.4.0.35"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/nvidia-cublas@13.1.1.3",
+        "pkg:pypi/nvidia-cusparse@12.6.3.3",
+        "pkg:pypi/nvidia-nvjitlink@13.3.33"
+      ],
+      "ref": "pkg:pypi/nvidia-cusolver@12.0.4.66"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/nvidia-nvjitlink@13.3.33"
+      ],
+      "ref": "pkg:pypi/nvidia-cusparse@12.6.3.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-cusparselt-cu13@0.8.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-nccl-cu13@2.29.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-nvjitlink@13.3.33"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-nvshmem-cu13@3.4.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/nvidia-nvtx@13.0.85"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/flatbuffers@25.12.19",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/protobuf@7.36.1",
+        "pkg:pypi/sympy@1.14.0"
+      ],
+      "ref": "pkg:pypi/onnxruntime@1.29.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/numpy@2.4.6"
+      ],
+      "ref": "pkg:pypi/opencv-python@5.0.0.93"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/et-xmlfile@2.0.0"
+      ],
+      "ref": "pkg:pypi/openpyxl@3.1.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/packaging@26.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/beautifulsoup4@4.15.0",
+        "pkg:pypi/fsspec@2026.7.0",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numba@0.67.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/openpyxl@3.1.5",
+        "pkg:pypi/python-dateutil@2.9.0.post0",
+        "pkg:pypi/scipy@1.17.1"
+      ],
+      "ref": "pkg:pypi/pandas@3.0.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/parso@0.8.7"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/ptyprocess@0.7.0"
+      ],
+      "ref": "pkg:pypi/pexpect@4.9.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/setuptools@84.0.0"
+      ],
+      "ref": "pkg:pypi/pillow@12.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/platformdirs@4.11.7"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/narwhals@2.25.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/setuptools@84.0.0"
+      ],
+      "ref": "pkg:pypi/plotly@7.0.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/platformdirs@4.11.7",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/tqdm@4.70.0"
+      ],
+      "ref": "pkg:pypi/pooch@1.9.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cymem@2.0.13",
+        "pkg:pypi/murmurhash@1.0.15"
+      ],
+      "ref": "pkg:pypi/preshed@3.0.13"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/wcwidth@0.8.3"
+      ],
+      "ref": "pkg:pypi/prompt-toolkit@3.0.53"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/protobuf@7.36.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/setuptools@84.0.0"
+      ],
+      "ref": "pkg:pypi/psutil@7.2.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/ptyprocess@0.7.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/pure-eval@0.2.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/py-rust-stemmers@0.1.8"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/pycparser@3.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/annotated-types@0.8.0",
+        "pkg:pypi/pydantic-core@2.46.5",
+        "pkg:pypi/typing-extensions@4.16.0",
+        "pkg:pypi/typing-inspection@0.4.4"
+      ],
+      "ref": "pkg:pypi/pydantic@2.13.5"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/pydantic-core@2.46.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/pygments@2.21.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/joblib@1.6.0",
+        "pkg:pypi/llvmlite@0.49.0",
+        "pkg:pypi/numba@0.67.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1"
+      ],
+      "ref": "pkg:pypi/pynndescent@0.6.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/jinja2@3.1.6"
+      ],
+      "ref": "pkg:pypi/pyparsing@3.3.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/six@1.17.0"
+      ],
+      "ref": "pkg:pypi/python-dateutil@2.9.0.post0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/python-docx@1.2.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/click@8.5.0"
+      ],
+      "ref": "pkg:pypi/python-dotenv@1.2.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/pyyaml@6.0.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/httpx@0.28.1",
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/networkx@3.6.1",
+        "pkg:pypi/pyparsing@3.3.2"
+      ],
+      "ref": "pkg:pypi/rdflib@7.6.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/regex@2026.9.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/chardet@7.6.0",
+        "pkg:pypi/charset-normalizer@3.5.1",
+        "pkg:pypi/idna@3.19",
+        "pkg:pypi/urllib3@2.7.0"
+      ],
+      "ref": "pkg:pypi/requests@2.34.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/ipywidgets@8.1.9",
+        "pkg:pypi/markdown-it-py@4.2.0",
+        "pkg:pypi/pygments@2.21.0"
+      ],
+      "ref": "pkg:pypi/rich@15.0.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/fsspec@2026.7.0",
+        "pkg:pypi/huggingface-hub@1.29.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/torch@2.13.0"
+      ],
+      "ref": "pkg:pypi/safetensors@0.8.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/joblib@1.6.0",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/narwhals@2.25.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/plotly@7.0.0",
+        "pkg:pypi/pooch@1.9.0",
+        "pkg:pypi/rich@15.0.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/seaborn@0.13.2",
+        "pkg:pypi/threadpoolctl@3.6.0"
+      ],
+      "ref": "pkg:pypi/scikit-learn@1.9.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/click@8.5.0",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/mpmath@1.3.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pooch@1.9.0",
+        "pkg:pypi/threadpoolctl@3.6.0",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/scipy@1.17.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/scipy@1.17.1"
+      ],
+      "ref": "pkg:pypi/seaborn@0.13.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/beautifulsoup4@4.15.0",
+        "pkg:pypi/chardet@7.6.0",
+        "pkg:pypi/click@8.5.0",
+        "pkg:pypi/faiss-cpu@1.15.0",
+        "pkg:pypi/fastembed@0.8.0",
+        "pkg:pypi/gensim@4.4.0",
+        "pkg:pypi/gitpython@3.1.61",
+        "pkg:pypi/grpcio@1.83.1",
+        "pkg:pypi/httpx@0.28.1",
+        "pkg:pypi/ipywidgets@8.1.9",
+        "pkg:pypi/librosa@0.11.0",
+        "pkg:pypi/loguru@0.7.3",
+        "pkg:pypi/lxml@6.1.2",
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/networkx@3.6.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/onnxruntime@1.29.0",
+        "pkg:pypi/opencv-python@5.0.0.93",
+        "pkg:pypi/openpyxl@3.1.5",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/plotly@7.0.0",
+        "pkg:pypi/protobuf@7.36.1",
+        "pkg:pypi/pydantic@2.13.5",
+        "pkg:pypi/python-docx@1.2.0",
+        "pkg:pypi/python-dotenv@1.2.3",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/rdflib@7.6.0",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/rich@15.0.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/seaborn@0.13.2",
+        "pkg:pypi/sentence-transformers@6.0.1",
+        "pkg:pypi/spacy@3.8.16",
+        "pkg:pypi/structlog@26.1.0",
+        "pkg:pypi/tokenizers@0.23.1",
+        "pkg:pypi/toml@0.10.2",
+        "pkg:pypi/torch@2.13.0",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/transformers@5.16.1",
+        "pkg:pypi/umap-learn@0.5.12"
+      ],
+      "ref": "pkg:pypi/semantica@0.6.5"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/huggingface-hub@1.29.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/tokenizers@0.23.1",
+        "pkg:pypi/torch@2.13.0",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/transformers@5.16.1",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/sentence-transformers@6.0.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/filelock@3.32.5",
+        "pkg:pypi/packaging@26.3"
+      ],
+      "ref": "pkg:pypi/setuptools@84.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/shellingham@1.5.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/six@1.17.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/typing-extensions@4.16.0",
+        "pkg:pypi/wrapt@2.4.0"
+      ],
+      "ref": "pkg:pypi/smart-open@8.0.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/smmap@5.0.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cffi@2.1.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/soundfile@0.14.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/soupsieve@2.9.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/numpy@2.4.6"
+      ],
+      "ref": "pkg:pypi/soxr@1.1.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/catalogue@2.0.10",
+        "pkg:pypi/click@8.5.0",
+        "pkg:pypi/confection@1.3.3",
+        "pkg:pypi/cymem@2.0.13",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/murmurhash@1.0.15",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/preshed@3.0.13",
+        "pkg:pypi/pydantic@2.13.5",
+        "pkg:pypi/requests@2.34.2",
+        "pkg:pypi/setuptools@84.0.0",
+        "pkg:pypi/spacy-legacy@3.0.12",
+        "pkg:pypi/spacy-loggers@1.0.5",
+        "pkg:pypi/srsly@2.5.3",
+        "pkg:pypi/thinc@8.3.13",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/typer@0.27.2",
+        "pkg:pypi/wasabi@1.1.3",
+        "pkg:pypi/weasel@1.0.0"
+      ],
+      "ref": "pkg:pypi/spacy@3.8.16"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/spacy-legacy@3.0.12"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/spacy-loggers@1.0.5"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/catalogue@2.0.10"
+      ],
+      "ref": "pkg:pypi/srsly@2.5.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/asttokens@3.0.2",
+        "pkg:pypi/executing@2.2.1",
+        "pkg:pypi/pure-eval@0.2.3",
+        "pkg:pypi/pygments@2.21.0"
+      ],
+      "ref": "pkg:pypi/stack-data@0.6.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/structlog@26.1.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/mpmath@1.3.0"
+      ],
+      "ref": "pkg:pypi/sympy@1.14.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/blis@1.3.3",
+        "pkg:pypi/catalogue@2.0.10",
+        "pkg:pypi/confection@1.3.3",
+        "pkg:pypi/cymem@2.0.13",
+        "pkg:pypi/murmurhash@1.0.15",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/preshed@3.0.13",
+        "pkg:pypi/pydantic@2.13.5",
+        "pkg:pypi/setuptools@84.0.0",
+        "pkg:pypi/srsly@2.5.3",
+        "pkg:pypi/torch@2.13.0",
+        "pkg:pypi/wasabi@1.1.3"
+      ],
+      "ref": "pkg:pypi/thinc@8.3.13"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/threadpoolctl@3.6.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/huggingface-hub@1.29.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/requests@2.34.2"
+      ],
+      "ref": "pkg:pypi/tokenizers@0.23.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/toml@0.10.2"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cuda-bindings@13.3.1",
+        "pkg:pypi/cuda-toolkit@13.0.3.0",
+        "pkg:pypi/filelock@3.32.5",
+        "pkg:pypi/fsspec@2026.7.0",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/networkx@3.6.1",
+        "pkg:pypi/nvidia-cudnn-cu13@9.20.0.48",
+        "pkg:pypi/nvidia-cusparselt-cu13@0.8.1",
+        "pkg:pypi/nvidia-nccl-cu13@2.29.7",
+        "pkg:pypi/nvidia-nvshmem-cu13@3.4.5",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/setuptools@84.0.0",
+        "pkg:pypi/sympy@1.14.0",
+        "pkg:pypi/triton@3.7.1",
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/torch@2.13.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/ipywidgets@8.1.9",
+        "pkg:pypi/requests@2.34.2"
+      ],
+      "ref": "pkg:pypi/tqdm@4.70.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/traitlets@5.16.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/beautifulsoup4@4.15.0",
+        "pkg:pypi/faiss-cpu@1.15.0",
+        "pkg:pypi/filelock@3.32.5",
+        "pkg:pypi/gitpython@3.1.61",
+        "pkg:pypi/huggingface-hub@1.29.0",
+        "pkg:pypi/jinja2@3.1.6",
+        "pkg:pypi/librosa@0.11.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pillow@12.3.0",
+        "pkg:pypi/protobuf@7.36.1",
+        "pkg:pypi/psutil@7.2.2",
+        "pkg:pypi/pydantic@2.13.5",
+        "pkg:pypi/pyyaml@6.0.3",
+        "pkg:pypi/regex@2026.9.3",
+        "pkg:pypi/rich@15.0.0",
+        "pkg:pypi/safetensors@0.8.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/tokenizers@0.23.1",
+        "pkg:pypi/torch@2.13.0",
+        "pkg:pypi/tqdm@4.70.0",
+        "pkg:pypi/typer@0.27.2",
+        "pkg:pypi/urllib3@2.7.0"
+      ],
+      "ref": "pkg:pypi/transformers@5.16.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/scipy@1.17.1"
+      ],
+      "ref": "pkg:pypi/triton@3.7.1"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/annotated-doc@0.0.5",
+        "pkg:pypi/rich@15.0.0",
+        "pkg:pypi/shellingham@1.5.4"
+      ],
+      "ref": "pkg:pypi/typer@0.27.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/typing-extensions@4.16.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/typing-inspection@0.4.4"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/matplotlib@3.11.1",
+        "pkg:pypi/numba@0.67.0",
+        "pkg:pypi/numpy@2.4.6",
+        "pkg:pypi/pandas@3.0.5",
+        "pkg:pypi/pynndescent@0.6.0",
+        "pkg:pypi/scikit-learn@1.9.0",
+        "pkg:pypi/scipy@1.17.1",
+        "pkg:pypi/seaborn@0.13.2",
+        "pkg:pypi/tqdm@4.70.0"
+      ],
+      "ref": "pkg:pypi/umap-learn@0.5.12"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/urllib3@2.7.0"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/typing-extensions@4.16.0"
+      ],
+      "ref": "pkg:pypi/wasabi@1.1.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/wcwidth@0.8.3"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/cloudpathlib@0.25.0",
+        "pkg:pypi/confection@1.3.3",
+        "pkg:pypi/httpx@0.28.1",
+        "pkg:pypi/packaging@26.3",
+        "pkg:pypi/pydantic@2.13.5",
+        "pkg:pypi/smart-open@8.0.1",
+        "pkg:pypi/srsly@2.5.3",
+        "pkg:pypi/typer@0.27.2",
+        "pkg:pypi/wasabi@1.1.3"
+      ],
+      "ref": "pkg:pypi/weasel@1.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "pkg:pypi/widgetsnbextension@4.0.16"
+    },
+    {
+      "dependsOn": [
+        "pkg:pypi/setuptools@84.0.0"
+      ],
+      "ref": "pkg:pypi/wrapt@2.4.0"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "urn:kotae:semantica-shadow:e046b81c440ba0672e66056bb1e146151195aa14",
+      "name": "kotae-semantica-shadow",
+      "type": "application",
+      "version": "e046b81c440ba0672e66056bb1e146151195aa14"
+    },
+    "properties": [
+      {
+        "name": "kotae:generator-version",
+        "value": "1"
+      },
+      {
+        "name": "kotae:requirements-lock-sha256",
+        "value": "38f17561220f03315ad440e1b7f4ead179190c2d91d631df45ca1e3a6aa530c0"
+      }
+    ]
+  },
+  "serialNumber": "urn:uuid:8d8c33e0-93db-53db-a750-b173bf818adf",
+  "specVersion": "1.6",
+  "version": 1
 }

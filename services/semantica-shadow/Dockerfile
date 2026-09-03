@@ -13,6 +13,7 @@ RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
     && python -c "import semantica; from semantica.context import ContextGraph; assert semantica.__version__ == '0.6.5'; ContextGraph()"
 
 COPY app.py ./app.py
+COPY inventory.py ./inventory.py
 
 USER 65532:65532
 EXPOSE 8080

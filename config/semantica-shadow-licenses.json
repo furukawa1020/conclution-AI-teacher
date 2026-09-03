@@ -1,0 +1,1431 @@
+{
+  "noAssertionCount": 2,
+  "packageCount": 155,
+  "packages": [
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "annotated-doc",
+      "version": "0.0.5"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "annotated-types",
+      "version": "0.8.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "anyio",
+      "version": "4.14.2"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache 2.0",
+      "declared": "Apache 2.0",
+      "expression": null,
+      "name": "asttokens",
+      "version": "3.0.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "audioread",
+      "version": "3.1.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT License",
+      "declared": "MIT License",
+      "expression": null,
+      "name": "beautifulsoup4",
+      "version": "4.15.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD",
+      "declared": "BSD",
+      "expression": null,
+      "name": "blis",
+      "version": "1.3.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "catalogue",
+      "version": "2.0.10"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)"
+      ],
+      "concluded": "MPL-2.0",
+      "declared": "MPL-2.0",
+      "expression": null,
+      "name": "certifi",
+      "version": "2026.7.22"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT-0",
+      "declared": null,
+      "expression": "MIT-0",
+      "name": "cffi",
+      "version": "2.1.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "0BSD",
+      "declared": null,
+      "expression": "0BSD",
+      "name": "chardet",
+      "version": "7.6.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "charset-normalizer",
+      "version": "3.5.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "click",
+      "version": "8.5.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "cloudpathlib",
+      "version": "0.25.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "cloudpickle",
+      "version": "3.1.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "comm",
+      "version": "0.2.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "confection",
+      "version": "1.3.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "contourpy",
+      "version": "1.3.3"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-SOFTWARE-LICENSE",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-SOFTWARE-LICENSE",
+      "name": "cuda-bindings",
+      "version": "13.3.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0",
+      "declared": null,
+      "expression": "Apache-2.0",
+      "name": "cuda-pathfinder",
+      "version": "1.8.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "NOASSERTION",
+      "declared": null,
+      "expression": null,
+      "name": "cuda-toolkit",
+      "version": "13.0.3.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "cycler",
+      "version": "0.12.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "cymem",
+      "version": "2.0.13"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-2-Clause",
+      "declared": "BSD-2-Clause",
+      "expression": null,
+      "name": "decorator",
+      "version": "5.3.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "et-xmlfile",
+      "version": "2.0.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "executing",
+      "version": "2.2.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "faiss-cpu",
+      "version": "1.15.0"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "Apache License",
+      "declared": "Apache License",
+      "expression": null,
+      "name": "fastembed",
+      "version": "0.8.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "filelock",
+      "version": "3.32.5"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "Apache 2.0",
+      "declared": "Apache 2.0",
+      "expression": null,
+      "name": "flatbuffers",
+      "version": "25.12.19"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "fonttools",
+      "version": "4.64.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "fsspec",
+      "version": "2026.7.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LGPL-2.1-only",
+      "declared": "LGPL-2.1-only",
+      "expression": null,
+      "name": "gensim",
+      "version": "4.4.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD License",
+      "declared": "BSD License",
+      "expression": null,
+      "name": "gitdb",
+      "version": "4.0.12"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "gitpython",
+      "version": "3.1.61"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0",
+      "declared": null,
+      "expression": "Apache-2.0",
+      "name": "grpcio",
+      "version": "1.83.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "h11",
+      "version": "0.16.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "Apache-2.0",
+      "declared": null,
+      "expression": "Apache-2.0",
+      "name": "hf-xet",
+      "version": "1.6.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "httpcore",
+      "version": "1.0.9"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "httpx",
+      "version": "0.28.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "Apache-2.0",
+      "declared": "Apache-2.0",
+      "expression": null,
+      "name": "huggingface-hub",
+      "version": "1.29.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "idna",
+      "version": "3.19"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "ipython",
+      "version": "9.17.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "ipython-pygments-lexers",
+      "version": "1.1.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD 3-Clause License",
+      "declared": "BSD 3-Clause License",
+      "expression": null,
+      "name": "ipywidgets",
+      "version": "8.1.9"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "jedi",
+      "version": "0.20.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "jinja2",
+      "version": "3.1.6"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "joblib",
+      "version": "1.6.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "jupyterlab-widgets",
+      "version": "3.0.17"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "kiwisolver",
+      "version": "1.5.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "lazy-loader",
+      "version": "0.5"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: ISC License (ISCL)"
+      ],
+      "concluded": "ISC",
+      "declared": "ISC",
+      "expression": null,
+      "name": "librosa",
+      "version": "0.11.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception",
+      "declared": null,
+      "expression": "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception",
+      "name": "llvmlite",
+      "version": "0.49.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "loguru",
+      "version": "0.7.3"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "lxml",
+      "version": "6.1.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "markdown-it-py",
+      "version": "4.2.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "markupsafe",
+      "version": "3.0.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Python Software Foundation License"
+      ],
+      "concluded": "OSI Approved :: Python Software Foundation License",
+      "declared": null,
+      "expression": null,
+      "name": "matplotlib",
+      "version": "3.11.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "matplotlib-inline",
+      "version": "0.2.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "mdurl",
+      "version": "0.1.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "mmh3",
+      "version": "5.3.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD",
+      "declared": "BSD",
+      "expression": null,
+      "name": "mpmath",
+      "version": "1.3.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0",
+      "declared": null,
+      "expression": "Apache-2.0",
+      "name": "msgpack",
+      "version": "1.2.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "murmurhash",
+      "version": "1.0.15"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "narwhals",
+      "version": "2.25.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "networkx",
+      "version": "3.6.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD",
+      "declared": "BSD",
+      "expression": null,
+      "name": "numba",
+      "version": "0.67.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "declared": null,
+      "expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "name": "numpy",
+      "version": "2.4.6"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-Proprietary",
+      "name": "nvidia-cublas",
+      "version": "13.1.1.3"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-cuda-cupti",
+      "version": "13.0.85"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-cuda-nvrtc",
+      "version": "13.0.88"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-Proprietary",
+      "name": "nvidia-cuda-runtime",
+      "version": "13.0.96"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-Proprietary",
+      "name": "nvidia-cudnn-cu13",
+      "version": "9.20.0.48"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-cufft",
+      "version": "12.0.0.61"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-cufile",
+      "version": "1.15.1.6"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-curand",
+      "version": "10.4.0.35"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-cusolver",
+      "version": "12.0.4.66"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": "LicenseRef-NVIDIA-Proprietary",
+      "expression": null,
+      "name": "nvidia-cusparse",
+      "version": "12.6.3.3"
+    },
+    {
+      "classifiers": [],
+      "concluded": "NVIDIA Proprietary Software",
+      "declared": "NVIDIA Proprietary Software",
+      "expression": null,
+      "name": "nvidia-cusparselt-cu13",
+      "version": "0.8.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-Proprietary",
+      "name": "nvidia-nccl-cu13",
+      "version": "2.29.7"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-Proprietary",
+      "name": "nvidia-nvjitlink",
+      "version": "13.3.33"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LicenseRef-NVIDIA-Proprietary",
+      "declared": null,
+      "expression": "LicenseRef-NVIDIA-Proprietary",
+      "name": "nvidia-nvshmem-cu13",
+      "version": "3.4.5"
+    },
+    {
+      "classifiers": [
+        "Other/Proprietary License"
+      ],
+      "concluded": "Apache 2.0",
+      "declared": "Apache 2.0",
+      "expression": null,
+      "name": "nvidia-nvtx",
+      "version": "13.0.85"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT License",
+      "declared": "MIT License",
+      "expression": null,
+      "name": "onnxruntime",
+      "version": "1.29.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "Apache 2.0",
+      "declared": "Apache 2.0",
+      "expression": null,
+      "name": "opencv-python",
+      "version": "5.0.0.93"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "openpyxl",
+      "version": "3.1.5"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0 OR BSD-2-Clause",
+      "declared": null,
+      "expression": "Apache-2.0 OR BSD-2-Clause",
+      "name": "packaging",
+      "version": "26.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "pandas",
+      "version": "3.0.5"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "parso",
+      "version": "0.8.7"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: ISC License (ISCL)"
+      ],
+      "concluded": "ISC license",
+      "declared": "ISC license",
+      "expression": null,
+      "name": "pexpect",
+      "version": "4.9.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT-CMU",
+      "declared": null,
+      "expression": "MIT-CMU",
+      "name": "pillow",
+      "version": "12.3.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "platformdirs",
+      "version": "4.11.7"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "plotly",
+      "version": "7.0.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "pooch",
+      "version": "1.9.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "preshed",
+      "version": "3.0.13"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "prompt-toolkit",
+      "version": "3.0.53"
+    },
+    {
+      "classifiers": [],
+      "concluded": "3-Clause BSD License",
+      "declared": "3-Clause BSD License",
+      "expression": null,
+      "name": "protobuf",
+      "version": "7.36.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "psutil",
+      "version": "7.2.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: ISC License (ISCL)"
+      ],
+      "concluded": "OSI Approved :: ISC License (ISCL)",
+      "declared": null,
+      "expression": null,
+      "name": "ptyprocess",
+      "version": "0.7.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "pure-eval",
+      "version": "0.2.3"
+    },
+    {
+      "classifiers": [],
+      "concluded": "NOASSERTION",
+      "declared": null,
+      "expression": null,
+      "name": "py-rust-stemmers",
+      "version": "0.1.8"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "pycparser",
+      "version": "3.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "pydantic",
+      "version": "2.13.5"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "pydantic-core",
+      "version": "2.46.5"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-2-Clause",
+      "declared": null,
+      "expression": "BSD-2-Clause",
+      "name": "pygments",
+      "version": "2.21.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-2-Clause",
+      "declared": null,
+      "expression": "BSD-2-Clause",
+      "name": "pynndescent",
+      "version": "0.6.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "pyparsing",
+      "version": "3.3.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License",
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "Dual License",
+      "declared": "Dual License",
+      "expression": null,
+      "name": "python-dateutil",
+      "version": "2.9.0.post0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "python-docx",
+      "version": "1.2.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "python-dotenv",
+      "version": "1.2.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "pyyaml",
+      "version": "6.0.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "rdflib",
+      "version": "7.6.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0 AND CNRI-Python",
+      "declared": null,
+      "expression": "Apache-2.0 AND CNRI-Python",
+      "name": "regex",
+      "version": "2026.9.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "Apache-2.0",
+      "declared": "Apache-2.0",
+      "expression": null,
+      "name": "requests",
+      "version": "2.34.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "rich",
+      "version": "15.0.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "OSI Approved :: Apache Software License",
+      "declared": null,
+      "expression": null,
+      "name": "safetensors",
+      "version": "0.8.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-3-Clause",
+      "declared": null,
+      "expression": "BSD-3-Clause",
+      "name": "scikit-learn",
+      "version": "1.9.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "scipy",
+      "version": "1.17.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "seaborn",
+      "version": "0.13.2"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "semantica",
+      "version": "0.6.5"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0",
+      "declared": null,
+      "expression": "Apache-2.0",
+      "name": "sentence-transformers",
+      "version": "6.0.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "setuptools",
+      "version": "84.0.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: ISC License (ISCL)"
+      ],
+      "concluded": "ISC License",
+      "declared": "ISC License",
+      "expression": null,
+      "name": "shellingham",
+      "version": "1.5.4"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "six",
+      "version": "1.17.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "smart-open",
+      "version": "8.0.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "smmap",
+      "version": "5.0.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD 3-Clause License",
+      "declared": "BSD 3-Clause License",
+      "expression": null,
+      "name": "soundfile",
+      "version": "0.14.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "soupsieve",
+      "version": "2.9.2"
+    },
+    {
+      "classifiers": [],
+      "concluded": "LGPL-2.1-or-later",
+      "declared": null,
+      "expression": "LGPL-2.1-or-later",
+      "name": "soxr",
+      "version": "1.1.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "spacy",
+      "version": "3.8.16"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "spacy-legacy",
+      "version": "3.0.12"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "spacy-loggers",
+      "version": "1.0.5"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "srsly",
+      "version": "2.5.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "stack-data",
+      "version": "0.6.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License",
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT OR Apache-2.0",
+      "declared": null,
+      "expression": "MIT OR Apache-2.0",
+      "name": "structlog",
+      "version": "26.1.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD",
+      "declared": "BSD",
+      "expression": null,
+      "name": "sympy",
+      "version": "1.14.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "thinc",
+      "version": "8.3.13"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD-3-Clause",
+      "declared": "BSD-3-Clause",
+      "expression": null,
+      "name": "threadpoolctl",
+      "version": "3.6.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "concluded": "OSI Approved :: Apache Software License",
+      "declared": null,
+      "expression": null,
+      "name": "tokenizers",
+      "version": "0.23.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "toml",
+      "version": "0.10.2"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT",
+      "declared": null,
+      "expression": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT",
+      "name": "torch",
+      "version": "2.13.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MPL-2.0 AND MIT",
+      "declared": "MPL-2.0 AND MIT",
+      "expression": null,
+      "name": "tqdm",
+      "version": "4.70.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "OSI Approved :: BSD License",
+      "declared": null,
+      "expression": null,
+      "name": "traitlets",
+      "version": "5.16.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "Apache 2.0 License",
+      "declared": "Apache 2.0 License",
+      "expression": null,
+      "name": "transformers",
+      "version": "5.16.1"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "OSI Approved :: MIT License",
+      "declared": null,
+      "expression": null,
+      "name": "triton",
+      "version": "3.7.1"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "typer",
+      "version": "0.27.2"
+    },
+    {
+      "classifiers": [],
+      "concluded": "PSF-2.0",
+      "declared": null,
+      "expression": "PSF-2.0",
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "typing-inspection",
+      "version": "0.4.4"
+    },
+    {
+      "classifiers": [
+        "OSI Approved"
+      ],
+      "concluded": "BSD",
+      "declared": "BSD",
+      "expression": null,
+      "name": "umap-learn",
+      "version": "0.5.12"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "urllib3",
+      "version": "2.7.0"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "wasabi",
+      "version": "1.1.3"
+    },
+    {
+      "classifiers": [],
+      "concluded": "MIT",
+      "declared": null,
+      "expression": "MIT",
+      "name": "wcwidth",
+      "version": "0.8.3"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: MIT License"
+      ],
+      "concluded": "MIT",
+      "declared": "MIT",
+      "expression": null,
+      "name": "weasel",
+      "version": "1.0.0"
+    },
+    {
+      "classifiers": [
+        "OSI Approved :: BSD License"
+      ],
+      "concluded": "BSD 3-Clause License",
+      "declared": "BSD 3-Clause License",
+      "expression": null,
+      "name": "widgetsnbextension",
+      "version": "4.0.16"
+    },
+    {
+      "classifiers": [],
+      "concluded": "BSD-2-Clause",
+      "declared": null,
+      "expression": "BSD-2-Clause",
+      "name": "wrapt",
+      "version": "2.4.0"
+    }
+  ],
+  "requirementsLockSha256": "38f17561220f03315ad440e1b7f4ead179190c2d91d631df45ca1e3a6aa530c0",
+  "schemaVersion": 1,
+  "sourceCommit": "e046b81c440ba0672e66056bb1e146151195aa14"
+}

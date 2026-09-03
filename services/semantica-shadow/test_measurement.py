@@ -79,6 +79,22 @@ class RuntimeMeasurementTest(unittest.TestCase):
         self.assertIn("finally", runner)
         self.assertIn("run jobs delete $JobName", runner)
 
+    def test_documented_cloud_metric_values_match_the_snapshot(self):
+        value = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        document = (REPO / "docs" / "semantica-shadow-runtime-measurement.md").read_text(
+            encoding="utf-8"
+        )
+        expected = (
+            f'{value["metrics"]["containerStartupLatency"]["weightedMean"]:,.3f} ms',
+            f'{value["metrics"]["containerMemoryUsage"]["weightedMean"]:,.0f} bytes',
+            f'{value["metrics"]["successfulRequestLatency"]["weightedMean"]:,.3f} ms',
+            f'{value["metrics"]["successfulEndToEndLatency"]["weightedMean"]:,.3f} ms',
+            f'{value["provenance"]["imageSizeBytes"]:,} bytes',
+        )
+        for rendered in expected:
+            with self.subTest(rendered=rendered):
+                self.assertIn(rendered, document)
+
 
 if __name__ == "__main__":
     unittest.main()

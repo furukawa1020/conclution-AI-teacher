@@ -46,9 +46,11 @@ Cloud Monitoringへの反映を120秒以上待ってからsnapshotを再生成�
 | 指標 | 観測数 | 加重平均 | 最大点平均 |
 |---|---:|---:|---:|
 | container startup | 1 | 42,457.149 ms | 42,457.149 ms |
-| container memory usage | 6 | 782,660,949 bytes | 939,323,392 bytes |
-| successful request latency | 20 | 3.861 ms | 15.958 ms |
-| successful end-to-end latency | 20 | 10.627 ms | 45.283 ms |
+| container memory usage | 7 | 805,041,298 bytes | 939,323,392 bytes |
+| successful request latency | 20 | 3.861 ms | 3.861 ms |
+| successful end-to-end latency | 20 | 10.627 ms | 10.627 ms |
 | successful pending latency | 20 | 0 ms | 0 ms |
 
 Artifact Registry上のimage sizeは3,351,117,164 bytesだった。起動は重いが、warm後のgraph再構成は短い。したがって、このserviceを音声の同期経路へ同居させず、上限付きnon-blocking shadowとして隔離する設計を維持する。startupは1観測だけなのでp50・p95や一般化したcold-start性能は主張しない。
+
+Cloud Monitoringの1分distributionとは別に、Cloud Run request logの個別20要求は最小2.692 ms、平均3.861 ms、最大15.958 msだった。probe Jobから見たnetwork込みclient時間は最小43.413 ms、平均50.806 ms、最大93.211 msだった。これらをCloud Monitoringの「最大点平均」と混同しない。

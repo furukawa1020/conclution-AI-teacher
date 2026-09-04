@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
   buildVoiceLatencyTrace,
   classifyVoiceLatencyDevice,
   classifyVoiceLatencyNetwork,
+  loadVoiceLatencyRevision,
   VOICE_LATENCY_DEVICE_CLASSES,
   VOICE_LATENCY_NETWORK_CLASSES,
   VOICE_LATENCY_TRACE_VERSION,
@@ -109,4 +111,53 @@ test("network classification collapses browser hints to fixed non-identifying bu
   assert.equal(classifyVoiceLatencyNetwork("2g"), VOICE_LATENCY_NETWORK_CLASSES.CONSTRAINED);
   assert.equal(classifyVoiceLatencyNetwork("slow-2g"), VOICE_LATENCY_NETWORK_CLASSES.CONSTRAINED);
   assert.equal(classifyVoiceLatencyNetwork("wifi"), VOICE_LATENCY_NETWORK_CLASSES.UNKNOWN);
+});
+
+test("release revision loads off the hot path from the immutable Hosting manifest", async () => {
+  const calls = [];
+  const loaded = await loadVoiceLatencyRevision(async (...args) => {
+    calls.push(args);
+    return {
+      ok: true,
+      text: async () => JSON.stringify({ schemaVersion: 2, sourceCommit: revision }),
+    };
+  });
+  assert.equal(loaded, revision);
+  assert.deepEqual(calls, [["/.kotae-release-manifest.json", {
+    cache: "no-store",
+    credentials: "omit",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+  }]]);
+});
+
+test("missing, malformed, and stale release manifests disable tracing", async () => {
+  for (const response of [
+    { ok: false, text: async () => "" },
+    { ok: true, text: async () => "not-json" },
+    { ok: true, text: async () => JSON.stringify({ schemaVersion: 2, sourceCommit: "main" }) },
+  ]) {
+    await assert.rejects(
+      () => loadVoiceLatencyRevision(async () => response),
+      /voice_latency_revision_invalid/u,
+    );
+  }
+});
+
+test("runtime binds HTTP and live milestones without awaiting diagnostics", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(bridge, /void loadVoiceLatencyRevision\(/u);
+  assert.doesNotMatch(bridge, /await loadVoiceLatencyRevision\(/u);
+  assert.match(bridge, /playback\.markLatencyCommitSent\(performance\.now\(\)\)/u);
+  assert.match(bridge, /playback\.markLatencyCommitAcknowledged\(performance\.now\(\)\)/u);
+  assert.match(bridge, /playback\.markLatencyFirstBinary\(performance\.now\(\)\)/u);
+  assert.match(bridge, /session\.playback\.markLatencyCommitAcknowledged\(acknowledgedAt\)/u);
+  assert.match(bridge, /session\.playback\.markLatencyFirstBinary\(performance\.now\(\)\)/u);
+  for (const transport of Object.values(VOICE_LATENCY_TRANSPORTS)) {
+    assert.match(bridge, new RegExp(`"${transport}"`, "u"));
+  }
+  assert.match(bridge, /new CustomEvent\("kotae:voice-latency-trace", \{ detail: trace \}\)/u);
 });

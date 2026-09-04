@@ -20,6 +20,7 @@ export const VOICE_LATENCY_NETWORK_CLASSES = Object.freeze({
 });
 
 const MAX_DURATION_MS = 120_000;
+const MAX_MANIFEST_BYTES = 64 * 1024;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/u;
 const ROUTES = new Set([
   "continuing-coach",
@@ -62,6 +63,44 @@ export function classifyVoiceLatencyNetwork(effectiveType) {
     return VOICE_LATENCY_NETWORK_CLASSES.CONSTRAINED;
   }
   return VOICE_LATENCY_NETWORK_CLASSES.UNKNOWN;
+}
+
+export async function loadVoiceLatencyRevision(
+  fetcher,
+  url = "/.kotae-release-manifest.json",
+) {
+  if (typeof fetcher !== "function" || typeof url !== "string" || !url.startsWith("/")) {
+    throw new TypeError("voice_latency_revision_invalid");
+  }
+  const response = await fetcher(url, {
+    cache: "no-store",
+    credentials: "omit",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+  });
+  if (!response?.ok || typeof response.text !== "function") {
+    throw new TypeError("voice_latency_revision_invalid");
+  }
+  const text = await response.text();
+  if (typeof text !== "string" || new TextEncoder().encode(text).byteLength > MAX_MANIFEST_BYTES) {
+    throw new TypeError("voice_latency_revision_invalid");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(text);
+  } catch {
+    throw new TypeError("voice_latency_revision_invalid");
+  }
+  if (
+    !manifest ||
+    typeof manifest !== "object" ||
+    Array.isArray(manifest) ||
+    manifest.schemaVersion !== 2 ||
+    !REVISION_PATTERN.test(manifest.sourceCommit)
+  ) {
+    throw new TypeError("voice_latency_revision_invalid");
+  }
+  return manifest.sourceCommit;
 }
 
 export function buildVoiceLatencyTrace({

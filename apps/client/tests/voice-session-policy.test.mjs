@@ -1109,7 +1109,7 @@ test("unfinished respondent coaching keeps Native input when privacy permits", a
   );
   assert.match(
     begin,
-    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*\)/u,
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*Math\.round\(listeningAt - prepareStartedAt\),\s*\)/u,
   );
 
   const routeStart = client.indexOf("const fn requires_staged_route(self)");
@@ -1171,11 +1171,11 @@ test("the staged coach lane stays coherent across interruption, fallback, and re
   const finish = bridge.slice(finishStart, finishEnd);
   assert.match(
     finish,
-    /createStreamingPlayback\(\s*expectedEpoch,\s*liveSession\.nativeAudio === true,\s*"live",\s*coachActive,\s*recording\.lastVoiceAt,\s*strictCloudMinimization,\s*disarmVoiceStartDeadline,\s*\)/u,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*liveSession\.nativeAudio === true,\s*"live",\s*coachActive,\s*recording\.lastVoiceAt,\s*strictCloudMinimization,\s*disarmVoiceStartDeadline,\s*recording\.gestureToListeningMs,[\s\S]*"native-live"[\s\S]*"http-buffered"/u,
   );
   assert.match(
     finish,
-    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*recording\.lastVoiceAt,\s*strictCloudMinimization,\s*disarmVoiceStartDeadline,\s*\)/u,
+    /createStreamingPlayback\(\s*expectedEpoch,\s*false,\s*"http",\s*coachActive,\s*recording\.lastVoiceAt,\s*strictCloudMinimization,\s*disarmVoiceStartDeadline,\s*recording\.gestureToListeningMs,\s*"http-stream"/u,
   );
   assert.match(
     finish,
@@ -1235,8 +1235,8 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
   assert.ok(assignmentAt > liveAt);
   assert.ok(assignmentAt < recordingAt);
   assert.match(
-    begin.slice(recordingAt, recordingAt + 180),
-    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*\)/u,
+    begin.slice(recordingAt, recordingAt + 260),
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*Math\.round\(listeningAt - prepareStartedAt\),\s*\)/u,
   );
   assert.doesNotMatch(begin, /voice_live_capture_late/u);
 });

@@ -95,6 +95,12 @@ import {
   parsePasskeyFinish,
 } from "./passkey-policy.mjs";
 import { createLongMemorySessionController } from "./long-memory-session-policy.mjs";
+import {
+  buildVoiceLatencyTrace,
+  classifyVoiceLatencyDevice,
+  classifyVoiceLatencyNetwork,
+  loadVoiceLatencyRevision,
+} from "./voice-latency-trace-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
 const EXPECTED_APP_ID = "1:551920539470:web:6518baf6d84d7ab89eb01f";
@@ -206,6 +212,7 @@ let voiceStartSloHandlers;
 let voiceStartSloMissTimer;
 let voiceStartSloStallTimer;
 let voiceStartSloState = createVoiceStartSloState();
+let voiceLatencyRevision;
 let sessionEpoch = 0;
 let documentEpoch = 0;
 let pcmCaptureGeneration = 0;
@@ -228,6 +235,14 @@ const sessionExpiryWatchdog = createSessionExpiryWatchdog({
 });
 const pcmCaptureWorkletLoads = new WeakMap();
 let pcmRingModuleLoad;
+
+void loadVoiceLatencyRevision(globalThis.fetch.bind(globalThis))
+  .then((revision) => {
+    voiceLatencyRevision = revision;
+  })
+  .catch(() => {
+    // Release identity is optional diagnostics and never owns voice startup.
+  });
 
 function setVoiceReceiptVisible(visible) {
   if (typeof visible !== "boolean" || visible === voiceReceiptVisible) {
@@ -328,6 +343,28 @@ function dispatchVoiceStartLatency(estimatedAudibleMs) {
       detail: Object.freeze({ milliseconds, version: 1 }),
     }),
   );
+}
+
+function dispatchVoiceLatencyTrace(measurement) {
+  if (typeof voiceLatencyRevision !== "string") return;
+  try {
+    const trace = buildVoiceLatencyTrace({
+      ...measurement,
+      deviceClass: classifyVoiceLatencyDevice({
+        coarsePointer: globalThis.matchMedia?.("(pointer: coarse)")?.matches,
+        touchPoints: globalThis.navigator?.maxTouchPoints,
+      }),
+      networkClass: classifyVoiceLatencyNetwork(
+        globalThis.navigator?.connection?.effectiveType,
+      ),
+      revision: voiceLatencyRevision,
+    });
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:voice-latency-trace", { detail: trace }),
+    );
+  } catch {
+    // A measurement fault cannot delay, cancel, or replace audible output.
+  }
 }
 
 function nextVoicePrepareSloGeneration() {
@@ -2835,6 +2872,7 @@ function createRecordingState(
   nativeAudio = false,
   coachActive = false,
   sessionContext,
+  gestureToListeningMs,
 ) {
   if (
     typeof nativeAudio !== "boolean" ||
@@ -2843,7 +2881,11 @@ function createRecordingState(
       (typeof sessionContext !== "string" ||
         !sessionContext.startsWith("kms1.") ||
         sessionContext.length > 4096 ||
-        /\s/u.test(sessionContext)))
+        /\s/u.test(sessionContext))) ||
+    (gestureToListeningMs !== undefined &&
+      (!Number.isSafeInteger(gestureToListeningMs) ||
+        gestureToListeningMs < 0 ||
+        gestureToListeningMs > 120_000))
   ) {
     fail("voice_turn_invalid");
   }
@@ -2871,6 +2913,7 @@ function createRecordingState(
     expectedEpoch: sessionEpoch,
     fallbackAudioComplete: true,
     firstVoiceAt: null,
+    gestureToListeningMs,
     lastVoiceAt: null,
     liveSpeechConfirmed: false,
     liveSpeechStartedAt: null,
@@ -2906,6 +2949,7 @@ function createRecording(
   nativeAudio = false,
   coachActive = false,
   sessionContext,
+  gestureToListeningMs,
 ) {
   setVoiceReceiptVisible(false);
   const recording = createRecordingState(
@@ -2913,6 +2957,7 @@ function createRecording(
     nativeAudio,
     coachActive,
     sessionContext,
+    gestureToListeningMs,
   );
   armVad(recording);
   return recording;
@@ -3068,15 +3113,17 @@ async function beginTurn(
         // first could confirm speech while the AudioWorklet was still loading
         // and force the live turn to cancel after its first PCM frame.
         activeLiveSession = liveSession;
+        const listeningAt = performance.now();
         const recording = createRecording(
           stream,
           nativeAudio,
           coachActive,
           sessionContext,
+          Math.round(listeningAt - prepareStartedAt),
         );
         activeRecording = recording;
         if (guestModeActive && typeof guestAFirstSprintSlo !== "undefined") {
-          guestAFirstSprintSlo.markListening(performance.now());
+          guestAFirstSprintSlo.markListening(listeningAt);
         }
         if (prepareGeneration !== undefined) {
           completeCurrentVoicePrepareSlo(
@@ -4503,7 +4550,9 @@ async function startVoiceLiveSession({
         if (message.type === "committed") {
           if (state !== "committed" || !Number.isFinite(speechEndedAt) ||
             Number.isFinite(speechEndToCommitAckMs)) fail("voice_response_invalid");
-          speechEndToCommitAckMs = Math.round(performance.now() - speechEndedAt);
+          const acknowledgedAt = performance.now();
+          speechEndToCommitAckMs = Math.round(acknowledgedAt - speechEndedAt);
+          session.playback.markLatencyCommitAcknowledged(acknowledgedAt);
           clientTransport.acknowledgeCommitted();
           return;
         }
@@ -4541,6 +4590,7 @@ async function startVoiceLiveSession({
         firstBinaryMs = commitToFirstAudioMs;
       }
       const audioEvent = protocol.acceptBinary(event.data);
+      session.playback.markLatencyFirstBinary(performance.now());
       if (
         session.playback.interrupted &&
         session.playback.coachActive
@@ -4820,6 +4870,7 @@ async function startVoiceLiveSession({
       state = "committed";
       commitSent = true;
       commitAt = performance.now();
+      playback.markLatencyCommitSent(commitAt);
       speechEndToCommitSendMs = Number.isFinite(speechEndedAt)
         ? Math.round(commitAt - speechEndedAt)
         : undefined;
@@ -6223,6 +6274,9 @@ function createStreamingPlayback(
   speechEndedAt = undefined,
   strictLocal = false,
   onFirstAudible = undefined,
+  gestureToListeningMs = undefined,
+  traceTransport = undefined,
+  onLatencyTrace = undefined,
 ) {
   if (
     activePlayback ||
@@ -6235,6 +6289,12 @@ function createStreamingPlayback(
       typeof onFirstAudible !== "function") ||
     (speechEndedAt !== undefined &&
       (!Number.isFinite(speechEndedAt) || speechEndedAt < 0)) ||
+    (gestureToListeningMs !== undefined &&
+      (!Number.isSafeInteger(gestureToListeningMs) ||
+        gestureToListeningMs < 0)) ||
+    (traceTransport !== undefined &&
+      !Object.values(VOICE_LATENCY_TRANSPORTS).includes(traceTransport)) ||
+    (onLatencyTrace !== undefined && typeof onLatencyTrace !== "function") ||
     (transportKind !== "http" && transportKind !== "live") ||
     (nativeAudio && transportKind !== "live")
   ) {
@@ -6252,6 +6312,9 @@ function createStreamingPlayback(
   let responseStartedAt;
   let firstAudiblePending = false;
   let firstAudibleTimer;
+  let latencyCommitAcknowledgedAt;
+  let latencyCommitSentAt;
+  let latencyFirstBinaryAt;
   const coachInitiallyActive = coachActive;
   const sloGeneration = nextVoiceStartSloGeneration();
   let sloRoute = classifyVoiceStartSloRoute({
@@ -6314,6 +6377,20 @@ function createStreamingPlayback(
     firstAudiblePending = false;
     clearFirstAudibleTimer();
     streamedAudio = true;
+    try {
+      onLatencyTrace?.({
+        commitAcknowledgedAt: latencyCommitAcknowledgedAt,
+        commitSentAt: latencyCommitSentAt,
+        firstBinaryAt: latencyFirstBinaryAt,
+        gestureToListeningMs,
+        route: sloRoute,
+        speakerWriteAt: audibleAt,
+        speechEndedAt,
+        transport: traceTransport,
+      });
+    } catch {
+      // Diagnostics never own the Web Audio output boundary.
+    }
     onFirstAudible?.(audibleAt);
     advanceCurrentVoiceStartSlo(
       sloGeneration,
@@ -6520,6 +6597,21 @@ function createStreamingPlayback(
     hasCommittedResponse: () => responseCommitted,
     hasPendingFirstAudible: () => firstAudiblePending,
     hasStreamedAudio: () => streamedAudio,
+    markLatencyCommitAcknowledged(at) {
+      if (latencyCommitAcknowledgedAt === undefined && Number.isFinite(at)) {
+        latencyCommitAcknowledgedAt = at;
+      }
+    },
+    markLatencyCommitSent(at) {
+      if (latencyCommitSentAt === undefined && Number.isFinite(at)) {
+        latencyCommitSentAt = at;
+      }
+    },
+    markLatencyFirstBinary(at) {
+      if (latencyFirstBinaryAt === undefined && Number.isFinite(at)) {
+        latencyFirstBinaryAt = at;
+      }
+    },
     interruptRecording: undefined,
     interrupted: false,
     interruptedBeforeFinal: false,
@@ -6711,6 +6803,7 @@ async function consumeVoiceStream(
           // schedule, or fire another first-audio event after confirmed barge.
           continue;
         }
+        playback.markLatencyFirstBinary(performance.now());
         playback.schedule(event);
       } else if (event.type === "final") {
         // Latch at parse time rather than EOF. Barge-in after this point must
@@ -7006,6 +7099,13 @@ async function finishTurn(
         recording.lastVoiceAt,
         strictCloudMinimization,
         disarmVoiceStartDeadline,
+        recording.gestureToListeningMs,
+        liveSession.nativeAudio === true
+          ? "native-live"
+          : "http-buffered",
+        typeof dispatchVoiceLatencyTrace === "function"
+          ? dispatchVoiceLatencyTrace
+          : undefined,
       );
       try {
         const completed = await awaitVoiceTurnResult(
@@ -7174,6 +7274,11 @@ async function finishTurn(
       recording.lastVoiceAt,
       strictCloudMinimization,
       disarmVoiceStartDeadline,
+      recording.gestureToListeningMs,
+      "http-stream",
+      typeof dispatchVoiceLatencyTrace === "function"
+        ? dispatchVoiceLatencyTrace
+        : undefined,
     );
     // The microphone remains disabled until the request has actually been
     // committed. After that boundary, the bounded local interruption gate can
@@ -7199,6 +7304,7 @@ async function finishTurn(
     }
     requestController = new AbortController();
     activeRequestController = requestController;
+    playback.markLatencyCommitSent(performance.now());
     const responsePromise = fetch(VOICE_ENDPOINT, {
       method: "POST",
       cache: "no-store",
@@ -7229,6 +7335,7 @@ async function finishTurn(
     if (!response.ok) {
       fail(mapVoiceResponseError(response.status));
     }
+    playback.markLatencyCommitAcknowledged(performance.now());
     const completed = await awaitVoiceTurnResult(
       consumeVoiceStream(
         response,

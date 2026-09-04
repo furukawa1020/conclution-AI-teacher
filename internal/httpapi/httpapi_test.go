@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/contracts"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/semanticshadow"
 )
 
 type fakeVerifier struct {
@@ -216,6 +218,43 @@ func testVoiceHandlerWithAppLimiter(
 			AppRateLimiter:  appLimiter,
 			RequestTimeout:  2 * time.Second,
 			MaxRequestBytes: 13 * 1024 * 1024,
+		},
+	)
+}
+
+type blockingSemanticShadowExporter struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (e *blockingSemanticShadowExporter) Export(ctx context.Context, _ semanticshadow.Graph) error {
+	e.once.Do(func() { close(e.started) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func testVoiceHandlerWithSemanticShadow(
+	service *fakeVoiceService,
+	dispatcher *semanticshadow.Dispatcher,
+) http.Handler {
+	return NewWithVoice(
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		fakeVerifier{principal: identity.Principal{
+			UID: "user-123", AppID: "app-123", Roles: map[string]bool{"user": true},
+		}},
+		&fakeLimiter{},
+		&fakeEvaluator{},
+		&fakeStore{},
+		2*time.Second,
+		4*1024,
+		VoiceOptions{
+			Service:           service,
+			RateLimiter:       &fakeLimiter{},
+			AppRateLimiter:    &fakeLimiter{wantKey: "app:app-123"},
+			RequestTimeout:    2 * time.Second,
+			MaxRequestBytes:   13 * 1024 * 1024,
+			SemanticShadow:    dispatcher,
+			SemanticShadowKey: bytes.Repeat([]byte{0x42}, 32),
 		},
 	)
 }
@@ -660,6 +699,64 @@ func TestVoiceTurnAcceptsOnlyAttestedBoundedAudio(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"researchStatus":"none"`) ||
 		!strings.Contains(response.Body.String(), `"researchRecords":[]`) {
 		t.Fatalf("response research metadata = %s", response.Body.String())
+	}
+}
+
+func TestVoiceResponseIsIdenticalWhileSemanticShadowTimesOut(t *testing.T) {
+	newResult := func() VoiceTurnResult {
+		return VoiceTurnResult{
+			Audio:            []byte("stable-audio"),
+			AudioMIMEType:    "audio/mpeg",
+			Caption:          "stable caption",
+			StateToken:       "opaque-state",
+			DetectedDomain:   "daily",
+			AssistanceTarget: "respondent",
+			RespondentStage:  "restructure",
+			CoachPhase:       "awaiting_restatement",
+			CoachAction:      "restate",
+			ResearchStatus:   "none",
+			ResearchRecords:  []ResearchRecord{},
+			Route:            "respondent-restructure-fast",
+		}
+	}
+	body := `{"audioBase64":"YXVkaW8=","mimeType":"audio/webm",` +
+		`"sessionState":"","turnMode":"intentional"}`
+
+	baseline := httptest.NewRecorder()
+	baselineRequest := authenticatedRequest(http.MethodPost, "/api/v1/voice/turns", body)
+	baselineRequest.Header.Set("Content-Type", "application/json")
+	testVoiceHandler(&fakeVoiceService{result: newResult()}, &fakeLimiter{}).
+		ServeHTTP(baseline, baselineRequest)
+
+	exporter := &blockingSemanticShadowExporter{started: make(chan struct{})}
+	dispatcher, err := semanticshadow.NewDispatcher(exporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dispatcher.Close()
+	withShadow := httptest.NewRecorder()
+	shadowRequest := authenticatedRequest(http.MethodPost, "/api/v1/voice/turns", body)
+	shadowRequest.Header.Set("Content-Type", "application/json")
+	completed := make(chan struct{})
+	go func() {
+		testVoiceHandlerWithSemanticShadow(&fakeVoiceService{result: newResult()}, dispatcher).
+			ServeHTTP(withShadow, shadowRequest)
+		close(completed)
+	}()
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("voice response waited for Semantica shadow")
+	}
+	if baseline.Code != http.StatusCreated || withShadow.Code != baseline.Code ||
+		withShadow.Body.String() != baseline.Body.String() {
+		t.Fatalf("shadow changed voice response: baseline=%d %s shadow=%d %s",
+			baseline.Code, baseline.Body.String(), withShadow.Code, withShadow.Body.String())
+	}
+	select {
+	case <-exporter.started:
+	case <-time.After(time.Second):
+		t.Fatal("post-response shadow export did not start")
 	}
 }
 

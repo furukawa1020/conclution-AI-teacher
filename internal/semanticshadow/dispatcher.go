@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,30 @@ type Dispatcher struct {
 	queue    chan observation
 	done     chan struct{}
 	once     sync.Once
+	stats    dispatcherStats
+}
+
+type dispatcherStats struct {
+	accepted       atomic.Uint64
+	droppedFull    atomic.Uint64
+	droppedClosed  atomic.Uint64
+	invalidGraph   atomic.Uint64
+	exported       atomic.Uint64
+	exportFailed   atomic.Uint64
+	exportTimedOut atomic.Uint64
+}
+
+// Snapshot is a content-free cumulative view of the shadow boundary. It is
+// safe to log: it contains only finite counters and never includes a digest,
+// graph, transcript, answer, UID, token, or error message.
+type Snapshot struct {
+	Accepted       uint64
+	DroppedFull    uint64
+	DroppedClosed  uint64
+	InvalidGraph   uint64
+	Exported       uint64
+	ExportFailed   uint64
+	ExportTimedOut uint64
 }
 
 func NewDispatcher(exporter Exporter) (*Dispatcher, error) {
@@ -55,14 +80,32 @@ func (d *Dispatcher) Observe(turnDigest string, signals Signals) bool {
 	}
 	select {
 	case <-d.done:
+		d.stats.droppedClosed.Add(1)
 		return false
 	default:
 	}
 	select {
 	case d.queue <- observation{turnDigest: turnDigest, signals: signals}:
+		d.stats.accepted.Add(1)
 		return true
 	default:
+		d.stats.droppedFull.Add(1)
 		return false
+	}
+}
+
+func (d *Dispatcher) Snapshot() Snapshot {
+	if d == nil {
+		return Snapshot{}
+	}
+	return Snapshot{
+		Accepted:       d.stats.accepted.Load(),
+		DroppedFull:    d.stats.droppedFull.Load(),
+		DroppedClosed:  d.stats.droppedClosed.Load(),
+		InvalidGraph:   d.stats.invalidGraph.Load(),
+		Exported:       d.stats.exported.Load(),
+		ExportFailed:   d.stats.exportFailed.Load(),
+		ExportTimedOut: d.stats.exportTimedOut.Load(),
 	}
 }
 
@@ -81,11 +124,20 @@ func (d *Dispatcher) run() {
 		case item := <-d.queue:
 			graph, err := Build(item.turnDigest, item.signals)
 			if err != nil {
+				d.stats.invalidGraph.Add(1)
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), defaultExportTimeout)
-			_ = d.exporter.Export(ctx, graph)
+			err = d.exporter.Export(ctx, graph)
 			cancel()
+			if err == nil {
+				d.stats.exported.Add(1)
+				continue
+			}
+			d.stats.exportFailed.Add(1)
+			if errors.Is(err, context.DeadlineExceeded) {
+				d.stats.exportTimedOut.Add(1)
+			}
 		}
 	}
 }

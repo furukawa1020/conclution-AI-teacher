@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "kotae.voice-latency-thresholds.v1",
+  "minimumTotal": 300,
+  "minimumPerTransport": 100,
+  "maximumP50Ms": 600,
+  "maximumP95Ms": 1000,
+  "maximumListeningP95Ms": 1000,
+  "requiredTransports": [
+    "http-buffered",
+    "http-stream",
+    "native-live"
+  ]
+}

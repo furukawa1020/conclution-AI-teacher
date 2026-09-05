@@ -24,7 +24,7 @@ $webSource = [System.IO.Path]::GetFullPath((Join-Path $workspace "apps\client\we
 $cssSource = [System.IO.Path]::GetFullPath((Join-Path $workspace "apps\client\assets\main.css"))
 $wasmInput = Join-Path $targetRoot "wasm32-unknown-unknown\release\kotae-client.wasm"
 $pcmRingWasmInput = Join-Path $targetRoot "wasm32-unknown-unknown\release\kotae_pcm_ring.wasm"
-$releaseManifestName = ".kotae-release-manifest.json"
+$releaseManifestName = "kotae-release-manifest.json"
 
 function Assert-WorkspacePath {
     param(
@@ -363,6 +363,7 @@ try {
         "temporal-vad-clock.mjs",
         "voice-session-policy.mjs",
         "voice-prepare-slo-policy.mjs",
+        "voice-latency-trace-policy.mjs",
         "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs"
     )) {
@@ -627,6 +628,7 @@ function decodeText(ptr, len) {
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-prepare-slo-policy.mjs",
+        "voice-latency-trace-policy.mjs",
         "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs",
         "assets\main.css",
@@ -726,6 +728,7 @@ function decodeText(ptr, len) {
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-prepare-slo-policy.mjs",
+                "voice-latency-trace-policy.mjs",
                 "voice-start-slo-policy.mjs",
                 "voice-stream-policy.mjs",
                 "assets/main.css",

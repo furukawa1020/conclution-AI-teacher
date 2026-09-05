@@ -123,7 +123,7 @@ test("release revision loads off the hot path from the immutable Hosting manifes
     };
   });
   assert.equal(loaded, revision);
-  assert.deepEqual(calls, [["/.kotae-release-manifest.json", {
+  assert.deepEqual(calls, [["/kotae-release-manifest.json", {
     cache: "no-store",
     credentials: "omit",
     redirect: "error",

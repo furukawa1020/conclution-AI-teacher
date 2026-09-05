@@ -26,12 +26,17 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(build, /\[string\]\s+\$ExpectedGitCommit/u);
   assert.match(build, /Assert-ReleaseSourceState[\s\S]+starting the web release build/u);
   assert.match(build, /Assert-ReleaseSourceState[\s\S]+finalizing the web release build/u);
-  assert.match(build, /\.kotae-release-manifest\.json/u);
+  assert.match(build, /kotae-release-manifest\.json/u);
+  assert.doesNotMatch(build, /"\.kotae-release-manifest\.json"/u);
   assert.match(build, /web-build\.lock/u);
   assert.match(build, /\[System\.IO\.FileShare\]::None/u);
   assert.match(build, /sha256\s*=\s*\(Get-FileHash/u);
   assert.match(build, /sourceCommit\s*=\s*\$ExpectedGitCommit/u);
   assert.match(build, /"voice-prepare-slo-policy\.mjs"/u);
+  assert.equal(
+    (build.match(/"voice-latency-trace-policy\.mjs"/gu) ?? []).length,
+    3,
+  );
   assert.match(build, /"voice-start-slo-policy\.mjs"/u);
   assert.equal(
     (build.match(/long-memory-session-policy\.mjs/gu) ?? []).length,
@@ -52,6 +57,11 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$originMain\s+-cne\s+\$ExpectedGitCommit/u);
   assert.match(deploy, /status",\s*"--porcelain=v1",\s*"--untracked-files=all"/u);
   assert.match(deploy, /Hosting artifact does not match its release manifest/u);
+  assert.match(deploy, /\$releaseManifestName = "kotae-release-manifest\.json"/u);
+  assert.equal(
+    (deploy.match(/"voice-latency-trace-policy\.mjs"/gu) ?? []).length,
+    2,
+  );
   assert.match(
     deploy,
     /identitytoolkit\.googleapis\.com\/admin\/v2\/projects\/\$ProjectId\/config/u,

@@ -67,7 +67,7 @@ export function classifyVoiceLatencyNetwork(effectiveType) {
 
 export async function loadVoiceLatencyRevision(
   fetcher,
-  url = "/.kotae-release-manifest.json",
+  url = "/kotae-release-manifest.json",
 ) {
   if (typeof fetcher !== "function" || typeof url !== "string" || !url.startsWith("/")) {
     throw new TypeError("voice_latency_revision_invalid");

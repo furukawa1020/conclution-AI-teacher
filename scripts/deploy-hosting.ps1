@@ -52,7 +52,7 @@ $expectedSourceRevision = "main"
 $expectedRuntimeServiceAccount = "kotae-api-runtime@$expectedProjectId.iam.gserviceaccount.com"
 $expectedBuildServiceAccount = "projects/$expectedProjectId/serviceAccounts/kotae-api-builder@$expectedProjectId.iam.gserviceaccount.com"
 $expectedStateSecretVersion = "1"
-$releaseManifestName = ".kotae-release-manifest.json"
+$releaseManifestName = "kotae-release-manifest.json"
 $requiredTtlCollectionGroups = @(
     "evaluations",
     "evaluationRateLimits",
@@ -758,6 +758,7 @@ function Assert-HostingArtifact {
         "pcm-capture-worklet.js",
         "voice-session-policy.mjs",
         "voice-prepare-slo-policy.mjs",
+        "voice-latency-trace-policy.mjs",
         "voice-start-slo-policy.mjs",
         "voice-stream-policy.mjs",
         "assets\main.css",
@@ -833,6 +834,7 @@ function Assert-HostingArtifact {
                 "pcm-capture-worklet.js",
                 "voice-session-policy.mjs",
                 "voice-prepare-slo-policy.mjs",
+                "voice-latency-trace-policy.mjs",
                 "voice-start-slo-policy.mjs",
                 "voice-stream-policy.mjs",
                 "assets/main.css",

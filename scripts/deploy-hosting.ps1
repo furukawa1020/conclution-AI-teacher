@@ -875,7 +875,10 @@ function Assert-HostingArtifact {
     if ($totalBytes -gt 25MB) {
         throw "Hosting artifacts exceed the 25 MiB aggregate safety limit."
     }
-    if ($snapshot.Count -ne $manifestByPath.Count) {
+    if (
+        -not $snapshot.Contains($releaseManifestName) -or
+        ($snapshot.Count - 1) -ne $manifestByPath.Count
+    ) {
         throw "Hosting release manifest contains a missing or unexpected artifact."
     }
 

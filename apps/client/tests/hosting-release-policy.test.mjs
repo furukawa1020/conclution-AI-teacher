@@ -122,6 +122,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   );
   assert.match(
     deploy,
+    /-not \$snapshot\.Contains\(\$releaseManifestName\)[\s\S]*\(\$snapshot\.Count - 1\) -ne \$manifestByPath\.Count/u,
+  );
+  assert.match(
+    deploy,
     /\$hostingSnapshot\s*=\s*\$hostingRelease\.Snapshot/u,
   );
   assert.match(

@@ -1,13 +1,17 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/coder/websocket"
 )
 
 const (
@@ -142,4 +146,19 @@ func newVoiceLivePreflightLeaseIDFrom(source io.Reader) (string, error) {
 		return "", errors.New("create voice live preflight lease")
 	}
 	return leaseID, nil
+}
+
+func writeVoiceLivePreflightReadyJSON(
+	ctx context.Context,
+	conn *websocket.Conn,
+	frame voiceLivePreflightReadyFrame,
+) error {
+	if !validVoiceLivePreflightReady(frame) {
+		return errors.New("invalid voice live preflight ready frame")
+	}
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, payload)
 }

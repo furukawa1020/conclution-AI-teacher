@@ -481,10 +481,19 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}
 	var start voiceLiveStartFrame
 	decodeErr := decodeStrictVoiceLiveJSON(payload, &start)
+	var preflight voiceLivePreflightFrame
+	preflightRequested := false
+	if decodeErr != nil || !validVoiceLiveStart(start) {
+		preflightDecodeErr := decodeStrictVoiceLiveJSON(payload, &preflight)
+		if preflightDecodeErr == nil && validVoiceLivePreflight(preflight) {
+			preflightRequested = true
+			decodeErr = nil
+		}
+	}
 	clear(payload)
 	if messageType != websocket.MessageText ||
 		decodeErr != nil ||
-		!validVoiceLiveStart(start) {
+		(!preflightRequested && !validVoiceLiveStart(start)) {
 		releaseAuthenticationSlot()
 		finishVoiceLiveWithError(
 			liveCtx,
@@ -499,14 +508,24 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		liveCtx,
 		voiceLiveGuardTimeout,
 	)
+	idToken := start.IDToken
+	appCheckToken := start.AppCheckToken
+	if preflightRequested {
+		idToken = preflight.IDToken
+		appCheckToken = preflight.AppCheckToken
+	}
 	principal, err := s.verifier.Verify(
 		verifyCtx,
-		start.IDToken,
-		start.AppCheckToken,
+		idToken,
+		appCheckToken,
 	)
 	cancelVerify()
 	start.IDToken = ""
 	start.AppCheckToken = ""
+	preflight.IDToken = ""
+	preflight.AppCheckToken = ""
+	idToken = ""
+	appCheckToken = ""
 	releaseAuthenticationSlot()
 	if err != nil {
 		finishVoiceLiveWithError(
@@ -527,7 +546,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	if start.NativeAudio && s.voice.NativeLiveService == nil {
+	if (preflightRequested || start.NativeAudio) &&
+		s.voice.NativeLiveService == nil {
 		finishVoiceLiveWithError(
 			liveCtx,
 			conn,
@@ -598,6 +618,79 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			pipelineDone,
 		)
 	}()
+	if preflightRequested {
+		preflightLeaseID, leaseIDErr := newVoiceLivePreflightLeaseID()
+		if leaseIDErr != nil {
+			finishVoiceLiveWithError(
+				liveCtx,
+				conn,
+				voiceLiveCodeAPIUnavailable,
+				websocket.StatusInternalError,
+			)
+			return
+		}
+		if err := writeVoiceLivePreflightReadyJSON(
+			liveCtx,
+			conn,
+			voiceLivePreflightReadyFrame{
+				Type:        "preflight-ready",
+				Version:     voiceLivePreflightVersion,
+				LeaseID:     preflightLeaseID,
+				Generation:  preflight.Generation,
+				ExpiresInMS: voiceLivePreflightTTL.Milliseconds(),
+			},
+		); err != nil {
+			return
+		}
+
+		activateCtx, cancelActivate := context.WithTimeout(
+			liveCtx,
+			voiceLivePreflightTTL,
+		)
+		activateType, activatePayload, activateErr := conn.Read(activateCtx)
+		cancelActivate()
+		if activateErr != nil {
+			clear(activatePayload)
+			return
+		}
+		var activate voiceLiveActivateFrame
+		activateDecodeErr := decodeStrictVoiceLiveJSON(
+			activatePayload,
+			&activate,
+		)
+		clear(activatePayload)
+		if activateType != websocket.MessageText ||
+			activateDecodeErr != nil ||
+			!validVoiceLiveActivate(
+				activate,
+				preflightLeaseID,
+				preflight.Generation,
+			) {
+			finishVoiceLiveWithError(
+				liveCtx,
+				conn,
+				voiceLiveCodeResponseInvalid,
+				websocket.StatusPolicyViolation,
+			)
+			return
+		}
+		preflightLeaseID = ""
+		start = voiceLiveStartFrame{
+			Type:                    "start",
+			Version:                 voiceLiveVersion,
+			NativeCoachControl:      activate.NativeCoachControl,
+			SessionState:            activate.SessionState,
+			SessionContext:          activate.SessionContext,
+			TurnMode:                activate.TurnMode,
+			SampleRateHz:            activate.SampleRateHz,
+			StrictCloudMinimization: activate.StrictCloudMinimization,
+			NativeAudio:             activate.NativeAudio,
+			LatencyProofVersion:     activate.LatencyProofVersion,
+		}
+		activate.LeaseID = ""
+		activate.SessionState = ""
+		activate.SessionContext = ""
+	}
 	readyAt := time.Time{}
 	if !start.NativeAudio {
 		// Preserve the legacy and strict-mode boundary: these routes acknowledge

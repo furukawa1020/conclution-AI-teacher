@@ -19,7 +19,11 @@ test("guest A-first SLO is bound to real capture and first-audible boundaries", 
   assert.match(bridge, /from "\.\/guest-a-first-slo-policy\.mjs";/u);
   assert.match(
     bridge,
-    /activeRecording = recording;[\s\S]*guestAFirstSprintSlo\.markListening\(performance\.now\(\)\)/u,
+    /const listeningAt = performance\.now\(\);[\s\S]*activeRecording = recording;[\s\S]*guestAFirstSprintSlo\.markListening\(listeningAt\)/u,
+  );
+  assert.doesNotMatch(
+    bridge,
+    /guestAFirstSprintSlo\.markListening\(performance\.now\(\)\)/u,
   );
   assert.match(
     bridge,

@@ -6,6 +6,14 @@
 
 export const NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS = 15_000;
 
+export const NATIVE_PREFLIGHT_PROTOCOL_LIMITS = Object.freeze({
+  maximumGeneration: Number.MAX_SAFE_INTEGER,
+  maximumSessionContextCharacters: 4_096,
+  maximumSessionStateCharacters: 16 * 1_024,
+  maximumTokenCharacters: 8_192,
+  sampleRateHz: 16_000,
+});
+
 export const NATIVE_PREFLIGHT_LEASE_STATES = Object.freeze({
   IDLE: "idle",
   CONNECTING: "connecting",
@@ -91,6 +99,14 @@ function validBinding(value) {
 
 function validLeaseId(value) {
   return typeof value === "string" && LEASE_PATTERN.test(value);
+}
+
+function validCredential(value) {
+  return (
+    typeof value === "string" &&
+    value.length <= NATIVE_PREFLIGHT_PROTOCOL_LIMITS.maximumTokenCharacters &&
+    /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value)
+  );
 }
 
 function frozenState(value) {
@@ -270,4 +286,106 @@ export function retireNativePreflightLease(state, value) {
   return transition(
     terminalState(state, NATIVE_PREFLIGHT_LEASE_STATES.RETIRED),
   );
+}
+
+export function createNativePreflightFrame(value) {
+  if (
+    !hasExactKeys(value, ["appCheckToken", "generation", "idToken"]) ||
+    !validCredential(value.appCheckToken) ||
+    !validGeneration(value.generation) ||
+    !validCredential(value.idToken)
+  ) {
+    throw new TypeError("native_preflight_frame_invalid");
+  }
+  return Object.freeze({
+    appCheckToken: value.appCheckToken,
+    generation: value.generation,
+    idToken: value.idToken,
+    type: "preflight",
+    version: 1,
+  });
+}
+
+export function acceptNativePreflightReady(value, receivedAt) {
+  if (
+    !hasExactKeys(value, [
+      "expiresInMs",
+      "generation",
+      "leaseId",
+      "type",
+      "version",
+    ]) ||
+    value.type !== "preflight-ready" ||
+    value.version !== 1 ||
+    !validLeaseId(value.leaseId) ||
+    !validGeneration(value.generation) ||
+    !Number.isSafeInteger(value.expiresInMs) ||
+    value.expiresInMs <= 0 ||
+    value.expiresInMs > NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS ||
+    !finiteTime(receivedAt)
+  ) {
+    throw new TypeError("native_preflight_ready_invalid");
+  }
+  return Object.freeze({
+    expiresAt: receivedAt + value.expiresInMs,
+    generation: value.generation,
+    leaseId: value.leaseId,
+  });
+}
+
+export function createNativePreflightActivateFrame(value) {
+  const expectedKeys = [
+    "generation",
+    "leaseId",
+    ...(value?.latencyProofVersion === 1 ? ["latencyProofVersion"] : []),
+    "nativeAudio",
+    "nativeCoachControl",
+    "sampleRateHz",
+    ...(value?.sessionContext === undefined ? [] : ["sessionContext"]),
+    "sessionState",
+    "strictCloudMinimization",
+    "turnMode",
+  ].sort();
+  if (
+    !hasExactKeys(value, expectedKeys) ||
+    !validGeneration(value.generation) ||
+    !validLeaseId(value.leaseId) ||
+    value.nativeAudio !== true ||
+    value.nativeCoachControl !== true ||
+    value.strictCloudMinimization !== false ||
+    value.sampleRateHz !== NATIVE_PREFLIGHT_PROTOCOL_LIMITS.sampleRateHz ||
+    typeof value.sessionState !== "string" ||
+    value.sessionState.length >
+      NATIVE_PREFLIGHT_PROTOCOL_LIMITS.maximumSessionStateCharacters ||
+    value.sessionState.trim() !== value.sessionState ||
+    (value.sessionContext !== undefined &&
+      (typeof value.sessionContext !== "string" ||
+        !value.sessionContext.startsWith("kms1.") ||
+        value.sessionContext.length >
+          NATIVE_PREFLIGHT_PROTOCOL_LIMITS.maximumSessionContextCharacters ||
+        /\s/u.test(value.sessionContext))) ||
+    !["ambient", "foreground", "intentional"].includes(value.turnMode) ||
+    (value.latencyProofVersion !== undefined &&
+      value.latencyProofVersion !== 1)
+  ) {
+    throw new TypeError("native_preflight_activate_invalid");
+  }
+  return Object.freeze({
+    generation: value.generation,
+    leaseId: value.leaseId,
+    ...(value.latencyProofVersion === undefined
+      ? {}
+      : { latencyProofVersion: value.latencyProofVersion }),
+    nativeAudio: true,
+    nativeCoachControl: true,
+    sampleRateHz: value.sampleRateHz,
+    ...(value.sessionContext === undefined
+      ? {}
+      : { sessionContext: value.sessionContext }),
+    sessionState: value.sessionState,
+    strictCloudMinimization: false,
+    turnMode: value.turnMode,
+    type: "activate",
+    version: 1,
+  });
 }

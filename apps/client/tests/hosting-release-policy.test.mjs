@@ -118,6 +118,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$hostingRelease\s*=\s*Assert-HostingArtifact/u);
   assert.match(
     deploy,
+    /if \(\$relativePath -ceq \$releaseManifestName\) \{\s*\$snapshot\[\$relativePath\] = \[System\.IO\.File\]::ReadAllBytes\(\$entry\.FullName\)\s*continue/u,
+  );
+  assert.match(
+    deploy,
     /\$hostingSnapshot\s*=\s*\$hostingRelease\.Snapshot/u,
   );
   assert.match(

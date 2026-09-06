@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  acceptNativePreflightReady,
   beginNativePreflightLease,
   claimNativePreflightLease,
+  createNativePreflightActivateFrame,
+  createNativePreflightFrame,
   createNativePreflightLeaseState,
   NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS,
   NATIVE_PREFLIGHT_LEASE_STATES,
+  NATIVE_PREFLIGHT_PROTOCOL_LIMITS,
   NATIVE_PREFLIGHT_RETIRE_REASONS,
   readyNativePreflightLease,
   retireNativePreflightLease,
@@ -190,6 +194,156 @@ test("exact input shapes reject content and credential smuggling", () => {
           ...extra,
         }),
       /native_preflight_lease_begin_invalid/u,
+    );
+  }
+});
+
+test("wire preflight can contain only credentials and generation", () => {
+  const frame = createNativePreflightFrame({
+    appCheckToken: "app.check.token",
+    generation: 12,
+    idToken: "identity.jwt.token",
+  });
+  assert.deepEqual(frame, {
+    appCheckToken: "app.check.token",
+    generation: 12,
+    idToken: "identity.jwt.token",
+    type: "preflight",
+    version: 1,
+  });
+  assert.equal(Object.isFrozen(frame), true);
+  for (const extra of [
+    { audio: "AA" },
+    { caption: "秘密" },
+    { question: "答えは？" },
+    { sessionState: "state" },
+    { turnMode: "intentional" },
+  ]) {
+    assert.throws(
+      () =>
+        createNativePreflightFrame({
+          appCheckToken: "app.check.token",
+          generation: 12,
+          idToken: "identity.jwt.token",
+          ...extra,
+        }),
+      /native_preflight_frame_invalid/u,
+    );
+  }
+});
+
+test("browser and server share finite protocol limits", () => {
+  assert.deepEqual(NATIVE_PREFLIGHT_PROTOCOL_LIMITS, {
+    maximumGeneration: Number.MAX_SAFE_INTEGER,
+    maximumSessionContextCharacters: 4_096,
+    maximumSessionStateCharacters: 16_384,
+    maximumTokenCharacters: 8_192,
+    sampleRateHz: 16_000,
+  });
+  for (const credential of [
+    "secret",
+    "header..signature",
+    "header.pay+load.signature",
+    `a.${"b".repeat(8_190)}.c`,
+  ]) {
+    assert.throws(
+      () =>
+        createNativePreflightFrame({
+          appCheckToken: credential,
+          generation: 1,
+          idToken: "identity.jwt.token",
+        }),
+      /native_preflight_frame_invalid/u,
+    );
+  }
+});
+
+test("preflight ready is exact, opaque, and bounded to 15 seconds", () => {
+  const ready = acceptNativePreflightReady(
+    {
+      expiresInMs: 15_000,
+      generation: 15,
+      leaseId: LEASE_A,
+      type: "preflight-ready",
+      version: 1,
+    },
+    20_000,
+  );
+  assert.deepEqual(ready, {
+    expiresAt: 35_000,
+    generation: 15,
+    leaseId: LEASE_A,
+  });
+  for (const invalid of [0, 15_001, 1.5]) {
+    assert.throws(
+      () =>
+        acceptNativePreflightReady(
+          {
+            expiresInMs: invalid,
+            generation: 15,
+            leaseId: LEASE_A,
+            type: "preflight-ready",
+            version: 1,
+          },
+          20_000,
+        ),
+      /native_preflight_ready_invalid/u,
+    );
+  }
+});
+
+test("activation sends no credential and binds the exact lease generation", () => {
+  const activation = createNativePreflightActivateFrame({
+    generation: 18,
+    leaseId: LEASE_A,
+    latencyProofVersion: 1,
+    nativeAudio: true,
+    nativeCoachControl: true,
+    sampleRateHz: 16_000,
+    sessionState: "",
+    strictCloudMinimization: false,
+    turnMode: "intentional",
+  });
+  assert.deepEqual(Object.keys(activation).sort(), [
+    "generation",
+    "latencyProofVersion",
+    "leaseId",
+    "nativeAudio",
+    "nativeCoachControl",
+    "sampleRateHz",
+    "sessionState",
+    "strictCloudMinimization",
+    "turnMode",
+    "type",
+    "version",
+  ]);
+  assert.equal(activation.type, "activate");
+  assert.equal("idToken" in activation, false);
+  assert.equal("appCheckToken" in activation, false);
+});
+
+test("activation rejects strict mode, non-Native routes, and surplus content", () => {
+  const valid = {
+    generation: 20,
+    leaseId: LEASE_A,
+    nativeAudio: true,
+    nativeCoachControl: true,
+    sampleRateHz: 16_000,
+    sessionState: "",
+    strictCloudMinimization: false,
+    turnMode: "foreground",
+  };
+  for (const override of [
+    { strictCloudMinimization: true },
+    { nativeAudio: false },
+    { nativeCoachControl: false },
+    { sampleRateHz: 48_000 },
+    { idToken: "identity.jwt.token" },
+    { audio: "AA" },
+  ]) {
+    assert.throws(
+      () => createNativePreflightActivateFrame({ ...valid, ...override }),
+      /native_preflight_activate_invalid/u,
     );
   }
 });

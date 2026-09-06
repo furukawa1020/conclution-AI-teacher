@@ -25,7 +25,7 @@ const FIXTURE_DIRECTORY = path.join(
   "tests",
   "browser",
 );
-const MANIFEST_NAME = ".kotae-release-manifest.json";
+const MANIFEST_NAME = "kotae-release-manifest.json";
 const MAXIMUM_ARTIFACT_BYTES = 15 * 1024 * 1024;
 const MAXIMUM_TOTAL_BYTES = 25 * 1024 * 1024;
 const PROFILE_CLEANUP_ATTEMPTS = 12;
@@ -44,6 +44,7 @@ const REQUIRED_ARTIFACTS = Object.freeze([
   "pcm-capture-worklet.js",
   "voice-session-policy.mjs",
   "voice-prepare-slo-policy.mjs",
+  "voice-latency-trace-policy.mjs",
   "voice-start-slo-policy.mjs",
   "voice-stream-policy.mjs",
   "assets/main.css",

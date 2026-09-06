@@ -14,6 +14,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
     cloudSetup,
     provenance,
     provenanceFixtures,
+    browserGate,
   ] = await Promise.all([
     readFile(new URL("scripts/build-web.ps1", root), "utf8"),
     readFile(new URL("scripts/deploy-hosting.ps1", root), "utf8"),
@@ -21,6 +22,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
     readFile(new URL("docs/cloud-setup.md", root), "utf8"),
     readFile(new URL("scripts/release-provenance.ps1", root), "utf8"),
     readFile(new URL("scripts/test-release-provenance.ps1", root), "utf8"),
+    readFile(new URL("scripts/test-browser-audio.mjs", root), "utf8"),
   ]);
 
   assert.match(build, /\[string\]\s+\$ExpectedGitCommit/u);
@@ -37,6 +39,12 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
     (build.match(/"voice-latency-trace-policy\.mjs"/gu) ?? []).length,
     3,
   );
+  assert.match(
+    browserGate,
+    /const MANIFEST_NAME = "kotae-release-manifest\.json";/u,
+  );
+  assert.match(browserGate, /"voice-latency-trace-policy\.mjs"/u);
+  assert.doesNotMatch(browserGate, /"\.kotae-release-manifest\.json"/u);
   assert.match(build, /"voice-start-slo-policy\.mjs"/u);
   assert.equal(
     (build.match(/long-memory-session-policy\.mjs/gu) ?? []).length,
@@ -169,7 +177,7 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   );
   assert.match(
     deploy,
-    /acousticCoverageWireValidated,acousticExchangeabilityValidated,directWasmGenerationIsolation,freshGenerationFrames,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,observationAddingValidated,provenance,quietSpectralCompensationValidated,quietSubbandEvidenceValidated,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture/u,
+    /acousticCoverageWireValidated,acousticExchangeabilityValidated,directWasmGenerationIsolation,freshGenerationFrames,guestAFirstFivePathValidated,guestAFirstSprintSloValidated,guestQuietOnsetValidated,intentionalFastLaneValidated,manifestSha256,observationAddingValidated,provenance,quietSpectralCompensationValidated,quietSubbandEvidenceValidated,sameContextReuseFrames,sameContextReuseIsolated,sampleRateHz,senderDetachGuardPassed,sourceCommit,status,temporalVadClockValidated,wrappedFrames,zeroOutputCapture/u,
   );
   assert.match(
     deploy,

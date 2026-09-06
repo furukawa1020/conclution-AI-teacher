@@ -856,6 +856,7 @@ function Assert-HostingArtifact {
         }
         $totalBytes += $entry.Length
         if ($relativePath -ceq $releaseManifestName) {
+            $snapshot[$relativePath] = [System.IO.File]::ReadAllBytes($entry.FullName)
             continue
         }
         if (-not $manifestByPath.ContainsKey($relativePath)) {

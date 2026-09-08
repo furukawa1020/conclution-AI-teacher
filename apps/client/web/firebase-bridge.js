@@ -3823,8 +3823,13 @@ async function startVoiceLiveSession({
       return;
     }
     try {
-      clientTransport.open();
-      preflightState = "awaiting-ready";
+      if (nativeAudio) {
+        clientTransport.openPreflight(expectedEpoch + 1);
+        preflightState = "awaiting-preflight-ready";
+      } else {
+        clientTransport.open();
+        preflightState = "awaiting-ready";
+      }
     } catch {
       failPreflight(new Error("voice_api_unavailable"));
     }
@@ -3834,6 +3839,20 @@ async function startVoiceLiveSession({
     try {
       if (typeof event.data !== "string") {
         fail("voice_response_invalid");
+      }
+      if (preflightState === "awaiting-preflight-ready") {
+        const preflightMessage = JSON.parse(event.data);
+        if (preflightMessage?.type === "error") {
+          const message = protocol.acceptText(event.data);
+          failPreflight(new Error(message.code));
+          return;
+        }
+        clientTransport.acceptPreflightReady(
+          preflightMessage,
+          performance.now(),
+        );
+        preflightState = "awaiting-ready";
+        return;
       }
       const message = protocol.acceptText(event.data);
       if (message.type === "error") {

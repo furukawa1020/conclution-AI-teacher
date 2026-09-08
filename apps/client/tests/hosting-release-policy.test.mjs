@@ -39,11 +39,16 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
     (build.match(/"voice-latency-trace-policy\.mjs"/gu) ?? []).length,
     3,
   );
+  assert.equal(
+    (build.match(/"native-preflight-lease-policy\.mjs"/gu) ?? []).length,
+    3,
+  );
   assert.match(
     browserGate,
     /const MANIFEST_NAME = "kotae-release-manifest\.json";/u,
   );
   assert.match(browserGate, /"voice-latency-trace-policy\.mjs"/u);
+  assert.match(browserGate, /"native-preflight-lease-policy\.mjs"/u);
   assert.doesNotMatch(browserGate, /"\.kotae-release-manifest\.json"/u);
   assert.match(build, /"voice-start-slo-policy\.mjs"/u);
   assert.equal(
@@ -68,6 +73,10 @@ test("Hosting release binds one clean origin/main commit to immutable artifacts"
   assert.match(deploy, /\$releaseManifestName = "kotae-release-manifest\.json"/u);
   assert.equal(
     (deploy.match(/"voice-latency-trace-policy\.mjs"/gu) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (deploy.match(/"native-preflight-lease-policy\.mjs"/gu) ?? []).length,
     2,
   );
   assert.match(

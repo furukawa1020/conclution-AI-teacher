@@ -3,6 +3,11 @@ import {
   advanceTemporalVadClock,
   createTemporalVadClock,
 } from "./temporal-vad-clock.mjs";
+import {
+  acceptNativePreflightReady,
+  createNativePreflightActivateFrame,
+  createNativePreflightFrame,
+} from "./native-preflight-lease-policy.mjs";
 
 const MEBIBYTE = 1024 * 1024;
 
@@ -987,6 +992,9 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
 
   const queue = createLivePcmQueue();
   let pendingStart = Object.freeze({ ...startFrame });
+  let pendingActivation;
+  let pendingPreflightGeneration;
+  const latencyProofVersion = startFrame.latencyProofVersion;
   let state = "connecting";
   let inputFrameCount = 0;
   let committedAcknowledged = false;
@@ -1046,11 +1054,34 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
   return Object.freeze({
     acknowledgeCommitted() {
       if (state !== "committed" || committedAcknowledged ||
-        startFrame.latencyProofVersion !== 1) invalid();
+        latencyProofVersion !== 1) invalid();
       committedAcknowledged = true;
+    },
+    acceptPreflightReady(value, receivedAt) {
+      if (
+        state !== "awaiting-preflight-ready" ||
+        pendingActivation === undefined ||
+        pendingPreflightGeneration === undefined
+      ) {
+        invalid();
+      }
+      const ready = acceptNativePreflightReady(value, receivedAt);
+      if (ready.generation !== pendingPreflightGeneration) invalid();
+      const activation = createNativePreflightActivateFrame({
+        ...pendingActivation,
+        generation: ready.generation,
+        leaseId: ready.leaseId,
+      });
+      sendText(JSON.stringify(activation));
+      pendingActivation = undefined;
+      pendingPreflightGeneration = undefined;
+      state = "awaiting-ready";
+      return ready;
     },
     close() {
       pendingStart = undefined;
+      pendingActivation = undefined;
+      pendingPreflightGeneration = undefined;
       queue.clear();
       state = "closed";
     },
@@ -1099,6 +1130,32 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       pendingStart = undefined;
       state = "awaiting-ready";
     },
+    openPreflight(generation) {
+      if (
+        state !== "connecting" ||
+        pendingStart === undefined ||
+        pendingStart.nativeAudio !== true
+      ) {
+        invalid();
+      }
+      const preflight = createNativePreflightFrame({
+        appCheckToken: pendingStart.appCheckToken,
+        generation,
+        idToken: pendingStart.idToken,
+      });
+      const {
+        appCheckToken: _appCheckToken,
+        idToken: _idToken,
+        type: _type,
+        version: _version,
+        ...activation
+      } = pendingStart;
+      sendText(JSON.stringify(preflight));
+      pendingStart = undefined;
+      pendingActivation = Object.freeze(activation);
+      pendingPreflightGeneration = generation;
+      state = "awaiting-preflight-ready";
+    },
     pushFrame(frame) {
       if (
         !(frame instanceof ArrayBuffer) ||
@@ -1111,7 +1168,11 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
         queue.push(frame);
         inputFrameCount += 1;
         flush(false);
-      } else if (state === "connecting" || state === "awaiting-ready") {
+      } else if (
+        state === "connecting" ||
+        state === "awaiting-preflight-ready" ||
+        state === "awaiting-ready"
+      ) {
         queue.push(frame);
         inputFrameCount += 1;
       } else {

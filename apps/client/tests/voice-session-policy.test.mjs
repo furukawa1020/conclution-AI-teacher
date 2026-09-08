@@ -1295,6 +1295,16 @@ test("Native strong ready owns Listening and PCM capture", async () => {
     2,
     "both the preflight and full socket listener must reject ready at 4 seconds",
   );
+  assert.match(
+    live,
+    /if \(nativeAudio\) \{\s*clientTransport\.openPreflight\(expectedEpoch \+ 1\);\s*preflightState = "awaiting-preflight-ready";\s*\} else \{\s*clientTransport\.open\(\);/u,
+    "only Native audio must use the content-free preflight handshake",
+  );
+  assert.match(
+    live,
+    /preflightState === "awaiting-preflight-ready"[\s\S]*clientTransport\.acceptPreflightReady\([\s\S]*preflightState = "awaiting-ready"/u,
+    "Native activation must wait for an authenticated bound lease",
+  );
 
   const beginStart = bridge.indexOf("async function beginTurn(");
   const beginEnd = bridge.indexOf(
@@ -3946,6 +3956,112 @@ test("native audio is explicit and cannot weaken strict mode", () => {
       }),
     /voice_live_start_invalid/,
   );
+});
+
+test("native preflight authenticates first then activates without credentials", () => {
+  const socket = new MockWebSocket();
+  const start = {
+    ...liveStartFrame(true),
+    appCheckToken: "header.payload.signature",
+    idToken: "identity.payload.signature",
+    latencyProofVersion: 1,
+    sessionContext: "kms1.opaque-context",
+  };
+  const transport = createVoiceLiveClientTransport(socket, start);
+  const queued = filledPcmFrame(31);
+  transport.pushFrame(queued);
+  transport.openPreflight(77);
+
+  assert.deepEqual(JSON.parse(socket.sent[0]), {
+    appCheckToken: "header.payload.signature",
+    generation: 77,
+    idToken: "identity.payload.signature",
+    type: "preflight",
+    version: 1,
+  });
+  assert.equal(transport.snapshot().state, "awaiting-preflight-ready");
+  assert.equal(transport.snapshot().queuedFrames, 1);
+
+  const leaseId = `knl1_${"c".repeat(43)}`;
+  assert.deepEqual(
+    transport.acceptPreflightReady({
+      expiresInMs: 15_000,
+      generation: 77,
+      leaseId,
+      type: "preflight-ready",
+      version: 1,
+    }, 1_000),
+    {
+      expiresAt: 16_000,
+      generation: 77,
+      leaseId,
+    },
+  );
+  assert.deepEqual(JSON.parse(socket.sent[1]), {
+    generation: 77,
+    latencyProofVersion: 1,
+    leaseId,
+    nativeAudio: true,
+    nativeCoachControl: true,
+    sampleRateHz: 16_000,
+    sessionContext: "kms1.opaque-context",
+    sessionState: "opaque-state",
+    strictCloudMinimization: false,
+    turnMode: "ambient",
+    type: "activate",
+    version: 1,
+  });
+  assert.equal("idToken" in JSON.parse(socket.sent[1]), false);
+  assert.equal("appCheckToken" in JSON.parse(socket.sent[1]), false);
+  assert.equal(transport.snapshot().state, "awaiting-ready");
+  assert.equal(transport.snapshot().queuedFrames, 1);
+
+  transport.markReady();
+  assert.equal(socket.sent[2] instanceof ArrayBuffer, true);
+  assert.equal(new Uint8Array(socket.sent[2])[0], 31);
+  assert.equal(transport.snapshot().queuedFrames, 0);
+});
+
+test("native preflight rejects stale or malformed readiness before activation", () => {
+  const ready = (generation) => ({
+    expiresInMs: 15_000,
+    generation,
+    leaseId: `knl1_${"d".repeat(43)}`,
+    type: "preflight-ready",
+    version: 1,
+  });
+  for (const response of [
+    ready(8),
+    { ...ready(9), idToken: "must-not-be-returned" },
+    { ...ready(9), expiresInMs: 15_001 },
+  ]) {
+    const socket = new MockWebSocket();
+    const transport = createVoiceLiveClientTransport(socket, {
+      ...liveStartFrame(true),
+      appCheckToken: "header.payload.signature",
+      idToken: "identity.payload.signature",
+    });
+    transport.openPreflight(9);
+    assert.throws(
+      () => transport.acceptPreflightReady(response, 1_000),
+      /native_preflight_ready_invalid|voice_response_invalid/u,
+    );
+    assert.equal(socket.sent.length, 1);
+    transport.close();
+    assert.equal(transport.snapshot().queuedFrames, 0);
+    assert.equal(transport.snapshot().state, "closed");
+  }
+});
+
+test("preflight is Native-only while legacy start remains available", () => {
+  const legacySocket = new MockWebSocket();
+  const legacy = createVoiceLiveClientTransport(
+    legacySocket,
+    liveStartFrame(),
+  );
+  assert.throws(() => legacy.openPreflight(1), /voice_response_invalid/u);
+  legacy.open();
+  assert.deepEqual(JSON.parse(legacySocket.sent[0]), liveStartFrame());
 });
 
 test("live transport binds one opaque memory context and rejects malformed values", () => {

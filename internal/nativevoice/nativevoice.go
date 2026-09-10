@@ -154,6 +154,13 @@ type Session interface {
 	Close() error
 }
 
+// LifecycleSession optionally exposes the provider session lifetime without
+// consuming captions or audio. Pools use it only to retire an unclaimed,
+// setup-complete preflight after the provider has already closed.
+type LifecycleSession interface {
+	Done() <-chan struct{}
+}
+
 // Opener is the dependency injected into the HTTP/WebSocket boundary.
 type Opener interface {
 	Open(context.Context) (Session, error)

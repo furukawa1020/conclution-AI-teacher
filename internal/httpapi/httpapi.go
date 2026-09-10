@@ -298,6 +298,16 @@ type VoiceTurnLiveService interface {
 	) (VoiceTurnResult, error)
 }
 
+// VoiceTurnLivePreflightService optionally opens one content-free provider
+// session before a Native turn is activated. PrepareLive returns only after
+// provider setup is complete. The prepared session remains UID-bound for the
+// supplied finite TTL; CancelPreparedLive is idempotent and cannot cancel a
+// session that ProcessLive has already claimed.
+type VoiceTurnLivePreflightService interface {
+	PrepareLive(ctx context.Context, uid string, ttl time.Duration) error
+	CancelPreparedLive(uid string)
+}
+
 // VoiceTurnLiveEndpointService optionally reports a provider-confirmed speech
 // endpoint while input remains open. The transport still owns the commit:
 // endpoint observation never authorizes model output or state publication.

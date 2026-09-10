@@ -364,6 +364,10 @@ func (s *liveSession) Close() error {
 	return nil
 }
 
+func (s *liveSession) Done() <-chan struct{} {
+	return s.ctx.Done()
+}
+
 func (s *liveSession) writerLoop() {
 	for {
 		select {

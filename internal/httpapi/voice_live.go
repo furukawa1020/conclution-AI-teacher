@@ -619,6 +619,40 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 	}()
 	if preflightRequested {
+		preflightService, ok := s.voice.NativeLiveService.(VoiceTurnLivePreflightService)
+		if !ok {
+			finishVoiceLiveWithError(
+				liveCtx,
+				conn,
+				voiceLiveCodeAPIUnavailable,
+				websocket.StatusInternalError,
+			)
+			return
+		}
+		prepareDeadline := started.Add(s.voice.liveNativeReadyTimeout)
+		prepareCtx, cancelPrepare := context.WithDeadline(
+			liveCtx,
+			prepareDeadline,
+		)
+		prepareErr := preflightService.PrepareLive(
+			prepareCtx,
+			principal.UID,
+			voiceLivePreflightTTL,
+		)
+		cancelPrepare()
+		if prepareErr != nil || !time.Now().Before(prepareDeadline) {
+			preflightService.CancelPreparedLive(principal.UID)
+			finishVoiceLiveWithError(
+				liveCtx,
+				conn,
+				voiceLiveCodeAPIUnavailable,
+				websocket.StatusInternalError,
+			)
+			return
+		}
+		// Safe on every later return: once ProcessLive claims the prepared
+		// provider session this call becomes an idempotent no-op.
+		defer preflightService.CancelPreparedLive(principal.UID)
 		preflightLeaseID, leaseIDErr := newVoiceLivePreflightLeaseID()
 		if leaseIDErr != nil {
 			finishVoiceLiveWithError(

@@ -3,6 +3,7 @@ package nativeflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -62,6 +63,346 @@ type fakeOpener struct {
 	opens        int
 	onOpen       func()
 	contextValue string
+	openContext  context.Context
+}
+
+type allocatingOpener struct {
+	mu       sync.Mutex
+	sessions []*scriptedSession
+}
+
+func (o *allocatingOpener) Open(context.Context) (nativevoice.Session, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	session := newScriptedSession()
+	o.sessions = append(o.sessions, session)
+	return session, nil
+}
+
+func TestPreparedNativeSessionStartsOnlyAfterProcessLiveClaimsIt(t *testing.T) {
+	session := newScriptedSession(
+		nativevoice.Event{
+			Kind:         nativevoice.EventInputCaption,
+			CaptionUTF8:  []byte("hello"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{
+			Kind:            nativevoice.EventAudioPCM,
+			PCM:             []byte{1, 0},
+			SampleRateHertz: nativevoice.OutputSampleRateHertz,
+		},
+		nativevoice.Event{
+			Kind:         nativevoice.EventOutputCaption,
+			CaptionUTF8:  []byte("hello there"),
+			CaptionFinal: true,
+		},
+		nativevoice.Event{Kind: nativevoice.EventTurnComplete},
+	)
+	opener := &fakeOpener{session: session}
+	service, err := New(opener, fakePreparer{token: "opaque-state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	if err := service.PrepareLive(
+		context.Background(),
+		"prepared-user",
+		maxPreparedSessionTTL,
+	); err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	startCallsBeforeActivation := session.startCalls
+	session.mu.Unlock()
+	if opener.opens != 1 || startCallsBeforeActivation != 0 {
+		t.Fatalf(
+			"opens=%d starts before activation=%d",
+			opener.opens,
+			startCallsBeforeActivation,
+		)
+	}
+	if opener.openContext == nil || opener.openContext.Err() != nil {
+		t.Fatal("prepared provider context ended before activation")
+	}
+
+	if _, err := service.ProcessLive(
+		context.Background(),
+		"prepared-user",
+		nativeInput(),
+		oneFrame(),
+		func([]byte) error { return nil },
+	); err != nil {
+		t.Fatal(err)
+	}
+	session.mu.Lock()
+	startCalls := session.startCalls
+	closes := session.closes
+	session.mu.Unlock()
+	if opener.opens != 1 || startCalls != 1 || closes != 1 {
+		t.Fatalf("opens=%d starts=%d closes=%d", opener.opens, startCalls, closes)
+	}
+	select {
+	case <-opener.openContext.Done():
+	default:
+		t.Fatal("claimed provider context survived turn release")
+	}
+}
+
+func TestPreparedNativePoolRejectsDuplicateUIDAndProcessOverflow(t *testing.T) {
+	opener := &allocatingOpener{}
+	service, err := New(opener, fakePreparer{token: "opaque-state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	for index := 0; index < maxProviderSessions; index++ {
+		uid := fmt.Sprintf("pool-user-%d", index)
+		if err := service.PrepareLive(
+			context.Background(),
+			uid,
+			maxPreparedSessionTTL,
+		); err != nil {
+			t.Fatalf("PrepareLive(%q) error = %v", uid, err)
+		}
+	}
+	if err := service.PrepareLive(
+		context.Background(),
+		"pool-user-0",
+		maxPreparedSessionTTL,
+	); !errors.Is(err, errNativeFlowUnavailable) {
+		t.Fatalf("duplicate UID error = %v", err)
+	}
+	if err := service.PrepareLive(
+		context.Background(),
+		"pool-overflow",
+		maxPreparedSessionTTL,
+	); !errors.Is(err, errNativeFlowUnavailable) {
+		t.Fatalf("overflow error = %v", err)
+	}
+	opener.mu.Lock()
+	opened := len(opener.sessions)
+	opener.mu.Unlock()
+	if opened != maxProviderSessions {
+		t.Fatalf("provider opens = %d, want %d", opened, maxProviderSessions)
+	}
+
+	for index := 0; index < maxProviderSessions; index++ {
+		service.CancelPreparedLive(fmt.Sprintf("pool-user-%d", index))
+	}
+	opener.mu.Lock()
+	defer opener.mu.Unlock()
+	for index, session := range opener.sessions {
+		session.mu.Lock()
+		closes := session.closes
+		discards := session.discards
+		session.mu.Unlock()
+		if closes != 1 || discards != 1 {
+			t.Fatalf("session %d closes=%d discards=%d", index, closes, discards)
+		}
+	}
+}
+
+func TestPreparedNativeSessionExpiresAndShutdownClosesExactlyOnce(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		stop func(*Service)
+	}{
+		{name: "expiry"},
+		{name: "cancel", stop: func(service *Service) {
+			service.CancelPreparedLive("finite-user")
+		}},
+		{name: "shutdown", stop: func(service *Service) {
+			_ = service.Close()
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			session := newScriptedSession()
+			service, err := New(
+				&fakeOpener{session: session},
+				fakePreparer{token: "opaque-state"},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := service.PrepareLive(
+				context.Background(),
+				"finite-user",
+				20*time.Millisecond,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.stop != nil {
+				testCase.stop(service)
+			}
+			deadline := time.Now().Add(time.Second)
+			for {
+				session.mu.Lock()
+				closes := session.closes
+				session.mu.Unlock()
+				if closes == 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("prepared session was not closed")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			service.CancelPreparedLive("finite-user")
+			_ = service.Close()
+			session.mu.Lock()
+			closes := session.closes
+			discards := session.discards
+			session.mu.Unlock()
+			if closes != 1 || discards != 1 {
+				t.Fatalf("closes=%d discards=%d", closes, discards)
+			}
+		})
+	}
+}
+
+type lifecycleScriptedSession struct {
+	*scriptedSession
+	done chan struct{}
+}
+
+func (s *lifecycleScriptedSession) Done() <-chan struct{} {
+	return s.done
+}
+
+func TestPreparedNativeProviderCloseRetiresImmediately(t *testing.T) {
+	base := newScriptedSession()
+	provider := &lifecycleScriptedSession{
+		scriptedSession: base,
+		done:            make(chan struct{}),
+	}
+	service, err := New(
+		&fakeOpener{session: provider},
+		fakePreparer{token: "opaque-state"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PrepareLive(
+		context.Background(),
+		"provider-close-user",
+		maxPreparedSessionTTL,
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(provider.done)
+	deadline := time.Now().Add(time.Second)
+	for {
+		base.mu.Lock()
+		closes := base.closes
+		base.mu.Unlock()
+		if closes == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider close did not retire prepared session")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	service.CancelPreparedLive("provider-close-user")
+	_ = service.Close()
+	base.mu.Lock()
+	closes := base.closes
+	discards := base.discards
+	base.mu.Unlock()
+	if closes != 1 || discards != 1 {
+		t.Fatalf("closes=%d discards=%d", closes, discards)
+	}
+}
+
+type panicStartSession struct {
+	*scriptedSession
+}
+
+func (*panicStartSession) StartActivity(context.Context) error {
+	panic("provider start panic")
+}
+
+func TestPreparedNativeSessionClosesExactlyOnceOnProviderPanic(t *testing.T) {
+	base := newScriptedSession()
+	service, err := New(
+		&fakeOpener{session: &panicStartSession{scriptedSession: base}},
+		fakePreparer{token: "opaque-state"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PrepareLive(
+		context.Background(),
+		"panic-user",
+		maxPreparedSessionTTL,
+	); err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("ProcessLive did not propagate the provider panic")
+			}
+		}()
+		_, _ = service.ProcessLive(
+			context.Background(),
+			"panic-user",
+			nativeInput(),
+			oneFrame(),
+			func([]byte) error { return nil },
+		)
+	}()
+	_ = service.Close()
+	base.mu.Lock()
+	closes := base.closes
+	discards := base.discards
+	base.mu.Unlock()
+	if closes != 1 || discards != 1 {
+		t.Fatalf("closes=%d discards=%d", closes, discards)
+	}
+}
+
+func TestPreparedNativeLateOpenClosesAfterConcurrentShutdown(t *testing.T) {
+	session := newScriptedSession()
+	opener := &lateNativeOpener{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		session: session,
+	}
+	service, err := New(opener, fakePreparer{token: "opaque-state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := make(chan error, 1)
+	go func() {
+		outcome <- service.PrepareLive(
+			context.Background(),
+			"late-preflight-user",
+			maxPreparedSessionTTL,
+		)
+	}()
+	<-opener.started
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(opener.release)
+	select {
+	case prepareErr := <-outcome:
+		if !errors.Is(prepareErr, errNativeFlowUnavailable) {
+			t.Fatalf("PrepareLive() error = %v", prepareErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late preflight open did not finish")
+	}
+	session.mu.Lock()
+	closes := session.closes
+	discards := session.discards
+	session.mu.Unlock()
+	if closes != 1 || discards != 1 {
+		t.Fatalf("closes=%d discards=%d", closes, discards)
+	}
 }
 
 type fakeContinuityPreparer struct {
@@ -178,8 +519,9 @@ func (f *fakeCaptionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 
 func (f *fakeCaptionHandoff) Cancel() { f.cancels++ }
 
-func (f *fakeOpener) Open(context.Context) (nativevoice.Session, error) {
+func (f *fakeOpener) Open(ctx context.Context) (nativevoice.Session, error) {
 	f.opens++
+	f.openContext = ctx
 	if f.onOpen != nil {
 		f.onOpen()
 	}

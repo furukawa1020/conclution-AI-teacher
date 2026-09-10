@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -123,6 +124,78 @@ func TestVoiceLivePreflightAuthenticatesBeforeBoundActivation(t *testing.T) {
 	case <-service.started:
 	case <-time.After(time.Second):
 		t.Fatal("provider pipeline did not start after activation")
+	}
+}
+
+func TestVoiceLivePreflightReadyWaitsForProviderSetup(t *testing.T) {
+	allowPreflight := make(chan struct{})
+	service := &strongReadyLiveTestService{
+		preflightStarted: make(chan struct{}),
+		allowPreflight:   allowPreflight,
+		started:          make(chan struct{}),
+		done:             make(chan struct{}),
+	}
+	server := newVoiceLivePreflightHandlerTestServer(t, service)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLivePreflight(t, ctx, conn, 32)
+	readyResult := make(chan map[string]any, 1)
+	go func() {
+		readyResult <- readVoiceLiveJSON(t, ctx, conn)
+	}()
+	select {
+	case <-service.preflightStarted:
+	case <-time.After(time.Second):
+		t.Fatal("provider preflight did not start")
+	}
+	select {
+	case ready := <-readyResult:
+		t.Fatalf("preflight-ready preceded SetupComplete: %#v", ready)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowPreflight)
+	select {
+	case ready := <-readyResult:
+		if ready["type"] != "preflight-ready" ||
+			ready["generation"] != float64(32) {
+			t.Fatalf("preflight ready = %#v", ready)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("preflight-ready did not follow provider setup")
+	}
+}
+
+func TestVoiceLivePreflightProviderFailureFallsBackBeforeActivation(t *testing.T) {
+	service := &strongReadyLiveTestService{
+		preflightErr: errors.New("provider setup unavailable"),
+		started:      make(chan struct{}),
+		done:         make(chan struct{}),
+	}
+	server := newVoiceLivePreflightHandlerTestServer(t, service)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := dialVoiceLive(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	writeVoiceLivePreflight(t, ctx, conn, 33)
+	terminal := readVoiceLiveJSON(t, ctx, conn)
+	if terminal["type"] != "error" ||
+		terminal["code"] != voiceLiveCodeAPIUnavailable {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	select {
+	case <-service.started:
+		t.Fatal("failed provider preflight reached the activated pipeline")
+	default:
 	}
 }
 

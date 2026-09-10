@@ -1179,20 +1179,45 @@ func writeVoiceLiveNativeStartWithCoachControl(
 }
 
 type strongReadyLiveTestService struct {
-	started         chan struct{}
-	allowReady      <-chan struct{}
-	readyPublished  chan struct{}
-	audioReceived   chan struct{}
-	done            chan struct{}
-	failBeforeReady error
+	preflightStarted chan struct{}
+	allowPreflight   <-chan struct{}
+	preflightErr     error
+	started          chan struct{}
+	allowReady       <-chan struct{}
+	readyPublished   chan struct{}
+	audioReceived    chan struct{}
+	done             chan struct{}
+	failBeforeReady  error
 
-	startOnce  sync.Once
-	readyOnce  sync.Once
-	audioOnce  sync.Once
-	doneOnce   sync.Once
-	mu         sync.Mutex
-	readyCalls int
+	preflightOnce sync.Once
+	startOnce     sync.Once
+	readyOnce     sync.Once
+	audioOnce     sync.Once
+	doneOnce      sync.Once
+	mu            sync.Mutex
+	readyCalls    int
 }
+
+func (service *strongReadyLiveTestService) PrepareLive(
+	ctx context.Context,
+	_ string,
+	_ time.Duration,
+) error {
+	if service.preflightStarted != nil {
+		service.preflightOnce.Do(func() { close(service.preflightStarted) })
+	}
+	if service.allowPreflight == nil {
+		return service.preflightErr
+	}
+	select {
+	case <-service.allowPreflight:
+		return service.preflightErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (*strongReadyLiveTestService) CancelPreparedLive(string) {}
 
 func (*strongReadyLiveTestService) Process(
 	context.Context,

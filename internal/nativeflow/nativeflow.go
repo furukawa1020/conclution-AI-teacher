@@ -1,8 +1,7 @@
 // Package nativeflow adapts bounded native-audio sessions to KOTAE's live
-// voice transport. Each browser turn owns one provider connection; there is
-// no provider-session resumption, and audio or captions are never persisted
-// server-side or logged. A bounded, screened prior exchange may be carried in
-// the caller-bound, short-lived encrypted state token.
+// voice transport. A content-free preflight may hold one setup-complete
+// provider connection for a UID, but each connection still serves exactly one
+// browser turn. Audio or captions are never persisted server-side or logged.
 package nativeflow
 
 import (
@@ -24,7 +23,9 @@ import (
 )
 
 const (
-	maxCaptionRunes = 480
+	maxCaptionRunes       = 480
+	maxProviderSessions   = 8
+	maxPreparedSessionTTL = 15 * time.Second
 )
 
 // defaultCompanionSystemPrompt defines the fast companion lane. It
@@ -50,7 +51,12 @@ const DefaultSystemPrompt = defaultCompanionSystemPrompt
 var errNativeFlowUnavailable = errors.New("native audio flow unavailable")
 
 type pooledSession struct {
-	session nativevoice.Session
+	session   nativevoice.Session
+	cancel    context.CancelFunc
+	prepared  bool
+	expiresAt time.Time
+	timer     *time.Timer
+	closeOnce sync.Once
 }
 
 type streamInputResult struct {
@@ -127,15 +133,160 @@ func (s *Service) Close() error {
 	s.close.Do(func() {
 		s.cancel()
 		s.mu.Lock()
+		retired := make([]*pooledSession, 0, len(s.sessions))
 		for uid, pooled := range s.sessions {
 			delete(s.sessions, uid)
-			if pooled.session != nil {
-				_ = pooled.session.Close()
-			}
+			retired = append(retired, pooled)
 		}
 		s.mu.Unlock()
+		for _, pooled := range retired {
+			closePooledSession(pooled, false)
+		}
 	})
 	return nil
+}
+
+// PrepareLive opens at most one UID-bound provider session and waits through
+// SetupComplete without starting provider activity or accepting PCM. The
+// process-wide cap includes both prepared and active sessions.
+func (s *Service) PrepareLive(
+	ctx context.Context,
+	uid string,
+	ttl time.Duration,
+) error {
+	if s == nil || ctx == nil || uid == "" || ttl <= 0 ||
+		ttl > maxPreparedSessionTTL || ctx.Err() != nil || s.ctx.Err() != nil {
+		return errNativeFlowUnavailable
+	}
+	startedAt := s.now()
+	pooled := &pooledSession{
+		prepared:  true,
+		expiresAt: startedAt.Add(ttl),
+	}
+	providerCtx, cancelProvider := context.WithCancel(s.ctx)
+	pooled.cancel = cancelProvider
+	s.mu.Lock()
+	if s.ctx.Err() != nil || s.sessions[uid] != nil ||
+		len(s.sessions) >= maxProviderSessions {
+		s.mu.Unlock()
+		cancelProvider()
+		return errNativeFlowUnavailable
+	}
+	s.sessions[uid] = pooled
+	s.mu.Unlock()
+
+	stopRequestCancel := context.AfterFunc(ctx, cancelProvider)
+	session, err := s.opener.Open(providerCtx)
+	stopRequestCancel()
+	if err != nil || ctx.Err() != nil || s.ctx.Err() != nil ||
+		!s.now().Before(pooled.expiresAt) {
+		s.mu.Lock()
+		owned := s.sessions[uid] == pooled && pooled.prepared
+		if owned {
+			pooled.session = session
+			delete(s.sessions, uid)
+		}
+		s.mu.Unlock()
+		if owned {
+			closePooledSession(pooled, false)
+		} else if session != nil {
+			closePooledSession(&pooledSession{session: session}, false)
+		}
+		return errNativeFlowUnavailable
+	}
+	s.mu.Lock()
+	if s.sessions[uid] != pooled || !pooled.prepared || s.ctx.Err() != nil {
+		s.mu.Unlock()
+		closePooledSession(&pooledSession{session: session}, false)
+		return errNativeFlowUnavailable
+	}
+	pooled.session = session
+	delay := pooled.expiresAt.Sub(s.now())
+	if delay <= 0 {
+		delete(s.sessions, uid)
+		s.mu.Unlock()
+		closePooledSession(pooled, false)
+		return errNativeFlowUnavailable
+	}
+	pooled.timer = time.AfterFunc(delay, func() {
+		s.expirePrepared(uid, pooled)
+	})
+	lifecycle, observesProviderClose := session.(nativevoice.LifecycleSession)
+	s.mu.Unlock()
+	if observesProviderClose {
+		go func() {
+			<-lifecycle.Done()
+			s.retireClosedPrepared(uid, pooled)
+		}()
+	}
+	return nil
+}
+
+// CancelPreparedLive retires only an unclaimed prepared session. It is safe
+// to call unconditionally from the WebSocket handler's cleanup path.
+func (s *Service) CancelPreparedLive(uid string) {
+	if s == nil || uid == "" {
+		return
+	}
+	s.mu.Lock()
+	pooled := s.sessions[uid]
+	if pooled == nil || !pooled.prepared {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.sessions, uid)
+	s.mu.Unlock()
+	closePooledSession(pooled, false)
+}
+
+func (s *Service) expirePrepared(uid string, pooled *pooledSession) {
+	if s == nil || pooled == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.sessions[uid] != pooled || !pooled.prepared ||
+		s.now().Before(pooled.expiresAt) {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.sessions, uid)
+	s.mu.Unlock()
+	closePooledSession(pooled, false)
+}
+
+func (s *Service) retireClosedPrepared(uid string, pooled *pooledSession) {
+	if s == nil || pooled == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.sessions[uid] != pooled || !pooled.prepared {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.sessions, uid)
+	s.mu.Unlock()
+	closePooledSession(pooled, false)
+}
+
+func closePooledSession(pooled *pooledSession, healthy bool) {
+	if pooled == nil {
+		return
+	}
+	pooled.closeOnce.Do(func() {
+		if pooled.timer != nil {
+			pooled.timer.Stop()
+		}
+		if pooled.cancel != nil {
+			pooled.cancel()
+		}
+		if pooled.session == nil {
+			return
+		}
+		if !healthy {
+			pooled.session.DiscardOutput()
+		}
+		_ = pooled.session.Close()
+	})
 }
 
 func (s *Service) ProcessLive(
@@ -212,6 +363,7 @@ func (s *Service) processLive(
 	// receive that exact prepared token instead of replaying stale caller input.
 	input.StateToken = preparedStateToken
 	if requiresStaged && (s.captionHandoff == nil || onCoachActive == nil) {
+		s.CancelPreparedLive(uid)
 		missingTimingResult := httpapi.VoiceTurnResult{
 			LiveTimings: newNativeLiveTimings(
 				time.Time{},
@@ -960,17 +1112,39 @@ func (s *Service) acquire(
 	uid string,
 	conversationContext string,
 ) (*pooledSession, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if ctx == nil || uid == "" || ctx.Err() != nil || s.ctx.Err() != nil {
+		return nil, errNativeFlowUnavailable
 	}
+	var retired *pooledSession
 	s.mu.Lock()
-	if s.sessions[uid] != nil {
+	if existing := s.sessions[uid]; existing != nil {
+		if existing.prepared && existing.session != nil &&
+			conversationContext == "" && s.now().Before(existing.expiresAt) {
+			existing.prepared = false
+			existing.expiresAt = time.Time{}
+			if existing.timer != nil {
+				existing.timer.Stop()
+				existing.timer = nil
+			}
+			s.mu.Unlock()
+			return existing, nil
+		}
+		if !existing.prepared {
+			s.mu.Unlock()
+			return nil, errNativeFlowUnavailable
+		}
+		delete(s.sessions, uid)
+		retired = existing
+	}
+	if len(s.sessions) >= maxProviderSessions {
 		s.mu.Unlock()
+		closePooledSession(retired, false)
 		return nil, errNativeFlowUnavailable
 	}
 	pooled := &pooledSession{}
 	s.sessions[uid] = pooled
 	s.mu.Unlock()
+	closePooledSession(retired, false)
 
 	var session nativevoice.Session
 	var err error
@@ -985,20 +1159,18 @@ func (s *Service) acquire(
 		}
 	}
 	if err != nil || ctx.Err() != nil {
-		if session != nil {
-			_ = session.Close()
-		}
 		s.mu.Lock()
 		if s.sessions[uid] == pooled {
 			delete(s.sessions, uid)
 		}
 		s.mu.Unlock()
+		closePooledSession(&pooledSession{session: session}, false)
 		return nil, errNativeFlowUnavailable
 	}
 	s.mu.Lock()
 	if s.sessions[uid] != pooled || s.ctx.Err() != nil {
 		s.mu.Unlock()
-		_ = session.Close()
+		closePooledSession(&pooledSession{session: session}, false)
 		return nil, errNativeFlowUnavailable
 	}
 	pooled.session = session
@@ -1017,10 +1189,5 @@ func (s *Service) release(uid string, pooled *pooledSession, healthy bool) {
 	}
 	delete(s.sessions, uid)
 	s.mu.Unlock()
-	if pooled.session != nil {
-		if !healthy {
-			pooled.session.DiscardOutput()
-		}
-		_ = pooled.session.Close()
-	}
+	closePooledSession(pooled, healthy)
 }

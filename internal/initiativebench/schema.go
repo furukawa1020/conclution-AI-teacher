@@ -137,6 +137,10 @@ func validateDataset(name string, observations []Observation, human bool, seen m
 			(!observation.RollbackRequired && observation.RollbackSucceeded) {
 			return fmt.Errorf("initiative benchmark %s observation invalid", name)
 		}
+		spoken := isSpokenAction(observation.ActualAction)
+		if spoken != (observation.FirstMeaningfulAudioMS != nil) {
+			return errors.New("initiative benchmark meaningful audio boundary invalid")
+		}
 		if human {
 			if observation.RaterCount < 2 || observation.RaterCount > 20 ||
 				observation.AgreementBPS < 0 || observation.AgreementBPS > 10_000 {
@@ -212,6 +216,15 @@ func validSituation(value Situation) bool {
 func validAction(value Action) bool {
 	switch value {
 	case ActionWait, ActionAskOne, ActionReflectUserGoal, ActionOfferChoice, ActionStartPractice, ActionRelease, ActionStop:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSpokenAction(value Action) bool {
+	switch value {
+	case ActionAskOne, ActionReflectUserGoal, ActionOfferChoice, ActionStartPractice:
 		return true
 	default:
 		return false

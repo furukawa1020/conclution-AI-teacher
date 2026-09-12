@@ -96,4 +96,9 @@ func TestValidateRejectsImpossibleMetricsAndFreeFormEnums(t *testing.T) {
 	if err := suite.Validate(); err == nil {
 		t.Fatal("rollback success without a required rollback accepted")
 	}
+	suite = validSuite()
+	suite.Generated[0].ActualAction = ActionAskOne
+	if err := suite.Validate(); err == nil {
+		t.Fatal("spoken action without a first meaningful audio boundary accepted")
+	}
 }

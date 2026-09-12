@@ -97,6 +97,7 @@ import {
 } from "./passkey-policy.mjs";
 import { createLongMemorySessionController } from "./long-memory-session-policy.mjs";
 import {
+  createNativePreflightLatencyObservation,
   createNativePreflightInvalidationGate,
   NATIVE_PREFLIGHT_RETIRE_REASONS,
 } from "./native-preflight-lease-policy.mjs";
@@ -371,6 +372,17 @@ function dispatchVoiceLatencyTrace(measurement) {
     );
   } catch {
     // A measurement fault cannot delay, cancel, or replace audible output.
+  }
+}
+
+function dispatchNativePreflightLatency(measurement) {
+  try {
+    const detail = createNativePreflightLatencyObservation(measurement);
+    globalThis.dispatchEvent(
+      new CustomEvent("kotae:native-preflight-latency", { detail }),
+    );
+  } catch {
+    // Content-free diagnostics never delay or change the voice route.
   }
 }
 
@@ -3826,6 +3838,7 @@ async function startVoiceLiveSession({
   }
 
   let preflightAuthReadyMs = 0;
+  let preflightActivatedAt;
   let preflightError;
   let preflightState = "connecting";
   let preflightOwnership;
@@ -3895,10 +3908,12 @@ async function startVoiceLiveSession({
           failPreflight(new Error(message.code));
           return;
         }
+        const activatedAt = performance.now();
         clientTransport.acceptPreflightReady(
           preflightMessage,
-          performance.now(),
+          activatedAt,
         );
+        preflightActivatedAt = activatedAt;
         preflightState = "awaiting-ready";
         return;
       }
@@ -3921,7 +3936,15 @@ async function startVoiceLiveSession({
         return;
       }
       clientTransport.markReady();
-      preflightAuthReadyMs = performance.now() - liveStartedAt;
+      const strongReadyAt = performance.now();
+      preflightAuthReadyMs = strongReadyAt - liveStartedAt;
+      if (nativeAudio && preflightActivatedAt !== undefined) {
+        dispatchNativePreflightLatency({
+          coldMs: preflightAuthReadyMs,
+          generation: expectedEpoch + 1,
+          warmMs: strongReadyAt - preflightActivatedAt,
+        });
+      }
       preflightState = "ready";
     } catch (error) {
       failPreflight(

@@ -5,6 +5,8 @@
 // answers, session state, and other conversation content.
 
 export const NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS = 15_000;
+export const NATIVE_PREFLIGHT_LATENCY_VERSION =
+  "kotae.native-preflight-latency.v1";
 
 export const NATIVE_PREFLIGHT_PROTOCOL_LIMITS = Object.freeze({
   maximumGeneration: Number.MAX_SAFE_INTEGER,
@@ -152,6 +154,30 @@ function finiteTime(value) {
 
 function validGeneration(value, allowZero = false) {
   return Number.isSafeInteger(value) && (allowZero ? value >= 0 : value > 0);
+}
+
+export function createNativePreflightLatencyObservation(value) {
+  if (
+    !hasExactKeys(value, ["coldMs", "generation", "warmMs"]) ||
+    !validGeneration(value.generation) ||
+    !Number.isFinite(value.coldMs) ||
+    !Number.isFinite(value.warmMs) ||
+    value.coldMs < 0 ||
+    value.coldMs > NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS ||
+    value.warmMs < 0 ||
+    value.warmMs > value.coldMs
+  ) {
+    throw new TypeError("native_preflight_latency_observation_invalid");
+  }
+  return Object.freeze({
+    coldMs: Math.round(value.coldMs * 10) / 10,
+    generation: value.generation,
+    // A Native turn cannot accept speech before strong ready. Consequently no
+    // provider connection remains to await after speech end.
+    speechEndConnectionWaitMs: 0,
+    version: NATIVE_PREFLIGHT_LATENCY_VERSION,
+    warmMs: Math.round(value.warmMs * 10) / 10,
+  });
 }
 
 function validBinding(value) {

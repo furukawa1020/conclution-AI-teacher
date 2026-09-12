@@ -5,6 +5,7 @@ import {
   getIdTokenResult,
   inMemoryPersistence,
   initializeAuth,
+  onIdTokenChanged,
   signInAnonymously,
   signInWithCustomToken,
   signOut,
@@ -95,6 +96,10 @@ import {
   parsePasskeyFinish,
 } from "./passkey-policy.mjs";
 import { createLongMemorySessionController } from "./long-memory-session-policy.mjs";
+import {
+  createNativePreflightInvalidationGate,
+  NATIVE_PREFLIGHT_RETIRE_REASONS,
+} from "./native-preflight-lease-policy.mjs";
 import {
   buildVoiceLatencyTrace,
   classifyVoiceLatencyDevice,
@@ -202,6 +207,8 @@ let preparingLiveSession;
 let pendingLiveSession;
 let pendingDocument;
 let pendingDocumentTimer;
+const nativePreflightInvalidation = createNativePreflightInvalidationGate();
+const observedAuthInstances = new WeakSet();
 let voiceTransportPrimed = false;
 let voiceReceiptVisible = false;
 let voicePrepareSloGeneration = 0;
@@ -756,6 +763,19 @@ async function initializeAppServices() {
 
 const appServices = createRetryableInitializer(initializeAppServices);
 
+function observeAuthInvalidation(auth) {
+  if (observedAuthInstances.has(auth)) return;
+  let initialNotification = true;
+  onIdTokenChanged(auth, () => {
+    if (initialNotification) {
+      initialNotification = false;
+      return;
+    }
+    if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
+  });
+  observedAuthInstances.add(auth);
+}
+
 async function initializeFirebaseAuth() {
   const { app } = await firebaseApp();
   // A fresh, signed-out browser has no Auth exchange to protect yet. Do not
@@ -766,6 +786,7 @@ async function initializeFirebaseAuth() {
   });
   const auth = authInstance;
   await auth.authStateReady();
+  observeAuthInvalidation(auth);
   return Object.freeze({ auth });
 }
 
@@ -794,6 +815,7 @@ async function initializeFirebaseGuestServices() {
   });
   const auth = guestAuthInstance;
   await auth.authStateReady();
+  observeAuthInvalidation(auth);
   return Object.freeze({ appCheck: guestAppCheckInstance, auth });
 }
 
@@ -2973,6 +2995,12 @@ async function beginTurn(
     stopSession("hidden");
     fail("request_cancelled");
   }
+  // A new explicit gesture is a generation boundary. Retire an orphaned or
+  // still-preparing Native socket before overlap validation, so it can never
+  // lend its identity/provider lease to a later turn.
+  if (nativePreflightInvalidation.hasActive()) {
+    stopSession("request_cancelled");
+  }
   if (
     typeof serializedSessionState !== "string" ||
     serializedSessionState.length > SESSION_STATE_MAX_CHARS ||
@@ -3800,8 +3828,16 @@ async function startVoiceLiveSession({
   let preflightAuthReadyMs = 0;
   let preflightError;
   let preflightState = "connecting";
+  let preflightOwnership;
+  function releasePreflightOwnership() {
+    if (preflightOwnership) {
+      nativePreflightInvalidation.release(preflightOwnership);
+      preflightOwnership = undefined;
+    }
+  }
   function failPreflight(error, close = true) {
     if (preflightError) return;
+    releasePreflightOwnership();
     preflightError =
       error instanceof Error
         ? error
@@ -3815,6 +3851,18 @@ async function startVoiceLiveSession({
     ) {
       socket.close(4002, "voice_live_failed");
     }
+  }
+  if (nativeAudio) {
+    preflightOwnership = nativePreflightInvalidation.begin(
+      expectedEpoch + 1,
+      (reason) => {
+        const code =
+          reason === NATIVE_PREFLIGHT_RETIRE_REASONS.DEVICE_CHANGED
+            ? "microphone_unavailable"
+            : "request_cancelled";
+        failPreflight(new Error(code));
+      },
+    );
   }
   const acceptPreflightOpen = () => {
     socketOpenedAt ??= performance.now();
@@ -3921,8 +3969,8 @@ async function startVoiceLiveSession({
         }),
       ]);
     } catch {
+      failPreflight(new Error("voice_api_unavailable"));
       detachPreflight();
-      clientTransport.close();
       if (
         socket.readyState === WebSocket.CONNECTING ||
         socket.readyState === WebSocket.OPEN
@@ -3939,6 +3987,7 @@ async function startVoiceLiveSession({
     !audioContext ||
     audioContext.state === "closed"
   ) {
+    failPreflight(new Error(stoppedSessionCode(expectedEpoch)));
     detachPreflight();
     if (
       socket.readyState === WebSocket.CONNECTING ||
@@ -3979,6 +4028,7 @@ async function startVoiceLiveSession({
       );
       captureSource = audioContext.createMediaStreamSource(stream);
     } catch {
+      failPreflight(new Error("voice_api_unavailable"));
       detachPreflight();
       captureNode?.disconnect();
       captureSource?.disconnect();
@@ -4959,6 +5009,7 @@ async function startVoiceLiveSession({
     );
   }
   if (fallbackOnly) {
+    releasePreflightOwnership();
     detachPreflight();
     captureSource.connect(captureNode);
     return session;
@@ -5050,6 +5101,7 @@ async function startVoiceLiveSession({
       acceptSocketOpen();
     } else if (socket.readyState !== WebSocket.CONNECTING) {
       failLive(new Error("voice_api_unavailable"));
+      releasePreflightOwnership();
       return undefined;
     }
   } else if (
@@ -5057,13 +5109,16 @@ async function startVoiceLiveSession({
     socket.readyState !== WebSocket.OPEN
   ) {
     failLive(new Error("voice_api_unavailable"));
+    releasePreflightOwnership();
     return undefined;
   }
   if (preparingLiveSession) {
+    releasePreflightOwnership();
     session.cancel(new Error("voice_turn_invalid"));
     return undefined;
   }
   preparingLiveSession = session;
+  releasePreflightOwnership();
   try {
     // For a Native turn the server's ready frame is the strong input gate:
     // authentication, quota, UID lease, provider SetupComplete, and
@@ -7483,6 +7538,15 @@ async function attachDocument(inputId) {
 }
 
 function stopSession(reason = "request_cancelled") {
+  const preflightRetireReason =
+    reason === "hidden" || reason === "pagehide"
+      ? NATIVE_PREFLIGHT_RETIRE_REASONS.PAGE_HIDDEN
+      : reason === "microphone_lost" || reason === "device_changed"
+        ? NATIVE_PREFLIGHT_RETIRE_REASONS.DEVICE_CHANGED
+        : reason === "identity_changed"
+          ? NATIVE_PREFLIGHT_RETIRE_REASONS.IDENTITY_CHANGED
+          : NATIVE_PREFLIGHT_RETIRE_REASONS.CANCELLED;
+  nativePreflightInvalidation.retireCurrent(preflightRetireReason);
   const { pauseReason, stopCode } =
     classifyVoiceSessionStopReason(reason);
   const stoppedEpoch = sessionEpoch;
@@ -7566,6 +7630,7 @@ function hasActiveVoiceSession() {
     beginGate.isBusy() ||
     activeRequestController ||
     activeLiveSession ||
+    nativePreflightInvalidation.hasActive() ||
     preparingLiveSession ||
     pendingLiveSession ||
     activePlayback ||
@@ -7574,6 +7639,26 @@ function hasActiveVoiceSession() {
     hasLiveAudioTrack(mediaStream),
   );
 }
+
+function hasIdentityBoundVoiceSession() {
+  return Boolean(
+    nativePreflightInvalidation.hasActive() ||
+    activeRecording ||
+    activeRequestController ||
+    activeLiveSession ||
+    preparingLiveSession ||
+    pendingLiveSession ||
+    activePlayback
+  );
+}
+
+navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+  if (hasActiveVoiceSession()) stopSession("device_changed");
+});
+
+globalThis.addEventListener("kotae:account-boundary-changed", () => {
+  if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
+});
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && activePasskeyController) {

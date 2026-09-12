@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,6 +8,7 @@ import {
   claimNativePreflightLease,
   createNativePreflightActivateFrame,
   createNativePreflightFrame,
+  createNativePreflightInvalidationGate,
   createNativePreflightLeaseState,
   NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS,
   NATIVE_PREFLIGHT_LEASE_STATES,
@@ -50,6 +52,96 @@ test("preflight lease exposes finite immutable states and a 15 second ceiling", 
   });
   assert.equal(Object.isFrozen(NATIVE_PREFLIGHT_LEASE_STATES), true);
   assert.equal(Object.isFrozen(NATIVE_PREFLIGHT_RETIRE_REASONS), true);
+});
+
+test("browser preflight invalidation cancels one current owner exactly once", () => {
+  const cancelled = [];
+  const gate = createNativePreflightInvalidationGate();
+  const first = gate.begin(1, (reason) => cancelled.push([1, reason]));
+  assert.equal(gate.hasActive(), true);
+  assert.equal(
+    gate.retire(first, NATIVE_PREFLIGHT_RETIRE_REASONS.PAGE_HIDDEN),
+    true,
+  );
+  assert.equal(
+    gate.retire(first, NATIVE_PREFLIGHT_RETIRE_REASONS.PAGE_HIDDEN),
+    false,
+  );
+  assert.deepEqual(cancelled, [[1, "page-hidden"]]);
+  assert.equal(gate.hasActive(), false);
+});
+
+test("a stale callback cannot retire the replacement generation", () => {
+  const cancelled = [];
+  const gate = createNativePreflightInvalidationGate();
+  const first = gate.begin(10, (reason) => cancelled.push([10, reason]));
+  const second = gate.begin(11, (reason) => cancelled.push([11, reason]));
+  assert.deepEqual(cancelled, [[10, "replaced"]]);
+  assert.equal(
+    gate.retire(first, NATIVE_PREFLIGHT_RETIRE_REASONS.PROVIDER_CLOSED),
+    false,
+  );
+  assert.equal(gate.release(first), false);
+  assert.equal(gate.hasActive(), true);
+  assert.equal(gate.release(second), true);
+  assert.equal(gate.hasActive(), false);
+  assert.deepEqual(cancelled, [[10, "replaced"]]);
+});
+
+test("browser invalidation accepts only finite reasons and generations", () => {
+  const gate = createNativePreflightInvalidationGate();
+  assert.throws(
+    () => gate.begin(0, () => {}),
+    /native_preflight_invalidation_begin_invalid/u,
+  );
+  const owner = gate.begin(1, () => {});
+  assert.throws(
+    () => gate.retire(owner, "transcript-or-device-label"),
+    /native_preflight_invalidation_reason_invalid/u,
+  );
+  assert.equal(gate.hasActive(), true);
+});
+
+test("release transfers ownership without invoking cancellation", () => {
+  let cancellations = 0;
+  const gate = createNativePreflightInvalidationGate();
+  const owner = gate.begin(4, () => {
+    cancellations += 1;
+  });
+  assert.equal(gate.release(owner), true);
+  assert.equal(gate.release(owner), false);
+  assert.equal(
+    gate.retireCurrent(NATIVE_PREFLIGHT_RETIRE_REASONS.CANCELLED),
+    false,
+  );
+  assert.equal(cancellations, 0);
+});
+
+test("browser lifecycle has one centralized preflight invalidation path", async () => {
+  const bridge = await readFile(
+    new URL("../web/firebase-bridge.js", import.meta.url),
+    "utf8",
+  );
+  assert.equal(
+    bridge.match(/addEventListener\?\.\("devicechange"/gu)?.length,
+    1,
+  );
+  assert.match(
+    bridge,
+    /onIdTokenChanged\(auth,[\s\S]*hasIdentityBoundVoiceSession\(\)[\s\S]*stopSession\("identity_changed"\)/u,
+  );
+  assert.match(
+    bridge,
+    /observedAuthInstances\.has\(auth\)[\s\S]*observedAuthInstances\.add\(auth\)/u,
+  );
+  assert.match(
+    bridge,
+    /function stopSession\([\s\S]*nativePreflightInvalidation\.retireCurrent\(preflightRetireReason\)/u,
+  );
+  assert.match(
+    bridge,
+    /preparingLiveSession = session;\s*releasePreflightOwnership\(\);\s*try/u,
+  );
 });
 
 test("one lease moves connecting to ready to exactly-once claimed", () => {

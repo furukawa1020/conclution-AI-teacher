@@ -480,6 +480,11 @@ export function classifyVoiceSessionStopReason(reason) {
         pauseReason: reason,
         stopCode: "microphone_unavailable",
       });
+    case "device_changed":
+      return Object.freeze({
+        pauseReason: null,
+        stopCode: "microphone_unavailable",
+      });
     default:
       return Object.freeze({
         pauseReason: null,

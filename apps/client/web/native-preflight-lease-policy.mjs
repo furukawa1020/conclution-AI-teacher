@@ -70,6 +70,67 @@ const RETIRE_REASON_VALUES = Object.freeze(
   Object.values(NATIVE_PREFLIGHT_RETIRE_REASONS),
 );
 
+// Owns the browser-side connection while it is too early to be represented by
+// a complete live session. A handle is intentionally opaque: only the exact
+// current handle can be released, so a delayed callback from an older
+// generation cannot retire or resurrect its replacement.
+export function createNativePreflightInvalidationGate() {
+  let current;
+  const handles = new WeakMap();
+
+  function retireHandle(handle, reason) {
+    if (!RETIRE_REASON_VALUES.includes(reason)) {
+      throw new TypeError("native_preflight_invalidation_reason_invalid");
+    }
+    if (handle !== current || handle?.retired === true) {
+      return false;
+    }
+    current = undefined;
+    handle.retired = true;
+    handle.cancel(reason);
+    return true;
+  }
+
+  function begin(generation, cancel) {
+    if (!validGeneration(generation) || typeof cancel !== "function") {
+      throw new TypeError("native_preflight_invalidation_begin_invalid");
+    }
+    if (current) {
+      retireHandle(current, NATIVE_PREFLIGHT_RETIRE_REASONS.REPLACED);
+    }
+    const handle = {
+      cancel,
+      generation,
+      retired: false,
+    };
+    const ownership = Object.freeze({ generation });
+    handles.set(ownership, handle);
+    current = handle;
+    return ownership;
+  }
+
+  function release(ownership) {
+    const handle = handles.get(ownership);
+    if (handle !== current || current?.retired === true) return false;
+    current = undefined;
+    return true;
+  }
+
+  function retire(ownership, reason) {
+    return retireHandle(handles.get(ownership), reason);
+  }
+
+  function retireCurrent(reason) {
+    return current ? retireHandle(current, reason) : false;
+  }
+
+  function hasActive() {
+    return current !== undefined;
+  }
+
+  return Object.freeze({ begin, hasActive, release, retire, retireCurrent });
+}
+
 function isPlainRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;

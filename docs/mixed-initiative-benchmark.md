@@ -19,6 +19,16 @@ Issue #223では、能動性をAIの発話数ではなく、本人の発話権�
 場面、発話floor、goal状態、provider fault、明示制御、介入回数、代理回答危険、別利用者state危険だけを有限値で持つ。
 期待actionは同じ決定的oracleから再計算し、artifact内の値だけを書き換えても検証を通らない。
 
+## 実システム結果の結合
+
+3条件のrun artifactは、同じcorpus SHA-256と同じ40桁source commitを持たなければならない。
+reactive baseline、always proactive、proposal controlledの順序、fixture数、fixture IDの順序も固定する。
+欠落、重複、並べ替え、別commitの混在は比較前に失敗させる。
+
+run artifactも会話本文を持たない。
+実際に選んだ有限action、本人の自発発話・本人由来回答・目的完了・拒否・訂正・撤回の真偽値、有限の時間値だけを受け取る。
+音声を出すactionに最初の有意味音声時刻がない場合、または音声を出さないactionに時刻がある場合は失敗させる。
+
 各fixtureには`reactive_baseline`、`always_proactive`、`proposal_controlled`の3条件を実行する。
 実行結果は生成fixtureそのものへ書き込まず、commitに束縛したbenchmark observationへ分離する。
 

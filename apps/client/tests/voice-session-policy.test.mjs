@@ -736,6 +736,8 @@ const pcm16BytesAudioBuffer = dependencies.pcm16BytesAudioBuffer;
 const performance = dependencies.performance;
 const markSessionSpeech = dependencies.markSessionSpeech;
 const nextVoiceStartSloGeneration = dependencies.nextVoiceStartSloGeneration;
+const nativePreflightInvalidation = dependencies.nativePreflightInvalidation;
+const NATIVE_PREFLIGHT_RETIRE_REASONS = dependencies.NATIVE_PREFLIGHT_RETIRE_REASONS;
 const releaseMicrophone = dependencies.releaseMicrophone;
 const restorePlaybackGain = dependencies.restorePlaybackGain;
 const retirePendingLiveSession = dependencies.retirePendingLiveSession;
@@ -878,6 +880,17 @@ return Object.freeze({
         return generation;
       };
     })(),
+    nativePreflightInvalidation: Object.freeze({
+      retireCurrent() {
+        return false;
+      },
+    }),
+    NATIVE_PREFLIGHT_RETIRE_REASONS: Object.freeze({
+      CANCELLED: "cancelled",
+      DEVICE_CHANGED: "device-changed",
+      IDENTITY_CHANGED: "identity-changed",
+      PAGE_HIDDEN: "page-hidden",
+    }),
     performance: { now: () => performanceNow },
     releaseMicrophone(code) {
       state.micEnabled = false;
@@ -7144,16 +7157,17 @@ test("hidden documents and pagehide stop only active voice sessions", () => {
 
 test("voice session pause reasons are finite and contain no user content", () => {
   const expected = new Map([
-    ["idle", "session_expired"],
-    ["maximum", "session_expired"],
-    ["hidden", "request_cancelled"],
-    ["pagehide", "request_cancelled"],
-    ["microphone_lost", "microphone_unavailable"],
+    ["idle", ["idle", "session_expired"]],
+    ["maximum", ["maximum", "session_expired"]],
+    ["hidden", ["hidden", "request_cancelled"]],
+    ["pagehide", ["pagehide", "request_cancelled"]],
+    ["microphone_lost", ["microphone_lost", "microphone_unavailable"]],
+    ["device_changed", [null, "microphone_unavailable"]],
   ]);
 
-  for (const [reason, stopCode] of expected) {
+  for (const [reason, [pauseReason, stopCode]] of expected) {
     const classified = classifyVoiceSessionStopReason(reason);
-    assert.deepEqual(classified, { pauseReason: reason, stopCode });
+    assert.deepEqual(classified, { pauseReason, stopCode });
     assert.equal(Object.isFrozen(classified), true);
   }
 

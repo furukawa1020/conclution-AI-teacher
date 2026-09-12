@@ -12,6 +12,7 @@ coverage.out
 *.test
 target/
 dist/
+.release-evidence/
 
 # Local Firebase state
 .firebase/

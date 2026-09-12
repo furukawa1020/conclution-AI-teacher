@@ -9,9 +9,11 @@ import {
   createNativePreflightActivateFrame,
   createNativePreflightFrame,
   createNativePreflightInvalidationGate,
+  createNativePreflightLatencyObservation,
   createNativePreflightLeaseState,
   NATIVE_PREFLIGHT_LEASE_MAX_TTL_MS,
   NATIVE_PREFLIGHT_LEASE_STATES,
+  NATIVE_PREFLIGHT_LATENCY_VERSION,
   NATIVE_PREFLIGHT_PROTOCOL_LIMITS,
   NATIVE_PREFLIGHT_RETIRE_REASONS,
   readyNativePreflightLease,
@@ -52,6 +54,38 @@ test("preflight lease exposes finite immutable states and a 15 second ceiling", 
   });
   assert.equal(Object.isFrozen(NATIVE_PREFLIGHT_LEASE_STATES), true);
   assert.equal(Object.isFrozen(NATIVE_PREFLIGHT_RETIRE_REASONS), true);
+});
+
+test("latency observation fixes cold, warm, and zero post-speech wait", () => {
+  const observation = createNativePreflightLatencyObservation({
+    coldMs: 812.34,
+    generation: 9,
+    warmMs: 138.26,
+  });
+  assert.deepEqual(observation, {
+    coldMs: 812.3,
+    generation: 9,
+    speechEndConnectionWaitMs: 0,
+    version: NATIVE_PREFLIGHT_LATENCY_VERSION,
+    warmMs: 138.3,
+  });
+  assert.equal(Object.isFrozen(observation), true);
+});
+
+test("latency observation rejects impossible clocks and surplus content", () => {
+  const valid = { coldMs: 800, generation: 1, warmMs: 120 };
+  for (const override of [
+    { coldMs: -1 },
+    { coldMs: 15_001 },
+    { generation: 0 },
+    { warmMs: 801 },
+    { transcript: "secret" },
+  ]) {
+    assert.throws(
+      () => createNativePreflightLatencyObservation({ ...valid, ...override }),
+      /native_preflight_latency_observation_invalid/u,
+    );
+  }
 });
 
 test("browser preflight invalidation cancels one current owner exactly once", () => {
@@ -141,6 +175,14 @@ test("browser lifecycle has one centralized preflight invalidation path", async 
   assert.match(
     bridge,
     /preparingLiveSession = session;\s*releasePreflightOwnership\(\);\s*try/u,
+  );
+  assert.match(
+    bridge,
+    /new CustomEvent\("kotae:native-preflight-latency", \{ detail \}\)/u,
+  );
+  assert.match(
+    bridge,
+    /coldMs: preflightAuthReadyMs,[\s\S]*warmMs: strongReadyAt - preflightActivatedAt/u,
   );
 });
 

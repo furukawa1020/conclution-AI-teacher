@@ -3,6 +3,14 @@ import {
   createTemporalVadClock,
 } from "./temporal-vad-clock.mjs";
 
+// A token refresh keeps the same identity; only UID replacement or sign-out
+// revokes an identity-bound voice session.
+export function authIdentityChanged(previousUid, nextUid) {
+  const valid = (uid) => uid === null || (typeof uid === `string` && uid.length > 0);
+  if (!valid(previousUid) || !valid(nextUid)) throw new TypeError(`auth_identity_invalid`);
+  return previousUid !== nextUid;
+}
+
 export const VOICE_SESSION_LIMITS = Object.freeze({
   vadIntervalMs: 40,
   minimumVoiceMs: 120,

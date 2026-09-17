@@ -17,6 +17,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app-check.js";
 import {
   advanceCandidateCapture,
+  authIdentityChanged,
   advanceVad,
   classifyVoiceSessionStopReason,
   createCandidateCaptureState,
@@ -778,11 +779,17 @@ const appServices = createRetryableInitializer(initializeAppServices);
 function observeAuthInvalidation(auth) {
   if (observedAuthInstances.has(auth)) return;
   let initialNotification = true;
-  onIdTokenChanged(auth, () => {
+  let previousUid = auth.currentUser?.uid ?? null;
+  onIdTokenChanged(auth, (user) => {
+    const nextUid = user?.uid ?? null;
     if (initialNotification) {
       initialNotification = false;
+      previousUid = nextUid;
       return;
     }
+    const changed = authIdentityChanged(previousUid, nextUid);
+    previousUid = nextUid;
+    if (!changed) return;
     if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
   });
   observedAuthInstances.add(auth);
@@ -834,6 +841,20 @@ async function initializeFirebaseGuestServices() {
 const firebaseGuestServices = createRetryableInitializer(
   initializeFirebaseGuestServices,
 );
+
+function verifiedGuestAppCheckToken(result) {
+  // The SDK may resolve with a dummy token and an error after attestation
+  // failure. Never send that token to Firebase Auth as if it were valid.
+  if (
+    result?.error ||
+    typeof result?.token !== `string` ||
+    result.token.split(`.`).length !== 3
+  ) {
+    fail(`guest_attestation_failed`);
+  }
+  return result.token;
+}
+
 let guestModeActive = false;
 let guestVoiceComparisonRequested = false;
 const guestVoiceComparison = createGuestVoiceComparison();
@@ -1603,7 +1624,8 @@ async function startGuestMode() {
       const { appCheck } = guestServices;
       auth = guestServices.auth;
       if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
-      await getAppCheckToken(appCheck, false);
+      const attestation = await getAppCheckToken(appCheck, false);
+      verifiedGuestAppCheckToken(attestation);
       if (!guestStartGate.isCurrent(generation)) fail("guest_start_stale");
       // This named Firebase app owns only an in-memory guest identity. The
       // primary passkey Auth session is neither replaced nor signed out.
@@ -1630,6 +1652,9 @@ async function startGuestMode() {
       verifiedAccountUid = undefined;
       return Object.freeze({ state: "guest-ready" });
     } catch (error) {
+      if (error instanceof Error && error.message === `guest_attestation_failed`) {
+        throw error;
+      }
       if (
         error instanceof Error &&
         ["guest_start_failed", "guest_start_stale"].includes(error.message)
@@ -1887,6 +1912,12 @@ async function getStatus() {
     return Object.freeze({ state: "configuration-required" });
   }
   try {
+    // Guest Auth lives on a separate named Firebase app. The primary passkey
+    // Auth may correctly be signed out throughout the guest voice session.
+    if (guestModeActive) {
+      await secureCredentials();
+      return Object.freeze({ state: `guest-ready` });
+    }
     const { auth } = await firebaseAuth();
     if (!auth.currentUser) {
       return Object.freeze({ state: "identity-required" });

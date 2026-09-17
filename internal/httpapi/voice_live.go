@@ -641,6 +641,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		)
 		cancelPrepare()
 		if prepareErr != nil || !time.Now().Before(prepareDeadline) {
+			s.logger.WarnContext(liveCtx, `voice live preparation stopped`,
+				`error_class`, `provider_preparation_failed`)
 			preflightService.CancelPreparedLive(principal.UID)
 			finishVoiceLiveWithError(
 				liveCtx,
@@ -1171,6 +1173,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	for commitAt.IsZero() {
 		select {
 		case outcome := <-outcomeChannel:
+			s.logger.WarnContext(liveCtx, `voice live stopped before commit`,
+				`error_class`, `provider_early_exit`,
+				`input_frames`, inputFrames)
 			s.finishUnexpectedVoiceLiveOutcome(
 				r.Context(),
 				conn,
@@ -1205,6 +1210,9 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			}
 		case read := <-readChannel:
 			if read.err != nil {
+				s.logger.InfoContext(liveCtx, `voice live input closed before commit`,
+					`close_status`, int(websocket.CloseStatus(read.err)),
+					`input_frames`, inputFrames)
 				cancelLive()
 				s.logVoiceLiveSession(
 					liveCtx,

@@ -124,6 +124,24 @@ export function shouldShowVoiceReceipt(
   );
 }
 
+// Receipt is advisory UI, not an endpointing gate. Audio and UI clocks can
+// temporarily disagree; fail closed without stopping the recording interval.
+export function safeVoiceReceiptVisible(state) {
+  if (
+    !state ||
+    typeof state.hasSpeech !== `boolean` ||
+    !Number.isFinite(state.now) ||
+    state.now < 0 ||
+    (state.lastVoiceAt !== null &&
+      (!Number.isFinite(state.lastVoiceAt) ||
+        state.lastVoiceAt < 0 ||
+        state.lastVoiceAt > state.now))
+  ) {
+    return false;
+  }
+  return shouldShowVoiceReceipt(state);
+}
+
 const RESEARCH_STATUSES = Object.freeze([
   "none",
   "needs_primary_evidence",

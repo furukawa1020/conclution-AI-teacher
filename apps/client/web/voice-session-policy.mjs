@@ -142,6 +142,36 @@ export function safeVoiceReceiptVisible(state) {
   return shouldShowVoiceReceipt(state);
 }
 
+// Only finite error identifiers may reach browser diagnostics. Never log the
+// original exception, stack, credential, transcript, or provider response.
+const VOICE_FAILURE_CODES = Object.freeze([
+  `voice_api_unavailable`,
+  `voice_live_frame_invalid`,
+  `voice_live_start_invalid`,
+  `voice_response_invalid`,
+  `voice_turn_invalid`,
+  `voice_turn_timeout`,
+  `native_preflight_ready_invalid`,
+  `native_preflight_activate_invalid`,
+  `vad_sample_invalid`,
+  `voice_receipt_state_invalid`,
+  `capture_invalid`,
+  `capture_overflow`,
+  `request_cancelled`,
+]);
+
+export function safeVoiceFailureCode(error) {
+  const code = error?.message;
+  if (typeof code === `string` && VOICE_FAILURE_CODES.includes(code)) {
+    return code;
+  }
+  if (error?.name === `NotAllowedError`) return `browser_permission_denied`;
+  if (error?.name === `NotSupportedError`) return `browser_unsupported`;
+  if (error?.name === `AbortError`) return `browser_aborted`;
+  if (error?.name === `TypeError`) return `unclassified_type_error`;
+  return `unclassified`;
+}
+
 const RESEARCH_STATUSES = Object.freeze([
   "none",
   "needs_primary_evidence",

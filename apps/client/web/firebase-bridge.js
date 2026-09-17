@@ -32,6 +32,7 @@ import {
   isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
+  safeVoiceFailureCode,
   safeVoiceReceiptVisible,
   shouldCommitHybridEndpoint,
   shouldStopSessionForLifecycle,
@@ -288,6 +289,11 @@ function nextPcmCaptureGeneration() {
 
 function fail(code) {
   throw new Error(code);
+}
+
+function reportVoiceFailure(phase, error) {
+  // These are finite identifiers only. Never expose the exception itself.
+  globalThis.console?.warn?.(`KOTAE_VOICE_FAILURE`, phase, safeVoiceFailureCode(error));
 }
 
 function boundedLatency(value) {
@@ -3223,6 +3229,7 @@ async function beginTurn(
     if (prepareGeneration !== undefined) {
       cancelCurrentVoicePrepareSlo(prepareGeneration);
     }
+    reportVoiceFailure(`begin`, error);
     throw error;
   } finally {
     beginGate.release(beginToken);
@@ -3238,6 +3245,7 @@ async function waitForTurnEnd() {
   try {
     capture = await recording.turnEndedPromise;
   } catch (error) {
+    reportVoiceFailure(`wait`, error);
     activeLiveSession?.cancel(
       error instanceof Error ? error : new Error("request_cancelled"),
     );
@@ -4459,6 +4467,7 @@ async function startVoiceLiveSession({
 
   function failLive(error) {
     clearSlowReplayCandidateTimer();
+    reportVoiceFailure(`live`, error);
     if (
       state === "failed" ||
       state === "cancelled" ||
@@ -4567,6 +4576,9 @@ async function startVoiceLiveSession({
         lastSequence: captureExpectedSequence - 1,
         sealing: captureSealing,
       });
+      if (signal !== `sealed`) {
+        reportVoiceFailure(`worklet`, new Error(signal));
+      }
       if (
         signal === "capture_invalid" ||
         signal === "capture_overflow"
@@ -7507,6 +7519,7 @@ async function finishTurn(
       ? finalizeGuestAFirstSloResult(receipted)
       : receipted;
   } catch (error) {
+    reportVoiceFailure(`finish`, error);
     if (typeof silenceReceiptGate !== "undefined") {
       silenceReceiptGate.clear();
     }

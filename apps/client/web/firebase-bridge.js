@@ -32,8 +32,8 @@ import {
   isPendingDocumentExpired,
   isValidTurnMode,
   normalizeResearchDiscovery,
+  safeVoiceReceiptVisible,
   shouldCommitHybridEndpoint,
-  shouldShowVoiceReceipt,
   shouldStopSessionForLifecycle,
   VOICE_SESSION_LIMITS,
 } from "./voice-session-policy.mjs";
@@ -270,7 +270,7 @@ function setVoiceReceiptVisible(visible) {
 
 function updateVoiceReceipt(recording, now) {
   setVoiceReceiptVisible(
-    shouldShowVoiceReceipt({
+    safeVoiceReceiptVisible({
       hasSpeech: recording.vadHasSpeech,
       lastVoiceAt: recording.lastVoiceAt,
       now,

@@ -24,7 +24,7 @@ test('voice start owns credentials until same-turn fallback or cancellation', as
   assert.match(bridge, /const credentials = await secureCredentials\(true\)/u);
   assert.match(bridge, /const recording = createRecording\([\s\S]*?credentials,\s*\);/u);
   assert.match(bridge, /const turnCredentials = sameTurnCredentials\([\s\S]*?recording\.expectedEpoch,[\s\S]*?sessionEpoch/u);
-  assert.match(bridge, /turnCredentials === undefined\s*\? secureCredentials\(\)\s*: Promise\.resolve\(turnCredentials\)/u);
-  assert.match(bridge, /function rejectRecording\(recording, code\) \{\s*recording\.turnCredentials = undefined/u);
+  assert.match(bridge, /turnCredentials === undefined\s*\? secureCredentials\(\)\s*: turnCredentials/u);
+  assert.match(bridge, /function rejectRecording\(recording, code, source = "other"\) \{\s*recording\.turnCredentials = undefined/u);
   assert.match(bridge, /recording\.sessionContext = undefined;\s*recording\.turnCredentials = undefined;/u);
 });

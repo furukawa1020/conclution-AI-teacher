@@ -2377,7 +2377,7 @@ function armCandidateDeadline(recording, candidate, captureLimitMs) {
       return;
     }
     if (!discardCurrentCandidate(recording, "candidate-deadline")) {
-      rejectRecording(recording, "voice_turn_invalid");
+      rejectRecording(recording, "voice_turn_invalid", "candidate_lifecycle");
     }
   }, remainingMs);
   return true;
@@ -2409,9 +2409,19 @@ function discardCurrentCandidate(recording, reason = "candidate-rejected") {
   return stopDetachedCandidate(candidate);
 }
 
-function rejectRecording(recording, code) {
+function rejectRecording(recording, code, source = "other") {
   recording.turnCredentials = undefined;
   if (recording.settled) return;
+  if (code === "voice_turn_invalid") {
+    const allowed = [
+      "clock", "evidence_factory", "evidence_advance", "candidate_lifecycle",
+      "recorder_create", "recorder_error", "recorder_start", "recorder_stop",
+    ];
+    globalThis.console?.warn?.(
+      "KOTAE_VOICE_CAPTURE",
+      allowed.includes(source) ? source : "other",
+    );
+  }
   recording.settled = true;
   recording.discard = true;
   recording.sessionContext = undefined;
@@ -2436,7 +2446,7 @@ function resolveRecording(recording, candidate) {
     candidate !== undefined &&
     (!candidateEventIsCurrent(recording, candidate) || !candidate.confirmed)
   ) {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "candidate_lifecycle");
     return;
   }
   recording.settled = true;
@@ -2506,20 +2516,20 @@ function requestRecordingStop(recording, reason) {
   }
   if (!candidate || !candidate.confirmed) {
     if (!discardCurrentCandidate(recording)) {
-      rejectRecording(recording, "voice_turn_invalid");
+      rejectRecording(recording, "voice_turn_invalid", "candidate_lifecycle");
       return true;
     }
     resolveRecording(recording, undefined);
     return true;
   }
   if (candidate.recorder.state !== "recording") {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "recorder_stop");
     return true;
   }
   try {
     candidate.recorder.stop();
   } catch {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "recorder_stop");
   }
   return true;
 }
@@ -2585,7 +2595,7 @@ function startCandidateRecorder(
   try {
     recorder = new MediaRecorder(recording.stream, recorderOptions());
   } catch {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "recorder_create");
     return false;
   }
   const candidate = {
@@ -2642,7 +2652,7 @@ function startCandidateRecorder(
     "error",
     () => {
       if (candidateEventIsCurrent(recording, candidate)) {
-        rejectRecording(recording, "voice_turn_invalid");
+        rejectRecording(recording, "voice_turn_invalid", "recorder_error");
       }
     },
     { once: true },
@@ -2664,6 +2674,7 @@ function startCandidateRecorder(
           recording.discard
             ? recordingErrorCode(recording)
             : "voice_turn_invalid",
+          "recorder_stop",
         );
         return;
       }
@@ -2689,7 +2700,7 @@ function startCandidateRecorder(
     candidate.discarded = true;
     candidate.captureBuffer.clear();
     recording.totalBytes = 0;
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "recorder_start");
     return false;
   }
 }
@@ -2755,11 +2766,11 @@ function armVad(recording) {
   recording.vadPcm = pcm;
   const initialClock = currentTemporalVadClock();
   if (initialClock === null) {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "clock");
     return;
   }
   if (typeof quietEvidenceTrackerFactory !== "function") {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "evidence_factory");
     return;
   }
   try {
@@ -2768,7 +2779,7 @@ function armVad(recording) {
       initialClock.startedFrame,
     );
   } catch {
-    rejectRecording(recording, "voice_turn_invalid");
+    rejectRecording(recording, "voice_turn_invalid", "evidence_factory");
     return;
   }
   let vadState = createVadState(recording.startedAt, initialClock);
@@ -2796,7 +2807,7 @@ function armVad(recording) {
     const now = performance.now();
     const clockFrame = currentAudioContextFrame();
     if (clockFrame === null) {
-      rejectRecording(recording, "voice_turn_invalid");
+      rejectRecording(recording, "voice_turn_invalid", "clock");
       return;
     }
     try {
@@ -2851,7 +2862,7 @@ function armVad(recording) {
         },
       );
     } catch {
-      rejectRecording(recording, "voice_turn_invalid");
+      rejectRecording(recording, "voice_turn_invalid", "evidence_advance");
       return;
     }
     recording.firstVoiceAt = vadState.firstVoiceAt;
@@ -7387,18 +7398,28 @@ async function finishTurn(
       recording.expectedEpoch,
       sessionEpoch,
     );
+    const audioPromise = Promise.resolve()
+      .then(() => usesQuietHttpPcm
+        ? quietHttpAudioBuffer.enhanced
+        : capture.blob.arrayBuffer())
+      .catch((error) => {
+        finishPhase = `fallback_read`;
+        throw error;
+      });
+    const credentialsPromise = Promise.resolve()
+      .then(() => turnCredentials === undefined
+        ? secureCredentials()
+        : turnCredentials)
+      .catch((error) => {
+        finishPhase = `fallback_auth`;
+        throw error;
+      });
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
-      Promise.all([
-        usesQuietHttpPcm
-          ? Promise.resolve(quietHttpAudioBuffer.enhanced)
-          : capture.blob.arrayBuffer(),
-        turnCredentials === undefined
-          ? secureCredentials()
-          : Promise.resolve(turnCredentials),
-      ]),
+      Promise.all([audioPromise, credentialsPromise]),
       () => rejectRecording(recording, "voice_turn_timeout"),
     );
     recording.turnCredentials = undefined;
+    finishPhase = `fallback_base64`;
     try {
       audioBase64 = arrayBufferToBase64(audioBuffer);
       if (usesQuietHttpPcm) {

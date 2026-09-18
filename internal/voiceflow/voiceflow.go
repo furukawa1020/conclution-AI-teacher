@@ -530,6 +530,8 @@ func (p *Pipeline) processLive(
 	latestInterim := ""
 	candidateTracker := speculativeCandidateTracker{}
 	speculationAttempted := false
+	speculationInvalidated := false
+	var invalidatedSynthesis *speculativeSynthesis
 	var speculation *liveSpeculation
 	defer func() {
 		if speculation != nil {
@@ -568,6 +570,13 @@ func (p *Pipeline) processLive(
 		switch event.Kind {
 		case speechio.StreamingTranscriptionInterim:
 			latestInterim = event.Text
+			if canceledTTS, invalidated := invalidateRevisedSpeculation(
+				&speculation,
+				joinTranscript(finalFragments, latestInterim),
+			); invalidated {
+				speculationInvalidated = true
+				invalidatedSynthesis = canceledTTS
+			}
 			if !speculationEligible || speculationAttempted {
 				continue
 			}
@@ -625,6 +634,12 @@ func (p *Pipeline) processLive(
 			notifyEndpoint()
 		}
 		finalTranscript := strings.Join(finalFragments, " ")
+		if canceledTTS, invalidated := invalidateRevisedSpeculation(
+			&speculation, finalTranscript,
+		); invalidated {
+			speculationInvalidated = true
+			invalidatedSynthesis = canceledTTS
+		}
 		if utf8.RuneCountInString(finalTranscript) >
 			conversation.MaxUtteranceRunes {
 			receiveErr = speechio.ErrTranscriptLong
@@ -738,10 +753,18 @@ func (p *Pipeline) processLive(
 	specHit := int64(0)
 	specMiss := int64(0)
 	specCancel := int64(0)
+	if speculationInvalidated {
+		specCancel = 1
+	}
 	firstTTSChunkMS := int64(-1)
 	ttsPrestarted := int64(0)
 	ttsBufferedBytes := int64(0)
 	ttsReleaseMS := int64(-1)
+	if invalidatedSynthesis != nil {
+		ttsPrestarted = 1
+		ttsBufferedBytes = invalidatedSynthesis.buffer.peakBufferedBytes()
+		firstTTSChunkMS = invalidatedSynthesis.firstChunkMS()
+	}
 	prestartedTTSDone := false
 	terminalSynthesisFailure := false
 	cancelSpeculation := func() {
@@ -1111,6 +1134,22 @@ func (speculation *liveSpeculation) cancel() *speculativeSynthesis {
 	}
 	speculation.mu.Unlock()
 	return synthesis
+}
+
+// A nonempty revision revokes an uncommitted candidate immediately. Its PCM
+// buffer is discarded synchronously; a provider that ignores cancellation
+// cannot publish the old reply. The final-caption path runs separately.
+func invalidateRevisedSpeculation(
+	current **liveSpeculation,
+	revised string,
+) (*speculativeSynthesis, bool) {
+	if *current == nil || revised == "" ||
+		speculationTextsMatch((*current).candidate, revised) {
+		return nil, false
+	}
+	stale := *current
+	*current = nil
+	return stale.cancel(), true
 }
 
 func startSpeculativeSynthesis(

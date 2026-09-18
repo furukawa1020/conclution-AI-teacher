@@ -36,9 +36,10 @@ test('live and worklet failures retain finite diagnostic codes', async () => {
 test('finish stages and stop reasons are finite diagnostics', async () => {
   assert.equal(safeVoiceFailureCode(new Error('no_speech')), 'no_speech');
   const bridge = await readFile(new URL('../web/firebase-bridge.js', import.meta.url), 'utf8');
-  for (const phase of ['turn_end', 'live_commit', 'live_playback', 'fallback_capture', 'fallback_encode', 'http_request', 'http_playback']) {
+  for (const phase of ['turn_end', 'live_commit', 'live_playback', 'fallback_capture', 'fallback_encode', 'fallback_read', 'fallback_auth', 'fallback_base64', 'http_request', 'http_playback']) {
     assert.ok(bridge.includes(`finishPhase = \`${phase}\``));
   }
   assert.match(bridge, /reportVoiceFailure\(finishPhase, error\)/u);
   assert.match(bridge, /KOTAE_VOICE_STOP/u);
+  assert.match(bridge, /KOTAE_VOICE_CAPTURE/u);
 });

@@ -1359,10 +1359,9 @@ test("voice upload conversion overlaps same-turn or refreshed credentials", asyn
   assert.notEqual(end, -1);
   const finish = bridge.slice(start, end);
 
-  assert.match(
-    finish,
-    /Promise\.all\(\[\s*usesQuietHttpPcm\s*\? Promise\.resolve\(quietHttpAudioBuffer\.enhanced\)\s*:\s*capture\.blob\.arrayBuffer\(\),\s*turnCredentials === undefined\s*\? secureCredentials\(\)\s*:\s*Promise\.resolve\(turnCredentials\),\s*\]\)/u,
-  );
+  assert.match(finish, /const audioPromise = Promise\.resolve\(\)[\s\S]*?capture\.blob\.arrayBuffer\(\)/u);
+  assert.match(finish, /const credentialsPromise = Promise\.resolve\(\)[\s\S]*?secureCredentials\(\)/u);
+  assert.match(finish, /Promise\.all\(\[audioPromise, credentialsPromise\]\)/u);
   const joinedAt = finish.indexOf("Promise.all([");
   const encodeAt = finish.indexOf("arrayBufferToBase64(audioBuffer)");
   assert.ok(joinedAt >= 0);

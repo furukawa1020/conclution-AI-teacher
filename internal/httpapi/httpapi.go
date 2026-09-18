@@ -1498,13 +1498,15 @@ func (s *Server) rejectCrossSiteWrites(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 			origins := r.Header.Values("Origin")
-			directVoiceStream := r.URL.Path == voiceStreamPath &&
+			directBrowserAPI := (r.URL.Path == voiceStreamPath ||
+				r.URL.Path == longTermMemoryContextBeginPath ||
+				r.URL.Path == longTermMemoryContextConsumePath) &&
 				len(origins) == 1 &&
 				origins[0] == allowedWebOrigin
 			if len(origins) != 1 ||
 				origins[0] != allowedWebOrigin ||
 				(strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") &&
-					!directVoiceStream) {
+					!directBrowserAPI) {
 				writeProblem(w, http.StatusForbidden, "cross_site_request", "Cross-site writes are not allowed.")
 				return
 			}

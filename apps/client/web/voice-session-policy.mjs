@@ -159,6 +159,11 @@ const VOICE_FAILURE_CODES = Object.freeze([
   `session_expired`,
   `voice_interrupted`,
   `voice_live_handoff_timeout`,
+  `authentication_failed`,
+  `passkey_required`,
+  `guest_session_expired`,
+  `identity_verification_failed`,
+  `account_boundary_changed`,
   `native_preflight_ready_invalid`,
   `native_preflight_activate_invalid`,
   `vad_sample_invalid`,
@@ -178,6 +183,32 @@ export function safeVoiceFailureCode(error) {
   if (error?.name === `AbortError`) return `browser_aborted`;
   if (error?.name === `TypeError`) return `unclassified_type_error`;
   return `unclassified`;
+}
+
+// The already authenticated start token may serve only the same bounded turn.
+// The server still verifies both tokens on the HTTP fallback request.
+export function sameTurnCredentials(value, recordingEpoch, currentEpoch) {
+  if (
+    !Number.isSafeInteger(recordingEpoch) ||
+    recordingEpoch < 0 ||
+    recordingEpoch !== currentEpoch ||
+    value === null ||
+    typeof value !== `object` ||
+    !Object.isFrozen(value) ||
+    Reflect.ownKeys(value).length !== 2 ||
+    !Reflect.ownKeys(value).every((key) =>
+      key === `appCheckToken` || key === `idToken`
+    )
+  ) return undefined;
+  for (const token of [value.appCheckToken, value.idToken]) {
+    if (
+      typeof token !== `string` ||
+      token.length === 0 ||
+      token.length > 8 * 1024 ||
+      /\s/u.test(token)
+    ) return undefined;
+  }
+  return value;
 }
 
 const RESEARCH_STATUSES = Object.freeze([

@@ -1826,10 +1826,12 @@ func TestPipelineLiveReleasesFullPrestartedTTSInOrder(t *testing.T) {
 	}
 }
 
-func TestPipelineLiveDiscardsPrestartedTTSOnFinalMismatch(t *testing.T) {
+func TestPipelineLiveDiscardsPrestartedTTSOnInterimRevision(t *testing.T) {
 	t.Parallel()
 	const interim = "先読み時点の質問内容です"
+	revisionGate := make(chan struct{})
 	finalGate := make(chan struct{})
+	providerHold := make(chan struct{})
 	session := newFakeLiveTranscriptionSession(
 		speechio.StreamingTranscriptionEvent{
 			Kind:      speechio.StreamingTranscriptionInterim,
@@ -1842,18 +1844,26 @@ func TestPipelineLiveDiscardsPrestartedTTSOnFinalMismatch(t *testing.T) {
 			Stability: 0.95,
 		},
 		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      "確定時点では異なる質問です",
+			Stability: 0.9,
+		},
+		speechio.StreamingTranscriptionEvent{
 			Kind: speechio.StreamingTranscriptionFinal,
 			Text: "確定時点では異なる質問です",
 		},
 	)
-	session.eventGates = map[int]<-chan struct{}{2: finalGate}
+	session.eventGates = map[int]<-chan struct{}{
+		2: revisionGate, 3: finalGate,
+	}
 	speech := &scriptedLiveSpeech{
 		session: session,
 		scripts: []scriptedSynthesis{
-			{chunks: [][]byte{{9, 0}}},
+			{chunks: [][]byte{{9, 0}}, beforeReturn: providerHold},
 			{chunks: [][]byte{{7, 0}}},
 		},
 		completed: make(chan int, 2),
+		returned:  make(chan int, 2),
 	}
 	agent := &speculativeTestAgent{
 		speculativeResult: liveTestDecision(
@@ -1909,6 +1919,15 @@ func TestPipelineLiveDiscardsPrestartedTTSOnFinalMismatch(t *testing.T) {
 	outputMu.Unlock()
 	if preFinalBytes != 0 {
 		t.Fatalf("pre-final output bytes=%d", preFinalBytes)
+	}
+	close(revisionGate)
+	select {
+	case call := <-speech.returned:
+		if call != 0 {
+			t.Fatalf("canceled synthesis call=%d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revised interim did not cancel the old synthesis")
 	}
 	close(finalGate)
 	var outcome pipelineOutcome

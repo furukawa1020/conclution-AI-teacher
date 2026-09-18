@@ -34,19 +34,21 @@ type captionHandoff struct {
 	onAudio         func([]byte) error
 	onCoachActive   func(httpapi.VoiceRespondentCheckpoint) error
 
-	tracker              speculativeCandidateTracker
-	speculation          *liveSpeculation
-	speculationAttempted bool
-	latestCaption        string
-	finalObserved        bool
-	finalObservedAt      time.Time
-	committed            bool
-	canceled             bool
-	finished             bool
-	audioAuthorized      bool
-	firstOutputAt        time.Time
-	outputDelivered      bool
-	firstOutputMu        sync.Mutex
+	tracker                speculativeCandidateTracker
+	speculation            *liveSpeculation
+	speculationAttempted   bool
+	speculationInvalidated bool
+	invalidatedSynthesis   *speculativeSynthesis
+	latestCaption          string
+	finalObserved          bool
+	finalObservedAt        time.Time
+	committed              bool
+	canceled               bool
+	finished               bool
+	audioAuthorized        bool
+	firstOutputAt          time.Time
+	outputDelivered        bool
+	firstOutputMu          sync.Mutex
 }
 
 // OpenCaptionHandoff opens no recognizer. It accepts only a Native Audio turn
@@ -119,6 +121,12 @@ func (handoff *captionHandoff) Observe(
 	if final {
 		handoff.finalObserved = true
 		handoff.finalObservedAt = observedAt
+	}
+	if canceledTTS, invalidated := invalidateRevisedSpeculation(
+		&handoff.speculation, caption,
+	); invalidated {
+		handoff.speculationInvalidated = true
+		handoff.invalidatedSynthesis = canceledTTS
 	}
 	if handoff.speculationAttempted || caption == "" ||
 		!voiceResponseExpected(handoff.input) {
@@ -221,7 +229,15 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 	specHit := int64(0)
 	specMiss := int64(0)
 	specCancel := int64(0)
+	if handoff.speculationInvalidated {
+		specCancel = 1
+	}
 	ttsPrestarted := int64(0)
+	if handoff.invalidatedSynthesis != nil {
+		ttsPrestarted = 1
+		ttsBufferedBytes = handoff.invalidatedSynthesis.buffer.peakBufferedBytes()
+		firstTTSChunkMS = handoff.invalidatedSynthesis.firstChunkMS()
+	}
 	prestartedTTSDone := false
 	adoptedDecision := false
 	var result httpapi.VoiceTurnResult

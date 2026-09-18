@@ -826,6 +826,112 @@ func TestCaptionHandoffMismatchDoesNotWaitForCanceledSynthesis(t *testing.T) {
 	}
 }
 
+func TestCaptionHandoffRevisionDiscardsSpeculationBeforeFinal(t *testing.T) {
+	speech := &nonCooperativeCaptionSynthesis{
+		captionHandoffNoSTTSpeech: &captionHandoffNoSTTSpeech{
+			scriptedLiveSpeech: &scriptedLiveSpeech{},
+		},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		lateErr: make(chan error, 1),
+	}
+	defer func() {
+		select {
+		case <-speech.release:
+		default:
+			close(speech.release)
+		}
+	}()
+	speculative := captionHandoffRespondentDecision()
+	speculative.SpokenReply = "speculative reply"
+	speculative.StateToken = "speculative-state"
+	committed := captionHandoffRespondentDecision()
+	committed.SpokenReply = "committed reply"
+	committed.StateToken = "committed-state"
+	pipeline, err := New(speech, &speculativeTestAgent{
+		speculativeResult: speculative,
+		normalResult:      committed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processingCommitted := make(chan struct{})
+	var delivered []byte
+	handoff, err := pipeline.OpenCaptionHandoff(
+		context.Background(),
+		"uid-caption-revision",
+		httpapi.VoiceTurnInput{
+			MIMEType:            speechio.StreamingAudioContentType,
+			NativeAudio:         true,
+			ProcessingCommitted: processingCommitted,
+		},
+		func(chunk []byte) error {
+			delivered = append(delivered, chunk...)
+			return nil
+		},
+		func(checkpoint httpapi.VoiceRespondentCheckpoint) error {
+			if checkpoint.SessionState != "committed-state" {
+				return errors.New("stale speculative checkpoint")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	const candidate = "My manager asked why the change was needed."
+	const revised = "My manager asked what the change was for."
+	for _, at := range []time.Time{
+		started, started.Add(minSpeculativeStableDuration),
+	} {
+		if err := handoff.Observe([]byte(candidate), false, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-speech.started:
+	case <-time.After(time.Second):
+		t.Fatal("speculative synthesis did not start")
+	}
+	if err := handoff.Observe(
+		[]byte(revised), false,
+		started.Add(minSpeculativeStableDuration+time.Millisecond),
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(speech.release)
+	select {
+	case lateErr := <-speech.lateErr:
+		if lateErr == nil {
+			t.Fatal("revised caption did not discard old PCM")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old synthesis did not stop before final")
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("old PCM escaped before final: %v", delivered)
+	}
+	if err := handoff.Observe(
+		[]byte(revised), true,
+		started.Add(minSpeculativeStableDuration+2*time.Millisecond),
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(processingCommitted)
+	result, err := handoff.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Caption != "committed reply" ||
+		result.LiveTimings.SpecCancel != 1 ||
+		result.LiveTimings.SpecMiss != 1 ||
+		result.LiveTimings.TTSPrestarted != 1 ||
+		string(delivered) != string([]byte{2, 0}) {
+		t.Fatalf("wrong committed response: result=%+v audio=%v", result, delivered)
+	}
+}
+
 type cancelBlockingCaptionHandoffAgent struct {
 	started chan struct{}
 	once    sync.Once

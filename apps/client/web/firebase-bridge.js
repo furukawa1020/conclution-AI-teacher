@@ -110,6 +110,7 @@ import {
   classifyVoiceLatencyDevice,
   classifyVoiceLatencyNetwork,
   loadVoiceLatencyRevision,
+  VOICE_LATENCY_TRANSPORTS,
 } from "./voice-latency-trace-policy.mjs";
 
 const EXPECTED_PROJECT_ID = "kotae-ai-u22-2026";
@@ -7433,6 +7434,7 @@ async function finishTurn(
       }
       quietHttpAudioBuffer = undefined;
     }
+    finishPhase = `http_prepare`;
     httpAudioMimeType = usesQuietHttpPcm
       ? "audio/l16"
       : capture.mimeType;

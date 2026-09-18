@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { safeVoiceFailureCode } from "../web/voice-session-policy.mjs";
+import { safeVoiceFailureCode, zeroizeCaptureFrame } from "../web/voice-session-policy.mjs";
 
 test("voice diagnostic discloses only finite codes, never arbitrary errors", () => {
   assert.equal(safeVoiceFailureCode(new Error("voice_live_frame_invalid")), "voice_live_frame_invalid");
@@ -42,4 +42,17 @@ test('finish stages and stop reasons are finite diagnostics', async () => {
   assert.match(bridge, /reportVoiceFailure\(finishPhase, error\)/u);
   assert.match(bridge, /KOTAE_VOICE_STOP/u);
   assert.match(bridge, /KOTAE_VOICE_CAPTURE/u);
+});
+
+test('Native HTTP fallback can zeroize all PCM buffers outside the live-session closure', async () => {
+  const bridge = await readFile(new URL('../web/firebase-bridge.js', import.meta.url), 'utf8');
+  assert.match(bridge, /import \{[\s\S]*?zeroizeCaptureFrame,[\s\S]*?\} from "\.\/voice-session-policy\.mjs"/u);
+  assert.doesNotMatch(bridge, /function zeroizeCaptureFrame\(/u);
+  assert.match(bridge, /zeroizeCaptureFrame\(audioBuffer\)/u);
+  assert.match(bridge, /zeroizeCaptureFrame\(quietHttpAudioBuffer\.baseline\)/u);
+  assert.match(bridge, /zeroizeCaptureFrame\(quietHttpAudioBuffer\.weak\)/u);
+  const frame = new Uint8Array(640).fill(173);
+  zeroizeCaptureFrame(frame.buffer);
+  assert.ok(frame.every((byte) => byte === 0));
+  assert.doesNotThrow(() => zeroizeCaptureFrame(undefined));
 });

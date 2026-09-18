@@ -38,6 +38,7 @@ import {
   shouldCommitHybridEndpoint,
   shouldStopSessionForLifecycle,
   VOICE_SESSION_LIMITS,
+  zeroizeCaptureFrame,
 } from "./voice-session-policy.mjs";
 import {
   advanceInterruptVad,
@@ -4187,12 +4188,6 @@ async function startVoiceLiveSession({
   void readyPromise.catch(() => {});
   void resultPromise.catch(() => {});
 
-  function zeroizeCaptureFrame(frame) {
-    if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
-      new Uint8Array(frame).fill(0);
-    }
-  }
-
   function discardCaptureMessage(event) {
     zeroizeCaptureFrame(event?.data?.pcm);
     zeroizeCaptureFrame(event?.data?.baselinePcm);
@@ -7431,7 +7426,7 @@ async function finishTurn(
         );
       }
     } finally {
-      new Uint8Array(audioBuffer).fill(0);
+      zeroizeCaptureFrame(audioBuffer);
       if (usesQuietHttpPcm) {
         zeroizeCaptureFrame(quietHttpAudioBuffer.baseline);
         zeroizeCaptureFrame(quietHttpAudioBuffer.weak);

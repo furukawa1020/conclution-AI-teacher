@@ -1390,7 +1390,7 @@ test("reviewed Native failure transfers quiet Rust PCM once before cancelling", 
   assert.match(finish, /baselineAudioBase64 = arrayBufferToBase64/u);
   assert.match(finish, /\{ baselineAudioBase64 \}/u);
   assert.match(finish, /\? "audio\/l16"\s*:\s*capture\.mimeType/u);
-  assert.match(finish, /new Uint8Array\(audioBuffer\)\.fill\(0\)/u);
+  assert.match(finish, /zeroizeCaptureFrame\(audioBuffer\)/u);
 });
 
 test("failed Native preparation keeps the quiet AudioWorklet as HTTP owner", async () => {

@@ -185,6 +185,14 @@ export function safeVoiceFailureCode(error) {
   return `unclassified`;
 }
 
+// Shared by live capture and Native-to-HTTP fallback. Keep the zeroizer in
+// module scope so fallback cleanup cannot reference a live-session closure.
+export function zeroizeCaptureFrame(frame) {
+  if (frame instanceof ArrayBuffer && frame.byteLength > 0) {
+    new Uint8Array(frame).fill(0);
+  }
+}
+
 // The already authenticated start token may serve only the same bounded turn.
 // The server still verifies both tokens on the HTTP fallback request.
 export function sameTurnCredentials(value, recordingEpoch, currentEpoch) {

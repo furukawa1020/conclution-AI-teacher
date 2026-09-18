@@ -679,6 +679,51 @@ func TestStandaloneGreetingEligibilityIsStrict(t *testing.T) {
 	}
 }
 
+func TestGreetingClearsExerciseButPreservesPriorConversationContext(t *testing.T) {
+	fake := &fakeGenerator{}
+	agent := newTestAgent(t, fake)
+	const uid = "uid-pending-greeting"
+	initial := conversationState{
+		Turn: 4,
+		Graph: ThoughtStateGraph{
+			Goals: []string{}, Claims: []string{}, Grounds: []string{},
+			Assumptions: []string{}, Constraints: []string{},
+			OpenLoops: []string{}, Contradictions: []string{},
+			Decisions: []string{},
+		},
+		ConversationSummary: "先ほどの会話の要点",
+		PendingAnswer: PendingAnswerFrame{
+			Active: true, Operator: answercontract.OperatorOpen,
+			Subject:       "今の問い",
+			RequiredSlots: []answercontract.RequiredSlot{answercontract.SlotPosition},
+		},
+		LastIntervention: ArbiterDecision{Act: "silent"},
+	}
+	token, err := agent.codec.seal(uid, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.Process(context.Background(), uid, VoiceTurn{
+		SchemaVersion: SchemaVersion, Utterance: "こんにちは", StateToken: token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Route != "phatic-local" ||
+		result.SpokenReply != phaticLocalSpokenReply || len(fake.calls) != 0 {
+		t.Fatalf("pending greeting escaped local route: %#v", result)
+	}
+	next, err := agent.codec.open(uid, result.StateToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Turn != initial.Turn+1 ||
+		next.PendingAnswer.Active ||
+		next.ConversationSummary != initial.ConversationSummary {
+		t.Fatalf("greeting lost conversation context or retained the old exercise: %#v", next)
+	}
+}
+
 func TestAgentGreetingWithQuestionStillUsesAuditedModelPath(t *testing.T) {
 	plan := validModelPlan()
 	fake := &fakeGenerator{generations: []fakeGeneration{

@@ -1641,6 +1641,11 @@ func (p *Pipeline) prepareTurn(
 				routeClarifyNoSpeech,
 			), lowConfidencePrompt, nil
 		}
+		slog.WarnContext(ctx, "transcription failed",
+			"request_id", input.RequestID,
+			"failure_class", speechio.RecognitionFailureClass(err),
+			"input_format", recognitionInputFormat(input.MIMEType),
+		)
 		return httpapi.VoiceTurnResult{}, "", httpapi.NewVoicePipelineFailure(
 			httpapi.VoicePipelineStageTranscribe,
 		)
@@ -1661,6 +1666,19 @@ func (p *Pipeline) prepareTurn(
 		false,
 		conversation.FloorEvidenceUnknown,
 	)
+}
+
+func recognitionInputFormat(mimeType string) string {
+	switch mimeType {
+	case "audio/l16":
+		return "pcm16"
+	case "audio/webm", "audio/webm;codecs=opus":
+		return "webm"
+	case "audio/mp4":
+		return "mp4"
+	default:
+		return "other"
+	}
 }
 
 func transcriptionContextWithResponseReserve(

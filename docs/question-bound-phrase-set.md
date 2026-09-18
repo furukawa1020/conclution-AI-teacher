@@ -6,7 +6,7 @@ Issue #102 の第一境界は、Cloud Speech-to-Text V2へ永続PhraseSet resour
 
 認識は次の順序です。
 
-1. 既存の東京 `chirp_3` 設定でbaselineを一度だけ認識する。
+1. 東京 `short` 設定でbaselineを一度だけ認識する。
 2. baselineがconfidence 0.65以上なら、その結果を返してadapted requestを送らない。
 3. baselineが空または不足した時だけ、同じ音声を単回inline PhraseSet付きで認識する。
 4. adaptedも0.65未満なら認識missへ倒す。

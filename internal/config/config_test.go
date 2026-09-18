@@ -140,8 +140,8 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.MaxVoiceBytes != 13*1024*1024 {
 		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)
 	}
-	if cfg.SpeechModel != "chirp_3" {
-		t.Fatalf("speech model = %q; want chirp_3", cfg.SpeechModel)
+	if cfg.SpeechModel != "short" {
+		t.Fatalf("speech model = %q; want short", cfg.SpeechModel)
 	}
 	if cfg.SpeechVoice != "ja-JP-Chirp3-HD-Kore" {
 		t.Fatalf(
@@ -558,16 +558,16 @@ func TestLoadRejectsMalformedPriorityFlag(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsExplicitChirp3SpeechModel(t *testing.T) {
+func TestLoadAcceptsExplicitShortSpeechModel(t *testing.T) {
 	setTestEnvironment(t)
-	t.Setenv("KOTAE_SPEECH_MODEL", "chirp_3")
+	t.Setenv("KOTAE_SPEECH_MODEL", "short")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SpeechModel != "chirp_3" {
-		t.Fatalf("speech model = %q; want chirp_3", cfg.SpeechModel)
+	if cfg.SpeechModel != "short" {
+		t.Fatalf("speech model = %q; want short", cfg.SpeechModel)
 	}
 }
 
@@ -621,8 +621,8 @@ func TestLoadRejectsUnsafeRateLimitOverrides(t *testing.T) {
 		{name: "request timeout collides with write deadline", key: "KOTAE_REQUEST_TIMEOUT", value: "51s"},
 		{name: "voice timeout leaves no speech reserve", key: "KOTAE_VOICE_TIMEOUT", value: "14s"},
 		{name: "voice timeout collides with write deadline", key: "KOTAE_VOICE_TIMEOUT", value: "51s"},
-		{name: "single utterance speech primary", key: "KOTAE_SPEECH_MODEL", value: "short"},
-		{name: "retired speech primary", key: "KOTAE_SPEECH_MODEL", value: "long"},
+		{name: "unavailable speech primary", key: "KOTAE_SPEECH_MODEL", value: "chirp_3"},
+		{name: "streaming-only speech primary", key: "KOTAE_SPEECH_MODEL", value: "long"},
 		{name: "unreviewed alias speech primary", key: "KOTAE_SPEECH_MODEL", value: "latest_long"},
 		{name: "unreviewed speech voice", key: "KOTAE_SPEECH_VOICE", value: "ja-JP-Neural2-B"},
 		{name: "unreviewed native model", key: "KOTAE_NATIVE_AUDIO_MODEL", value: "gemini-live-latest"},

@@ -22,7 +22,7 @@ func pairedStreamingService(
 	next := 0
 	return &CloudService{
 		recognizer:  "projects/project/locations/asia-northeast1/recognizers/_",
-		speechModel: "chirp_3",
+		speechModel: "short",
 		streamRecognizeCall: func(context.Context) (streamingRecognizeClient, error) {
 			mutex.Lock()
 			defer mutex.Unlock()
@@ -218,7 +218,7 @@ func TestPairedAgreementRejectsInvalidUTF8(t *testing.T) {
 func TestNewCloudServiceRejectsNonConversationModelBeforeClientInitialization(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"", "short", "latest_short", "latest_long", "long"} {
+	for _, model := range []string{"", "chirp_3", "latest_short", "latest_long", "long"} {
 		model := model
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()
@@ -310,19 +310,19 @@ func TestRecognizedTextHandlesEmptyResponse(t *testing.T) {
 	}
 }
 
-func TestTranscribeUsesOnlyConfiguredChirp3Model(t *testing.T) {
+func TestTranscribeUsesOnlyConfiguredShortModel(t *testing.T) {
 	t.Parallel()
 
 	var calls int
 	service := &CloudService{
-		speechModel: "chirp_3",
+		speechModel: "short",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			if request.Config.Model != "chirp_3" {
-				t.Fatalf("model = %q; want chirp_3", request.Config.Model)
+			if request.Config.Model != "short" {
+				t.Fatalf("model = %q; want short", request.Config.Model)
 			}
 			if len(request.Config.LanguageCodes) != 1 ||
 				request.Config.LanguageCodes[0] != "ja-JP" {
@@ -361,7 +361,7 @@ func TestTranscribeUsesOnlyConfiguredChirp3Model(t *testing.T) {
 	}
 }
 
-func TestTranscribePCM16UsesExplicitJapaneseChirp3Contract(t *testing.T) {
+func TestTranscribePCM16UsesExplicitJapaneseLongContract(t *testing.T) {
 	t.Parallel()
 	stream := &fakeStreamingRecognizeClient{recv: []streamingRecognizeReceive{
 		{response: &speechpb.StreamingRecognizeResponse{
@@ -370,7 +370,7 @@ func TestTranscribePCM16UsesExplicitJapaneseChirp3Contract(t *testing.T) {
 			},
 		}},
 	}}
-	service := streamingTestService(stream, "chirp_3")
+	service := streamingTestService(stream, "short")
 	audio := make([]byte, maxStreamingPCMBytes+640)
 	text, confidence, err := service.TranscribePCM16(
 		context.Background(),
@@ -403,14 +403,14 @@ func TestTranscribeReturnsProviderErrorWithoutRetry(t *testing.T) {
 
 	var calls int
 	service := &CloudService{
-		speechModel: "chirp_3",
+		speechModel: "short",
 		recognizeCall: func(
 			_ context.Context,
 			request *speechpb.RecognizeRequest,
 		) (*speechpb.RecognizeResponse, error) {
 			calls++
-			if request.Config.Model != "chirp_3" {
-				t.Fatalf("model = %q; want chirp_3", request.Config.Model)
+			if request.Config.Model != "short" {
+				t.Fatalf("model = %q; want short", request.Config.Model)
 			}
 			return nil, status.Error(
 				codes.PermissionDenied,
@@ -437,7 +437,7 @@ func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 
 	var calls int
 	service := &CloudService{
-		speechModel: "chirp_3",
+		speechModel: "short",
 		recognizeCall: func(
 			_ context.Context,
 			_ *speechpb.RecognizeRequest,
@@ -459,7 +459,7 @@ func TestTranscribeRejectsEmptyAudioBeforeProviderCall(t *testing.T) {
 func TestTranscribeRejectsNonConversationModelBeforeProviderCall(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"", "short", "latest_short", "latest_long", "long"} {
+	for _, model := range []string{"", "chirp_3", "latest_short", "latest_long", "long"} {
 		model := model
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()

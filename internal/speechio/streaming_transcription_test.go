@@ -13,7 +13,7 @@ import (
 func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 	t.Parallel()
 	stream := &fakeStreamingRecognizeClient{}
-	service := streamingTestService(stream, "chirp_3")
+	service := streamingTestService(stream, "short")
 	session, err := service.OpenStreamingTranscription(context.Background())
 	if err != nil || session == nil {
 		t.Fatalf("open: session=%v err=%v", session, err)
@@ -37,7 +37,7 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 		explicit.AudioChannelCount != StreamingInputChannelCount {
 		t.Fatalf("decoding=%+v", explicit)
 	}
-	if config.Config.Model != "chirp_3" ||
+	if config.Config.Model != "long" ||
 		len(config.Config.LanguageCodes) != 1 ||
 		config.Config.LanguageCodes[0] != "ja-JP" ||
 		config.Config.Features == nil ||
@@ -51,21 +51,21 @@ func TestOpenStreamingTranscriptionSendsExplicitPCMConfigFirst(t *testing.T) {
 	}
 }
 
-func TestStreamingRecognitionConfigUsesReviewedChirp3ModelWithoutUnsupportedEndpointing(t *testing.T) {
+func TestStreamingRecognitionConfigUsesReviewedLongModelWithoutUnsupportedEndpointing(t *testing.T) {
 	t.Parallel()
-	chirp := streamingRecognitionConfigRequest("recognizer", " chirp_3 ").
+	configured := streamingRecognitionConfigRequest("recognizer", " long ").
 		GetStreamingConfig()
-	if chirp.Config.Model != "chirp_3" ||
-		chirp.StreamingFeatures.EndpointingSensitivity !=
+	if configured.Config.Model != "long" ||
+		configured.StreamingFeatures.EndpointingSensitivity !=
 			speechpb.StreamingRecognitionFeatures_ENDPOINTING_SENSITIVITY_UNSPECIFIED {
-		t.Fatalf("chirp_3 config=%+v", chirp)
+		t.Fatalf("long config=%+v", configured)
 	}
 }
 
 func TestOpenStreamingTranscriptionRejectsNonConversationModelBeforeProviderCall(t *testing.T) {
 	t.Parallel()
 
-	for _, model := range []string{"", "short", "latest_short", "latest_long", "long"} {
+	for _, model := range []string{"", "chirp_3", "latest_short", "latest_long", "long"} {
 		model := model
 		t.Run(model, func(t *testing.T) {
 			t.Parallel()
@@ -249,7 +249,7 @@ func TestStreamingTranscriptionCancellationAndTransportFailures(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	stream := &fakeStreamingRecognizeClient{}
-	session, err := streamingTestService(stream, "chirp_3").
+	session, err := streamingTestService(stream, "short").
 		OpenStreamingTranscription(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestStreamingTranscriptionCancellationAndTransportFailures(t *testing.T) {
 	}
 
 	startErr := errors.New("start failed")
-	service := streamingTestService(nil, "chirp_3")
+	service := streamingTestService(nil, "short")
 	service.streamRecognizeCall = func(context.Context) (streamingRecognizeClient, error) {
 		return nil, startErr
 	}
@@ -341,7 +341,7 @@ func openStreamingTestSession(
 	stream streamingRecognizeClient,
 ) StreamingTranscriptionSession {
 	t.Helper()
-	session, err := streamingTestService(stream, "chirp_3").
+	session, err := streamingTestService(stream, "short").
 		OpenStreamingTranscription(context.Background())
 	if err != nil {
 		t.Fatal(err)

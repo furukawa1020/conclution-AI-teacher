@@ -21,7 +21,8 @@ const (
 	maxSpokenReplyRunes        = 1_200
 	maxStreamingAudioChunkSize = 1 << 20
 	maxStreamingAudioTotalSize = 16 << 20
-	conversationSpeechModel    = "chirp_3"
+	conversationSpeechModel    = "short"
+	streamingSpeechModel       = "long"
 
 	// StreamingAudioContentType describes the raw audio bytes returned by
 	// StreamSynthesize. The stream has no container or file header.
@@ -413,7 +414,7 @@ func reviewedJapaneseRecognitionFeatures() *speechpb.RecognitionFeatures {
 
 func validateConversationSpeechModel(model string) error {
 	if model != conversationSpeechModel {
-		return errors.New("speech model is not the reviewed Japanese Chirp 3 recognizer")
+		return errors.New("speech model is not the reviewed Japanese short recognizer")
 	}
 	return nil
 }

@@ -30,7 +30,7 @@ func TestQuestionBoundPhraseSetUsesOnlyInlineBoundedPhrasesAfterBaselineMiss(t *
 	}
 	var requests []*speechpb.RecognizeRequest
 	service := &CloudService{
-		speechModel: "chirp_3",
+		speechModel: "short",
 		recognizeCall: func(_ context.Context, request *speechpb.RecognizeRequest) (*speechpb.RecognizeResponse, error) {
 			requests = append(requests, request)
 			if len(requests) == 1 {
@@ -78,7 +78,7 @@ func TestQuestionBoundPhraseSetSkipsAdaptedRequestWhenBaselineIsSufficient(t *te
 	set := validPhraseSet(t, now, digest, "generation_1")
 	var calls int
 	service := &CloudService{
-		speechModel: "chirp_3",
+		speechModel: "short",
 		recognizeCall: func(_ context.Context, request *speechpb.RecognizeRequest) (*speechpb.RecognizeResponse, error) {
 			calls++
 			if request.Config.Adaptation != nil {
@@ -103,7 +103,7 @@ func TestQuestionBoundPhraseSetRejectsContradictoryAdaptedTranscript(t *testing.
 	set := validPhraseSet(t, now, digest, "generation_2")
 	var calls int
 	service := &CloudService{
-		speechModel: "chirp_3",
+		speechModel: "short",
 		recognizeCall: func(_ context.Context, _ *speechpb.RecognizeRequest) (*speechpb.RecognizeResponse, error) {
 			calls++
 			if calls == 1 {

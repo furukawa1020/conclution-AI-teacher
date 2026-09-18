@@ -125,7 +125,7 @@ func (s *CloudService) OpenStreamingTranscription(
 	}
 	if err := stream.Send(streamingRecognitionConfigRequest(
 		s.recognizer,
-		s.speechModel,
+		streamingSpeechModel,
 	)); err != nil {
 		cancelStream()
 		return nil, fmt.Errorf("send regional streaming transcription configuration: %w", err)

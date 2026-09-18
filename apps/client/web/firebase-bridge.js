@@ -296,6 +296,16 @@ function reportVoiceFailure(phase, error) {
   globalThis.console?.warn?.(`KOTAE_VOICE_FAILURE`, phase, safeVoiceFailureCode(error));
 }
 
+function reportVoiceStop(reason) {
+  const allowed = Object.freeze([
+    `hidden`, `pagehide`, `device_changed`, `identity_changed`,
+    `microphone_lost`, `request_cancelled`, `session_expired`,
+  ]);
+  globalThis.console?.warn?.(
+    `KOTAE_VOICE_STOP`, allowed.includes(reason) ? reason : `other`,
+  );
+}
+
 function boundedLatency(value) {
   if (!Number.isFinite(value) || value < 0) return 0;
   return Math.min(120_000, Math.round(value * 10) / 10);
@@ -7039,6 +7049,7 @@ async function finishTurn(
   let voiceStartDeadlineReject;
   let voiceStartDeadlineTimer;
   let voiceStartTimedOut = false;
+  let finishPhase = `turn_end`;
   const voiceStartDeadlinePromise = new Promise((_, reject) => {
     voiceStartDeadlineReject = reject;
   });
@@ -7218,6 +7229,7 @@ async function finishTurn(
       liveSession = undefined;
     }
     if (liveSession) {
+      finishPhase = `live_commit`;
       setTracksEnabled(false);
       if (!audioContext || audioContext.state === "closed") {
         fail("audio_playback_blocked");
@@ -7255,6 +7267,7 @@ async function finishTurn(
           ),
           () => liveSession.cancel(new Error("voice_turn_timeout")),
         );
+        finishPhase = `live_playback`;
         await awaitVoiceStartDeadlineResult(
           awaitValidatedPlaybackCompletion(
             playback,
@@ -7327,6 +7340,7 @@ async function finishTurn(
         liveSession = undefined;
       }
     }
+    finishPhase = `fallback_capture`;
     capture = await awaitVoiceTurnResult(
       recording.endPromise,
       () => rejectRecording(recording, "voice_turn_timeout"),
@@ -7359,6 +7373,7 @@ async function finishTurn(
     if (quietHttpAudioBuffer && !usesQuietHttpPcm) {
       fail("voice_api_unavailable");
     }
+    finishPhase = `fallback_encode`;
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
       Promise.all([
         usesQuietHttpPcm
@@ -7442,6 +7457,7 @@ async function finishTurn(
         mimeType: documentForTurn.mimeType,
       };
     }
+    finishPhase = `http_request`;
     requestController = new AbortController();
     activeRequestController = requestController;
     playback.markLatencyCommitSent(performance.now());
@@ -7475,6 +7491,7 @@ async function finishTurn(
     if (!response.ok) {
       fail(mapVoiceResponseError(response.status));
     }
+    finishPhase = `http_playback`;
     playback.markLatencyCommitAcknowledged(performance.now());
     const completed = await awaitVoiceTurnResult(
       consumeVoiceStream(
@@ -7519,7 +7536,7 @@ async function finishTurn(
       ? finalizeGuestAFirstSloResult(receipted)
       : receipted;
   } catch (error) {
-    reportVoiceFailure(`finish`, error);
+    reportVoiceFailure(finishPhase, error);
     if (typeof silenceReceiptGate !== "undefined") {
       silenceReceiptGate.clear();
     }
@@ -7605,6 +7622,11 @@ async function attachDocument(inputId) {
 }
 
 function stopSession(reason = "request_cancelled") {
+  try {
+    if (hasActiveVoiceSession()) reportVoiceStop(reason);
+  } catch {
+    // Diagnostics can never block microphone release.
+  }
   const preflightRetireReason =
     reason === "hidden" || reason === "pagehide"
       ? NATIVE_PREFLIGHT_RETIRE_REASONS.PAGE_HIDDEN

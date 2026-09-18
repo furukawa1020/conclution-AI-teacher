@@ -6324,7 +6324,7 @@ test("committed-response barge-in preserves foreground response mode", async () 
     /stopSession\(sessionStatus\.expiry \?\? "maximum"\);[\s\S]*fail\("session_expired"\)/u,
   );
   const stopAt = bridge.indexOf("function stopSession(");
-  const stop = bridge.slice(stopAt, stopAt + 2_500);
+  const stop = bridge.slice(stopAt, bridge.indexOf("function hasActiveVoiceSession()", stopAt));
   assert.match(stop, /sessionExpiryWatchdog\.disarm\(\)/u);
   assert.match(stop, /releaseMicrophone\(stopCode\)/u);
   assert.match(stop, /rememberStoppedSession\(stoppedEpoch, stopCode\)/u);

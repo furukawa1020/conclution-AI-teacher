@@ -16,7 +16,7 @@ test("visible begin, wait, and finish failure paths emit finite diagnostics", as
   const bridge = await readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8");
   assert.match(bridge, /function reportVoiceFailure\(phase, error\)/u);
   assert.match(bridge, /safeVoiceFailureCode\(error\)/u);
-  for (const phase of ["begin", "wait", "finish"]) {
+  for (const phase of ["begin", "wait"]) {
     assert.match(bridge, new RegExp(`reportVoiceFailure\\(\\x60${phase}\\x60, error\\)`, "u"));
   }
   const reporter = bridge.slice(
@@ -31,4 +31,14 @@ test('live and worklet failures retain finite diagnostic codes', async () => {
   const bridge = await readFile(new URL('../web/firebase-bridge.js', import.meta.url), 'utf8');
   assert.match(bridge, /reportVoiceFailure\(`live`, error\)/u);
   assert.match(bridge, /reportVoiceFailure\(`worklet`, new Error\(signal\)\)/u);
+});
+
+test('finish stages and stop reasons are finite diagnostics', async () => {
+  assert.equal(safeVoiceFailureCode(new Error('no_speech')), 'no_speech');
+  const bridge = await readFile(new URL('../web/firebase-bridge.js', import.meta.url), 'utf8');
+  for (const phase of ['turn_end', 'live_commit', 'live_playback', 'fallback_capture', 'fallback_encode', 'http_request', 'http_playback']) {
+    assert.ok(bridge.includes(`finishPhase = \`${phase}\``));
+  }
+  assert.match(bridge, /reportVoiceFailure\(finishPhase, error\)/u);
+  assert.match(bridge, /KOTAE_VOICE_STOP/u);
 });

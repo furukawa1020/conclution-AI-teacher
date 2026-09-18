@@ -1122,7 +1122,7 @@ test("unfinished respondent coaching keeps Native input when privacy permits", a
   );
   assert.match(
     begin,
-    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*Math\.round\(listeningAt - prepareStartedAt\),\s*\)/u,
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*Math\.round\(listeningAt - prepareStartedAt\),\s*credentials,\s*\)/u,
   );
 
   const routeStart = client.indexOf("const fn requires_staged_route(self)");
@@ -1249,7 +1249,7 @@ test("live PCM capture is attached before VAD can confirm immediate speech", asy
   assert.ok(assignmentAt < recordingAt);
   assert.match(
     begin.slice(recordingAt, recordingAt + 260),
-    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*Math\.round\(listeningAt - prepareStartedAt\),\s*\)/u,
+    /createRecording\(\s*stream,\s*nativeAudio,\s*coachActive,\s*sessionContext,\s*Math\.round\(listeningAt - prepareStartedAt\),\s*credentials,\s*\)/u,
   );
   assert.doesNotMatch(begin, /voice_live_capture_late/u);
 });
@@ -1348,7 +1348,7 @@ test("Native strong ready owns Listening and PCM capture", async () => {
   );
 });
 
-test("voice upload conversion overlaps refreshed credentials", async () => {
+test("voice upload conversion overlaps same-turn or refreshed credentials", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -1361,7 +1361,7 @@ test("voice upload conversion overlaps refreshed credentials", async () => {
 
   assert.match(
     finish,
-    /Promise\.all\(\[\s*usesQuietHttpPcm\s*\? Promise\.resolve\(quietHttpAudioBuffer\.enhanced\)\s*:\s*capture\.blob\.arrayBuffer\(\),\s*secureCredentials\(\),\s*\]\)/u,
+    /Promise\.all\(\[\s*usesQuietHttpPcm\s*\? Promise\.resolve\(quietHttpAudioBuffer\.enhanced\)\s*:\s*capture\.blob\.arrayBuffer\(\),\s*turnCredentials === undefined\s*\? secureCredentials\(\)\s*:\s*Promise\.resolve\(turnCredentials\),\s*\]\)/u,
   );
   const joinedAt = finish.indexOf("Promise.all([");
   const encodeAt = finish.indexOf("arrayBufferToBase64(audioBuffer)");

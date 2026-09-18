@@ -33,6 +33,7 @@ import {
   isValidTurnMode,
   normalizeResearchDiscovery,
   safeVoiceFailureCode,
+  sameTurnCredentials,
   safeVoiceReceiptVisible,
   shouldCommitHybridEndpoint,
   shouldStopSessionForLifecycle,
@@ -2409,6 +2410,7 @@ function discardCurrentCandidate(recording, reason = "candidate-rejected") {
 }
 
 function rejectRecording(recording, code) {
+  recording.turnCredentials = undefined;
   if (recording.settled) return;
   recording.settled = true;
   recording.discard = true;
@@ -2954,6 +2956,7 @@ function createRecordingState(
   coachActive = false,
   sessionContext,
   gestureToListeningMs,
+  turnCredentials,
 ) {
   if (
     typeof nativeAudio !== "boolean" ||
@@ -3017,6 +3020,7 @@ function createRecordingState(
     totalBytes: 0,
     turnEnded: false,
     turnEndedPromise,
+    turnCredentials,
     vadHasSpeech: false,
     quietEvidenceTracker: undefined,
     vadPcm: undefined,
@@ -3031,6 +3035,7 @@ function createRecording(
   coachActive = false,
   sessionContext,
   gestureToListeningMs,
+  turnCredentials,
 ) {
   setVoiceReceiptVisible(false);
   const recording = createRecordingState(
@@ -3039,6 +3044,7 @@ function createRecording(
     coachActive,
     sessionContext,
     gestureToListeningMs,
+    turnCredentials,
   );
   armVad(recording);
   return recording;
@@ -3207,6 +3213,7 @@ async function beginTurn(
           coachActive,
           sessionContext,
           Math.round(listeningAt - prepareStartedAt),
+          credentials,
         );
         activeRecording = recording;
         if (guestModeActive && typeof guestAFirstSprintSlo !== "undefined") {
@@ -3283,6 +3290,7 @@ async function waitForTurnEnd() {
       retirePendingLiveSession(new Error("no_speech"));
     }
     activeRecording = undefined;
+    recording.turnCredentials = undefined;
   } else {
     if (!markSessionSpeech(recording.expectedEpoch)) {
       fail("session_expired");
@@ -7374,15 +7382,23 @@ async function finishTurn(
       fail("voice_api_unavailable");
     }
     finishPhase = `fallback_encode`;
+    const turnCredentials = sameTurnCredentials(
+      recording.turnCredentials,
+      recording.expectedEpoch,
+      sessionEpoch,
+    );
     const [audioBuffer, credentials] = await awaitVoiceTurnResult(
       Promise.all([
         usesQuietHttpPcm
           ? Promise.resolve(quietHttpAudioBuffer.enhanced)
           : capture.blob.arrayBuffer(),
-        secureCredentials(),
+        turnCredentials === undefined
+          ? secureCredentials()
+          : Promise.resolve(turnCredentials),
       ]),
       () => rejectRecording(recording, "voice_turn_timeout"),
     );
+    recording.turnCredentials = undefined;
     try {
       audioBase64 = arrayBufferToBase64(audioBuffer);
       if (usesQuietHttpPcm) {
@@ -7590,6 +7606,7 @@ async function finishTurn(
     finishGate.release(finishToken);
     audioBase64 = "";
     recording.sessionContext = undefined;
+    recording.turnCredentials = undefined;
     if (activeRequestController === requestController) {
       activeRequestController = undefined;
     }

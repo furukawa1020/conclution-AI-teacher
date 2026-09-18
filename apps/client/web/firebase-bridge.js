@@ -2416,7 +2416,8 @@ function rejectRecording(recording, code, source = "other") {
   if (recording.settled) return;
   if (code === "voice_turn_invalid") {
     const allowed = [
-      "clock", "evidence_factory", "evidence_advance", "candidate_lifecycle",
+      "clock", "evidence_factory", "evidence_tracker", "evidence_contract",
+      "vad_transition", "candidate_lifecycle",
       "recorder_create", "recorder_error", "recorder_start", "recorder_stop",
     ];
     globalThis.console?.warn?.(
@@ -2812,11 +2813,17 @@ function armVad(recording) {
       rejectRecording(recording, "voice_turn_invalid", "clock");
       return;
     }
+    // The AudioContext clock can pause even while a wall-clock interval fires.
+    // Reprocessing the same frame would be rejected by both Rust trackers and
+    // falsely end the turn; it must grant neither speech nor silence credit.
+    if (clockFrame === vadState.temporalClock.lastFrame) return;
+    let evidenceStage = "evidence_tracker";
     try {
       const rustEvidence = recording.quietEvidenceTracker.advance(
         clockFrame,
         pcm,
       );
+      evidenceStage = "evidence_contract";
       if (
         !(rustEvidence instanceof Float64Array) ||
         rustEvidence.length !== 3 ||
@@ -2835,6 +2842,7 @@ function armVad(recording) {
       ) {
         throw new TypeError("quiet_evidence_result_invalid");
       }
+      evidenceStage = "vad_transition";
       vadState = advanceVad(
         vadState,
         {
@@ -2864,7 +2872,7 @@ function armVad(recording) {
         },
       );
     } catch {
-      rejectRecording(recording, "voice_turn_invalid", "evidence_advance");
+      rejectRecording(recording, "voice_turn_invalid", evidenceStage);
       return;
     }
     recording.firstVoiceAt = vadState.firstVoiceAt;

@@ -63,3 +63,15 @@ test('Native HTTP fallback can zeroize all PCM buffers outside the live-session 
   assert.ok(frame.every((byte) => byte === 0));
   assert.doesNotThrow(() => zeroizeCaptureFrame(undefined));
 });
+
+test('a paused AudioContext frame grants no VAD credit and preserves the recording', async () => {
+  const bridge = await readFile(new URL('../web/firebase-bridge.js', import.meta.url), 'utf8');
+  const vad = bridge.slice(bridge.indexOf('function armVad(recording)'), bridge.indexOf('function createRecordingState('));
+  const skipAt = vad.indexOf('if (clockFrame === vadState.temporalClock.lastFrame) return;');
+  const trackerAt = vad.indexOf('recording.quietEvidenceTracker.advance(');
+  assert.ok(skipAt > 0 && trackerAt > skipAt);
+  assert.match(vad, /evidenceStage = "evidence_tracker"/u);
+  assert.match(vad, /evidenceStage = "evidence_contract"/u);
+  assert.match(vad, /evidenceStage = "vad_transition"/u);
+  assert.match(vad, /rejectRecording\(recording, "voice_turn_invalid", evidenceStage\)/u);
+});

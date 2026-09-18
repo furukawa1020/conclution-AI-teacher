@@ -25,8 +25,16 @@ const (
 	// This is a semantic-content threshold, not a score. It marks a finalized
 	// transcript as extended only when there is enough recognized material to
 	// ground a same-turn main-point reflection safely.
-	extendedSpeechMinRunes       = 160
-	maxSpeculativeTTSBufferBytes = 24_000
+	extendedSpeechMinRunes = 160
+	// Bound the prebuffer to 100 ms of 24 kHz mono PCM. This is a capacity,
+	// not a wall-clock latency guarantee; provider delivery may still stall.
+	// Deriving bytes from the format prevents a future sample-rate change
+	// from silently restoring a half-second prebuffer.
+	speculativeTTSPrebufferMS    = 100
+	maxSpeculativeTTSBufferBytes = speechio.StreamingSampleRateHertz *
+		speechio.StreamingChannelCount *
+		(speechio.StreamingBitsPerSample / 8) *
+		speculativeTTSPrebufferMS / 1_000
 	voiceSynthesisReserve        = 5 * time.Second
 	lowConfidencePrompt          = "急がなくて大丈夫です。こちらから小さな話題を一つ置きます。音がない時間と、何か流れている時間では、どちらが少し楽ですか。答えは一語でも、聞いているだけでも大丈夫です。"
 	routeClarifyNoSpeech         = "stt-clarify-no-speech"
@@ -1377,7 +1385,7 @@ func (synthesis *speculativeSynthesis) firstChunkMS() int64 {
 
 // commitBoundary waits until the entire short stream is validated or the
 // bounded PCM buffer is full. A completed stream can be MIME-checked before
-// any release. At the 24 KB boundary, progress relies on StreamingService's
+// any release. At the 100 ms PCM boundary, progress relies on StreamingService's
 // raw PCM contract and the final return value is still checked after release.
 func (synthesis *speculativeSynthesis) commitBoundary(
 	ctx context.Context,

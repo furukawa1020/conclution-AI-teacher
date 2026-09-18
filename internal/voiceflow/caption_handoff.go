@@ -349,10 +349,11 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 
 	if !adoptedDecision {
 		if speculation != nil {
-			synthesis := speculation.cancel()
-			if synthesis != nil {
-				synthesis.await(handoff.ctx)
-			}
+			// The candidate was never committed: discard its bounded PCM before
+			// starting the final-caption pass, but do not wait for a canceled TTS
+			// provider to return. Even a non-cooperative provider cannot release
+			// audio from the discarded buffer.
+			speculation.cancel()
 			specCancel = 1
 		}
 		specMiss = 1

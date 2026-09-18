@@ -240,6 +240,52 @@ func (metrics *voiceLiveOutputMetrics) markCommitted() {
 	metrics.mu.Unlock()
 }
 
+// voiceLiveCoachOutputGate serializes the control-state check with the whole
+// PCM write. A checkpoint cannot observe zero output frames and then race an
+// already-authorized write to the socket before its own control frame.
+type voiceLiveCoachOutputGate struct {
+	mu         sync.Mutex
+	attempted  bool
+	accepted   bool
+	rejected   bool
+	checkpoint VoiceRespondentCheckpoint
+}
+
+func (gate *voiceLiveCoachOutputGate) deliver(write func() error) error {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.rejected || (gate.attempted && !gate.accepted) {
+		gate.rejected = true
+		return errors.New("voice coach control state was rejected")
+	}
+	return write()
+}
+
+func (gate *voiceLiveCoachOutputGate) beginCheckpoint() error {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.attempted {
+		gate.rejected = true
+		return errors.New("voice coach control was published more than once")
+	}
+	gate.attempted = true
+	return nil
+}
+
+func (gate *voiceLiveCoachOutputGate) reject() {
+	gate.mu.Lock()
+	gate.rejected = true
+	gate.mu.Unlock()
+}
+
+func (gate *voiceLiveCoachOutputGate) snapshot() (
+	bool, VoiceRespondentCheckpoint, bool,
+) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.rejected, gate.checkpoint, gate.accepted
+}
+
 func (metrics *voiceLiveOutputMetrics) markNativeCommit(at time.Time) {
 	if at.IsZero() {
 		return
@@ -824,35 +870,18 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}()
-		var controlGateMu sync.Mutex
-		controlAttempted := false
-		controlRejected := false
-		var controlCheckpoint VoiceRespondentCheckpoint
-		controlAccepted := false
-		rejectControl := func() {
-			controlGateMu.Lock()
-			controlRejected = true
-			controlGateMu.Unlock()
-		}
+		controlGate := &voiceLiveCoachOutputGate{}
 		onAudio := func(audio []byte) error {
-			controlGateMu.Lock()
-			rejected := controlRejected
-			checkpointInFlight := controlAttempted && !controlAccepted
-			if checkpointInFlight {
-				controlRejected = true
-			}
-			controlGateMu.Unlock()
-			if rejected || checkpointInFlight {
-				return errors.New("voice coach control state was rejected")
-			}
-			if pipelineInput.StrictCloudMinimization {
-				return strictOutput.append(audio)
-			}
-			return outputMetrics.deliver(
-				liveCtx,
-				conn,
-				audio,
-			)
+			return controlGate.deliver(func() error {
+				if pipelineInput.StrictCloudMinimization {
+					return strictOutput.append(audio)
+				}
+				return outputMetrics.deliver(
+					liveCtx,
+					conn,
+					audio,
+				)
+			})
 		}
 		selectedLiveService := liveService
 		if pipelineInput.NativeAudio && s.voice.NativeLiveService != nil {
@@ -877,20 +906,15 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				},
 				func(transition VoiceRespondentCheckpointTransition) error {
 					checkpoint := transition.Checkpoint
-					controlGateMu.Lock()
-					if controlAttempted {
-						controlRejected = true
-						controlGateMu.Unlock()
-						return errors.New("voice coach control was published more than once")
+					if err := controlGate.beginCheckpoint(); err != nil {
+						return err
 					}
-					controlAttempted = true
-					controlGateMu.Unlock()
 					if !validVoiceRespondentCheckpoint(checkpoint) ||
 						!validVoiceLiveCoachSessionState(checkpoint.SessionState) ||
 						!validVoiceLiveCoachSessionState(
 							transition.PreviousSessionState,
 						) {
-						rejectControl()
+						controlGate.reject()
 						return errors.New("invalid voice respondent checkpoint")
 					}
 					if s.voice.CoachStateValidator == nil ||
@@ -906,20 +930,20 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 								checkpoint.CoachPhase,
 								checkpoint.CoachAction,
 							) != nil {
-						rejectControl()
+						controlGate.reject()
 						return errors.New("unauthenticated voice coach state transition")
 					}
 					_, outputFrames, _ := outputMetrics.snapshot()
 					if outputFrames != 0 {
-						rejectControl()
+						controlGate.reject()
 						return errors.New("voice respondent checkpoint followed response audio")
 					}
 					// Serialize checkpoint publication with response delivery. Once a
 					// checkpoint attempt starts, onAudio either observes the accepted
 					// frame or fails closed; it can never race the WebSocket write.
-					controlGateMu.Lock()
-					if controlRejected {
-						controlGateMu.Unlock()
+					controlGate.mu.Lock()
+					if controlGate.rejected {
+						controlGate.mu.Unlock()
 						return errors.New("voice respondent checkpoint raced response audio")
 					}
 					if err := writeVoiceLiveJSON(
@@ -937,21 +961,18 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 							CoachAction:      checkpoint.CoachAction,
 						},
 					); err != nil {
-						controlRejected = true
-						controlGateMu.Unlock()
+						controlGate.rejected = true
+						controlGate.mu.Unlock()
 						return err
 					}
-					controlCheckpoint = checkpoint
-					controlAccepted = true
-					controlGateMu.Unlock()
+					controlGate.checkpoint = checkpoint
+					controlGate.accepted = true
+					controlGate.mu.Unlock()
 					return nil
 				},
 			)
-			controlGateMu.Lock()
-			rejected := controlRejected
-			checkpoint := controlCheckpoint
-			checkpointAccepted := controlAccepted
-			controlGateMu.Unlock()
+			rejected, checkpoint, checkpointAccepted :=
+				controlGate.snapshot()
 			if rejected {
 				processErr = errors.New("voice coach control state was rejected")
 			} else if processErr == nil && checkpointAccepted &&

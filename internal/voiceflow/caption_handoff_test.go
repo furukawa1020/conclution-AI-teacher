@@ -332,17 +332,10 @@ func TestCaptionHandoff159RunesMayAdoptSpeculationAfterCheckpoint(
 	if err := handoff.Observe([]byte(caption), false, started); err != nil {
 		t.Fatal(err)
 	}
-	if err := handoff.Observe(
-		[]byte(caption),
-		false,
-		started.Add(minSpeculativeStableDuration),
-	); err != nil {
-		t.Fatal(err)
-	}
 	select {
 	case <-completed:
 	case <-time.After(time.Second):
-		t.Fatal("speculative synthesis did not finish behind commit buffer")
+		t.Fatal("first Native partial did not start private synthesis")
 	}
 	eventMu.Lock()
 	if len(events) != 0 || len(delivered) != 0 {
@@ -357,7 +350,7 @@ func TestCaptionHandoff159RunesMayAdoptSpeculationAfterCheckpoint(
 	if err := handoff.Observe(
 		[]byte(caption),
 		true,
-		started.Add(minSpeculativeStableDuration+time.Millisecond),
+		started.Add(time.Millisecond),
 	); err != nil {
 		t.Fatal(err)
 	}

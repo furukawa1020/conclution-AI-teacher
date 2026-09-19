@@ -88,8 +88,10 @@ func (p *Pipeline) OpenCaptionHandoff(
 }
 
 // Observe takes ownership of captionUTF8 and clears it before returning. A
-// Native partial has no calibrated stability score, so readiness requires the
-// identical canonical caption at least twice across the existing 160 ms lease.
+// Native partials have no calibrated stability score. The first non-final,
+// nonempty caption may start private model/TTS work because every PCM byte
+// remains sealed until an exact final-caption match and transport commit.
+// A revision synchronously discards that private work.
 func (handoff *captionHandoff) Observe(
 	captionUTF8 []byte,
 	final bool,
@@ -133,6 +135,10 @@ func (handoff *captionHandoff) Observe(
 		return nil
 	}
 	candidate, ready := handoff.tracker.observe(caption, true, observedAt)
+	if !final && !ready {
+		candidate = canonicalSpeculationText(caption)
+		ready = candidate != ""
+	}
 	if !ready {
 		return nil
 	}

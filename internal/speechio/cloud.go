@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -105,6 +106,7 @@ type CloudService struct {
 	) (*speechpb.RecognizeResponse, error)
 	streamRecognizeCall  func(context.Context) (streamingRecognizeClient, error)
 	streamSynthesizeCall func(context.Context) (streamingSynthesizeClient, error)
+	streamingPCMCache    *streamingPCMCache
 }
 
 func NewCloudService(
@@ -147,6 +149,10 @@ func NewCloudService(
 		),
 		speechModel: speechModel,
 		voiceName:   voiceName,
+		streamingPCMCache: newStreamingPCMCache(
+			defaultStreamingPCMCacheEntries,
+			defaultStreamingPCMCacheBytes,
+		),
 	}
 	service.recognizeCall = func(
 		callContext context.Context,
@@ -520,6 +526,25 @@ func (s *CloudService) StreamSynthesize(
 		return "", errors.New("streaming speech synthesis is unavailable")
 	}
 
+	cacheKey := newStreamingPCMCacheKey(s.voiceName, text)
+	if s.streamingPCMCache != nil {
+		if cached, ok := s.streamingPCMCache.get(cacheKey); ok {
+			for _, chunk := range cached.chunks {
+				if err := ctx.Err(); err != nil {
+					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
+				}
+				if err := onChunk(chunk); err != nil {
+					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
+				}
+			}
+			slog.InfoContext(ctx, "streaming speech PCM cache hit",
+				"audio_bytes", cached.size,
+				"chunk_count", len(cached.chunks),
+			)
+			return StreamingAudioContentType, nil
+		}
+	}
+
 	streamContext, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
@@ -550,8 +575,17 @@ func (s *CloudService) StreamSynthesize(
 	if err := stream.CloseSend(); err != nil {
 		return "", fmt.Errorf("close regional streaming speech input: %w", err)
 	}
-	if err := receiveStreamingAudio(ctx, stream, onChunk); err != nil {
+	collector := newStreamingPCMCollector(maxStreamingPCMCacheEntryBytes)
+	if err := receiveStreamingAudio(ctx, stream, func(audio []byte) error {
+		collector.add(audio)
+		return onChunk(audio)
+	}); err != nil {
 		return "", err
+	}
+	if s.streamingPCMCache != nil {
+		if cached, ok := collector.complete(); ok {
+			s.streamingPCMCache.put(cacheKey, cached)
+		}
 	}
 	return StreamingAudioContentType, nil
 }

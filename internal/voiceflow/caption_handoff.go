@@ -24,6 +24,11 @@ var (
 // exact final caption is observed and Commit is called by the Native service.
 type captionHandoff struct {
 	mu sync.Mutex
+	// terminalMu serializes Cancel and normal completion. publicationMu is the
+	// linearization boundary for PCM callbacks: terminal operations invalidate
+	// state first, then cross this barrier before returning.
+	terminalMu    sync.Mutex
+	publicationMu sync.Mutex
 
 	p               *Pipeline
 	ctx             context.Context
@@ -158,6 +163,11 @@ func (handoff *captionHandoff) deliverAudio(chunk []byte) error {
 	if len(chunk) == 0 || len(chunk)%2 != 0 {
 		return errSpeculativeAudioChunk
 	}
+	if err := handoff.ctx.Err(); err != nil {
+		return err
+	}
+	handoff.publicationMu.Lock()
+	defer handoff.publicationMu.Unlock()
 	if err := handoff.ctx.Err(); err != nil {
 		return err
 	}
@@ -461,9 +471,13 @@ func (handoff *captionHandoff) Cancel() {
 	if handoff == nil {
 		return
 	}
+	handoff.terminalMu.Lock()
+	defer handoff.terminalMu.Unlock()
+
 	handoff.mu.Lock()
 	if handoff.canceled || handoff.finished {
 		handoff.mu.Unlock()
+		handoff.awaitPublicationDrain()
 		return
 	}
 	handoff.canceled = true
@@ -479,12 +493,17 @@ func (handoff *captionHandoff) Cancel() {
 	if speculation != nil {
 		speculation.cancel()
 	}
+	handoff.awaitPublicationDrain()
 }
 
 func (handoff *captionHandoff) finishCommitted() {
+	handoff.terminalMu.Lock()
+	defer handoff.terminalMu.Unlock()
+
 	handoff.mu.Lock()
 	if handoff.finished {
 		handoff.mu.Unlock()
+		handoff.awaitPublicationDrain()
 		return
 	}
 	handoff.finished = true
@@ -494,6 +513,12 @@ func (handoff *captionHandoff) finishCommitted() {
 	if cancel != nil {
 		cancel()
 	}
+	handoff.awaitPublicationDrain()
+}
+
+func (handoff *captionHandoff) awaitPublicationDrain() {
+	handoff.publicationMu.Lock()
+	handoff.publicationMu.Unlock()
 }
 
 var _ httpapi.VoiceCaptionHandoffService = (*Pipeline)(nil)

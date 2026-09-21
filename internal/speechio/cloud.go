@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	speech "cloud.google.com/go/speech/apiv2"
@@ -20,6 +21,7 @@ import (
 const (
 	maxTranscriptRunes         = 12_000
 	maxSpokenReplyRunes        = 1_200
+	maxDirectPCMSynthesisRunes = 64
 	maxStreamingAudioChunkSize = 1 << 20
 	maxStreamingAudioTotalSize = 16 << 20
 	conversationSpeechModel    = "short"
@@ -106,7 +108,11 @@ type CloudService struct {
 	) (*speechpb.RecognizeResponse, error)
 	streamRecognizeCall  func(context.Context) (streamingRecognizeClient, error)
 	streamSynthesizeCall func(context.Context) (streamingSynthesizeClient, error)
-	streamingPCMCache    *streamingPCMCache
+	synthesizePCMCall    func(
+		context.Context,
+		*texttospeechpb.SynthesizeSpeechRequest,
+	) (*texttospeechpb.SynthesizeSpeechResponse, error)
+	streamingPCMCache *streamingPCMCache
 }
 
 func NewCloudService(
@@ -169,6 +175,12 @@ func NewCloudService(
 		callContext context.Context,
 	) (streamingSynthesizeClient, error) {
 		return ttsClient.StreamingSynthesize(callContext)
+	}
+	service.synthesizePCMCall = func(
+		callContext context.Context,
+		request *texttospeechpb.SynthesizeSpeechRequest,
+	) (*texttospeechpb.SynthesizeSpeechResponse, error) {
+		return ttsClient.SynthesizeSpeech(callContext, request)
 	}
 	return service, nil
 }
@@ -545,6 +557,47 @@ func (s *CloudService) StreamSynthesize(
 		}
 	}
 
+	if utf8.RuneCountInString(text) <= maxDirectPCMSynthesisRunes &&
+		s.synthesizePCMCall != nil {
+		started := time.Now()
+		response, directErr := s.synthesizePCMCall(
+			ctx,
+			directPCMSynthesizeRequest(text, s.voiceName),
+		)
+		if directErr == nil &&
+			response != nil &&
+			len(response.AudioContent) > 0 &&
+			len(response.AudioContent) <= maxStreamingAudioTotalSize {
+			if err := ctx.Err(); err != nil {
+				return "", fmt.Errorf("deliver direct PCM speech audio: %w", err)
+			}
+			if err := onChunk(response.AudioContent); err != nil {
+				return "", fmt.Errorf("deliver direct PCM speech audio: %w", err)
+			}
+			if s.streamingPCMCache != nil &&
+				len(response.AudioContent) <= maxStreamingPCMCacheEntryBytes {
+				s.streamingPCMCache.put(cacheKey, cachedStreamingPCM{
+					chunks: [][]byte{response.AudioContent},
+					size:   len(response.AudioContent),
+				})
+			}
+			slog.InfoContext(ctx, "streaming speech adaptive route completed",
+				"route", "direct_pcm",
+				"duration_ms", time.Since(started).Milliseconds(),
+				"audio_bytes", len(response.AudioContent),
+			)
+			return StreamingAudioContentType, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return "", fmt.Errorf("direct PCM speech synthesis canceled: %w", err)
+		}
+		slog.WarnContext(ctx, "streaming speech adaptive route fell back",
+			"route", "direct_pcm",
+			"duration_ms", time.Since(started).Milliseconds(),
+			"reason", directPCMFallbackReason(response, directErr),
+		)
+	}
+
 	streamContext, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
@@ -588,6 +641,43 @@ func (s *CloudService) StreamSynthesize(
 		}
 	}
 	return StreamingAudioContentType, nil
+}
+
+func directPCMSynthesizeRequest(
+	text string,
+	voiceName string,
+) *texttospeechpb.SynthesizeSpeechRequest {
+	return &texttospeechpb.SynthesizeSpeechRequest{
+		Input: &texttospeechpb.SynthesisInput{
+			InputSource: &texttospeechpb.SynthesisInput_Text{Text: text},
+		},
+		Voice: &texttospeechpb.VoiceSelectionParams{
+			LanguageCode: "ja-JP",
+			Name:         voiceName,
+		},
+		AudioConfig: &texttospeechpb.AudioConfig{
+			AudioEncoding:   texttospeechpb.AudioEncoding_PCM,
+			SampleRateHertz: StreamingSampleRateHertz,
+		},
+	}
+}
+
+func directPCMFallbackReason(
+	response *texttospeechpb.SynthesizeSpeechResponse,
+	err error,
+) string {
+	switch {
+	case err != nil:
+		return "provider_error"
+	case response == nil:
+		return "nil_response"
+	case len(response.AudioContent) == 0:
+		return "empty_audio"
+	case len(response.AudioContent) > maxStreamingAudioTotalSize:
+		return "audio_too_large"
+	default:
+		return "invalid_audio"
+	}
 }
 
 func streamingSynthesizeRequests(

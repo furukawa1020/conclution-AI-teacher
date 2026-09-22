@@ -39,7 +39,12 @@ const (
 	voiceLiveMaxPCMFrameBytes   = 15 * 1024
 	voiceLivePCMFrameBytes      = 640
 	voiceLiveMaxPCMFrames       = 12_000
-	voiceLiveMaxPCMTotalBytes   = voiceLivePCMFrameBytes *
+	// Synthesized output is 24 kHz mono signed PCM16. A 20 ms WebSocket
+	// message lets the browser enqueue the first audible frame without waiting
+	// for a provider-sized chunk or a complete direct-PCM response.
+	voiceLiveOutputPCMFrameBytes = speechio.StreamingSampleRateHertz * 2 / 50
+	voiceLiveMaxOutputPCMFrames  = 3_000
+	voiceLiveMaxPCMTotalBytes    = voiceLivePCMFrameBytes *
 		voiceLiveMaxPCMFrames
 	voiceLiveMaxTokenBytes = 8 * 1024
 	// A process crash cannot run the normal release path. The lease therefore
@@ -183,6 +188,7 @@ type voiceLiveRead struct {
 
 type voiceLiveOutputMetrics struct {
 	mu                   sync.Mutex
+	writeMu              sync.Mutex
 	committed            bool
 	firstOutputAt        time.Time
 	frames               int
@@ -342,32 +348,64 @@ func (metrics *voiceLiveOutputMetrics) deliver(
 	conn *websocket.Conn,
 	audio []byte,
 ) error {
+	metrics.writeMu.Lock()
+	defer metrics.writeMu.Unlock()
+
+	requiredFrames := (len(audio) + voiceLiveOutputPCMFrameBytes - 1) /
+		voiceLiveOutputPCMFrameBytes
 	metrics.mu.Lock()
-	defer metrics.mu.Unlock()
 	if !metrics.committed ||
 		len(audio) == 0 ||
 		len(audio)%2 != 0 ||
 		len(audio) > voiceStreamMaxChunkBytes ||
-		metrics.frames >= voiceStreamMaxChunks ||
+		requiredFrames <= 0 ||
+		requiredFrames > voiceLiveMaxOutputPCMFrames-metrics.frames ||
 		len(audio) > voiceStreamMaxAudioBytes-metrics.bytes {
+		metrics.mu.Unlock()
 		return errors.New("live synthesized audio is outside bounds")
 	}
+	metrics.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	meaningful := speechio.PCM16HasMeaningfulSample(audio)
-	if err := conn.Write(ctx, websocket.MessageBinary, audio); err != nil {
-		return err
-	}
-	if meaningful && metrics.firstOutputAt.IsZero() {
-		observedAt := time.Now()
-		metrics.firstOutputAt = observedAt
-		if !metrics.nativeClosed && metrics.nativeFirstAudioAt.IsZero() {
-			metrics.nativeFirstAudioAt = observedAt
+	return writeVoiceLivePCM20ms(ctx, audio, func(frame []byte) error {
+		if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+			return err
 		}
+		meaningful := speechio.PCM16HasMeaningfulSample(frame)
+		metrics.mu.Lock()
+		if meaningful && metrics.firstOutputAt.IsZero() {
+			observedAt := time.Now()
+			metrics.firstOutputAt = observedAt
+			if !metrics.nativeClosed && metrics.nativeFirstAudioAt.IsZero() {
+				metrics.nativeFirstAudioAt = observedAt
+			}
+		}
+		metrics.frames++
+		metrics.bytes += len(frame)
+		metrics.mu.Unlock()
+		return nil
+	})
+}
+
+func writeVoiceLivePCM20ms(
+	ctx context.Context,
+	audio []byte,
+	write func([]byte) error,
+) error {
+	if ctx == nil || write == nil || len(audio) == 0 || len(audio)%2 != 0 {
+		return errors.New("live synthesized audio frame is invalid")
 	}
-	metrics.frames++
-	metrics.bytes += len(audio)
+	for offset := 0; offset < len(audio); {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := min(offset+voiceLiveOutputPCMFrameBytes, len(audio))
+		if err := write(audio[offset:end]); err != nil {
+			return err
+		}
+		offset = end
+	}
 	return nil
 }
 

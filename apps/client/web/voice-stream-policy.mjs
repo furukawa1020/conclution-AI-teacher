@@ -296,39 +296,57 @@ function advanceIntentionalInterrupt(
     Math.max(0, Math.min(2_400, Math.floor(candidateElapsedMs))),
     aecVerified,
   );
+  const packed = typeof result === "bigint" && result >= 0n;
+  const legacy =
+    result instanceof Float64Array &&
+    result.length === 9 &&
+    result.every(Number.isSafeInteger);
+  const phase = packed ? Number(result & 7n) : result?.[0];
+  const score = packed ? Number((result >> 3n) & 63n) - 24 : result?.[1];
+  const foregroundMs = packed
+    ? Number((result >> 9n) & 4095n)
+    : result?.[2];
+  const changeCount = packed
+    ? Number((result >> 21n) & 15n)
+    : result?.[3];
+  const gapMs = packed ? Number((result >> 25n) & 127n) : result?.[4];
+  const lastBucket = packed ? Number((result >> 32n) & 7n) : result?.[5];
+  const lastElapsedMs = packed
+    ? Number((result >> 35n) & 4095n)
+    : result?.[6];
+  const signal = packed ? Number((result >> 47n) & 3n) : result?.[7];
+  const fastReady = packed ? Number((result >> 49n) & 1n) : result?.[8];
   if (
-    !(result instanceof Float64Array) ||
-    result.length !== 9 ||
-    !result.every(Number.isSafeInteger) ||
-    ![0, 1, 2, 3, 4, 5, 6].includes(result[0]) ||
-    result[1] < -24 ||
-    result[1] > 32 ||
-    result[2] < 0 ||
-    result[2] > 2_400 ||
-    result[3] < 0 ||
-    result[3] > 8 ||
-    result[4] < 0 ||
-    result[4] > 80 ||
-    result[5] < 0 ||
-    result[5] > 4 ||
-    result[6] < 0 ||
-    result[6] > 2_400 ||
-    ![0, 1, 2, 3].includes(result[7]) ||
-    ![0, 1].includes(result[8])
+    (!packed && !legacy) ||
+    ![0, 1, 2, 3, 4, 5, 6].includes(phase) ||
+    score < -24 ||
+    score > 32 ||
+    foregroundMs < 0 ||
+    foregroundMs > 2_400 ||
+    changeCount < 0 ||
+    changeCount > 8 ||
+    gapMs < 0 ||
+    gapMs > 80 ||
+    lastBucket < 0 ||
+    lastBucket > 4 ||
+    lastElapsedMs < 0 ||
+    lastElapsedMs > 2_400 ||
+    ![0, 1, 2, 3].includes(signal) ||
+    ![0, 1].includes(fastReady)
   ) {
     throw new TypeError("intentional_interrupt_advancer_result_invalid");
   }
   return Object.freeze({
-    fastReady: result[8] === 1,
-    signal: result[7],
+    fastReady: fastReady === 1,
+    signal,
     state: Object.freeze({
-      changeCount: result[3],
-      foregroundMs: result[2],
-      gapMs: result[4],
-      lastBucket: result[5],
-      lastElapsedMs: result[6],
-      phase: result[0],
-      score: result[1],
+      changeCount,
+      foregroundMs,
+      gapMs,
+      lastBucket,
+      lastElapsedMs,
+      phase,
+      score,
     }),
   });
 }

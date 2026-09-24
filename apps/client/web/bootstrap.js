@@ -2,7 +2,7 @@ const { installQuietEvidenceTrackerFactory } = await import("/firebase-bridge.js
 
 const {
   default: init,
-  advanceIntentionalInterrupt,
+  advanceIntentionalInterruptPacked,
   advanceTemporalVadClock,
   classifyInterruptFrame,
   classifyOnsetFrame,
@@ -23,6 +23,6 @@ const {
 installInterruptFrameClassifier(classifyInterruptFrame);
 installOnsetFrameClassifier(classifyOnsetFrame);
 installQuietEvidenceTrackerFactory(createQuietEvidenceTracker);
-installIntentionalInterruptAdvancer(advanceIntentionalInterrupt);
+installIntentionalInterruptAdvancer(advanceIntentionalInterruptPacked);
 installTemporalVadClockAdvancer(advanceTemporalVadClock);
 await init();

@@ -147,6 +147,104 @@ type speculativeSynthesis struct {
 	firstChunkAt time.Time
 }
 
+// speculativeSynthesisPreparation overlaps only the provider's configuration
+// handshake with model reasoning. It never owns reply text. A prepared stream
+// can be taken only when it is already ready; the response path never waits for
+// preparation and therefore cannot regress to a slower critical path.
+type speculativeSynthesisPreparation struct {
+	mu sync.Mutex
+
+	cancel   context.CancelFunc
+	prepared speechio.PreparedStreamingSynthesis
+	closed   bool
+}
+
+type ownedPreparedSynthesis struct {
+	speechio.PreparedStreamingSynthesis
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (prepared *ownedPreparedSynthesis) Close() {
+	if prepared == nil {
+		return
+	}
+	prepared.once.Do(func() {
+		prepared.PreparedStreamingSynthesis.Close()
+		if prepared.cancel != nil {
+			prepared.cancel()
+		}
+	})
+}
+
+func startSpeculativeSynthesisPreparation(
+	ctx context.Context,
+	streamingSpeech speechio.StreamingService,
+) *speculativeSynthesisPreparation {
+	preparer, ok := streamingSpeech.(speechio.StreamingSynthesisPreparer)
+	if !ok {
+		return nil
+	}
+	prepareCtx, cancel := context.WithCancel(ctx)
+	preparation := &speculativeSynthesisPreparation{cancel: cancel}
+	go func() {
+		prepared, err := preparer.PrepareStreamingSynthesis(prepareCtx)
+		if err != nil || prepared == nil {
+			return
+		}
+		preparation.mu.Lock()
+		if preparation.closed {
+			preparation.mu.Unlock()
+			prepared.Close()
+			return
+		}
+		preparation.prepared = prepared
+		preparation.mu.Unlock()
+	}()
+	return preparation
+}
+
+func (preparation *speculativeSynthesisPreparation) takeReady() speechio.PreparedStreamingSynthesis {
+	if preparation == nil {
+		return nil
+	}
+	preparation.mu.Lock()
+	defer preparation.mu.Unlock()
+	if preparation.closed || preparation.prepared == nil {
+		return nil
+	}
+	prepared := preparation.prepared
+	preparation.prepared = nil
+	cancel := preparation.cancel
+	preparation.cancel = nil
+	return &ownedPreparedSynthesis{
+		PreparedStreamingSynthesis: prepared,
+		cancel:                     cancel,
+	}
+}
+
+func (preparation *speculativeSynthesisPreparation) close() {
+	if preparation == nil {
+		return
+	}
+	preparation.mu.Lock()
+	if preparation.closed {
+		preparation.mu.Unlock()
+		return
+	}
+	preparation.closed = true
+	prepared := preparation.prepared
+	preparation.prepared = nil
+	cancel := preparation.cancel
+	preparation.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if prepared != nil {
+		prepared.Close()
+	}
+}
+
 type liveTranscriptionSendResult struct {
 	err          error
 	committed    bool
@@ -1106,9 +1204,14 @@ func (p *Pipeline) startLiveSpeculation(
 		cancelContext: cancel,
 		outcome:       outcome,
 	}
+	preparation := startSpeculativeSynthesisPreparation(
+		speculationCtx,
+		streamingSpeech,
+	)
 	turn := conversationTurn(input, candidate, true)
 	started := time.Now()
 	go func() {
+		defer preparation.close()
 		decision, err := p.agent.Process(speculationCtx, uid, turn)
 		durationMS := time.Since(started).Milliseconds()
 		var synthesis *speculativeSynthesis
@@ -1128,6 +1231,7 @@ func (p *Pipeline) startLiveSpeculation(
 					synthesis = startSpeculativeSynthesis(
 						speculationCtx,
 						streamingSpeech,
+						preparation.takeReady(),
 						decision.SpokenReply,
 						deliverAudio,
 					)
@@ -1200,6 +1304,7 @@ func invalidateRevisedSpeculation(
 func startSpeculativeSynthesis(
 	ctx context.Context,
 	streamingSpeech speechio.StreamingService,
+	prepared speechio.PreparedStreamingSynthesis,
 	spokenReply string,
 	deliverAudio func([]byte) error,
 ) *speculativeSynthesis {
@@ -1214,14 +1319,22 @@ func startSpeculativeSynthesis(
 		deliverAudio,
 	)
 	go func() {
-		mimeType, err := streamingSpeech.StreamSynthesize(
-			synthesisCtx,
-			spokenReply,
-			func(chunk []byte) error {
-				synthesis.markFirstChunk()
-				return synthesis.buffer.write(synthesisCtx, chunk)
-			},
-		)
+		onChunk := func(chunk []byte) error {
+			synthesis.markFirstChunk()
+			return synthesis.buffer.write(synthesisCtx, chunk)
+		}
+		var mimeType string
+		var err error
+		if prepared != nil {
+			defer prepared.Close()
+			mimeType, err = prepared.StreamSynthesize(spokenReply, onChunk)
+		} else {
+			mimeType, err = streamingSpeech.StreamSynthesize(
+				synthesisCtx,
+				spokenReply,
+				onChunk,
+			)
+		}
 		if err == nil && mimeType != speechio.StreamingAudioContentType {
 			err = errSpeculativeAudioMIME
 		}

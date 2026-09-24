@@ -574,6 +574,68 @@ func TestStreamSynthesizeSendsBoundedPCMRequestAndDeliversChunksInOrder(t *testi
 	}
 }
 
+func TestPreparedStreamingSynthesisSendsNoTextUntilSingleUse(t *testing.T) {
+	t.Parallel()
+	stream := &fakeStreamingSynthesizeClient{
+		recvResults: []streamingReceiveResult{
+			{response: &texttospeechpb.StreamingSynthesizeResponse{
+				AudioContent: []byte{7, 8},
+			}},
+			{err: io.EOF},
+		},
+	}
+	service := cloudServiceWithStream(stream)
+	prepared, err := service.PrepareStreamingSynthesis(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stream.sent) != 1 || stream.sent[0].GetStreamingConfig() == nil ||
+		stream.sent[0].GetInput() != nil || stream.closeCalled {
+		t.Fatalf("prepare sent content or closed early: sent=%d closed=%t", len(stream.sent), stream.closeCalled)
+	}
+	text := strings.Repeat("あ", maxDirectPCMSynthesisRunes+1)
+	var audio []byte
+	contentType, err := prepared.StreamSynthesize(text, func(chunk []byte) error {
+		audio = append(audio, chunk...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != StreamingAudioContentType || !bytes.Equal(audio, []byte{7, 8}) {
+		t.Fatalf("contentType=%q audio=%v", contentType, audio)
+	}
+	if len(stream.sent) != 2 || stream.sent[1].GetInput().GetText() != text ||
+		!stream.closeCalled {
+		t.Fatalf("prepared stream sequence invalid: sent=%d closed=%t", len(stream.sent), stream.closeCalled)
+	}
+	if _, err := prepared.StreamSynthesize(text, func([]byte) error { return nil }); err == nil {
+		t.Fatal("prepared stream was consumed twice")
+	}
+}
+
+func TestPreparedStreamingSynthesisCloseRevokesUnusedStream(t *testing.T) {
+	t.Parallel()
+	stream := &fakeStreamingSynthesizeClient{}
+	prepared, err := cloudServiceWithStream(stream).PrepareStreamingSynthesis(
+		context.Background(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Close()
+	prepared.Close()
+	if len(stream.sent) != 1 || !stream.closeCalled {
+		t.Fatalf("unused prepared stream was not closed: sent=%d closed=%t", len(stream.sent), stream.closeCalled)
+	}
+	if _, err := prepared.StreamSynthesize(
+		strings.Repeat("あ", maxDirectPCMSynthesisRunes+1),
+		func([]byte) error { return nil },
+	); err == nil {
+		t.Fatal("closed prepared stream was revived")
+	}
+}
+
 func TestStreamSynthesizeFailsClosedOnTransportErrors(t *testing.T) {
 	t.Parallel()
 

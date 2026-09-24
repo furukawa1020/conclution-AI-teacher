@@ -90,6 +90,18 @@ type StreamingService interface {
 	) (string, error)
 }
 
+// PreparedStreamingSynthesis is a single-use, config-only provider stream.
+// Prepare sends no user or model text. StreamSynthesize owns the first and only
+// text input; Close revokes an unused preparation.
+type PreparedStreamingSynthesis interface {
+	StreamSynthesize(text string, onChunk StreamChunkHandler) (string, error)
+	Close()
+}
+
+type StreamingSynthesisPreparer interface {
+	PrepareStreamingSynthesis(ctx context.Context) (PreparedStreamingSynthesis, error)
+}
+
 type streamingSynthesizeClient interface {
 	Send(*texttospeechpb.StreamingSynthesizeRequest) error
 	Recv() (*texttospeechpb.StreamingSynthesizeResponse, error)
@@ -113,6 +125,15 @@ type CloudService struct {
 		*texttospeechpb.SynthesizeSpeechRequest,
 	) (*texttospeechpb.SynthesizeSpeechResponse, error)
 	streamingPCMCache *streamingPCMCache
+}
+
+type preparedCloudSynthesis struct {
+	mu      sync.Mutex
+	service *CloudService
+	ctx     context.Context
+	cancel  context.CancelFunc
+	stream  streamingSynthesizeClient
+	used    bool
 }
 
 func NewCloudService(
@@ -641,6 +662,131 @@ func (s *CloudService) StreamSynthesize(
 		}
 	}
 	return StreamingAudioContentType, nil
+}
+
+// PrepareStreamingSynthesis opens one provider stream and sends only the fixed
+// voice/audio configuration. It never sends text and never receives PCM until
+// the returned single-use capability is consumed.
+func (s *CloudService) PrepareStreamingSynthesis(
+	ctx context.Context,
+) (PreparedStreamingSynthesis, error) {
+	if s == nil || s.streamSynthesizeCall == nil {
+		return nil, errors.New("streaming speech synthesis is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("prepare streaming speech synthesis canceled: %w", err)
+	}
+	streamContext, cancel := context.WithCancel(ctx)
+	stream, err := s.streamSynthesizeCall(streamContext)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("prepare regional streaming speech synthesis: %w", err)
+	}
+	if stream == nil {
+		cancel()
+		return nil, errors.New("regional streaming speech synthesis returned no stream")
+	}
+	configRequest, _ := streamingSynthesizeRequests("", s.voiceName)
+	if err := stream.Send(configRequest); err != nil {
+		cancel()
+		return nil, fmt.Errorf("prepare regional streaming speech configuration: %w", err)
+	}
+	return &preparedCloudSynthesis{
+		service: s,
+		ctx:     streamContext,
+		cancel:  cancel,
+		stream:  stream,
+	}, nil
+}
+
+func (prepared *preparedCloudSynthesis) StreamSynthesize(
+	text string,
+	onChunk StreamChunkHandler,
+) (string, error) {
+	if prepared == nil {
+		return "", errors.New("prepared streaming speech synthesis is unavailable")
+	}
+	prepared.mu.Lock()
+	if prepared.used {
+		prepared.mu.Unlock()
+		return "", errors.New("prepared streaming speech synthesis was already consumed")
+	}
+	prepared.used = true
+	prepared.mu.Unlock()
+	defer prepared.cancel()
+
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", errors.New("spoken reply is empty")
+	}
+	if utf8.RuneCountInString(text) > maxSpokenReplyRunes {
+		return "", ErrReplyLong
+	}
+	if onChunk == nil {
+		return "", errors.New("streaming speech synthesis requires a chunk handler")
+	}
+	if err := prepared.ctx.Err(); err != nil {
+		return "", fmt.Errorf("prepared streaming speech synthesis canceled: %w", err)
+	}
+
+	cacheKey := newStreamingPCMCacheKey(prepared.service.voiceName, text)
+	if prepared.service.streamingPCMCache != nil {
+		if cached, ok := prepared.service.streamingPCMCache.get(cacheKey); ok {
+			_ = prepared.stream.CloseSend()
+			for _, chunk := range cached.chunks {
+				if err := prepared.ctx.Err(); err != nil {
+					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
+				}
+				if err := onChunk(chunk); err != nil {
+					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
+				}
+			}
+			return StreamingAudioContentType, nil
+		}
+	}
+	// The direct PCM route remains faster for short text. Revoke the unused
+	// config-only stream and delegate without waiting for it to produce output.
+	if utf8.RuneCountInString(text) <= maxDirectPCMSynthesisRunes &&
+		prepared.service.synthesizePCMCall != nil {
+		_ = prepared.stream.CloseSend()
+		return prepared.service.StreamSynthesize(prepared.ctx, text, onChunk)
+	}
+
+	_, inputRequest := streamingSynthesizeRequests(text, prepared.service.voiceName)
+	if err := prepared.stream.Send(inputRequest); err != nil {
+		return "", fmt.Errorf("send prepared streaming speech input: %w", err)
+	}
+	if err := prepared.stream.CloseSend(); err != nil {
+		return "", fmt.Errorf("close prepared streaming speech input: %w", err)
+	}
+	collector := newStreamingPCMCollector(maxStreamingPCMCacheEntryBytes)
+	if err := receiveStreamingAudio(prepared.ctx, prepared.stream, func(audio []byte) error {
+		collector.add(audio)
+		return onChunk(audio)
+	}); err != nil {
+		return "", err
+	}
+	if prepared.service.streamingPCMCache != nil {
+		if cached, ok := collector.complete(); ok {
+			prepared.service.streamingPCMCache.put(cacheKey, cached)
+		}
+	}
+	return StreamingAudioContentType, nil
+}
+
+func (prepared *preparedCloudSynthesis) Close() {
+	if prepared == nil {
+		return
+	}
+	prepared.mu.Lock()
+	if prepared.used {
+		prepared.mu.Unlock()
+		return
+	}
+	prepared.used = true
+	prepared.mu.Unlock()
+	_ = prepared.stream.CloseSend()
+	prepared.cancel()
 }
 
 func directPCMSynthesizeRequest(

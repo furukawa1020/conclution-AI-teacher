@@ -54,7 +54,7 @@ test("bootstrap installs the classifier before launching the Wasm UI", async () 
     "installTemporalVadClockAdvancer(advanceTemporalVadClock)",
   );
   const intentionalInstall = bootstrap.indexOf(
-    "installIntentionalInterruptAdvancer(advanceIntentionalInterrupt)",
+    "installIntentionalInterruptAdvancer(advanceIntentionalInterruptPacked)",
   );
   assert.ok(classifierImport >= 0);
   assert.ok(onsetImport >= 0);

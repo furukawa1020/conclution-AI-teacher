@@ -10,6 +10,17 @@ import {
 } from "../web/voice-stream-policy.mjs";
 
 let frameFlags = 0b111;
+function packStep(phase, score, foregroundMs, changes, gapMs, lastBucket, elapsed, signal, ready) {
+  return BigInt(phase) |
+    (BigInt(score + 24) << 3n) |
+    (BigInt(foregroundMs) << 9n) |
+    (BigInt(changes) << 21n) |
+    (BigInt(gapMs) << 25n) |
+    (BigInt(lastBucket) << 32n) |
+    (BigInt(elapsed) << 35n) |
+    (BigInt(signal) << 47n) |
+    (BigInt(ready ? 1 : 0) << 49n);
+}
 installInterruptFrameClassifier(() => frameFlags);
 installTemporalVadClockAdvancer((rate, started, previous, current) => {
   if (current <= previous) throw new TypeError("clock_invalid");
@@ -20,9 +31,9 @@ installTemporalVadClockAdvancer((rate, started, previous, current) => {
 });
 installIntentionalInterruptAdvancer((phase, score, foregroundMs, changes, gapMs, lastBucket, lastElapsedMs, flags, rms, peak, credit, elapsed, aec) => {
   if (elapsed <= lastElapsedMs) throw new TypeError("clock_invalid");
-  if ([5, 6].includes(phase)) return new Float64Array([phase, score, foregroundMs, changes, gapMs, lastBucket, elapsed, 0, 0]);
-  if (!aec) return new Float64Array([5, score, foregroundMs, changes, gapMs, lastBucket, elapsed, 0, 0]);
-  if (elapsed > 520) return new Float64Array([5, score, foregroundMs, changes, gapMs, lastBucket, elapsed, 0, 0]);
+  if ([5, 6].includes(phase)) return packStep(phase, score, foregroundMs, changes, gapMs, lastBucket, elapsed, 0, false);
+  if (!aec) return packStep(5, score, foregroundMs, changes, gapMs, lastBucket, elapsed, 0, false);
+  if (elapsed > 520) return packStep(5, score, foregroundMs, changes, gapMs, lastBucket, elapsed, 0, false);
   const foreground = (flags & 1) !== 0 && (flags & 4) !== 0;
   const voiced = (flags & 2) !== 0;
   const bucket = foreground
@@ -46,7 +57,7 @@ installIntentionalInterruptAdvancer((phase, score, foregroundMs, changes, gapMs,
   if ([1, 2, 3].includes(phase) && foregroundMs >= 320 && changes >= 3 && score >= 24 && gapMs <= 80) phase = 3;
   const ready = phase === 3 && elapsed >= 400 && elapsed <= 520;
   if (ready) phase = 4;
-  return new Float64Array([phase, score, foregroundMs, changes, gapMs, lastBucket, elapsed, signal, Number(ready)]);
+  return packStep(phase, score, foregroundMs, changes, gapMs, lastBucket, elapsed, signal, ready);
 });
 
 function runTrace({ aecVerified, levels, ticks }) {

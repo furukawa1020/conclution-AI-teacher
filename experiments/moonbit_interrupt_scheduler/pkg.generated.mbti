@@ -1,0 +1,13 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "kotae/interrupt_scheduler"
+
+// Values
+pub fn advance_intentional_interrupt(Int64, Int, Double, Double, Int, Int, Int) -> Int64
+
+// Errors
+
+// Types and methods
+
+// Type aliases
+
+// Traits

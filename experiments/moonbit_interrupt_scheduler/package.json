@@ -1,0 +1,8 @@
+{
+  "name": "kotae-moonbit-interrupt-benchmark",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

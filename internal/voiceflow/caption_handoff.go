@@ -20,6 +20,74 @@ var (
 	errCaptionHandoffInput = errors.New("voiceflow: caption handoff input is invalid")
 )
 
+const respondentInitiativeLeaseLifetimeMS int64 = 30_000
+
+// preparedInitiative carries no reply text or PCM. It is the single-use right
+// shared by speculative resource preparation and the later audible boundary.
+type preparedInitiative struct {
+	authority *initiativescheduler.PublicationAuthority
+	lease     initiativescheduler.Lease
+	action    initiativescheduler.Action
+}
+
+func prepareRespondentInitiative(
+	assistanceTarget string,
+	coachAction string,
+	spokenReply string,
+) (*preparedInitiative, error) {
+	if assistanceTarget != "respondent" || strings.TrimSpace(spokenReply) == "" {
+		return nil, nil
+	}
+	action, valid := respondentInitiativeAction(coachAction)
+	if !valid {
+		return nil, errCaptionHandoffState
+	}
+	var capability [16]byte
+	if _, err := rand.Read(capability[:]); err != nil {
+		return nil, errCaptionHandoffState
+	}
+	authority, err := initiativescheduler.NewPublicationAuthority(capability)
+	if err != nil {
+		return nil, errCaptionHandoffState
+	}
+	lease, err := authority.Prepare(
+		time.Now().UnixMilli(),
+		respondentInitiativeLeaseLifetimeMS,
+		1,
+		1,
+		1,
+		action,
+	)
+	if err != nil {
+		return nil, errCaptionHandoffState
+	}
+	return &preparedInitiative{
+		authority: authority,
+		lease:     lease,
+		action:    action,
+	}, nil
+}
+
+func (initiative *preparedInitiative) commit(nowMS int64) error {
+	if initiative == nil || initiative.authority == nil {
+		return errCaptionHandoffState
+	}
+	return initiative.authority.Commit(
+		nowMS,
+		initiative.lease,
+		1,
+		1,
+		1,
+		initiative.action,
+	)
+}
+
+func (initiative *preparedInitiative) abort() {
+	if initiative != nil && initiative.authority != nil {
+		initiative.authority.Abort()
+	}
+}
+
 // captionHandoff lets Native Audio donate its already-finalized transcript to
 // the audited staged agent. A stable interim may start model and TTS work, but
 // startLiveSpeculation keeps every PCM byte behind its commit buffer until the
@@ -32,15 +100,14 @@ type captionHandoff struct {
 	terminalMu    sync.Mutex
 	publicationMu sync.Mutex
 
-	p                   *Pipeline
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	uid                 string
-	input               httpapi.VoiceTurnInput
-	streamingSpeech     speechio.StreamingService
-	onAudio             func([]byte) error
-	onCoachActive       func(httpapi.VoiceRespondentCheckpoint) error
-	initiativeAuthority *initiativescheduler.PublicationAuthority
+	p               *Pipeline
+	ctx             context.Context
+	cancel          context.CancelFunc
+	uid             string
+	input           httpapi.VoiceTurnInput
+	streamingSpeech speechio.StreamingService
+	onAudio         func([]byte) error
+	onCoachActive   func(httpapi.VoiceRespondentCheckpoint) error
 
 	tracker                speculativeCandidateTracker
 	speculation            *liveSpeculation
@@ -82,27 +149,16 @@ func (p *Pipeline) OpenCaptionHandoff(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var initiativeCapability [16]byte
-	if _, err := rand.Read(initiativeCapability[:]); err != nil {
-		return nil, errCaptionHandoffState
-	}
-	initiativeAuthority, err := initiativescheduler.NewPublicationAuthority(
-		initiativeCapability,
-	)
-	if err != nil {
-		return nil, errCaptionHandoffState
-	}
 	handoffCtx, cancel := context.WithCancel(ctx)
 	return &captionHandoff{
-		p:                   p,
-		ctx:                 handoffCtx,
-		cancel:              cancel,
-		uid:                 uid,
-		input:               input,
-		streamingSpeech:     streamingSpeech,
-		onAudio:             onAudio,
-		onCoachActive:       onCoachActive,
-		initiativeAuthority: initiativeAuthority,
+		p:               p,
+		ctx:             handoffCtx,
+		cancel:          cancel,
+		uid:             uid,
+		input:           input,
+		streamingSpeech: streamingSpeech,
+		onAudio:         onAudio,
+		onCoachActive:   onCoachActive,
 	}, nil
 }
 
@@ -169,6 +225,13 @@ func (handoff *captionHandoff) Observe(
 		candidate,
 		handoff.streamingSpeech,
 		handoff.deliverAudio,
+		func(decision conversation.VoiceTurnResult) (*preparedInitiative, error) {
+			return prepareRespondentInitiative(
+				decision.AssistanceTarget,
+				decision.CoachAction,
+				decision.SpokenReply,
+			)
+		},
 	)
 	return nil
 }
@@ -272,6 +335,7 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 	adoptedDecision := false
 	var result httpapi.VoiceTurnResult
 	var spokenReply string
+	var initiative *preparedInitiative
 	outputAuthorized := false
 	authorizeOutput := func() error {
 		if outputAuthorized {
@@ -281,25 +345,20 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 			return err
 		}
 		if result.AssistanceTarget == "respondent" {
-			var initiativeLease initiativescheduler.Lease
 			initiativeAudible := strings.TrimSpace(spokenReply) != ""
-			initiativeAction, initiativeActionValid := respondentInitiativeAction(
-				result.CoachAction,
-			)
 			if initiativeAudible {
-				if !initiativeActionValid {
+				var err error
+				if initiative == nil {
+					initiative, err = prepareRespondentInitiative(
+						result.AssistanceTarget,
+						result.CoachAction,
+						spokenReply,
+					)
+				}
+				if err != nil {
 					return errCaptionHandoffState
 				}
-				var err error
-				initiativeLease, err = handoff.initiativeAuthority.Prepare(
-					time.Now().UnixMilli(),
-					30_000,
-					1,
-					1,
-					1,
-					initiativeAction,
-				)
-				if err != nil {
+				if initiative == nil {
 					return errCaptionHandoffState
 				}
 			}
@@ -319,22 +378,15 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 				return errCaptionHandoffState
 			}
 			if err := handoff.onCoachActive(checkpoint); err != nil {
-				handoff.initiativeAuthority.Abort()
+				initiative.abort()
 				return err
 			}
 			if err := handoff.ctx.Err(); err != nil {
-				handoff.initiativeAuthority.Abort()
+				initiative.abort()
 				return err
 			}
 			if initiativeAudible {
-				if err := handoff.initiativeAuthority.Commit(
-					time.Now().UnixMilli(),
-					initiativeLease,
-					1,
-					1,
-					1,
-					initiativeAction,
-				); err != nil {
+				if err := initiative.commit(time.Now().UnixMilli()); err != nil {
 					return errCaptionHandoffState
 				}
 			}
@@ -376,6 +428,7 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 					outcome.decision,
 				)
 			result = voiceResultFromDecision(handoff.input, outcome.decision)
+			initiative = outcome.initiative
 			if spokenReply == "" {
 				adoptedDecision = true
 			} else if outcome.synthesis != nil {
@@ -531,7 +584,6 @@ func (handoff *captionHandoff) Cancel() {
 		return
 	}
 	handoff.canceled = true
-	handoff.initiativeAuthority.Abort()
 	handoff.audioAuthorized = false
 	handoff.latestCaption = ""
 	speculation := handoff.speculation

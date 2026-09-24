@@ -232,6 +232,7 @@ func TestStartLiveSpeculationStopsAtFinalizedExtendedSpeechBoundary(t *testing.T
 		shortCandidate,
 		speech,
 		func([]byte) error { return nil },
+		nil,
 	)
 	if speculation == nil {
 		t.Fatal("159 canonical runes did not start eligible speculation")
@@ -254,6 +255,7 @@ func TestStartLiveSpeculationStopsAtFinalizedExtendedSpeechBoundary(t *testing.T
 		longCandidate,
 		speech,
 		func([]byte) error { return nil },
+		nil,
 	); got != nil {
 		got.cancel()
 		t.Fatal("160 canonical runes started metadata-unsafe speculation")

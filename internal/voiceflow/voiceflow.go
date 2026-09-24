@@ -68,6 +68,7 @@ type speculativeTurnOutcome struct {
 	err        error
 	durationMS int64
 	synthesis  *speculativeSynthesis
+	initiative *preparedInitiative
 }
 
 type liveSpeculation struct {
@@ -75,8 +76,9 @@ type liveSpeculation struct {
 	cancelContext context.CancelFunc
 	outcome       <-chan speculativeTurnOutcome
 
-	mu        sync.Mutex
-	synthesis *speculativeSynthesis
+	mu         sync.Mutex
+	synthesis  *speculativeSynthesis
+	initiative *preparedInitiative
 }
 
 type speculativeAudioBufferState uint8
@@ -594,6 +596,7 @@ func (p *Pipeline) processLive(
 					candidate,
 					streamingSpeech,
 					deliverAudio,
+					nil,
 				)
 			}
 			continue
@@ -663,6 +666,7 @@ func (p *Pipeline) processLive(
 					candidate,
 					streamingSpeech,
 					deliverAudio,
+					nil,
 				)
 			}
 		}
@@ -1050,6 +1054,7 @@ func (p *Pipeline) startLiveSpeculation(
 	candidate string,
 	streamingSpeech speechio.StreamingService,
 	deliverAudio func([]byte) error,
+	prepareOutput func(conversation.VoiceTurnResult) (*preparedInitiative, error),
 ) *liveSpeculation {
 	candidate = canonicalSpeculationText(candidate)
 	if input.StrictCloudMinimization || input.Document != nil ||
@@ -1082,6 +1087,7 @@ func (p *Pipeline) startLiveSpeculation(
 		decision, err := p.agent.Process(speculationCtx, uid, turn)
 		durationMS := time.Since(started).Milliseconds()
 		var synthesis *speculativeSynthesis
+		var initiative *preparedInitiative
 		if err == nil && terminalAnswerOwnershipSpeechConflict(decision) {
 			err = errAnswerOwnershipSpeechConflict
 		}
@@ -1090,13 +1096,22 @@ func (p *Pipeline) startLiveSpeculation(
 			if contextErr := speculationCtx.Err(); contextErr != nil {
 				err = contextErr
 			} else {
-				synthesis = startSpeculativeSynthesis(
-					speculationCtx,
-					streamingSpeech,
-					decision.SpokenReply,
-					deliverAudio,
-				)
-				speculation.synthesis = synthesis
+				if prepareOutput != nil {
+					initiative, err = prepareOutput(decision)
+				}
+				if err == nil {
+					synthesis = startSpeculativeSynthesis(
+						speculationCtx,
+						streamingSpeech,
+						decision.SpokenReply,
+						deliverAudio,
+					)
+					speculation.synthesis = synthesis
+					speculation.initiative = initiative
+				} else if initiative != nil {
+					initiative.abort()
+					initiative = nil
+				}
 			}
 			speculation.mu.Unlock()
 		}
@@ -1105,6 +1120,7 @@ func (p *Pipeline) startLiveSpeculation(
 			err:        err,
 			durationMS: durationMS,
 			synthesis:  synthesis,
+			initiative: initiative,
 		}
 	}()
 	return speculation
@@ -1125,8 +1141,12 @@ func liveProcessingCommitted(input httpapi.VoiceTurnInput) bool {
 func (speculation *liveSpeculation) cancel() *speculativeSynthesis {
 	speculation.mu.Lock()
 	synthesis := speculation.synthesis
+	initiative := speculation.initiative
 	if synthesis != nil {
 		synthesis.buffer.discard(context.Canceled)
+	}
+	if initiative != nil {
+		initiative.abort()
 	}
 	speculation.cancelContext()
 	if synthesis != nil {

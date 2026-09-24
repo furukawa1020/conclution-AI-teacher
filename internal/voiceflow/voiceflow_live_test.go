@@ -1577,6 +1577,7 @@ func TestLiveSpeculationRejectsTerminalAnswerOwnershipSpeechBeforeSynthesis(
 			delivered++
 			return nil
 		},
+		nil,
 	)
 	if speculation == nil {
 		t.Fatal("eligible speculation was not started")

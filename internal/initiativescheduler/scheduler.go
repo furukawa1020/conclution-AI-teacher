@@ -11,6 +11,10 @@ const (
 	ActionReflectGoal Action = "reflect_user_goal"
 	ActionOfferChoice Action = "offer_choice"
 	ActionPractice    Action = "start_practice"
+	// ActionAcknowledge releases the floor without asking, coaching or adding
+	// answer content. It is distinct from reflection so completion receipts do
+	// not get misclassified as a new intervention.
+	ActionAcknowledge Action = "acknowledge_release"
 )
 
 type Floor string
@@ -144,7 +148,9 @@ func inactive(prepared *Lease, reason string) Decision {
 }
 
 func validAction(action Action) bool {
-	return action == ActionAskOne || action == ActionReflectGoal || action == ActionOfferChoice || action == ActionPractice
+	return action == ActionAskOne || action == ActionReflectGoal ||
+		action == ActionOfferChoice || action == ActionPractice ||
+		action == ActionAcknowledge
 }
 
 func validFloor(floor Floor) bool {

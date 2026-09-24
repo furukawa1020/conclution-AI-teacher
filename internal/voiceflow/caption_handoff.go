@@ -2,6 +2,7 @@ package voiceflow
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/initiativescheduler"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
@@ -30,14 +32,15 @@ type captionHandoff struct {
 	terminalMu    sync.Mutex
 	publicationMu sync.Mutex
 
-	p               *Pipeline
-	ctx             context.Context
-	cancel          context.CancelFunc
-	uid             string
-	input           httpapi.VoiceTurnInput
-	streamingSpeech speechio.StreamingService
-	onAudio         func([]byte) error
-	onCoachActive   func(httpapi.VoiceRespondentCheckpoint) error
+	p                   *Pipeline
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	uid                 string
+	input               httpapi.VoiceTurnInput
+	streamingSpeech     speechio.StreamingService
+	onAudio             func([]byte) error
+	onCoachActive       func(httpapi.VoiceRespondentCheckpoint) error
+	initiativeAuthority *initiativescheduler.PublicationAuthority
 
 	tracker                speculativeCandidateTracker
 	speculation            *liveSpeculation
@@ -79,16 +82,27 @@ func (p *Pipeline) OpenCaptionHandoff(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var initiativeCapability [16]byte
+	if _, err := rand.Read(initiativeCapability[:]); err != nil {
+		return nil, errCaptionHandoffState
+	}
+	initiativeAuthority, err := initiativescheduler.NewPublicationAuthority(
+		initiativeCapability,
+	)
+	if err != nil {
+		return nil, errCaptionHandoffState
+	}
 	handoffCtx, cancel := context.WithCancel(ctx)
 	return &captionHandoff{
-		p:               p,
-		ctx:             handoffCtx,
-		cancel:          cancel,
-		uid:             uid,
-		input:           input,
-		streamingSpeech: streamingSpeech,
-		onAudio:         onAudio,
-		onCoachActive:   onCoachActive,
+		p:                   p,
+		ctx:                 handoffCtx,
+		cancel:              cancel,
+		uid:                 uid,
+		input:               input,
+		streamingSpeech:     streamingSpeech,
+		onAudio:             onAudio,
+		onCoachActive:       onCoachActive,
+		initiativeAuthority: initiativeAuthority,
 	}, nil
 }
 
@@ -267,6 +281,28 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 			return err
 		}
 		if result.AssistanceTarget == "respondent" {
+			var initiativeLease initiativescheduler.Lease
+			initiativeAudible := strings.TrimSpace(spokenReply) != ""
+			initiativeAction, initiativeActionValid := respondentInitiativeAction(
+				result.CoachAction,
+			)
+			if initiativeAudible {
+				if !initiativeActionValid {
+					return errCaptionHandoffState
+				}
+				var err error
+				initiativeLease, err = handoff.initiativeAuthority.Prepare(
+					time.Now().UnixMilli(),
+					30_000,
+					1,
+					1,
+					1,
+					initiativeAction,
+				)
+				if err != nil {
+					return errCaptionHandoffState
+				}
+			}
 			// Respondent audio is a state transition, not an ordinary caption. The
 			// transport authenticates and accepts this checkpoint synchronously
 			// before any PCM byte can cross the commit boundary. Missing control or
@@ -283,10 +319,24 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 				return errCaptionHandoffState
 			}
 			if err := handoff.onCoachActive(checkpoint); err != nil {
+				handoff.initiativeAuthority.Abort()
 				return err
 			}
 			if err := handoff.ctx.Err(); err != nil {
+				handoff.initiativeAuthority.Abort()
 				return err
+			}
+			if initiativeAudible {
+				if err := handoff.initiativeAuthority.Commit(
+					time.Now().UnixMilli(),
+					initiativeLease,
+					1,
+					1,
+					1,
+					initiativeAction,
+				); err != nil {
+					return errCaptionHandoffState
+				}
 			}
 		}
 		handoff.mu.Lock()
@@ -481,6 +531,7 @@ func (handoff *captionHandoff) Cancel() {
 		return
 	}
 	handoff.canceled = true
+	handoff.initiativeAuthority.Abort()
 	handoff.audioAuthorized = false
 	handoff.latestCaption = ""
 	speculation := handoff.speculation
@@ -514,6 +565,21 @@ func (handoff *captionHandoff) finishCommitted() {
 		cancel()
 	}
 	handoff.awaitPublicationDrain()
+}
+
+func respondentInitiativeAction(
+	coachAction string,
+) (initiativescheduler.Action, bool) {
+	switch coachAction {
+	case "elicit", "retry", "expand":
+		return initiativescheduler.ActionAskOne, true
+	case "restate":
+		return initiativescheduler.ActionReflectGoal, true
+	case "complete", "release":
+		return initiativescheduler.ActionAcknowledge, true
+	default:
+		return "", false
+	}
 }
 
 func (handoff *captionHandoff) awaitPublicationDrain() {

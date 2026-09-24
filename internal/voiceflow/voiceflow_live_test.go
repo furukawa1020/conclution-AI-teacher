@@ -1540,6 +1540,87 @@ func TestPipelineLivePublishesSilentAnswerOwnershipOnlyAtExactFinal(t *testing.T
 	}
 }
 
+func TestPipelineLiveRejectsRespondentSpeculationBeforeTTSWithoutFiniteLease(t *testing.T) {
+	t.Parallel()
+	const utterance = "本人の回答を待つための十分に長い発話候補です"
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.91,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind:      speechio.StreamingTranscriptionInterim,
+			Text:      utterance,
+			Stability: 0.95,
+		},
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	appendProviderSpeechEnd(session)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			fakeSpeech: fakeSpeech{},
+			chunks:     [][]byte{{41, 0}},
+		},
+		session: session,
+	}
+	speculative := liveTestDecision("公開してはいけない投機音声", "spec-state")
+	speculative.AssistanceTarget = "respondent"
+	speculative.RespondentStage = "restructure"
+	speculative.CoachPhase = "awaiting_answer"
+	speculative.CoachAction = "future_unreviewed_action"
+	normal := liveTestDecision("確定経路の応答", "normal-state")
+	agent := &speculativeTestAgent{
+		speculativeResult: speculative,
+		normalResult:      normal,
+		started:           make(chan struct{}),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Unix(210, 0)
+	pipeline.now = sequenceClock(
+		started,
+		started.Add(minSpeculativeStableDuration),
+	)
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	var delivered [][]byte
+	result, err := pipeline.ProcessLive(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{RequestID: "spec-lease-rejected"},
+		audio,
+		func(chunk []byte) error {
+			delivered = append(delivered, append([]byte(nil), chunk...))
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StateToken != "normal-state" || result.Caption != "確定経路の応答" ||
+		result.LiveTimings.SpecHit != 0 || result.LiveTimings.SpecMiss != 1 ||
+		result.LiveTimings.SpecCancel != 1 {
+		t.Fatalf("invalid initiative speculation was adopted: %+v", result)
+	}
+	if speech.streamCalls != 1 || speech.synthesizedText != "確定経路の応答" {
+		t.Fatalf(
+			"speculative TTS escaped prepare gate: calls=%d text=%q",
+			speech.streamCalls,
+			speech.synthesizedText,
+		)
+	}
+	if len(delivered) != 1 || !bytes.Equal(delivered[0], []byte{41, 0}) {
+		t.Fatalf("delivered=%v", delivered)
+	}
+}
+
 func TestLiveSpeculationRejectsTerminalAnswerOwnershipSpeechBeforeSynthesis(
 	t *testing.T,
 ) {

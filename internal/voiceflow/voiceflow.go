@@ -547,6 +547,15 @@ func (p *Pipeline) processLive(
 	finalObservedAt := time.Time{}
 	endpointNotified := false
 	providerSpeechEndPending := false
+	prepareInitiativeOutput := func(
+		decision conversation.VoiceTurnResult,
+	) (*preparedInitiative, error) {
+		return prepareRespondentInitiative(
+			decision.AssistanceTarget,
+			decision.CoachAction,
+			decision.SpokenReply,
+		)
+	}
 	notifyEndpoint := func() {
 		if endpointNotified || onEndpoint == nil ||
 			len(finalFragments) == 0 {
@@ -596,7 +605,7 @@ func (p *Pipeline) processLive(
 					candidate,
 					streamingSpeech,
 					deliverAudio,
-					nil,
+					prepareInitiativeOutput,
 				)
 			}
 			continue
@@ -666,7 +675,7 @@ func (p *Pipeline) processLive(
 					candidate,
 					streamingSpeech,
 					deliverAudio,
-					nil,
+					prepareInitiativeOutput,
 				)
 			}
 		}
@@ -881,6 +890,22 @@ func (p *Pipeline) processLive(
 						if err == nil &&
 							outcome.synthesis.firstChunkMS() < 0 {
 							err = errSpeculativeAudioChunk
+						}
+					}
+					if err == nil &&
+						outcome.decision.AssistanceTarget == "respondent" &&
+						strings.TrimSpace(outcome.decision.SpokenReply) != "" {
+						if outcome.initiative == nil {
+							err = errCaptionHandoffState
+						} else {
+							err = outcome.initiative.commit(time.Now().UnixMilli())
+						}
+						if err != nil {
+							// A prepared voice whose authority cannot be revalidated
+							// is never retried from the same decision. Discard it and
+							// let the committed final-caption baseline run below.
+							outcome.synthesis.abort(err)
+							synthesisReady = false
 						}
 					}
 					if err == nil {

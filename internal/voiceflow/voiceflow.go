@@ -76,9 +76,10 @@ type liveSpeculation struct {
 	cancelContext context.CancelFunc
 	outcome       <-chan speculativeTurnOutcome
 
-	mu         sync.Mutex
-	synthesis  *speculativeSynthesis
-	initiative *preparedInitiative
+	mu              sync.Mutex
+	synthesis       *speculativeSynthesis
+	initiative      *preparedInitiative
+	candidateClosed bool
 }
 
 type speculativeAudioBufferState uint8
@@ -143,6 +144,7 @@ type speculativeSynthesis struct {
 
 	mu           sync.Mutex
 	result       speculativeSynthesisResult
+	spokenReply  string
 	startedAt    time.Time
 	firstChunkAt time.Time
 }
@@ -1212,17 +1214,78 @@ func (p *Pipeline) startLiveSpeculation(
 	started := time.Now()
 	go func() {
 		defer preparation.close()
-		decision, err := p.agent.Process(speculationCtx, uid, turn)
+		prepareAuditedCandidate := func(
+			candidate conversation.AuditedSpeechCandidate,
+		) {
+			if candidate.SpokenReply == "" {
+				return
+			}
+			speculation.mu.Lock()
+			defer speculation.mu.Unlock()
+			if speculation.candidateClosed ||
+				speculation.synthesis != nil ||
+				speculationCtx.Err() != nil {
+				return
+			}
+			candidateDecision := conversation.VoiceTurnResult{
+				AssistanceTarget: "assistant",
+				RespondentStage:  "none",
+				SpokenReply:      candidate.SpokenReply,
+			}
+			var initiative *preparedInitiative
+			var prepareErr error
+			if prepareOutput != nil {
+				initiative, prepareErr = prepareOutput(candidateDecision)
+			}
+			if prepareErr != nil || initiative != nil {
+				if initiative != nil {
+					initiative.abort()
+				}
+				return
+			}
+			speculation.synthesis = startSpeculativeSynthesis(
+				speculationCtx,
+				streamingSpeech,
+				preparation.takeReady(),
+				candidate.SpokenReply,
+				deliverAudio,
+			)
+		}
+		var decision conversation.VoiceTurnResult
+		var err error
+		if auditedAgent, ok := p.agent.(conversation.AuditedCandidateAgent); ok {
+			decision, err = auditedAgent.ProcessWithAuditedCandidate(
+				speculationCtx,
+				uid,
+				turn,
+				prepareAuditedCandidate,
+			)
+		} else {
+			decision, err = p.agent.Process(speculationCtx, uid, turn)
+		}
 		durationMS := time.Since(started).Milliseconds()
 		var synthesis *speculativeSynthesis
 		var initiative *preparedInitiative
 		if err == nil && terminalAnswerOwnershipSpeechConflict(decision) {
 			err = errAnswerOwnershipSpeechConflict
 		}
+		speculation.mu.Lock()
+		speculation.candidateClosed = true
+		if speculation.synthesis != nil &&
+			(err != nil ||
+				decision.SpokenReply == "" ||
+				speculation.synthesis.spokenReply != decision.SpokenReply) {
+			speculation.synthesis.buffer.discard(errSpeculativeAudioDiscarded)
+			speculation.synthesis.cancel()
+			speculation.synthesis = nil
+		}
+		speculation.mu.Unlock()
 		if err == nil && decision.SpokenReply != "" {
 			speculation.mu.Lock()
 			if contextErr := speculationCtx.Err(); contextErr != nil {
 				err = contextErr
+			} else if speculation.synthesis != nil {
+				synthesis = speculation.synthesis
 			} else {
 				if prepareOutput != nil {
 					initiative, err = prepareOutput(decision)
@@ -1310,9 +1373,10 @@ func startSpeculativeSynthesis(
 ) *speculativeSynthesis {
 	synthesisCtx, cancel := context.WithCancel(ctx)
 	synthesis := &speculativeSynthesis{
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		startedAt: time.Now(),
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		spokenReply: spokenReply,
+		startedAt:   time.Now(),
 	}
 	synthesis.buffer = newSpeculativeAudioCommitBuffer(
 		synthesisCtx,

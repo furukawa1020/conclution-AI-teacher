@@ -142,6 +142,26 @@ type Agent interface {
 	Process(ctx context.Context, uid string, turn VoiceTurn) (VoiceTurnResult, error)
 }
 
+// AuditedSpeechCandidate is an ordinary-assistant reply that has already
+// passed the independent answer critic. It remains provisional: callers may
+// prepare cancellable audio, but must compare it with the final result before
+// publishing any byte.
+type AuditedSpeechCandidate struct {
+	SpokenReply string
+}
+
+// AuditedCandidateAgent exposes an optional two-phase latency handoff without
+// widening Agent for implementations that cannot stream a safe candidate.
+type AuditedCandidateAgent interface {
+	Agent
+	ProcessWithAuditedCandidate(
+		ctx context.Context,
+		uid string,
+		turn VoiceTurn,
+		onCandidate func(AuditedSpeechCandidate),
+	) (VoiceTurnResult, error)
+}
+
 // StateTokenValidator authenticates an opaque state token without advancing
 // conversation state. Voice transports use this optional production
 // capability before reflecting a token on an STT no-op path.
@@ -367,7 +387,10 @@ type speculativeAuditResult struct {
 type speculativeAudit struct {
 	candidate modelPlan
 	cancel    context.CancelFunc
-	result    <-chan speculativeAuditResult
+	done      chan struct{}
+
+	mu     sync.Mutex
+	result speculativeAuditResult
 }
 
 func NewVertexAgent(
@@ -771,6 +794,24 @@ func (agent *vertexAgent) Process(
 	uid string,
 	turn VoiceTurn,
 ) (VoiceTurnResult, error) {
+	return agent.process(ctx, uid, turn, nil)
+}
+
+func (agent *vertexAgent) ProcessWithAuditedCandidate(
+	ctx context.Context,
+	uid string,
+	turn VoiceTurn,
+	onCandidate func(AuditedSpeechCandidate),
+) (VoiceTurnResult, error) {
+	return agent.process(ctx, uid, turn, onCandidate)
+}
+
+func (agent *vertexAgent) process(
+	ctx context.Context,
+	uid string,
+	turn VoiceTurn,
+	onAuditedCandidate func(AuditedSpeechCandidate),
+) (VoiceTurnResult, error) {
 	if ctx == nil || !validUID(uid) {
 		return VoiceTurnResult{}, ErrInvalidTurn
 	}
@@ -935,6 +976,20 @@ func (agent *vertexAgent) Process(
 			state,
 			candidate,
 		)
+		if earlyAudit != nil && onAuditedCandidate != nil {
+			audit := earlyAudit
+			go func() {
+				assessment, auditErr := awaitSpeculativeAudit(ctx, audit)
+				if auditErr != nil ||
+					assessment.Outcome != answercontract.OutcomeKeep ||
+					ctx.Err() != nil {
+					return
+				}
+				onAuditedCandidate(AuditedSpeechCandidate{
+					SpokenReply: audit.candidate.SpokenReply,
+				})
+			}()
+		}
 	}
 	fastBudget, hasFastBudget := timeoutBudgetWithReserve(
 		ctx,
@@ -3760,7 +3815,11 @@ func (agent *vertexAgent) startSpeculativeAudit(
 		return nil
 	}
 	auditCtx, cancel := context.WithCancel(ctx)
-	result := make(chan speculativeAuditResult, 1)
+	audit := &speculativeAudit{
+		candidate: candidate,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+	}
 	go func() {
 		assessment, err := agent.auditAnswer(
 			auditCtx,
@@ -3771,16 +3830,15 @@ func (agent *vertexAgent) startSpeculativeAudit(
 			state,
 			candidate,
 		)
-		result <- speculativeAuditResult{
+		audit.mu.Lock()
+		audit.result = speculativeAuditResult{
 			assessment: assessment,
 			err:        err,
 		}
+		audit.mu.Unlock()
+		close(audit.done)
 	}()
-	return &speculativeAudit{
-		candidate: candidate,
-		cancel:    cancel,
-		result:    result,
-	}
+	return audit
 }
 
 func canConsumeSpeculativeAudit(
@@ -3813,8 +3871,11 @@ func awaitSpeculativeAudit(
 		return answercontract.Assessment{}, ErrModelUnavailable
 	}
 	select {
-	case result := <-audit.result:
+	case <-audit.done:
 		audit.cancel()
+		audit.mu.Lock()
+		result := audit.result
+		audit.mu.Unlock()
 		return result.assessment, result.err
 	case <-ctx.Done():
 		audit.cancel()

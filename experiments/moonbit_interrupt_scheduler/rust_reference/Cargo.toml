@@ -1,0 +1,20 @@
+[package]
+name = "kotae-interrupt-scheduler-reference"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kotae-audio-core = { path = "../../../crates/audio_core" }
+
+[workspace]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = "symbols"

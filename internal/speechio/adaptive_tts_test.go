@@ -142,6 +142,61 @@ func TestDirectPCMCallbackFailureDoesNotCauseDoubleSpeech(t *testing.T) {
 	}
 }
 
+func TestPreparedShortReplyKeepsReadyStreamAndDeliversFirstChunk(t *testing.T) {
+	t.Parallel()
+
+	directCalls := 0
+	stream := &fakeStreamingSynthesizeClient{
+		recvResults: []streamingReceiveResult{
+			{response: &texttospeechpb.StreamingSynthesizeResponse{
+				AudioContent: []byte{9, 10},
+			}},
+			{response: &texttospeechpb.StreamingSynthesizeResponse{
+				AudioContent: []byte{11, 12},
+			}},
+			{err: io.EOF},
+		},
+	}
+	service := cloudServiceWithStream(stream)
+	service.synthesizePCMCall = func(
+		context.Context,
+		*texttospeechpb.SynthesizeSpeechRequest,
+	) (*texttospeechpb.SynthesizeSpeechResponse, error) {
+		directCalls++
+		return nil, errors.New("prepared short reply must not restart direct synthesis")
+	}
+	prepared, err := service.PrepareStreamingSynthesis(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	callbackErr := errors.New("first chunk observed")
+	callbacks := 0
+	_, err = prepared.StreamSynthesize("短い返答です。", func(chunk []byte) error {
+		callbacks++
+		if !bytes.Equal(chunk, []byte{9, 10}) {
+			t.Fatalf("first chunk = %v", chunk)
+		}
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("callback error = %v", err)
+	}
+	if directCalls != 0 || callbacks != 1 || stream.receiveIndex != 1 {
+		t.Fatalf(
+			"direct=%d callbacks=%d receives=%d",
+			directCalls,
+			callbacks,
+			stream.receiveIndex,
+		)
+	}
+	if len(stream.sent) != 2 ||
+		stream.sent[0].GetStreamingConfig() == nil ||
+		stream.sent[1].GetInput().GetText() != "短い返答です。" ||
+		!stream.closeCalled {
+		t.Fatalf("prepared short stream sequence invalid: sent=%d closed=%t", len(stream.sent), stream.closeCalled)
+	}
+}
+
 func TestLongReplyKeepsStreamingRoute(t *testing.T) {
 	t.Parallel()
 

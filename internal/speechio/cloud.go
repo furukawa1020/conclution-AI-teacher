@@ -744,14 +744,6 @@ func (prepared *preparedCloudSynthesis) StreamSynthesize(
 			return StreamingAudioContentType, nil
 		}
 	}
-	// The direct PCM route remains faster for short text. Revoke the unused
-	// config-only stream and delegate without waiting for it to produce output.
-	if utf8.RuneCountInString(text) <= maxDirectPCMSynthesisRunes &&
-		prepared.service.synthesizePCMCall != nil {
-		_ = prepared.stream.CloseSend()
-		return prepared.service.StreamSynthesize(prepared.ctx, text, onChunk)
-	}
-
 	_, inputRequest := streamingSynthesizeRequests(text, prepared.service.voiceName)
 	if err := prepared.stream.Send(inputRequest); err != nil {
 		return "", fmt.Errorf("send prepared streaming speech input: %w", err)

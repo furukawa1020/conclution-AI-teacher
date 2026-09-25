@@ -32,6 +32,11 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   // After clear speech, a short but genuinely changing quiet word may refresh
   // the endpoint without opting the whole turn into the three-second mode.
   softVoiceContinuationEvidenceSpanMs: 120,
+  // A short, clear acknowledgement or one-word answer does not need the
+  // full sentence pause. Longer speech keeps the existing continuation
+  // windows below, so this fast tier cannot clip a reflective answer.
+  briefSpeechSpanMs: 640,
+  briefEndOfTurnSilenceMs: 640,
   endOfTurnSilenceMs: 1_200,
   reflectiveEndOfTurnSilenceMs: 2_200,
   softVoiceEndOfTurnSilenceMs: 3_000,
@@ -42,6 +47,7 @@ export const VOICE_SESSION_LIMITS = Object.freeze({
   monologueEndOfTurnSilenceMs: 5_000,
   monologueSpeechSpanMs: 12_000,
   hybridEndpointSilenceMs: 1_200,
+  briefHybridEndpointSilenceMs: 440,
   hybridReflectiveEndpointSilenceMs: 2_200,
   hybridSoftVoiceEndpointSilenceMs: 3_000,
   hybridMonologueEndpointSilenceMs: 5_000,
@@ -970,6 +976,10 @@ export function shouldCommitHybridEndpoint({
     VOICE_SESSION_LIMITS.vadIntervalMs;
   const monologue =
     speechSpan >= VOICE_SESSION_LIMITS.monologueSpeechSpanMs;
+  const brief =
+    speechSpan <= VOICE_SESSION_LIMITS.briefSpeechSpanMs &&
+    !softVoiceConfirmed &&
+    !continuationEvidence;
   const reflective =
     speechSpan >= VOICE_SESSION_LIMITS.reflectiveSpeechSpanMs ||
     (nativeAudio && !coachActive && continuationEvidence);
@@ -980,7 +990,9 @@ export function shouldCommitHybridEndpoint({
     ? VOICE_SESSION_LIMITS.coachHybridEndpointSilenceMs
     : nativeAudio
       ? VOICE_SESSION_LIMITS.nativeAudioHybridEndpointSilenceMs
-      : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
+      : brief
+        ? VOICE_SESSION_LIMITS.briefHybridEndpointSilenceMs
+        : VOICE_SESSION_LIMITS.hybridEndpointSilenceMs;
   const requiredSilence = monologue
     ? VOICE_SESSION_LIMITS.hybridMonologueEndpointSilenceMs
     : softVoiceConfirmed && !shortUtteranceConfirmed
@@ -1367,9 +1379,17 @@ export function advanceVad(
     firstVoiceAt === null || lastVoiceAt === null
       ? 0
       : lastVoiceAt - firstVoiceAt + effectiveIntervalMs;
+  const briefClearSpeech =
+    speechSpanMs <= VOICE_SESSION_LIMITS.briefSpeechSpanMs &&
+    !softVoiceConfirmed &&
+    !continuationEvidence;
   const shortEndOfTurnSilenceMs = coachActive
     ? coachEndOfTurnSilenceMs
-    : endOfTurnSilenceMs;
+    : nativeAudio
+      ? endOfTurnSilenceMs
+      : briefClearSpeech
+        ? VOICE_SESSION_LIMITS.briefEndOfTurnSilenceMs
+        : endOfTurnSilenceMs;
   const trailingSilenceMs =
     speechSpanMs >= monologueSpeechSpanMs
       ? monologueEndOfTurnSilenceMs

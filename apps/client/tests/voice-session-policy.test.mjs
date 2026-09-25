@@ -4669,6 +4669,22 @@ test("a Native coach control is exact, one-shot, and precedes response audio", (
 });
 
 test("hybrid endpoint requires provider and local silence agreement", () => {
+  const brief = {
+    firstVoiceAt: 100,
+    hasSpeech: true,
+    lastVoiceAt: 500,
+    providerEndpointAt: 700,
+  };
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...brief, now: 939 }),
+    false,
+  );
+  assert.equal(
+    shouldCommitHybridEndpoint({ ...brief, now: 940 }),
+    true,
+    "a brief clear HTTP answer can use a 440 ms two-detector agreement",
+  );
+
   const short = {
     firstVoiceAt: 100,
     hasSpeech: true,
@@ -7389,7 +7405,9 @@ test("a watchdog reports synchronous expiry instead of rearming a stopped sessio
   assert.equal(timerCreated, false);
 });
 
-test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
+test("VAD confirms a brief clear word then ends after 640 ms silence", () => {
+  assert.equal(VOICE_SESSION_LIMITS.briefSpeechSpanMs, 640);
+  assert.equal(VOICE_SESSION_LIMITS.briefEndOfTurnSilenceMs, 640);
   assert.equal(VOICE_SESSION_LIMITS.endOfTurnSilenceMs, 1_200);
   const startedAt = 1_000;
   let state = createVadState(startedAt);
@@ -7418,7 +7436,7 @@ test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
     now:
       startedAt +
       VOICE_SESSION_LIMITS.minimumVoiceMs +
-      VOICE_SESSION_LIMITS.endOfTurnSilenceMs -
+      VOICE_SESSION_LIMITS.briefEndOfTurnSilenceMs -
       1,
     peak: 0,
     rms: 0.003,
@@ -7429,7 +7447,39 @@ test("VAD confirms 120 ms of voice then ends after 1.2 seconds silence", () => {
     now:
       startedAt +
       VOICE_SESSION_LIMITS.minimumVoiceMs +
-      VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
+      VOICE_SESSION_LIMITS.briefEndOfTurnSilenceMs,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, "end-of-turn");
+});
+
+test("VAD keeps the 1.2 second pause for speech beyond the brief tier", () => {
+  const startedAt = 2_000;
+  let state = createVadState(startedAt);
+  const spokenMs =
+    VOICE_SESSION_LIMITS.briefSpeechSpanMs +
+    VOICE_SESSION_LIMITS.vadIntervalMs;
+  for (
+    let elapsed = VOICE_SESSION_LIMITS.vadIntervalMs;
+    elapsed <= spokenMs;
+    elapsed += VOICE_SESSION_LIMITS.vadIntervalMs
+  ) {
+    state = advanceVad(state, {
+      now: startedAt + elapsed,
+      peak: 0.08,
+      rms: 0.03,
+    });
+  }
+  const lastVoiceAt = state.lastVoiceAt;
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.briefEndOfTurnSilenceMs,
+    peak: 0,
+    rms: 0.003,
+  });
+  assert.equal(state.action, null);
+  state = advanceVad(state, {
+    now: lastVoiceAt + VOICE_SESSION_LIMITS.endOfTurnSilenceMs,
     peak: 0,
     rms: 0.003,
   });
@@ -8262,7 +8312,8 @@ test("VAD refreshes the trailing-silence clock as soon as confirmed speech resum
   const resumesAt =
     startedAt +
     VOICE_SESSION_LIMITS.minimumVoiceMs +
-    VOICE_SESSION_LIMITS.endOfTurnSilenceMs;
+    VOICE_SESSION_LIMITS.briefEndOfTurnSilenceMs -
+    VOICE_SESSION_LIMITS.vadIntervalMs;
   for (
     let now =
       startedAt +

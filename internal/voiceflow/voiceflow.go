@@ -758,14 +758,13 @@ func (p *Pipeline) processLive(
 			break
 		}
 		// A newly finalized fragment is itself a stable observation. This is
-		// important when the recognizer emits one interim and then the same
-		// text as final instead of repeating the interim hypothesis.
+		// provider-authoritative text, so it must not inherit the minimum rune,
+		// repetition, or hold-time thresholds used only for revisable interims.
+		// This lets short acknowledgements start sealed model/TTS work while the
+		// transport is still closing. Exact-final and processing-commit gates
+		// below remain the only authority to release any resulting PCM.
 		if speculationEligible && !speculationAttempted {
-			candidate, ready := candidateTracker.observe(
-				finalTranscript,
-				true,
-				p.currentTime(),
-			)
+			candidate, ready := candidateTracker.observeFinal(finalTranscript)
 			if ready {
 				speculationAttempted = true
 				speculation = p.startLiveSpeculation(
@@ -1719,6 +1718,20 @@ func (tracker *speculativeCandidateTracker) observe(
 			!observedAt.Before(tracker.firstSeenAt) &&
 			observedAt.Sub(tracker.firstSeenAt) >=
 				minSpeculativeStableDuration
+}
+
+func (tracker *speculativeCandidateTracker) observeFinal(
+	rawCandidate string,
+) (string, bool) {
+	candidate := canonicalSpeculationText(rawCandidate)
+	if candidate == "" {
+		tracker.reset()
+		return "", false
+	}
+	tracker.candidate = candidate
+	tracker.firstSeenAt = time.Time{}
+	tracker.observed = 1
+	return candidate, true
 }
 
 func (tracker *speculativeCandidateTracker) reset() {

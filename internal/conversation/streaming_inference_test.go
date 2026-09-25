@@ -53,6 +53,61 @@ type scriptedInferenceResponseStream struct {
 	responses []*genai.GenerateContentResponse
 }
 
+type blockingCriticStreamingGenerator struct {
+	planner       string
+	criticStarted chan struct{}
+	releaseCritic chan struct{}
+}
+
+func (generator *blockingCriticStreamingGenerator) GenerateContentStream(
+	_ context.Context,
+	_ string,
+	_ []*genai.Content,
+	_ *genai.GenerateContentConfig,
+) iter.Seq2[*genai.GenerateContentResponse, error] {
+	return func(yield func(*genai.GenerateContentResponse, error) bool) {
+		yield(&genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{{
+				Content: genai.NewContentFromText(
+					generator.planner,
+					genai.RoleModel,
+				),
+				FinishReason: genai.FinishReasonStop,
+			}},
+		}, nil)
+	}
+}
+
+func (generator *blockingCriticStreamingGenerator) GenerateContent(
+	ctx context.Context,
+	_ string,
+	contents []*genai.Content,
+	_ *genai.GenerateContentConfig,
+) (*genai.GenerateContentResponse, error) {
+	close(generator.criticStarted)
+	select {
+	case <-generator.releaseCritic:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	var prompt string
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			prompt += part.Text
+		}
+	}
+	body, err := defaultCriticBody(prompt)
+	if err != nil {
+		return nil, err
+	}
+	return &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content:      genai.NewContentFromText(body, genai.RoleModel),
+			FinishReason: genai.FinishReasonStop,
+		}},
+	}, nil
+}
+
 func (stream scriptedInferenceResponseStream) GenerateContentStream(
 	_ context.Context,
 	_ string,
@@ -108,6 +163,63 @@ func TestStreamedInferencePublishesCompleteCandidateBeforePlannerTail(t *testing
 	}
 	if !published || string(raw) != first+second {
 		t.Fatalf("published=%v raw=%q", published, raw)
+	}
+}
+
+func TestSealedCandidateIsAvailableWhileIndependentCriticIsRunning(t *testing.T) {
+	plan := validModelPlan()
+	generator := &blockingCriticStreamingGenerator{
+		planner:       encodePlan(t, plan),
+		criticStarted: make(chan struct{}),
+		releaseCritic: make(chan struct{}),
+	}
+	agent := newTestAgent(t, generator)
+	candidate := make(chan SealedSpeechCandidate, 1)
+	type outcome struct {
+		result VoiceTurnResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := agent.ProcessWithSealedCandidate(
+			context.Background(),
+			"sealed-candidate-user",
+			VoiceTurn{
+				SchemaVersion: SchemaVersion,
+				Utterance:     "次に何をすればいいですか",
+			},
+			func(value SealedSpeechCandidate) { candidate <- value },
+		)
+		done <- outcome{result: result, err: err}
+	}()
+
+	select {
+	case <-generator.criticStarted:
+	case <-time.After(time.Second):
+		t.Fatal("independent critic did not start")
+	}
+	select {
+	case value := <-candidate:
+		if value.SpokenReply != plan.SpokenReply {
+			t.Fatalf("sealed candidate=%q", value.SpokenReply)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sealed candidate waited for critic completion")
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("final result escaped before critic: %+v", result)
+	default:
+	}
+
+	close(generator.releaseCritic)
+	select {
+	case result := <-done:
+		if result.err != nil || result.result.SpokenReply != plan.SpokenReply {
+			t.Fatalf("final result=%+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final result did not consume completed critic")
 	}
 }
 

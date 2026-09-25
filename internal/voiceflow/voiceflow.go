@@ -712,6 +712,23 @@ func (p *Pipeline) processLive(
 		case speechio.StreamingTranscriptionSpeechEnd:
 			providerSpeechEndPending = true
 			notifyEndpoint()
+			if speculationEligible && !speculationAttempted {
+				candidate, ready := candidateTracker.observeFinal(
+					strings.Join(finalFragments, " "),
+				)
+				if ready {
+					speculationAttempted = true
+					speculation = p.startLiveSpeculation(
+						ctx,
+						uid,
+						input,
+						candidate,
+						streamingSpeech,
+						deliverAudio,
+						prepareInitiativeOutput,
+					)
+				}
+			}
 			continue
 		case speechio.StreamingTranscriptionFinal:
 		default:
@@ -757,14 +774,22 @@ func (p *Pipeline) processLive(
 			receiveErr = speechio.ErrTranscriptLong
 			break
 		}
-		// A newly finalized fragment is itself a stable observation. This is
-		// provider-authoritative text, so it must not inherit the minimum rune,
-		// repetition, or hold-time thresholds used only for revisable interims.
-		// This lets short acknowledgements start sealed model/TTS work while the
-		// transport is still closing. Exact-final and processing-commit gates
-		// below remain the only authority to release any resulting PCM.
+		// A newly finalized fragment is a stable observation. Once the provider
+		// has also emitted SpeechEnd, it is endpoint-authoritative and may bypass
+		// the interim-only rune/repetition thresholds. Provider EOF alone is not
+		// endpoint authority and must never start model work before transport
+		// commit.
 		if speculationEligible && !speculationAttempted {
-			candidate, ready := candidateTracker.observeFinal(finalTranscript)
+			candidate, ready := "", false
+			if providerSpeechEndPending {
+				candidate, ready = candidateTracker.observeFinal(finalTranscript)
+			} else {
+				candidate, ready = candidateTracker.observe(
+					finalTranscript,
+					true,
+					p.currentTime(),
+				)
+			}
 			if ready {
 				speculationAttempted = true
 				speculation = p.startLiveSpeculation(
@@ -1213,8 +1238,8 @@ func (p *Pipeline) startLiveSpeculation(
 	started := time.Now()
 	go func() {
 		defer preparation.close()
-		prepareAuditedCandidate := func(
-			candidate conversation.AuditedSpeechCandidate,
+		prepareSealedCandidate := func(
+			candidate conversation.SealedSpeechCandidate,
 		) {
 			if candidate.SpokenReply == "" {
 				return
@@ -1252,12 +1277,12 @@ func (p *Pipeline) startLiveSpeculation(
 		}
 		var decision conversation.VoiceTurnResult
 		var err error
-		if auditedAgent, ok := p.agent.(conversation.AuditedCandidateAgent); ok {
-			decision, err = auditedAgent.ProcessWithAuditedCandidate(
+		if sealedAgent, ok := p.agent.(conversation.SealedCandidateAgent); ok {
+			decision, err = sealedAgent.ProcessWithSealedCandidate(
 				speculationCtx,
 				uid,
 				turn,
-				prepareAuditedCandidate,
+				prepareSealedCandidate,
 			)
 		} else {
 			decision, err = p.agent.Process(speculationCtx, uid, turn)

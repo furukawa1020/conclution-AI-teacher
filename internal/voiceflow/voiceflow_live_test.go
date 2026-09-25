@@ -2537,6 +2537,53 @@ func TestPipelineLiveTreatsFinalAsStableSpeculativeObservation(t *testing.T) {
 	}
 }
 
+func TestPipelineLiveShortFinalStartsSpeculationOnlyAfterProviderSpeechEnd(
+	t *testing.T,
+) {
+	t.Parallel()
+	const utterance = "はい"
+	session := newFakeLiveTranscriptionSession(
+		speechio.StreamingTranscriptionEvent{
+			Kind: speechio.StreamingTranscriptionFinal,
+			Text: utterance,
+		},
+	)
+	appendProviderSpeechEnd(session)
+	speech := &fakeLiveSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{
+			fakeSpeech: fakeSpeech{},
+			chunks:     [][]byte{{10, 0}},
+		},
+		session: session,
+	}
+	agent := &speculativeTestAgent{
+		speculativeResult: liveTestDecision("短語への先読み回答", "spec-state"),
+		normalResult:      liveTestDecision("通常回答", "normal-state"),
+	}
+	pipeline, err := New(speech, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	result, err := pipeline.ProcessLive(
+		context.Background(),
+		"uid",
+		httpapi.VoiceTurnInput{},
+		audio,
+		func([]byte) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns := agent.recordedTurns()
+	if len(turns) != 1 || !turns[0].Speculative ||
+		turns[0].Utterance != utterance || result.LiveTimings.SpecHit != 1 {
+		t.Fatalf("turns=%+v timings=%+v", turns, result.LiveTimings)
+	}
+}
+
 func TestPipelineLiveDiscardsUnsafeSpeculationAndRerunsFinal(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

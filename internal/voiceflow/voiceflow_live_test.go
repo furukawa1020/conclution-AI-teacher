@@ -1200,6 +1200,15 @@ func TestSpeculativeCandidateRequiresRepeatedStableExactText(t *testing.T) {
 		t.Fatal("a candidate shorter than eight runes became eligible")
 	}
 
+	tracker.reset()
+	if candidate, ready := tracker.observeFinal(" はい "); !ready || candidate != "はい" {
+		t.Fatalf("short provider-final candidate=%q ready=%v", candidate, ready)
+	}
+	tracker.reset()
+	if candidate, ready := tracker.observeFinal(" \t\n "); ready || candidate != "" {
+		t.Fatalf("empty provider-final candidate=%q ready=%v", candidate, ready)
+	}
+
 	joined := joinTranscript(
 		[]string{"確定した前半", "確定した中盤"},
 		"仮の後半",

@@ -1053,4 +1053,266 @@ class KotaePcmCaptureProcessor extends AudioWorkletProcessor {
   }
 }
 
+const PLAYBACK_PROTOCOL_VERSION = 1;
+const PLAYBACK_INPUT_SAMPLE_RATE_HZ = 24_000;
+const PLAYBACK_MAX_CHUNK_BYTES = 2 * 1024 * 1024;
+const PLAYBACK_MAX_QUEUED_SAMPLES = 1_500_000;
+const PLAYBACK_MEANINGFUL_THRESHOLD = 33;
+
+class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const generation = options?.processorOptions?.generation;
+    if (
+      !Number.isSafeInteger(generation) ||
+      generation <= 0 ||
+      !Number.isSafeInteger(sampleRate) ||
+      sampleRate < PLAYBACK_INPUT_SAMPLE_RATE_HZ ||
+      sampleRate > 192_000
+    ) {
+      throw new Error("invalid_playback_processor_options");
+    }
+    this.generation = generation;
+    this.expectedSequence = 0;
+    this.chunks = [];
+    this.headOffset = 0;
+    this.queuedSamples = 0;
+    this.sourcePosition = 0;
+    this.state = "open";
+    this.started = false;
+    this.terminalPosted = false;
+    this.port.onmessage = (event) => {
+      try {
+        this.handleControl(event?.data);
+      } catch {
+        this.failClosed("playback_invalid");
+      }
+    };
+  }
+
+  hasExactKeys(value, expected) {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value)
+    ) {
+      return false;
+    }
+    const keys = Reflect.ownKeys(value);
+    return (
+      keys.length === expected.length &&
+      keys.every(
+        (key) => typeof key === "string" && expected.includes(key),
+      )
+    );
+  }
+
+  postTerminal(type) {
+    if (this.terminalPosted) return;
+    this.terminalPosted = true;
+    this.port.postMessage({
+      generation: this.generation,
+      type,
+      version: PLAYBACK_PROTOCOL_VERSION,
+    });
+  }
+
+  clearAudio() {
+    for (const chunk of this.chunks) {
+      chunk.fill(0);
+    }
+    this.chunks.length = 0;
+    this.headOffset = 0;
+    this.queuedSamples = 0;
+    this.sourcePosition = 0;
+  }
+
+  failClosed(type) {
+    this.clearAudio();
+    this.state = "stopped";
+    this.postTerminal(type);
+  }
+
+  handleControl(message) {
+    if (
+      this.state === "stopped" ||
+      message === null ||
+      typeof message !== "object" ||
+      Array.isArray(message)
+    ) {
+      throw new Error("playback_control_invalid");
+    }
+    if (message.type === "push") {
+      if (
+        this.state !== "open" ||
+        !this.hasExactKeys(message, [
+          "generation",
+          "pcm",
+          "sampleRateHz",
+          "sequence",
+          "type",
+          "version",
+        ]) ||
+        message.version !== PLAYBACK_PROTOCOL_VERSION ||
+        message.generation !== this.generation ||
+        message.sampleRateHz !== PLAYBACK_INPUT_SAMPLE_RATE_HZ ||
+        message.sequence !== this.expectedSequence ||
+        !(message.pcm instanceof ArrayBuffer) ||
+        message.pcm.byteLength === 0 ||
+        message.pcm.byteLength % 2 !== 0 ||
+        message.pcm.byteLength > PLAYBACK_MAX_CHUNK_BYTES
+      ) {
+        throw new Error("playback_push_invalid");
+      }
+      const samples = new Int16Array(message.pcm);
+      if (
+        samples.length >
+        PLAYBACK_MAX_QUEUED_SAMPLES - this.queuedSamples
+      ) {
+        samples.fill(0);
+        throw new Error("playback_queue_full");
+      }
+      this.chunks.push(samples);
+      this.queuedSamples += samples.length;
+      this.expectedSequence += 1;
+      return;
+    }
+    if (message.type === "seal") {
+      if (
+        this.state !== "open" ||
+        !this.hasExactKeys(message, [
+          "generation",
+          "type",
+          "version",
+        ]) ||
+        message.version !== PLAYBACK_PROTOCOL_VERSION ||
+        message.generation !== this.generation
+      ) {
+        throw new Error("playback_seal_invalid");
+      }
+      this.state = "sealed";
+      return;
+    }
+    if (message.type === "stop") {
+      if (
+        !this.hasExactKeys(message, [
+          "generation",
+          "type",
+          "version",
+        ]) ||
+        message.version !== PLAYBACK_PROTOCOL_VERSION ||
+        message.generation !== this.generation
+      ) {
+        throw new Error("playback_stop_invalid");
+      }
+      this.clearAudio();
+      this.state = "stopped";
+      return;
+    }
+    throw new Error("playback_control_unknown");
+  }
+
+  peek(relativeIndex) {
+    let remaining = this.headOffset + relativeIndex;
+    for (const chunk of this.chunks) {
+      if (remaining < chunk.length) return chunk[remaining];
+      remaining -= chunk.length;
+    }
+    return undefined;
+  }
+
+  consume(count) {
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new Error("playback_consume_invalid");
+    }
+    let remaining = count;
+    while (remaining > 0 && this.chunks.length > 0) {
+      const head = this.chunks[0];
+      const available = head.length - this.headOffset;
+      const consumed = Math.min(remaining, available);
+      head.fill(0, this.headOffset, this.headOffset + consumed);
+      this.headOffset += consumed;
+      this.queuedSamples -= consumed;
+      remaining -= consumed;
+      if (this.headOffset === head.length) {
+        this.chunks.shift();
+        this.headOffset = 0;
+      }
+    }
+    if (remaining !== 0 || this.queuedSamples < 0) {
+      throw new Error("playback_consume_outside_queue");
+    }
+  }
+
+  process(_inputs, outputs) {
+    if (this.state === "stopped") return false;
+    const output = outputs[0]?.[0];
+    if (!(output instanceof Float32Array) || output.length === 0) {
+      this.failClosed("playback_invalid");
+      return false;
+    }
+    output.fill(0);
+    try {
+      for (let index = 0; index < output.length; index += 1) {
+        if (this.queuedSamples < 2) {
+          if (this.state === "sealed" && this.queuedSamples === 1) {
+            const finalSample = this.peek(0);
+            output[index] = finalSample / 32_768;
+            if (
+              !this.started &&
+              Math.abs(finalSample) >= PLAYBACK_MEANINGFUL_THRESHOLD
+            ) {
+              this.started = true;
+              this.port.postMessage({
+                contextFrame: currentFrame + index,
+                generation: this.generation,
+                sequence: Math.max(0, this.expectedSequence - 1),
+                type: "started",
+                version: PLAYBACK_PROTOCOL_VERSION,
+              });
+            }
+            this.consume(1);
+          }
+          break;
+        }
+        const left = this.peek(0);
+        const right = this.peek(1);
+        const interpolated =
+          left + (right - left) * this.sourcePosition;
+        output[index] = interpolated / 32_768;
+        if (
+          !this.started &&
+          Math.abs(interpolated) >= PLAYBACK_MEANINGFUL_THRESHOLD
+        ) {
+          this.started = true;
+          this.port.postMessage({
+            contextFrame: currentFrame + index,
+            generation: this.generation,
+            sequence: Math.max(0, this.expectedSequence - 1),
+            type: "started",
+            version: PLAYBACK_PROTOCOL_VERSION,
+          });
+        }
+        this.sourcePosition +=
+          PLAYBACK_INPUT_SAMPLE_RATE_HZ / sampleRate;
+        const consumed = Math.floor(this.sourcePosition);
+        if (consumed > 0) {
+          this.consume(consumed);
+          this.sourcePosition -= consumed;
+        }
+      }
+    } catch {
+      this.failClosed("playback_invalid");
+      return false;
+    }
+    if (this.state === "sealed" && this.queuedSamples === 0) {
+      this.state = "stopped";
+      this.postTerminal("ended");
+      return false;
+    }
+    return true;
+  }
+}
+
 registerProcessor("kotae-pcm-capture", KotaePcmCaptureProcessor);
+registerProcessor("kotae-pcm-playback", KotaePcmPlaybackProcessor);

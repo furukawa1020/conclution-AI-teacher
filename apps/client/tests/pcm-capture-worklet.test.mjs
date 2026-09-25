@@ -209,7 +209,7 @@ function createHarness(config = {}) {
       };
   const output = [];
   let ringIndex = 0;
-  let Processor;
+  const processors = new Map();
   class TestAudioWorkletProcessor {
     constructor() {
       this.port = {
@@ -255,8 +255,12 @@ function createHarness(config = {}) {
     Uint8Array,
     currentFrame: 0,
     registerProcessor(name, constructor) {
-      assert.equal(name, "kotae-pcm-capture");
-      Processor = constructor;
+      assert.equal(
+        ["kotae-pcm-capture", "kotae-pcm-playback"].includes(name),
+        true,
+      );
+      assert.equal(processors.has(name), false);
+      processors.set(name, constructor);
     },
     sampleRate: sampleRateHz,
   };
@@ -264,6 +268,7 @@ function createHarness(config = {}) {
   new vm.Script(workletSource, {
     filename: "pcm-capture-worklet.js",
   }).runInContext(sandbox);
+  const Processor = processors.get("kotae-pcm-capture");
   assert.equal(typeof Processor, "function");
 
   const processor = new Processor({ processorOptions });
@@ -309,12 +314,138 @@ function createHarness(config = {}) {
   };
 }
 
+function createPlaybackHarness(config = {}) {
+  const generation = config.generation ?? 11;
+  const sampleRateHz = config.sampleRateHz ?? 48_000;
+  const output = [];
+  const processors = new Map();
+  class TestAudioWorkletProcessor {
+    constructor() {
+      this.port = {
+        onmessage: null,
+        postMessage(message) {
+          output.push(structuredClone(message));
+        },
+      };
+    }
+  }
+  const sandbox = {
+    Array,
+    ArrayBuffer,
+    AudioWorkletProcessor: TestAudioWorkletProcessor,
+    DataView,
+    Error,
+    Float32Array,
+    Int16Array,
+    Math,
+    Number,
+    Object,
+    Reflect,
+    Set,
+    Uint8Array,
+    createPcmRing() {
+      throw new Error("capture_ring_must_not_be_created");
+    },
+    currentFrame: 0,
+    registerProcessor(name, constructor) {
+      assert.equal(processors.has(name), false);
+      processors.set(name, constructor);
+    },
+    sampleRate: sampleRateHz,
+  };
+  vm.createContext(sandbox);
+  new vm.Script(workletSource, {
+    filename: "pcm-capture-worklet.js",
+  }).runInContext(sandbox);
+  const Processor = processors.get("kotae-pcm-playback");
+  assert.equal(typeof Processor, "function");
+  const processor = new Processor({
+    processorOptions: { generation },
+  });
+  let contextFrame = 0;
+  return {
+    control(data) {
+      processor.port.onmessage({ data });
+    },
+    generation,
+    output,
+    processor,
+    render() {
+      const pcm = new Float32Array(128);
+      sandbox.currentFrame = contextFrame;
+      const keepAlive = processor.process([], [[pcm]]);
+      contextFrame += pcm.length;
+      return { keepAlive, pcm };
+    },
+  };
+}
+
 function exactKeys(value, expected) {
   assert.deepEqual(
     Reflect.ownKeys(value).sort(),
     [...expected].sort(),
   );
 }
+
+test("playback processor continuously resamples ordered PCM and seals once", () => {
+  const harness = createPlaybackHarness();
+  const pcm = new ArrayBuffer(480 * 2);
+  const view = new Int16Array(pcm);
+  for (let index = 0; index < view.length; index += 1) {
+    view[index] = index < 24 ? 0 : 8_192;
+  }
+  harness.control({
+    generation: harness.generation,
+    pcm,
+    sampleRateHz: 24_000,
+    sequence: 0,
+    type: "push",
+    version: 1,
+  });
+  harness.control({
+    generation: harness.generation,
+    type: "seal",
+    version: 1,
+  });
+
+  const rendered = [];
+  for (let index = 0; index < 20; index += 1) {
+    const result = harness.render();
+    rendered.push(...result.pcm);
+    if (!result.keepAlive) break;
+  }
+  assert.equal(harness.processor.queuedSamples, 0);
+  assert.equal(
+    rendered.some((sample) => Math.abs(sample - 0.25) < 0.001),
+    true,
+  );
+  assert.deepEqual(
+    harness.output.map(({ type }) => type),
+    ["started", "ended"],
+  );
+  assert.equal(harness.output[0].contextFrame >= 0, true);
+});
+
+test("playback processor rejects sequence gaps and zeroizes retained PCM", () => {
+  const harness = createPlaybackHarness();
+  const pcm = new ArrayBuffer(960);
+  new Int16Array(pcm).fill(4_096);
+  harness.control({
+    generation: harness.generation,
+    pcm,
+    sampleRateHz: 24_000,
+    sequence: 1,
+    type: "push",
+    version: 1,
+  });
+  assert.equal(harness.processor.state, "stopped");
+  assert.equal(harness.processor.queuedSamples, 0);
+  assert.deepEqual(
+    harness.output.map(({ type }) => type),
+    ["playback_invalid"],
+  );
+  assert.equal(harness.render().keepAlive, false);
+});
 
 function isZero(value) {
   return [...new Uint8Array(value)].every((byte) => byte === 0);

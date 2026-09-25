@@ -54,7 +54,11 @@ const (
 	voiceStreamSampleRateHz  = 24_000
 	voiceStreamMaxChunkBytes = 1 << 20
 	voiceStreamMaxAudioBytes = 16 << 20
-	voiceStreamMaxChunks     = 512
+	// One extra event lets the HTTP fallback flush the first 20 ms before the
+	// remainder of the provider's first chunk without reducing the historical
+	// 512-provider-chunk ceiling.
+	voiceStreamMaxChunks            = 513
+	voiceStreamFirstAudioFrameBytes = voiceStreamSampleRateHz * 2 / 50
 )
 
 var (

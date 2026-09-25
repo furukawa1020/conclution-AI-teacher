@@ -13,9 +13,12 @@ const MEBIBYTE = 1024 * 1024;
 
 export const VOICE_STREAM_LIMITS = Object.freeze({
   maximumAudioChunkBytes: MEBIBYTE,
-  maximumAudioEventCount: 512,
+  // The HTTP fallback may split the first provider chunk into a 20 ms start
+  // event plus its remainder. This preserves the historical 512 provider
+  // chunks while allowing the first speaker write to begin immediately.
+  maximumAudioEventCount: 513,
   maximumAudioTotalBytes: 16 * MEBIBYTE,
-  maximumEventCount: 514,
+  maximumEventCount: 515,
   maximumLineCharacters: 1_400_256,
   maximumResponseBytes: 24 * MEBIBYTE,
 });

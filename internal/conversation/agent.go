@@ -142,23 +142,24 @@ type Agent interface {
 	Process(ctx context.Context, uid string, turn VoiceTurn) (VoiceTurnResult, error)
 }
 
-// AuditedSpeechCandidate is an ordinary-assistant reply that has already
-// passed the independent answer critic. It remains provisional: callers may
-// prepare cancellable audio, but must compare it with the final result before
+// SealedSpeechCandidate is a structurally valid, low-risk ordinary-assistant
+// reply whose independent answer audit is running concurrently. It is not an
+// audible decision. Callers may synthesize it only into a private cancellable
+// buffer and must compare it with the fully audited final result before
 // publishing any byte.
-type AuditedSpeechCandidate struct {
+type SealedSpeechCandidate struct {
 	SpokenReply string
 }
 
-// AuditedCandidateAgent exposes an optional two-phase latency handoff without
-// widening Agent for implementations that cannot stream a safe candidate.
-type AuditedCandidateAgent interface {
+// SealedCandidateAgent exposes an optional two-phase latency handoff without
+// widening Agent for implementations that cannot privately stage a candidate.
+type SealedCandidateAgent interface {
 	Agent
-	ProcessWithAuditedCandidate(
+	ProcessWithSealedCandidate(
 		ctx context.Context,
 		uid string,
 		turn VoiceTurn,
-		onCandidate func(AuditedSpeechCandidate),
+		onCandidate func(SealedSpeechCandidate),
 	) (VoiceTurnResult, error)
 }
 
@@ -797,11 +798,11 @@ func (agent *vertexAgent) Process(
 	return agent.process(ctx, uid, turn, nil)
 }
 
-func (agent *vertexAgent) ProcessWithAuditedCandidate(
+func (agent *vertexAgent) ProcessWithSealedCandidate(
 	ctx context.Context,
 	uid string,
 	turn VoiceTurn,
-	onCandidate func(AuditedSpeechCandidate),
+	onCandidate func(SealedSpeechCandidate),
 ) (VoiceTurnResult, error) {
 	return agent.process(ctx, uid, turn, onCandidate)
 }
@@ -810,7 +811,7 @@ func (agent *vertexAgent) process(
 	ctx context.Context,
 	uid string,
 	turn VoiceTurn,
-	onAuditedCandidate func(AuditedSpeechCandidate),
+	onSealedCandidate func(SealedSpeechCandidate),
 ) (VoiceTurnResult, error) {
 	if ctx == nil || !validUID(uid) {
 		return VoiceTurnResult{}, ErrInvalidTurn
@@ -976,19 +977,13 @@ func (agent *vertexAgent) process(
 			state,
 			candidate,
 		)
-		if earlyAudit != nil && onAuditedCandidate != nil {
-			audit := earlyAudit
-			go func() {
-				assessment, auditErr := awaitSpeculativeAudit(ctx, audit)
-				if auditErr != nil ||
-					assessment.Outcome != answercontract.OutcomeKeep ||
-					ctx.Err() != nil {
-					return
-				}
-				onAuditedCandidate(AuditedSpeechCandidate{
-					SpokenReply: audit.candidate.SpokenReply,
-				})
-			}()
+		if earlyAudit != nil && onSealedCandidate != nil {
+			// The voice layer may overlap private synthesis with this audit, but
+			// its commit buffer cannot release PCM until process returns the same
+			// reply after consuming the successful independent audit.
+			onSealedCandidate(SealedSpeechCandidate{
+				SpokenReply: earlyAudit.candidate.SpokenReply,
+			})
 		}
 	}
 	fastBudget, hasFastBudget := timeoutBudgetWithReserve(

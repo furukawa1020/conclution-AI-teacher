@@ -30,16 +30,16 @@ func (agent *auditedCandidateTestAgent) Process(
 	return agent.final, nil
 }
 
-func (agent *auditedCandidateTestAgent) ProcessWithAuditedCandidate(
+func (agent *auditedCandidateTestAgent) ProcessWithSealedCandidate(
 	ctx context.Context,
 	_ string,
 	_ conversation.VoiceTurn,
-	onCandidate func(conversation.AuditedSpeechCandidate),
+	onCandidate func(conversation.SealedSpeechCandidate),
 ) (conversation.VoiceTurnResult, error) {
 	agent.mu.Lock()
 	agent.observedCandidateCallback = true
 	agent.mu.Unlock()
-	onCandidate(conversation.AuditedSpeechCandidate{SpokenReply: agent.candidate})
+	onCandidate(conversation.SealedSpeechCandidate{SpokenReply: agent.candidate})
 	select {
 	case text := <-agent.started:
 		agent.mu.Lock()

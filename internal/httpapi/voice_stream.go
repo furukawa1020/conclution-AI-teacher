@@ -80,32 +80,45 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	defer strictOutput.clear()
 	strictOutput.markCommitted()
 	deliverAudio := func(audio []byte) error {
+		requiredEvents := 1
+		if sequence == 0 && len(audio) > voiceStreamFirstAudioFrameBytes {
+			requiredEvents = 2
+		}
 		if len(audio) == 0 ||
 			len(audio) > voiceStreamMaxChunkBytes ||
 			len(audio)%2 != 0 ||
-			sequence >= voiceStreamMaxChunks ||
+			requiredEvents > voiceStreamMaxChunks-sequence ||
 			len(audio) > voiceStreamMaxAudioBytes-totalAudioBytes {
 			return errors.New("streamed audio is outside bounds")
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if firstAudioAt.IsZero() {
-			firstAudioAt = time.Now()
+		frames := [][]byte{audio}
+		if requiredEvents == 2 {
+			frames = [][]byte{
+				audio[:voiceStreamFirstAudioFrameBytes],
+				audio[voiceStreamFirstAudioFrameBytes:],
+			}
 		}
-		frame := voiceStreamFrame{
-			Type:         "audio",
-			Version:      voiceStreamVersion,
-			Sequence:     &sequence,
-			AudioBase64:  base64.StdEncoding.EncodeToString(audio),
-			SampleRateHz: pointerTo(voiceStreamSampleRateHz),
+		for _, audioFrame := range frames {
+			if firstAudioAt.IsZero() {
+				firstAudioAt = time.Now()
+			}
+			frame := voiceStreamFrame{
+				Type:         "audio",
+				Version:      voiceStreamVersion,
+				Sequence:     &sequence,
+				AudioBase64:  base64.StdEncoding.EncodeToString(audioFrame),
+				SampleRateHz: pointerTo(voiceStreamSampleRateHz),
+			}
+			if err := encoder.Encode(frame); err != nil {
+				return err
+			}
+			flusher.Flush()
+			sequence++
 		}
-		if err := encoder.Encode(frame); err != nil {
-			return err
-		}
-		flusher.Flush()
 		totalAudioBytes += len(audio)
-		sequence++
 		return nil
 	}
 	onAudio := deliverAudio

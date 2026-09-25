@@ -247,6 +247,7 @@ const sessionExpiryWatchdog = createSessionExpiryWatchdog({
   setTimer: (callback, delay) => setTimeout(callback, delay),
 });
 const pcmCaptureWorkletLoads = new WeakMap();
+const pcmPlaybackReadyContexts = new WeakSet();
 let pcmRingModuleLoad;
 
 void loadVoiceLatencyRevision(globalThis.fetch.bind(globalThis))
@@ -3778,6 +3779,13 @@ function loadPcmCaptureWorklet(context) {
     })();
     load = boundedPcmWorkletLoad(pending);
     pcmCaptureWorkletLoads.set(context, load);
+    void load
+      .then(() => {
+        pcmPlaybackReadyContexts.add(context);
+      })
+      .catch(() => {
+        // The existing AudioBufferSourceNode path remains available.
+      });
     void load.catch(() => {
       if (pcmCaptureWorkletLoads.get(context) === load) {
         pcmCaptureWorkletLoads.delete(context);
@@ -6502,6 +6510,8 @@ function createStreamingPlayback(
   const gainNode = playbackContext.createGain();
   gainNode.gain.setValueAtTime(1, playbackContext.currentTime);
   gainNode.connect(playbackContext.destination);
+  let playbackWorklet;
+  let playbackWorkletSequence = 0;
   const completion = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
@@ -6523,6 +6533,25 @@ function createStreamingPlayback(
     for (let index = 0; index < samples.length; index += 1) {
       if (Math.abs(samples[index]) >= 0.001) {
         return index / buffer.sampleRate;
+      }
+    }
+    return undefined;
+  }
+
+  function firstMeaningfulPCMOffsetSeconds(pcm, sampleRateHz) {
+    if (
+      !(pcm instanceof ArrayBuffer) ||
+      pcm.byteLength === 0 ||
+      pcm.byteLength % 2 !== 0 ||
+      !Number.isSafeInteger(sampleRateHz) ||
+      sampleRateHz <= 0
+    ) {
+      return undefined;
+    }
+    const samples = new Int16Array(pcm);
+    for (let index = 0; index < samples.length; index += 1) {
+      if (Math.abs(samples[index]) >= 33) {
+        return index / sampleRateHz;
       }
     }
     return undefined;
@@ -6683,6 +6712,177 @@ function createStreamingPlayback(
     return audibleAt;
   }
 
+  function estimateWorkletAudibleAt(meaningfulOffsetSeconds = 0) {
+    let outputTimestamp;
+    if (typeof playbackContext.getOutputTimestamp === "function") {
+      try {
+        outputTimestamp = playbackContext.getOutputTimestamp();
+      } catch {
+        // outputLatency remains the standards-based fallback below.
+      }
+    }
+    return (
+      estimateAudiblePerformanceTime({
+        baseLatencySeconds: playbackContext.baseLatency,
+        currentContextTime: playbackContext.currentTime,
+        outputLatencySeconds: playbackContext.outputLatency,
+        outputTimestamp,
+        performanceNow: performance.now(),
+        targetContextTime: playbackContext.currentTime,
+      }) +
+      meaningfulOffsetSeconds * 1_000
+    );
+  }
+
+  function scheduleWorkletPCM(pcm, event) {
+    if (
+      !playbackWorklet ||
+      settled ||
+      sealed ||
+      expectedEpoch !== sessionEpoch ||
+      !audioContext ||
+      audioContext.state === "closed" ||
+      !(pcm instanceof ArrayBuffer) ||
+      pcm.byteLength === 0 ||
+      pcm.byteLength % 2 !== 0
+    ) {
+      fail(
+        expectedEpoch === sessionEpoch
+          ? "audio_playback_blocked"
+          : stoppedSessionCode(expectedEpoch),
+      );
+    }
+    const byteLength = pcm.byteLength;
+    const meaningfulOffset = firstMeaningfulPCMOffsetSeconds(
+      pcm,
+      event.sampleRateHz,
+    );
+    const audibleAt = Number.isFinite(meaningfulOffset)
+      ? estimateWorkletAudibleAt(meaningfulOffset)
+      : undefined;
+    if (
+      !streamedAudio &&
+      !firstAudiblePending &&
+      Number.isFinite(audibleAt)
+    ) {
+      firstAudiblePending = true;
+    }
+    playbackWorklet.port.postMessage(
+      {
+        generation: expectedEpoch,
+        pcm,
+        sampleRateHz: event.sampleRateHz,
+        sequence: playbackWorkletSequence,
+        type: "push",
+        version: 1,
+      },
+      [pcm],
+    );
+    playbackWorkletSequence += 1;
+    const durationSeconds = byteLength / 2 / event.sampleRateHz;
+    nextStartAt =
+      Math.max(nextStartAt, playbackContext.currentTime) +
+      durationSeconds;
+    return audibleAt;
+  }
+
+  if (
+    typeof pcmPlaybackReadyContexts !== "undefined" &&
+    pcmPlaybackReadyContexts.has(playbackContext) &&
+    typeof globalThis.AudioWorkletNode === "function"
+  ) {
+    try {
+      playbackWorklet = new AudioWorkletNode(
+        playbackContext,
+        "kotae-pcm-playback",
+        {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          processorOptions: { generation: expectedEpoch },
+        },
+      );
+      pendingSources += 1;
+      playbackWorklet.connect(gainNode);
+      playbackWorklet.port.onmessage = (messageEvent) => {
+        const message = messageEvent?.data;
+        if (
+          message === null ||
+          typeof message !== "object" ||
+          Array.isArray(message) ||
+          message.version !== 1 ||
+          message.generation !== expectedEpoch
+        ) {
+          haltStreamingPlayback(
+            playback,
+            new Error("audio_playback_blocked"),
+          );
+          return;
+        }
+        if (
+          message.type === "started" &&
+          Number.isSafeInteger(message.contextFrame) &&
+          message.contextFrame >= 0 &&
+          Number.isSafeInteger(message.sequence) &&
+          message.sequence >= 0
+        ) {
+          let outputTimestamp;
+          if (typeof playbackContext.getOutputTimestamp === "function") {
+            try {
+              outputTimestamp = playbackContext.getOutputTimestamp();
+            } catch {
+              // outputLatency remains the standards-based fallback below.
+            }
+          }
+          const audibleAt = estimateAudiblePerformanceTime({
+            baseLatencySeconds: playbackContext.baseLatency,
+            currentContextTime: playbackContext.currentTime,
+            outputLatencySeconds: playbackContext.outputLatency,
+            outputTimestamp,
+            performanceNow: performance.now(),
+            targetContextTime:
+              message.contextFrame / playbackContext.sampleRate,
+          });
+          publishFirstAudible(audibleAt, {
+            sequence: message.sequence,
+          });
+          return;
+        }
+        if (message.type === "ended") {
+          playbackWorklet.port.onmessage = null;
+          playbackWorklet.onprocessorerror = null;
+          playbackWorklet.disconnect();
+          playbackWorklet = undefined;
+          pendingSources -= 1;
+          if (sealed && pendingSources === 0 && !settled) {
+            settled = true;
+            stopBargeInMonitoring(playback);
+            if (activePlayback === playback) {
+              activePlayback = undefined;
+            }
+            gainNode.disconnect();
+            resolveCompletion();
+          }
+          return;
+        }
+        haltStreamingPlayback(
+          playback,
+          new Error("audio_playback_blocked"),
+        );
+      };
+      playbackWorklet.onprocessorerror = () => {
+        haltStreamingPlayback(
+          playback,
+          new Error("audio_playback_blocked"),
+        );
+      };
+    } catch {
+      playbackWorklet?.disconnect();
+      playbackWorklet = undefined;
+      pendingSources = 0;
+    }
+  }
+
   playback = {
     activateCoach() {
       if (
@@ -6797,6 +6997,12 @@ function createStreamingPlayback(
       rejectCompletion(error);
     },
     schedule(event) {
+      if (playbackWorklet) {
+        return scheduleWorkletPCM(
+          base64ToArrayBuffer(event.audioBase64),
+          event,
+        );
+      }
       const buffer = pcm16AudioBuffer(
         event.audioBase64,
         event.decodedBytes,
@@ -6805,6 +7011,9 @@ function createStreamingPlayback(
       return scheduleBuffer(buffer, event);
     },
     schedulePcm(event) {
+      if (playbackWorklet) {
+        return scheduleWorkletPCM(event.pcm, event);
+      }
       const buffer = pcm16BytesAudioBuffer(
         event.pcm,
         event.pcm.byteLength,
@@ -6820,6 +7029,13 @@ function createStreamingPlayback(
       if (!firstAudiblePending) {
         cancelCurrentVoiceStartSlo(sloGeneration);
       }
+      if (playbackWorklet) {
+        playbackWorklet.port.postMessage({
+          generation: expectedEpoch,
+          type: "seal",
+          version: 1,
+        });
+      }
       if (pendingSources === 0) {
         settled = true;
         stopBargeInMonitoring(playback);
@@ -6831,6 +7047,25 @@ function createStreamingPlayback(
       }
     },
     sources,
+    get workletNode() {
+      return playbackWorklet;
+    },
+    stopWorklet() {
+      if (!playbackWorklet) return;
+      playbackWorklet.port.onmessage = null;
+      playbackWorklet.onprocessorerror = null;
+      try {
+        playbackWorklet.port.postMessage({
+          generation: expectedEpoch,
+          type: "stop",
+          version: 1,
+        });
+      } catch {
+        // The processor can already have terminated.
+      }
+      playbackWorklet.disconnect();
+      playbackWorklet = undefined;
+    },
   };
   activePlayback = playback;
   return playback;
@@ -6845,6 +7080,7 @@ function haltStreamingPlayback(playback, error) {
   // synchronously in some browser engines.
   playback.reject(error);
   stopBargeInMonitoring(playback);
+  playback.stopWorklet?.();
   for (const source of playback.sources) {
     try {
       source.stop();

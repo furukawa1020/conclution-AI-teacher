@@ -6363,7 +6363,10 @@ test("committed-response barge-in preserves foreground response mode", async () 
     /if \(shouldDiscardInterruptedPlaybackRecording\(playback\)\) \{\s*discardInterruptedPlaybackRecording\(playback\);\s*\}/u,
   );
   const scheduleAt = bridge.indexOf("function scheduleBuffer(");
-  const schedule = bridge.slice(scheduleAt, scheduleAt + 4_500);
+  const schedule = bridge.slice(
+    scheduleAt,
+    bridge.indexOf("function haltStreamingPlayback(", scheduleAt),
+  );
   assert.match(
     schedule,
     /const ownsFirstAudible =[\s\S]*!streamedAudio[\s\S]*Number\.isFinite\(audibleAt\)/u,

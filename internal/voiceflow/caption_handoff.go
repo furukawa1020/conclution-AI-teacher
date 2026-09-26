@@ -460,7 +460,7 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 				}
 				firstTTSChunkMS = outcome.synthesis.firstChunkMS()
 				ttsBufferedBytes = outcome.synthesis.buffer.peakBufferedBytes()
-				if synthesisErr == nil && firstTTSChunkMS >= 0 {
+				if synthesisErr == nil && ttsBufferedBytes > 0 {
 					prestartedTTSDone = true
 					adoptedDecision = true
 				} else {
@@ -517,18 +517,21 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 			return result, err
 		}
 		started := time.Now()
+		ttsChunkObserved := false
 		audioMIME, err := handoff.streamingSpeech.StreamSynthesize(
 			handoff.ctx,
 			spokenReply,
 			func(chunk []byte) error {
-				if firstTTSChunkMS < 0 {
+				ttsChunkObserved = true
+				if firstTTSChunkMS < 0 &&
+					speechio.PCM16HasMeaningfulSample(chunk) {
 					firstTTSChunkMS = time.Since(started).Milliseconds()
 				}
 				return handoff.deliverAudio(chunk)
 			},
 		)
 		if err != nil || audioMIME != speechio.StreamingAudioContentType ||
-			firstTTSChunkMS < 0 {
+			!ttsChunkObserved {
 			return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
 				httpapi.VoicePipelineStageSynthesize,
 			)

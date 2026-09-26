@@ -7561,9 +7561,7 @@ async function finishTurn(
       if (!audioContext || audioContext.state === "closed") {
         fail("audio_playback_blocked");
       }
-      if (audioContext.state === "suspended") {
-        await awaitVoiceTurnResult(audioContext.resume());
-      }
+      const responseAudioContext = audioContext;
       if (expectedEpoch !== sessionEpoch) {
         fail(stoppedSessionCode(expectedEpoch));
       }
@@ -7586,12 +7584,16 @@ async function finishTurn(
           ? dispatchVoiceLatencyTrace
           : undefined,
       );
+      const resumeAudioPromise =
+        responseAudioContext.state === "suspended"
+          ? responseAudioContext.resume()
+          : Promise.resolve();
       try {
         const completed = await awaitVoiceTurnResult(
-          liveSession.commit(
-            playback,
-            recording.lastVoiceAt,
-          ),
+          Promise.all([
+            liveSession.commit(playback, recording.lastVoiceAt),
+            resumeAudioPromise,
+          ]).then(([result]) => result),
           () => liveSession.cancel(new Error("voice_turn_timeout")),
         );
         finishPhase = `live_playback`;
@@ -7758,9 +7760,7 @@ async function finishTurn(
     if (!audioContext || audioContext.state === "closed") {
       fail("audio_playback_blocked");
     }
-    if (audioContext.state === "suspended") {
-      await awaitVoiceTurnResult(audioContext.resume());
-    }
+    const responseAudioContext = audioContext;
     if (expectedEpoch !== sessionEpoch) {
       fail(stoppedSessionCode(expectedEpoch));
     }
@@ -7781,6 +7781,10 @@ async function finishTurn(
         ? dispatchVoiceLatencyTrace
         : undefined,
     );
+    const resumeAudioPromise =
+      responseAudioContext.state === "suspended"
+        ? responseAudioContext.resume()
+        : Promise.resolve();
     // The microphone remains disabled until the request has actually been
     // committed. After that boundary, the bounded local interruption gate can
     // hear a sustained correction while the provider is still thinking.
@@ -7830,8 +7834,8 @@ async function finishTurn(
         }
       },
     });
-    const response = await awaitVoiceTurnResult(
-      responsePromise,
+    const [response] = await awaitVoiceTurnResult(
+      Promise.all([responsePromise, resumeAudioPromise]),
       () => requestController.abort(),
     );
     if (!response.ok) {
@@ -7883,6 +7887,7 @@ async function finishTurn(
       : receipted;
   } catch (error) {
     reportVoiceFailure(finishPhase, error);
+    requestController?.abort();
     if (typeof silenceReceiptGate !== "undefined") {
       silenceReceiptGate.clear();
     }

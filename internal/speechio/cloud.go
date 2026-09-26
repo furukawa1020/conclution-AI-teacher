@@ -102,6 +102,14 @@ type StreamingSynthesisPreparer interface {
 	PrepareStreamingSynthesis(ctx context.Context) (PreparedStreamingSynthesis, error)
 }
 
+// StreamingSynthesisWarmupResult contains counts only. It deliberately never
+// exposes text, audio, provider errors, or cache keys to logs.
+type StreamingSynthesisWarmupResult struct {
+	Requested int
+	Warmed    int
+	Failed    int
+}
+
 type streamingSynthesizeClient interface {
 	Send(*texttospeechpb.StreamingSynthesizeRequest) error
 	Recv() (*texttospeechpb.StreamingSynthesizeResponse, error)
@@ -208,6 +216,94 @@ func NewCloudService(
 
 func (s *CloudService) Close() error {
 	return errors.Join(s.speechClient.Close(), s.ttsClient.Close())
+}
+
+// WarmStreamingSynthesis fills the ordinary bounded PCM cache for a small,
+// server-authored vocabulary. It uses the same validation, provider route and
+// cache limits as a real request. Failures are counted independently and never
+// make server readiness depend on optional warmup work.
+func (s *CloudService) WarmStreamingSynthesis(
+	ctx context.Context,
+	texts []string,
+	maxConcurrent int,
+) StreamingSynthesisWarmupResult {
+	if s == nil || ctx == nil {
+		return StreamingSynthesisWarmupResult{}
+	}
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	if maxConcurrent > 4 {
+		maxConcurrent = 4
+	}
+	unique := make([]string, 0, len(texts))
+	seen := make(map[string]struct{}, len(texts))
+	for _, text := range texts {
+		text = strings.TrimSpace(text)
+		if text == "" || utf8.RuneCountInString(text) > maxSpokenReplyRunes {
+			continue
+		}
+		if _, exists := seen[text]; exists {
+			continue
+		}
+		seen[text] = struct{}{}
+		unique = append(unique, text)
+	}
+	result := StreamingSynthesisWarmupResult{Requested: len(unique)}
+	if len(unique) == 0 {
+		return result
+	}
+	if maxConcurrent > len(unique) {
+		maxConcurrent = len(unique)
+	}
+	jobs := make(chan string)
+	results := make(chan bool, len(unique))
+	var workers sync.WaitGroup
+	workers.Add(maxConcurrent)
+	for range maxConcurrent {
+		go func() {
+			defer workers.Done()
+			for text := range jobs {
+				observed := false
+				mimeType, err := s.StreamSynthesize(
+					ctx,
+					text,
+					func(chunk []byte) error {
+						if PCM16HasMeaningfulSample(chunk) {
+							observed = true
+						}
+						return nil
+					},
+				)
+				results <- err == nil &&
+					mimeType == StreamingAudioContentType && observed
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, text := range unique {
+			select {
+			case jobs <- text:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	for warmed := range results {
+		if warmed {
+			result.Warmed++
+		} else {
+			result.Failed++
+		}
+	}
+	// Jobs not dispatched because the deadline elapsed are failures too.
+	result.Failed += result.Requested - result.Warmed - result.Failed
+	return result
 }
 
 func (s *CloudService) Transcribe(

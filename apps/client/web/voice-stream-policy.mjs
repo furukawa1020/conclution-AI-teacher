@@ -1060,6 +1060,18 @@ export function createVoiceLiveClientTransport(socket, startFrame) {
       ) {
         break;
       }
+      if (frameCount === 1) {
+        const [frame] = queue.take(1);
+        try {
+          // WebSocket.send snapshots BufferSource bytes synchronously. Passing
+          // the captured 20 ms frame directly avoids one allocation and one
+          // JS copy on every microphone tick while preserving immediate wipe.
+          socket.send(frame);
+        } finally {
+          erasePcmFrame(frame);
+        }
+        continue;
+      }
       const chunk = new Uint8Array(chunkBytes);
       queue.take(frameCount).forEach((frame, index) => {
         chunk.set(

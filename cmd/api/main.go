@@ -515,7 +515,7 @@ func main() {
 				conversation.AuditedInstantVoiceCues(),
 				2,
 			)
-			logger.Info("audited QARC speech warmup completed",
+			logger.Info("audited instant speech warmup completed",
 				"requested", result.Requested,
 				"warmed", result.Warmed,
 				"failed", result.Failed,

@@ -40,7 +40,7 @@ func TestWarmStreamingSynthesisPopulatesCompletedPCMCache(t *testing.T) {
 	result := service.WarmStreamingSynthesis(
 		context.Background(),
 		[]string{"first cue", " second cue ", "first cue", ""},
-		2,
+		1,
 	)
 	if result.Requested != 2 || result.Warmed != 2 || result.Failed != 0 {
 		mu.Lock()
@@ -91,7 +91,7 @@ func TestWarmStreamingSynthesisCountsFailureWithoutStoppingPeers(t *testing.T) {
 	result := service.WarmStreamingSynthesis(
 		context.Background(),
 		[]string{"success", "failure"},
-		2,
+		1,
 	)
 	if result.Requested != 2 || result.Warmed != 1 || result.Failed != 1 {
 		t.Fatalf("warmup result = %+v", result)
@@ -193,6 +193,46 @@ func TestShortReplyFallsBackToStreamingBeforeOutput(t *testing.T) {
 	}
 	if !bytes.Equal(audio, []byte{5, 6}) {
 		t.Fatalf("audio = %v", audio)
+	}
+}
+
+func TestDirectPCMProviderFailureOpensCircuitForFollowingShortReply(t *testing.T) {
+	t.Parallel()
+
+	directCalls := 0
+	streamCalls := 0
+	service := &CloudService{
+		voiceName: "ja-JP-Chirp3-HD-Kore",
+		synthesizePCMCall: func(
+			context.Context,
+			*texttospeechpb.SynthesizeSpeechRequest,
+		) (*texttospeechpb.SynthesizeSpeechResponse, error) {
+			directCalls++
+			return nil, errors.New("direct unavailable")
+		},
+		streamSynthesizeCall: func(context.Context) (streamingSynthesizeClient, error) {
+			streamCalls++
+			return &fakeStreamingSynthesizeClient{
+				recvResults: []streamingReceiveResult{
+					{response: &texttospeechpb.StreamingSynthesizeResponse{
+						AudioContent: []byte{40, 0},
+					}},
+					{err: io.EOF},
+				},
+			}, nil
+		},
+	}
+	for _, text := range []string{"first short reply", "second short reply"} {
+		if _, err := service.StreamSynthesize(
+			context.Background(),
+			text,
+			func([]byte) error { return nil },
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if directCalls != 1 || streamCalls != 2 {
+		t.Fatalf("direct calls = %d, stream calls = %d", directCalls, streamCalls)
 	}
 }
 

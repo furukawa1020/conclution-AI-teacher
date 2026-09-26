@@ -512,7 +512,7 @@ func main() {
 			defer cancelWarmup()
 			result := speechWarmupService.WarmStreamingSynthesis(
 				warmupCtx,
-				conversation.AuditedQARCCues(),
+				conversation.AuditedInstantVoiceCues(),
 				2,
 			)
 			logger.Info("audited QARC speech warmup completed",

@@ -50,6 +50,11 @@ func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPC
 	if !ok {
 		return cachedStreamingPCM{}, false
 	}
+	// A successful delivery is real use, not a passive lookup. Move it to the
+	// newest position so frequently spoken audited cues survive unrelated
+	// one-off replies instead of being evicted in insertion (FIFO) order.
+	cache.removeFromOrder(key)
+	cache.order = append(cache.order, key)
 	return cloneCachedStreamingPCM(entry), true
 }
 

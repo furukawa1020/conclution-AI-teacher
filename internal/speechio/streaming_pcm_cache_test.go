@@ -152,6 +152,32 @@ func TestStreamingPCMCacheIsBoundedAndCopiesAudio(t *testing.T) {
 	}
 }
 
+func TestStreamingPCMCacheHitRefreshesLRUOrder(t *testing.T) {
+	t.Parallel()
+
+	cache := newStreamingPCMCache(2, 16)
+	one := newStreamingPCMCacheKey("voice", "one")
+	two := newStreamingPCMCacheKey("voice", "two")
+	three := newStreamingPCMCacheKey("voice", "three")
+	cache.put(one, cachedStreamingPCM{chunks: [][]byte{{1, 0}}, size: 2})
+	cache.put(two, cachedStreamingPCM{chunks: [][]byte{{2, 0}}, size: 2})
+
+	if _, ok := cache.get(one); !ok {
+		t.Fatal("recently used entry was missing before eviction")
+	}
+	cache.put(three, cachedStreamingPCM{chunks: [][]byte{{3, 0}}, size: 2})
+
+	if _, ok := cache.get(two); ok {
+		t.Fatal("least recently used entry survived eviction")
+	}
+	if _, ok := cache.get(one); !ok {
+		t.Fatal("recently used entry was evicted")
+	}
+	if _, ok := cache.get(three); !ok {
+		t.Fatal("newest entry was evicted")
+	}
+}
+
 func TestStreamingPCMCollectorRejectsOversizeAudio(t *testing.T) {
 	t.Parallel()
 

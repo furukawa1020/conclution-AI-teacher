@@ -139,6 +139,42 @@ func TestPreparedSynthesisUsesAnAlreadyReadyConnection(t *testing.T) {
 	}
 }
 
+func TestSpeculativeSynthesisCountsOnlyMeaningfulPCMAsFirstChunk(t *testing.T) {
+	speech := &fakeStreamingSpeech{chunks: [][]byte{
+		{0, 0, 0, 0},
+		{32, 0},
+		{40, 0},
+	}}
+	synthesis := startSpeculativeSynthesis(
+		context.Background(),
+		speech,
+		nil,
+		"短い確認です",
+		func([]byte) error { return nil },
+	)
+	result := synthesis.await(context.Background())
+	if result.err != nil {
+		t.Fatalf("speculative synthesis: %v", result.err)
+	}
+	if got := synthesis.firstChunkMS(); got < 0 {
+		t.Fatalf("meaningful first chunk ms=%d", got)
+	}
+
+	silent := startSpeculativeSynthesis(
+		context.Background(),
+		&fakeStreamingSpeech{chunks: [][]byte{{0, 0}, {32, 0}}},
+		nil,
+		"無音では開始しません",
+		func([]byte) error { return nil },
+	)
+	if result := silent.await(context.Background()); result.err != nil {
+		t.Fatalf("silent synthesis: %v", result.err)
+	}
+	if got := silent.firstChunkMS(); got != -1 {
+		t.Fatalf("silent first chunk ms=%d want=-1", got)
+	}
+}
+
 func TestPreparedSynthesisNeverWaitsForASlowConnection(t *testing.T) {
 	speech := &preparingStreamingSpeech{
 		prepareStarted:  make(chan struct{}),

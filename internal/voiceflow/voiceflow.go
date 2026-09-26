@@ -1408,7 +1408,9 @@ func startSpeculativeSynthesis(
 	)
 	go func() {
 		onChunk := func(chunk []byte) error {
-			synthesis.markFirstChunk()
+			if speechio.PCM16HasMeaningfulSample(chunk) {
+				synthesis.markFirstChunk()
+			}
 			return synthesis.buffer.write(synthesisCtx, chunk)
 		}
 		var mimeType string

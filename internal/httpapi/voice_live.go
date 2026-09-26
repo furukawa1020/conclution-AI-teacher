@@ -189,6 +189,7 @@ type voiceLiveRead struct {
 type voiceLiveOutputMetrics struct {
 	mu                   sync.Mutex
 	writeMu              sync.Mutex
+	writer               *voiceLiveOutboundWriter
 	committed            bool
 	firstOutputAt        time.Time
 	frames               int
@@ -369,7 +370,13 @@ func (metrics *voiceLiveOutputMetrics) deliver(
 		return err
 	}
 	return writeVoiceLivePCM20ms(ctx, audio, func(frame []byte) error {
-		if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		var err error
+		if metrics.writer != nil {
+			err = metrics.writer.writeAudio(ctx, frame)
+		} else {
+			err = conn.Write(ctx, websocket.MessageBinary, frame)
+		}
+		if err != nil {
 			return err
 		}
 		meaningful := speechio.PCM16HasMeaningfulSample(frame)
@@ -812,11 +819,12 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 		activate.SessionContext = ""
 	}
 	readyAt := time.Time{}
+	outboundWriter := newVoiceLiveOutboundWriter(liveCtx, conn)
 	if !start.NativeAudio {
 		// Preserve the legacy and strict-mode boundary: these routes acknowledge
 		// readiness immediately after the lease and before starting their
 		// pipeline, exactly as before Native strong readiness was introduced.
-		if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
+		if err := outboundWriter.writeJSON(liveCtx, voiceLiveOutboundFrame{
 			Type:    "ready",
 			Version: voiceLiveVersion,
 		}); err != nil {
@@ -841,7 +849,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			close(processingCommittedAtSignal)
 		}
 	}()
-	outputMetrics := &voiceLiveOutputMetrics{}
+	outputMetrics := &voiceLiveOutputMetrics{writer: outboundWriter}
 	defer outputMetrics.closeNativeWaterfall()
 
 	input := VoiceTurnInput{
@@ -984,9 +992,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 						controlGate.mu.Unlock()
 						return errors.New("voice respondent checkpoint raced response audio")
 					}
-					if err := writeVoiceLiveJSON(
+					if err := outboundWriter.writeJSON(
 						liveCtx,
-						conn,
 						voiceLiveOutboundFrame{
 							Type:             "coach",
 							Version:          voiceLiveVersion,
@@ -1138,7 +1145,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			liveCtx,
 			readyDeadline,
 		)
-		err := writeVoiceLiveJSON(readyWriteCtx, conn, voiceLiveOutboundFrame{
+		err := outboundWriter.writeJSON(readyWriteCtx, voiceLiveOutboundFrame{
 			Type:    "ready",
 			Version: voiceLiveVersion,
 		})
@@ -1256,9 +1263,8 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 			)
 			return
 		case <-endpointChannel:
-			if err := writeVoiceLiveJSON(
+			if err := outboundWriter.writeJSON(
 				liveCtx,
-				conn,
 				voiceLiveOutboundFrame{
 					Type:    "endpoint",
 					Version: voiceLiveVersion,
@@ -1389,7 +1395,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				outputMetrics.markCommitted()
 				strictOutput.markCommitted()
 				if start.LatencyProofVersion != nil {
-					if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
+					if err := outboundWriter.writeJSON(liveCtx, voiceLiveOutboundFrame{
 						Type: "committed", Version: voiceLiveLatencyProofVersion,
 					}); err != nil {
 						cancelLive()
@@ -1597,7 +1603,7 @@ outcomeReady:
 		finalResult.AudioMIMEType = "audio/L16"
 		finalResult.Caption = &outcome.result.Caption
 	}
-	if err := writeVoiceLiveJSON(liveCtx, conn, voiceLiveOutboundFrame{
+	if err := outboundWriter.writeJSON(liveCtx, voiceLiveOutboundFrame{
 		Type:    "final",
 		Version: voiceLiveVersion,
 		Result:  &finalResult,

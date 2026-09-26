@@ -216,6 +216,7 @@ let pendingDocumentTimer;
 const nativePreflightInvalidation = createNativePreflightInvalidationGate();
 const observedAuthInstances = new WeakSet();
 let voiceTransportPrimed = false;
+let voiceServiceWarmupStarted = false;
 let voiceReceiptVisible = false;
 let voicePrepareSloGeneration = 0;
 let voicePrepareSloState = createVoicePrepareSloState();
@@ -1632,6 +1633,10 @@ async function startGuestMode() {
   if (guestStartCleanup !== undefined) fail("guest_start_busy");
   const generation = guestStartGate.begin();
   if (generation === null) fail("guest_start_busy");
+  // Start a content-free Cloud Run wake-up beside App Check and anonymous
+  // authentication. It carries no UID, token, transcript, or audio and never
+  // delays or decides whether the guest session may start.
+  warmVoiceService();
   if (typeof guestAFirstSprintSlo !== "undefined") {
     guestAFirstSprintSlo.begin(performance.now());
   }
@@ -1926,6 +1931,31 @@ function primeVoiceTransportConnection() {
   preconnect.crossOrigin = "anonymous";
   document.head.append(preconnect);
 }
+
+function warmVoiceService() {
+  primeVoiceTransportConnection();
+  if (voiceServiceWarmupStarted) return;
+  voiceServiceWarmupStarted = true;
+  void fetch(`${VOICE_ORIGIN}/health`, {
+    method: "GET",
+    cache: "no-store",
+    credentials: "omit",
+    mode: "cors",
+    redirect: "follow",
+    referrerPolicy: "no-referrer",
+  })
+    .then((response) => {
+      if (!response.ok) throw new Error("voice_warmup_failed");
+      return response.text();
+    })
+    .catch(() => {
+      // Warm-up availability never owns authentication or voice availability.
+    });
+}
+
+// Establish DNS/TLS while the person is still reading the entry screen. The
+// request that may wake Cloud Run remains gesture-bound in warmVoiceService.
+primeVoiceTransportConnection();
 
 async function getStatus() {
   if (!siteKeyConfigured()) {
@@ -3133,7 +3163,7 @@ async function beginTurn(
       stopSession(sessionStatus.expiry);
       fail("session_expired");
     }
-    primeVoiceTransportConnection();
+    warmVoiceService();
     // A new intentional/foreground turn owns a new content-free measurement.
     // Clear the previous value before any asynchronous permission or network
     // work so a stale fast result can never be shown for the current turn.

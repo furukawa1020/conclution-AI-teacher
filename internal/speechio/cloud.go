@@ -133,6 +133,9 @@ type CloudService struct {
 		*texttospeechpb.SynthesizeSpeechRequest,
 	) (*texttospeechpb.SynthesizeSpeechResponse, error)
 	streamingPCMCache *streamingPCMCache
+	synthesisFlights  streamingSynthesisFlightGroup
+	warmSynthesisMu   sync.RWMutex
+	warmSynthesisKeys map[streamingPCMCacheKey]struct{}
 }
 
 type preparedCloudSynthesis struct {
@@ -253,6 +256,14 @@ func (s *CloudService) WarmStreamingSynthesis(
 	if len(unique) == 0 {
 		return result
 	}
+	s.warmSynthesisMu.Lock()
+	if s.warmSynthesisKeys == nil {
+		s.warmSynthesisKeys = make(map[streamingPCMCacheKey]struct{}, len(unique))
+	}
+	for _, text := range unique {
+		s.warmSynthesisKeys[newStreamingPCMCacheKey(s.voiceName, text)] = struct{}{}
+	}
+	s.warmSynthesisMu.Unlock()
 	if maxConcurrent > len(unique) {
 		maxConcurrent = len(unique)
 	}
@@ -673,6 +684,28 @@ func (s *CloudService) StreamSynthesize(
 			return StreamingAudioContentType, nil
 		}
 	}
+	s.warmSynthesisMu.RLock()
+	_, sharedWarmAsset := s.warmSynthesisKeys[cacheKey]
+	s.warmSynthesisMu.RUnlock()
+	if !sharedWarmAsset {
+		return s.streamSynthesizeUncached(ctx, text, onChunk)
+	}
+	return s.synthesisFlights.stream(
+		ctx,
+		cacheKey,
+		func(providerCtx context.Context, publish StreamChunkHandler) (string, error) {
+			return s.streamSynthesizeUncached(providerCtx, text, publish)
+		},
+		onChunk,
+	)
+}
+
+func (s *CloudService) streamSynthesizeUncached(
+	ctx context.Context,
+	text string,
+	onChunk StreamChunkHandler,
+) (string, error) {
+	cacheKey := newStreamingPCMCacheKey(s.voiceName, text)
 
 	if utf8.RuneCountInString(text) <= maxDirectPCMSynthesisRunes &&
 		s.synthesizePCMCall != nil {

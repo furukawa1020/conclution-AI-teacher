@@ -3305,7 +3305,7 @@ class MockWebSocket {
   }
 
   send(value) {
-    this.sent.push(value);
+    this.sent.push(value instanceof ArrayBuffer ? value.slice(0) : value);
   }
 }
 
@@ -3899,10 +3899,11 @@ test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
     socket,
     liveStartFrame(),
   );
+  const capturedFrames = [];
   for (let index = 0; index < 7; index += 1) {
-    transport.pushFrame(
-      new ArrayBuffer(VOICE_LIVE_LIMITS.inputFrameBytes),
-    );
+    const frame = filledPcmFrame(index + 1);
+    capturedFrames.push(frame);
+    transport.pushFrame(frame);
   }
   transport.open();
   assert.deepEqual(JSON.parse(socket.sent[0]), liveStartFrame());
@@ -3913,6 +3914,13 @@ test("mock WebSocket sends auth first then exact 20 ms PCM frames", () => {
     VOICE_LIVE_LIMITS.outboundChunkBytes,
   );
   assert.equal(transport.snapshot().queuedFrames, 0);
+  assert.equal(
+    capturedFrames.every((frame) =>
+      new Uint8Array(frame).every((value) => value === 0),
+    ),
+    true,
+    "the captured frame is wiped immediately after WebSocket snapshots it",
+  );
   assert.equal(
     socket.sent.slice(1).every(
       (frame) =>

@@ -2,6 +2,39 @@ package conversation
 
 import "github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 
+// AuditedQARCCues returns the complete, immutable prose vocabulary that QARC
+// may speak. The returned slice is a copy. It contains no user, model, or
+// session data, so infrastructure may prepare these exact assets before a
+// conversation without speculating about the user's answer.
+func AuditedQARCCues() []string {
+	pairs := [...]struct {
+		template respondent.QARCTemplateID
+		slot     respondent.QARCCueSlot
+	}{
+		{respondent.QARCTemplateBoolean, respondent.QARCSlotPolarity},
+		{respondent.QARCTemplateChoice, respondent.QARCSlotSelection},
+		{respondent.QARCTemplateQuantity, respondent.QARCSlotQuantity},
+		{respondent.QARCTemplateState, respondent.QARCSlotState},
+		{respondent.QARCTemplateCause, respondent.QARCSlotCause},
+		{respondent.QARCTemplatePurpose, respondent.QARCSlotPurpose},
+		{respondent.QARCTemplateProcedure, respondent.QARCSlotProcedure},
+		{respondent.QARCTemplateDefinition, respondent.QARCSlotDefinition},
+		{respondent.QARCTemplateComparison, respondent.QARCSlotComparison},
+		{respondent.QARCTemplateEvidence, respondent.QARCSlotEvidence},
+		{respondent.QARCTemplateOpen, respondent.QARCSlotPosition},
+		{respondent.QARCTemplateNeutral, respondent.QARCSlotNone},
+		{respondent.QARCTemplateRelease, respondent.QARCSlotNone},
+	}
+	cues := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		cue, ok := renderQARCCue(pair.template, pair.slot)
+		if ok && cue != "" {
+			cues = append(cues, cue)
+		}
+	}
+	return cues
+}
+
 // renderQARCCue is the only prose boundary for a QARC decision. Both inputs
 // are closed numeric enums; no caller-controlled string enters the renderer.
 func renderQARCCue(

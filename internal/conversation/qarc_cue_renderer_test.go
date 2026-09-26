@@ -2,10 +2,36 @@ package conversation
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/respondent"
 )
+
+func TestAuditedQARCCuesContainsEveryAudibleTemplateOnce(t *testing.T) {
+	cues := AuditedQARCCues()
+	if len(cues) != 13 {
+		t.Fatalf("audited cue count = %d", len(cues))
+	}
+	seen := make(map[string]bool, len(cues))
+	for _, cue := range cues {
+		if strings.TrimSpace(cue) == "" {
+			t.Fatal("audited cue catalog contains an empty cue")
+		}
+		if seen[cue] {
+			t.Fatalf("audited cue catalog contains duplicate %q", cue)
+		}
+		seen[cue] = true
+	}
+	for templateValue := respondent.QARCTemplateBoolean; templateValue <= respondent.QARCTemplateRelease; templateValue++ {
+		for slotValue := respondent.QARCSlotNone; slotValue <= respondent.QARCSlotPosition; slotValue++ {
+			cue, ok := renderQARCCue(templateValue, slotValue)
+			if ok && cue != "" && !seen[cue] {
+				t.Fatalf("audible template missing from catalog: %q", cue)
+			}
+		}
+	}
+}
 
 func TestRenderQARCCueClosedGrammar(t *testing.T) {
 	tests := []struct {

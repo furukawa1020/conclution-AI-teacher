@@ -79,6 +79,7 @@ func main() {
 	var passkeyAppCircuitBreaker guard.Limiter
 	var closeFirestore func() error
 	var closeSpeech func() error
+	var speechWarmupService *speechio.CloudService
 	closeNative := func() error { return nil }
 	var semanticDispatcher *semanticshadow.Dispatcher
 	var longTermMemory *longmemory.Manager
@@ -366,6 +367,7 @@ func main() {
 			logger.Error("initialize regional speech services", "error", err)
 			os.Exit(1)
 		}
+		speechWarmupService = speechService
 		closeSpeech = speechService.Close
 		voiceService, err = voiceflow.NewWithPrivacy(
 			speechService,
@@ -504,6 +506,22 @@ func main() {
 			stop()
 		}
 	}()
+	if speechWarmupService != nil {
+		go func() {
+			warmupCtx, cancelWarmup := context.WithTimeout(ctx, 25*time.Second)
+			defer cancelWarmup()
+			result := speechWarmupService.WarmStreamingSynthesis(
+				warmupCtx,
+				conversation.AuditedQARCCues(),
+				2,
+			)
+			logger.Info("audited QARC speech warmup completed",
+				"requested", result.Requested,
+				"warmed", result.Warmed,
+				"failed", result.Failed,
+			)
+		}()
+	}
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

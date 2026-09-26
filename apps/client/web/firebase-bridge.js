@@ -3200,7 +3200,42 @@ async function beginTurn(
     }
     return await initializeWithCleanup(
       async () => {
-        const credentials = await secureCredentials(true);
+        const prepareMutedMedia = async () => {
+          const preparedStream = await ensureMediaStream(
+            expectedEpoch,
+            turnMode === "intentional",
+          );
+          // A newly granted microphone starts enabled in browsers. Keep every
+          // track muted until Native strong-ready or bounded HTTP fallback has
+          // been selected below.
+          setStreamTracksEnabled(preparedStream, false);
+          await ensureAudioGraph(preparedStream, expectedEpoch);
+          return preparedStream;
+        };
+        let credentials;
+        let stream;
+        if (guestModeActive) {
+          // Guest Auth has no WebAuthn UI, so token/App Check refresh and the
+          // local microphone graph can safely progress together. allSettled is
+          // intentional: cleanup must not run while the other branch can still
+          // acquire and publish a MediaStream into shared session state.
+          const [credentialResult, mediaResult] = await Promise.allSettled([
+            secureCredentials(true),
+            prepareMutedMedia(),
+          ]);
+          if (credentialResult.status === "rejected") {
+            throw credentialResult.reason;
+          }
+          if (mediaResult.status === "rejected") {
+            throw mediaResult.reason;
+          }
+          credentials = credentialResult.value;
+          stream = mediaResult.value;
+        } else {
+          // Preserve the established passkey order so a WebAuthn prompt never
+          // competes with a browser microphone permission prompt.
+          credentials = await secureCredentials(true);
+        }
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
         }
@@ -3218,15 +3253,9 @@ async function beginTurn(
         } catch {
           // This optional preparation never owns voice-start availability.
         }
-        const stream = await ensureMediaStream(
-          expectedEpoch,
-          turnMode === "intentional",
-        );
-        // Provider preparation is content-free. A newly granted microphone
-        // starts enabled in browsers, so mute it immediately while the exact
-        // Native provider turn proves SetupComplete + StartActivity.
-        setStreamTracksEnabled(stream, false);
-        await ensureAudioGraph(stream, expectedEpoch);
+        if (stream === undefined) {
+          stream = await prepareMutedMedia();
+        }
         if (expectedEpoch !== sessionEpoch) {
           fail(stoppedSessionCode(expectedEpoch));
         }

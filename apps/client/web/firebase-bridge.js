@@ -1925,6 +1925,15 @@ function primeVoiceTransportConnection() {
   if (voiceTransportPrimed) return;
   voiceTransportPrimed = true;
 
+  const existing = document.getElementById("kotae-voice-preconnect");
+  if (
+    existing instanceof HTMLLinkElement &&
+    existing.rel === "preconnect" &&
+    new URL(existing.href).origin === VOICE_ORIGIN
+  ) {
+    return;
+  }
+
   const preconnect = document.createElement("link");
   preconnect.rel = "preconnect";
   preconnect.href = VOICE_ORIGIN;

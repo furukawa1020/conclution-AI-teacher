@@ -136,6 +136,7 @@ type CloudService struct {
 	synthesisFlights  streamingSynthesisFlightGroup
 	warmSynthesisMu   sync.RWMutex
 	warmSynthesisKeys map[streamingPCMCacheKey]struct{}
+	directPCMCircuit  directPCMRouteCircuit
 }
 
 type preparedCloudSynthesis struct {
@@ -708,19 +709,22 @@ func (s *CloudService) streamSynthesizeUncached(
 	cacheKey := newStreamingPCMCacheKey(s.voiceName, text)
 
 	if utf8.RuneCountInString(text) <= maxDirectPCMSynthesisRunes &&
-		s.synthesizePCMCall != nil {
+		s.synthesizePCMCall != nil &&
+		s.directPCMCircuit.begin(time.Now()) {
 		started := time.Now()
 		response, directErr := s.synthesizePCMCall(
 			ctx,
 			directPCMSynthesizeRequest(text, s.voiceName),
 		)
+		if err := ctx.Err(); err != nil {
+			s.directPCMCircuit.canceled()
+			return "", fmt.Errorf("direct PCM speech synthesis canceled: %w", err)
+		}
 		if directErr == nil &&
 			response != nil &&
 			len(response.AudioContent) > 0 &&
 			len(response.AudioContent) <= maxStreamingAudioTotalSize {
-			if err := ctx.Err(); err != nil {
-				return "", fmt.Errorf("deliver direct PCM speech audio: %w", err)
-			}
+			s.directPCMCircuit.succeeded()
 			if err := onChunk(response.AudioContent); err != nil {
 				return "", fmt.Errorf("deliver direct PCM speech audio: %w", err)
 			}
@@ -738,9 +742,7 @@ func (s *CloudService) streamSynthesizeUncached(
 			)
 			return StreamingAudioContentType, nil
 		}
-		if err := ctx.Err(); err != nil {
-			return "", fmt.Errorf("direct PCM speech synthesis canceled: %w", err)
-		}
+		s.directPCMCircuit.failed(time.Now())
 		slog.WarnContext(ctx, "streaming speech adaptive route fell back",
 			"route", "direct_pcm",
 			"duration_ms", time.Since(started).Milliseconds(),

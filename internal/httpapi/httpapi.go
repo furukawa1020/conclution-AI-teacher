@@ -1483,7 +1483,8 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		resourcePolicy := "same-origin"
-		if (r.URL.Path == voiceStreamPath ||
+		if (r.URL.Path == "/health" ||
+			r.URL.Path == voiceStreamPath ||
 			r.URL.Path == voiceLivePath ||
 			r.URL.Path == longTermMemoryContextBeginPath ||
 			r.URL.Path == longTermMemoryContextConsumePath) &&

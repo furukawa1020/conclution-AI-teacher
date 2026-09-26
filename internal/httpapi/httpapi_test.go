@@ -2055,3 +2055,47 @@ func TestSecurityHeadersAreApplied(t *testing.T) {
 		t.Error("X-Request-ID is missing")
 	}
 }
+
+func TestHealthWarmProbeAllowsOnlyTheProductionWebOrigin(t *testing.T) {
+	t.Parallel()
+
+	handler := testHandler(&fakeEvaluator{}, &fakeStore{})
+	for _, test := range []struct {
+		name               string
+		origin             string
+		wantAllowOrigin    string
+		wantResourcePolicy string
+	}{
+		{
+			name:               "production hosting",
+			origin:             allowedWebOrigin,
+			wantAllowOrigin:    allowedWebOrigin,
+			wantResourcePolicy: "cross-origin",
+		},
+		{
+			name:               "untrusted origin",
+			origin:             "https://attacker.example",
+			wantResourcePolicy: "same-origin",
+		},
+		{
+			name:               "non-browser probe",
+			wantResourcePolicy: "same-origin",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/health", nil)
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK ||
+				response.Header().Get("Access-Control-Allow-Origin") !=
+					test.wantAllowOrigin ||
+				response.Header().Get("Cross-Origin-Resource-Policy") !=
+					test.wantResourcePolicy {
+				t.Fatalf("status=%d headers=%v", response.Code, response.Header())
+			}
+		})
+	}
+}

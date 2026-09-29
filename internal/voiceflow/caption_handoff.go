@@ -106,8 +106,13 @@ type captionHandoff struct {
 	uid             string
 	input           httpapi.VoiceTurnInput
 	streamingSpeech speechio.StreamingService
-	onAudio         func([]byte) error
-	onCoachActive   func(httpapi.VoiceRespondentCheckpoint) error
+	// synthesisPreparation contains no caption, reply, UID, or conversation
+	// state. Starting only the provider configuration handshake here lets the
+	// Native caption path overlap it with the user's speech, just like the
+	// ordinary live path. Ownership moves exactly once to liveSpeculation.
+	synthesisPreparation *speculativeSynthesisPreparation
+	onAudio              func([]byte) error
+	onCoachActive        func(httpapi.VoiceRespondentCheckpoint) error
 
 	tracker                speculativeCandidateTracker
 	speculation            *liveSpeculation
@@ -150,7 +155,7 @@ func (p *Pipeline) OpenCaptionHandoff(
 		return nil, err
 	}
 	handoffCtx, cancel := context.WithCancel(ctx)
-	return &captionHandoff{
+	handoff := &captionHandoff{
 		p:               p,
 		ctx:             handoffCtx,
 		cancel:          cancel,
@@ -159,7 +164,14 @@ func (p *Pipeline) OpenCaptionHandoff(
 		streamingSpeech: streamingSpeech,
 		onAudio:         onAudio,
 		onCoachActive:   onCoachActive,
-	}, nil
+	}
+	if voiceResponseExpected(input) {
+		handoff.synthesisPreparation = startSpeculativeSynthesisPreparation(
+			handoffCtx,
+			streamingSpeech,
+		)
+	}
+	return handoff, nil
 }
 
 // Observe takes ownership of captionUTF8 and clears it before returning. A
@@ -218,12 +230,16 @@ func (handoff *captionHandoff) Observe(
 		return nil
 	}
 	handoff.speculationAttempted = true
-	handoff.speculation = handoff.p.startLiveSpeculation(
+	preparation := handoff.synthesisPreparation
+	handoff.synthesisPreparation = nil
+	handoff.speculation = handoff.p.startLiveSpeculationWithPreparation(
 		handoff.ctx,
 		handoff.uid,
 		handoff.input,
 		candidate,
 		handoff.streamingSpeech,
+		preparation,
+		true,
 		handoff.deliverAudio,
 		func(decision conversation.VoiceTurnResult) (*preparedInitiative, error) {
 			return prepareRespondentInitiative(
@@ -591,8 +607,11 @@ func (handoff *captionHandoff) Cancel() {
 	handoff.latestCaption = ""
 	speculation := handoff.speculation
 	handoff.speculation = nil
+	preparation := handoff.synthesisPreparation
+	handoff.synthesisPreparation = nil
 	cancel := handoff.cancel
 	handoff.mu.Unlock()
+	preparation.close()
 	if cancel != nil {
 		cancel()
 	}
@@ -614,8 +633,11 @@ func (handoff *captionHandoff) finishCommitted() {
 	}
 	handoff.finished = true
 	handoff.audioAuthorized = false
+	preparation := handoff.synthesisPreparation
+	handoff.synthesisPreparation = nil
 	cancel := handoff.cancel
 	handoff.mu.Unlock()
+	preparation.close()
 	if cancel != nil {
 		cancel()
 	}

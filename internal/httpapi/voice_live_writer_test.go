@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -109,5 +110,69 @@ func TestVoiceLiveOutboundWriterBoundsSlowConsumer(t *testing.T) {
 	err := writer.writeAudio(requestCtx, []byte{1, 2})
 	if err == nil || time.Since(started) > 250*time.Millisecond {
 		t.Fatalf("slow writer error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestVoiceLiveOutboundWriterExpiresAudioInsteadOfPlayingItLate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	controlStarted := make(chan struct{})
+	releaseControl := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var order []string
+	writer := newVoiceLiveOutboundWriterWithWrite(
+		ctx,
+		func(
+			writeCtx context.Context,
+			_ websocket.MessageType,
+			payload []byte,
+		) error {
+			value := string(payload)
+			mu.Lock()
+			order = append(order, value)
+			mu.Unlock()
+			if value == "control" {
+				once.Do(func() { close(controlStarted) })
+				select {
+				case <-releaseControl:
+				case <-writeCtx.Done():
+					return writeCtx.Err()
+				}
+			}
+			return nil
+		},
+	)
+	writer.audioQueueDeadline = 5 * time.Millisecond
+	controlResult := make(chan error, 1)
+	go func() {
+		controlResult <- writer.submit(
+			ctx, writer.control, websocket.MessageText, []byte("control"),
+		)
+	}()
+	<-controlStarted
+	audioResult := make(chan error, 1)
+	go func() {
+		audioResult <- writer.writeAudio(ctx, []byte("audio"))
+	}()
+	waitForVoiceLiveQueueDepth(t, writer.audio, 1)
+	time.Sleep(10 * time.Millisecond)
+	close(releaseControl)
+	if err := <-controlResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-audioResult; !errors.Is(err, errVoiceLiveAudioQueueExpired) {
+		t.Fatalf("audio queue error=%v", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	if want := []string{"control"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("write order=%v want=%v", got, want)
+	}
+	snapshot := writer.snapshot()
+	if snapshot.audioFrames != 1 || snapshot.audioExpired != 1 ||
+		snapshot.maximumAudioQueueWait < writer.audioQueueDeadline {
+		t.Fatalf("writer metrics=%+v", snapshot)
 	}
 }

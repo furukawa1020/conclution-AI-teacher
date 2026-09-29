@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -12,14 +13,32 @@ import (
 const (
 	voiceLiveAudioWriteQueueCapacity   = 4
 	voiceLiveControlWriteQueueCapacity = 8
+	voiceLiveAudioQueueDeadline        = 100 * time.Millisecond
 	voiceLiveSocketWriteTimeout        = 500 * time.Millisecond
+)
+
+var errVoiceLiveAudioQueueExpired = errors.New(
+	"voice live audio frame exceeded its queue deadline",
 )
 
 type voiceLiveSocketWriteRequest struct {
 	ctx         context.Context
+	audio       bool
+	enqueuedAt  time.Time
 	messageType websocket.MessageType
 	payload     []byte
 	done        chan error
+}
+
+type voiceLiveOutboundWriterSnapshot struct {
+	audioFrames             int64
+	audioExpired            int64
+	firstAudioQueueWait     time.Duration
+	maximumAudioQueueWait   time.Duration
+	maximumAudioWrite       time.Duration
+	controlFrames           int64
+	maximumControlQueueWait time.Duration
+	maximumControlWrite     time.Duration
 }
 
 // voiceLiveOutboundWriter gives PCM its own bounded lane. Control traffic can
@@ -27,10 +46,13 @@ type voiceLiveSocketWriteRequest struct {
 // before the next control frame. Callers remain synchronous so borrowed PCM
 // stays valid until websocket.Write has snapshotted it.
 type voiceLiveOutboundWriter struct {
-	audio   chan voiceLiveSocketWriteRequest
-	control chan voiceLiveSocketWriteRequest
-	done    chan struct{}
-	write   func(context.Context, websocket.MessageType, []byte) error
+	audio              chan voiceLiveSocketWriteRequest
+	control            chan voiceLiveSocketWriteRequest
+	done               chan struct{}
+	write              func(context.Context, websocket.MessageType, []byte) error
+	audioQueueDeadline time.Duration
+	metricsMu          sync.Mutex
+	metrics            voiceLiveOutboundWriterSnapshot
 }
 
 func newVoiceLiveOutboundWriter(
@@ -45,10 +67,11 @@ func newVoiceLiveOutboundWriterWithWrite(
 	write func(context.Context, websocket.MessageType, []byte) error,
 ) *voiceLiveOutboundWriter {
 	writer := &voiceLiveOutboundWriter{
-		audio:   make(chan voiceLiveSocketWriteRequest, voiceLiveAudioWriteQueueCapacity),
-		control: make(chan voiceLiveSocketWriteRequest, voiceLiveControlWriteQueueCapacity),
-		done:    make(chan struct{}),
-		write:   write,
+		audio:              make(chan voiceLiveSocketWriteRequest, voiceLiveAudioWriteQueueCapacity),
+		control:            make(chan voiceLiveSocketWriteRequest, voiceLiveControlWriteQueueCapacity),
+		done:               make(chan struct{}),
+		write:              write,
+		audioQueueDeadline: voiceLiveAudioQueueDeadline,
 	}
 	go writer.run(ctx)
 	return writer
@@ -84,14 +107,70 @@ func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
 				}
 			}
 		}
+		dequeuedAt := time.Now()
+		queueWait := dequeuedAt.Sub(request.enqueuedAt)
+		if request.audio && queueWait > writer.audioQueueDeadline {
+			writer.observe(request.audio, queueWait, 0, true)
+			request.done <- errVoiceLiveAudioQueueExpired
+			continue
+		}
 		writeCtx, cancel := context.WithTimeout(
 			request.ctx,
 			voiceLiveSocketWriteTimeout,
 		)
+		writeStartedAt := time.Now()
 		err := writer.write(writeCtx, request.messageType, request.payload)
+		writeDuration := time.Since(writeStartedAt)
 		cancel()
+		writer.observe(request.audio, queueWait, writeDuration, false)
 		request.done <- err
 	}
+}
+
+func (writer *voiceLiveOutboundWriter) observe(
+	audio bool,
+	queueWait time.Duration,
+	writeDuration time.Duration,
+	expired bool,
+) {
+	writer.metricsMu.Lock()
+	defer writer.metricsMu.Unlock()
+	if audio {
+		if writer.metrics.audioFrames == 0 {
+			writer.metrics.firstAudioQueueWait = queueWait
+		}
+		writer.metrics.audioFrames++
+		if expired {
+			writer.metrics.audioExpired++
+		}
+		writer.metrics.maximumAudioQueueWait = max(
+			writer.metrics.maximumAudioQueueWait,
+			queueWait,
+		)
+		writer.metrics.maximumAudioWrite = max(
+			writer.metrics.maximumAudioWrite,
+			writeDuration,
+		)
+		return
+	}
+	writer.metrics.controlFrames++
+	writer.metrics.maximumControlQueueWait = max(
+		writer.metrics.maximumControlQueueWait,
+		queueWait,
+	)
+	writer.metrics.maximumControlWrite = max(
+		writer.metrics.maximumControlWrite,
+		writeDuration,
+	)
+}
+
+func (writer *voiceLiveOutboundWriter) snapshot() voiceLiveOutboundWriterSnapshot {
+	if writer == nil {
+		return voiceLiveOutboundWriterSnapshot{}
+	}
+	writer.metricsMu.Lock()
+	defer writer.metricsMu.Unlock()
+	return writer.metrics
 }
 
 func (writer *voiceLiveOutboundWriter) submit(
@@ -105,6 +184,8 @@ func (writer *voiceLiveOutboundWriter) submit(
 	}
 	request := voiceLiveSocketWriteRequest{
 		ctx:         ctx,
+		audio:       lane == writer.audio,
+		enqueuedAt:  time.Now(),
 		messageType: messageType,
 		payload:     payload,
 		done:        make(chan error, 1),

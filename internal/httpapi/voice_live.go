@@ -1892,6 +1892,7 @@ func (s *Server) logVoiceLiveSession(
 	}
 	firstOutputAt, outputFrames, outputBytes, nativeSnapshot :=
 		outputMetrics.snapshotForLog()
+	writerSnapshot := outputMetrics.writer.snapshot()
 	latencyProof := outputMetrics.latencyProofSnapshot()
 	speechEndToServerCommitLowerMS := int64(-1)
 	speechEndToServerCommitUpperMS := int64(-1)
@@ -1976,6 +1977,19 @@ func (s *Server) logVoiceLiveSession(
 		"input_bytes", inputBytes,
 		"output_frames", outputFrames,
 		"output_bytes", outputBytes,
+		"audio_write_frames", writerSnapshot.audioFrames,
+		"audio_write_expired", writerSnapshot.audioExpired,
+		"first_audio_queue_wait_us",
+		writerSnapshot.firstAudioQueueWait.Microseconds(),
+		"maximum_audio_queue_wait_us",
+		writerSnapshot.maximumAudioQueueWait.Microseconds(),
+		"maximum_audio_write_us",
+		writerSnapshot.maximumAudioWrite.Microseconds(),
+		"control_write_frames", writerSnapshot.controlFrames,
+		"maximum_control_queue_wait_us",
+		writerSnapshot.maximumControlQueueWait.Microseconds(),
+		"maximum_control_write_us",
+		writerSnapshot.maximumControlWrite.Microseconds(),
 		"cancelled", cancelled,
 	)
 }

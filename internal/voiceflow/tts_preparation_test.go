@@ -19,6 +19,7 @@ type fakePreparedSynthesis struct {
 	calls  int
 	text   string
 	closed bool
+	err    error
 }
 
 func (prepared *fakePreparedSynthesis) StreamSynthesize(
@@ -39,6 +40,9 @@ func (prepared *fakePreparedSynthesis) StreamSynthesize(
 		if err := onChunk(chunk); err != nil {
 			return "", err
 		}
+	}
+	if prepared.err != nil {
+		return "", prepared.err
 	}
 	return speechio.StreamingAudioContentType, nil
 }
@@ -149,6 +153,86 @@ func TestPreparedSynthesisUsesAnAlreadyReadyConnection(t *testing.T) {
 			speech.streamCalls,
 			delivered,
 		)
+	}
+}
+
+func TestPreparedSynthesisFallsBackOnlyBeforeAnyPCM(t *testing.T) {
+	prepared := &fakePreparedSynthesis{err: context.DeadlineExceeded}
+	speech := &preparingStreamingSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{chunks: [][]byte{{7, 0}}},
+		prepared:            prepared,
+	}
+	preparation := startSpeculativeSynthesisPreparation(context.Background(), speech)
+	var ready speechio.PreparedStreamingSynthesis
+	deadline := time.Now().Add(time.Second)
+	for ready == nil && time.Now().Before(deadline) {
+		ready = preparation.takeReady()
+		time.Sleep(time.Millisecond)
+	}
+	if ready == nil {
+		t.Fatal("prepared synthesis did not become ready")
+	}
+
+	var delivered []byte
+	synthesis := startSpeculativeSynthesis(
+		context.Background(),
+		speech,
+		ready,
+		"短い返答です。",
+		func(chunk []byte) error {
+			delivered = append(delivered, chunk...)
+			return nil
+		},
+	)
+	if result := synthesis.await(context.Background()); result.err != nil {
+		t.Fatalf("zero-PCM prepared fallback: %v", result.err)
+	}
+	if _, err := synthesis.buffer.release(context.Background()); err != nil {
+		t.Fatalf("release fallback synthesis: %v", err)
+	}
+	if prepared.calls != 1 || speech.streamCalls != 1 ||
+		!bytes.Equal(delivered, []byte{7, 0}) {
+		t.Fatalf(
+			"prepared=%d fallback=%d delivered=%v",
+			prepared.calls,
+			speech.streamCalls,
+			delivered,
+		)
+	}
+}
+
+func TestPreparedSynthesisDoesNotMixFallbackAfterPartialPCM(t *testing.T) {
+	prepared := &fakePreparedSynthesis{
+		chunks: [][]byte{{3, 0}},
+		err:    context.DeadlineExceeded,
+	}
+	speech := &preparingStreamingSpeech{
+		fakeStreamingSpeech: fakeStreamingSpeech{chunks: [][]byte{{7, 0}}},
+		prepared:            prepared,
+	}
+	preparation := startSpeculativeSynthesisPreparation(context.Background(), speech)
+	var ready speechio.PreparedStreamingSynthesis
+	deadline := time.Now().Add(time.Second)
+	for ready == nil && time.Now().Before(deadline) {
+		ready = preparation.takeReady()
+		time.Sleep(time.Millisecond)
+	}
+	if ready == nil {
+		t.Fatal("prepared synthesis did not become ready")
+	}
+
+	synthesis := startSpeculativeSynthesis(
+		context.Background(),
+		speech,
+		ready,
+		"短い返答です。",
+		func([]byte) error { return nil },
+	)
+	if result := synthesis.await(context.Background()); result.err == nil {
+		t.Fatal("partial prepared PCM failure was accepted")
+	}
+	if speech.streamCalls != 0 {
+		t.Fatalf("ordinary stream calls=%d, want 0 after partial PCM", speech.streamCalls)
 	}
 }
 

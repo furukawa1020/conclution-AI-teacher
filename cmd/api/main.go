@@ -485,6 +485,12 @@ func main() {
 		passkeyAppCircuitBreaker,
 	)
 	server := newAPIServer(":"+cfg.Port, handler)
+	if err := requireAuditedSpeechReady(ctx, logger, speechWarmupService); err != nil {
+		logger.Error("refuse traffic before audited speech is ready",
+			"error", err,
+		)
+		os.Exit(1)
+	}
 
 	go func() {
 		logger.Info("API listening",
@@ -506,23 +512,6 @@ func main() {
 			stop()
 		}
 	}()
-	if speechWarmupService != nil {
-		go func() {
-			warmupCtx, cancelWarmup := context.WithTimeout(ctx, 25*time.Second)
-			defer cancelWarmup()
-			result := speechWarmupService.WarmStreamingSynthesis(
-				warmupCtx,
-				conversation.AuditedInstantVoiceCues(),
-				2,
-			)
-			logger.Info("audited instant speech warmup completed",
-				"requested", result.Requested,
-				"warmed", result.Warmed,
-				"failed", result.Failed,
-			)
-		}()
-	}
-
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

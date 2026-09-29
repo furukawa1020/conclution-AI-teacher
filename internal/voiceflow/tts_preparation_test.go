@@ -262,3 +262,51 @@ func TestLivePipelineStartsContentFreeTTSPreparationBeforeSpeechCommit(t *testin
 		t.Fatal("canceled live preparation did not finish")
 	}
 }
+
+func TestCaptionHandoffStartsAndCancelsContentFreeTTSPreparationBeforeCaption(
+	t *testing.T,
+) {
+	prepareStarted := make(chan struct{})
+	prepareCanceled := make(chan struct{})
+	speech := &preparingLiveSpeech{
+		preparingStreamingSpeech: preparingStreamingSpeech{
+			prepareStarted:  prepareStarted,
+			prepareCanceled: prepareCanceled,
+			blockPrepare:    true,
+		},
+		session: newFakeLiveTranscriptionSession(),
+	}
+	pipeline, err := New(speech, &fakeAgent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processingCommitted := make(chan struct{})
+	handoff, err := pipeline.OpenCaptionHandoff(
+		context.Background(),
+		"uid-caption-content-free-tts-preparation",
+		httpapi.VoiceTurnInput{
+			MIMEType:            speechio.StreamingAudioContentType,
+			NativeAudio:         true,
+			ProcessingCommitted: processingCommitted,
+		},
+		func([]byte) error { return nil },
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-prepareStarted:
+		// No Observe call has occurred, so no caption, reply, model decision,
+		// or user content can have reached this provider handshake.
+	case <-time.After(time.Second):
+		t.Fatal("caption handoff waited for a caption before TTS preparation")
+	}
+
+	handoff.Cancel()
+	select {
+	case <-prepareCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("unused caption handoff preparation was not canceled")
+	}
+}

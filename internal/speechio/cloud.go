@@ -710,7 +710,7 @@ func (s *CloudService) streamSynthesizeUncached(
 
 	if utf8.RuneCountInString(text) <= maxDirectPCMSynthesisRunes &&
 		s.synthesizePCMCall != nil &&
-		s.directPCMCircuit.begin(time.Now()) {
+		s.directPCMCircuit.begin() {
 		started := time.Now()
 		response, directErr := s.synthesizePCMCall(
 			ctx,
@@ -742,7 +742,7 @@ func (s *CloudService) streamSynthesizeUncached(
 			)
 			return StreamingAudioContentType, nil
 		}
-		s.directPCMCircuit.failed(time.Now())
+		s.directPCMCircuit.failed()
 		slog.WarnContext(ctx, "streaming speech adaptive route fell back",
 			"route", "direct_pcm",
 			"duration_ms", time.Since(started).Milliseconds(),

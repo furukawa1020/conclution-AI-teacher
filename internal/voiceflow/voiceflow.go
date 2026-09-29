@@ -1464,8 +1464,20 @@ func startSpeculativeSynthesis(
 		var mimeType string
 		var err error
 		if prepared != nil {
-			defer prepared.Close()
 			mimeType, err = prepared.StreamSynthesize(spokenReply, onChunk)
+			prepared.Close()
+			// A content-free prepared stream may expire while the user is still
+			// speaking. It is only an optional latency path: if it failed before
+			// producing any PCM, retry once through the ordinary stream. Once any
+			// byte exists, fail closed rather than concatenate two provider runs.
+			if err != nil && synthesisCtx.Err() == nil &&
+				synthesis.buffer.canRetryBeforeAudio() {
+				mimeType, err = streamingSpeech.StreamSynthesize(
+					synthesisCtx,
+					spokenReply,
+					onChunk,
+				)
+			}
 		} else {
 			mimeType, err = streamingSpeech.StreamSynthesize(
 				synthesisCtx,
@@ -1699,6 +1711,13 @@ func (buffer *speculativeAudioCommitBuffer) peakBufferedBytes() int64 {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 	return int64(buffer.peakBytes)
+}
+
+func (buffer *speculativeAudioCommitBuffer) canRetryBeforeAudio() bool {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.state == speculativeAudioPending &&
+		buffer.bufferedBytes == 0 && buffer.peakBytes == 0
 }
 
 func (synthesis *speculativeSynthesis) markFirstChunk() {

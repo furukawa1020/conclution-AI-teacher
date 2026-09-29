@@ -625,6 +625,19 @@ func (p *Pipeline) processLive(
 	// race the agent's mandatory document wipe.
 	speculationEligible := responseExpected && input.Document == nil &&
 		!input.StrictCloudMinimization
+	// Open only the content-free TTS configuration stream while the person is
+	// still speaking. Stable transcript text and reply text remain unavailable
+	// to this capability until the existing speculative decision boundary.
+	// This moves provider setup off the speech-end critical path without
+	// publishing or even preparing user-derived PCM early.
+	synthesisPreparation := (*speculativeSynthesisPreparation)(nil)
+	if speculationEligible {
+		synthesisPreparation = startSpeculativeSynthesisPreparation(
+			ctx,
+			streamingSpeech,
+		)
+		defer synthesisPreparation.close()
+	}
 	finalFragments := make([]string, 0, 4)
 	finalConfidence := float32(0)
 	finalConfidenceObserved := false
@@ -698,12 +711,14 @@ func (p *Pipeline) processLive(
 			)
 			if ready {
 				speculationAttempted = true
-				speculation = p.startLiveSpeculation(
+				speculation = p.startLiveSpeculationWithPreparation(
 					ctx,
 					uid,
 					input,
 					candidate,
 					streamingSpeech,
+					synthesisPreparation,
+					false,
 					deliverAudio,
 					prepareInitiativeOutput,
 				)
@@ -718,12 +733,14 @@ func (p *Pipeline) processLive(
 				)
 				if ready {
 					speculationAttempted = true
-					speculation = p.startLiveSpeculation(
+					speculation = p.startLiveSpeculationWithPreparation(
 						ctx,
 						uid,
 						input,
 						candidate,
 						streamingSpeech,
+						synthesisPreparation,
+						false,
 						deliverAudio,
 						prepareInitiativeOutput,
 					)
@@ -792,12 +809,14 @@ func (p *Pipeline) processLive(
 			}
 			if ready {
 				speculationAttempted = true
-				speculation = p.startLiveSpeculation(
+				speculation = p.startLiveSpeculationWithPreparation(
 					ctx,
 					uid,
 					input,
 					candidate,
 					streamingSpeech,
+					synthesisPreparation,
+					false,
 					deliverAudio,
 					prepareInitiativeOutput,
 				)
@@ -1205,11 +1224,39 @@ func (p *Pipeline) startLiveSpeculation(
 	deliverAudio func([]byte) error,
 	prepareOutput func(conversation.VoiceTurnResult) (*preparedInitiative, error),
 ) *liveSpeculation {
+	preparation := startSpeculativeSynthesisPreparation(ctx, streamingSpeech)
+	return p.startLiveSpeculationWithPreparation(
+		ctx,
+		uid,
+		input,
+		candidate,
+		streamingSpeech,
+		preparation,
+		true,
+		deliverAudio,
+		prepareOutput,
+	)
+}
+
+func (p *Pipeline) startLiveSpeculationWithPreparation(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	candidate string,
+	streamingSpeech speechio.StreamingService,
+	preparation *speculativeSynthesisPreparation,
+	closePreparation bool,
+	deliverAudio func([]byte) error,
+	prepareOutput func(conversation.VoiceTurnResult) (*preparedInitiative, error),
+) *liveSpeculation {
 	candidate = canonicalSpeculationText(candidate)
 	if input.StrictCloudMinimization || input.Document != nil ||
 		liveProcessingCommitted(input) ||
 		candidate == "" ||
 		!speculationPreservesFinalMetadata(candidate) {
+		if closePreparation {
+			preparation.close()
+		}
 		return nil
 	}
 	speculationCtx, cancel := context.WithCancel(ctx)
@@ -1222,6 +1269,9 @@ func (p *Pipeline) startLiveSpeculation(
 	}
 	if liveProcessingCommitted(input) {
 		cancel()
+		if closePreparation {
+			preparation.close()
+		}
 		return nil
 	}
 	outcome := make(chan speculativeTurnOutcome, 1)
@@ -1230,14 +1280,12 @@ func (p *Pipeline) startLiveSpeculation(
 		cancelContext: cancel,
 		outcome:       outcome,
 	}
-	preparation := startSpeculativeSynthesisPreparation(
-		speculationCtx,
-		streamingSpeech,
-	)
 	turn := conversationTurn(input, candidate, true)
 	started := time.Now()
 	go func() {
-		defer preparation.close()
+		if closePreparation {
+			defer preparation.close()
+		}
 		prepareSealedCandidate := func(
 			candidate conversation.SealedSpeechCandidate,
 		) {

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
@@ -57,6 +58,18 @@ type preparingStreamingSpeech struct {
 	blockPrepare    bool
 	startOnce       sync.Once
 	cancelOnce      sync.Once
+}
+
+type preparingLiveSpeech struct {
+	preparingStreamingSpeech
+	session *fakeLiveTranscriptionSession
+}
+
+func (speech *preparingLiveSpeech) OpenStreamingTranscription(
+	ctx context.Context,
+) (speechio.StreamingTranscriptionSession, error) {
+	speech.session.ctx = ctx
+	return speech.session, nil
 }
 
 func (speech *preparingStreamingSpeech) PrepareStreamingSynthesis(
@@ -199,5 +212,53 @@ func TestPreparedSynthesisNeverWaitsForASlowConnection(t *testing.T) {
 	case <-speech.prepareCanceled:
 	case <-time.After(time.Second):
 		t.Fatal("unused preparation was not canceled")
+	}
+}
+
+func TestLivePipelineStartsContentFreeTTSPreparationBeforeSpeechCommit(t *testing.T) {
+	closeGate := make(chan struct{})
+	session := newFakeLiveTranscriptionSession()
+	session.closeGate = closeGate
+	prepareStarted := make(chan struct{})
+	speech := &preparingLiveSpeech{
+		preparingStreamingSpeech: preparingStreamingSpeech{
+			fakeStreamingSpeech: fakeStreamingSpeech{},
+			prepared:            &fakePreparedSynthesis{},
+			prepareStarted:      prepareStarted,
+		},
+		session: session,
+	}
+	pipeline, err := New(speech, &fakeAgent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	audio := make(chan []byte, 1)
+	audio <- []byte{1, 0}
+	close(audio)
+	done := make(chan error, 1)
+	go func() {
+		_, processErr := pipeline.ProcessLive(
+			ctx,
+			"uid-content-free-tts-preparation",
+			httpapi.VoiceTurnInput{},
+			audio,
+			func([]byte) error { return nil },
+		)
+		done <- processErr
+	}()
+	select {
+	case <-prepareStarted:
+		// CloseSend is still blocked: no final transcript, candidate, or reply
+		// can exist yet, so preparation is necessarily content-free.
+	case <-time.After(time.Second):
+		t.Fatal("TTS configuration did not overlap live speech transport")
+	}
+	cancel()
+	close(closeGate)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled live preparation did not finish")
 	}
 }

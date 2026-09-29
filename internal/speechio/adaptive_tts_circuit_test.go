@@ -2,33 +2,36 @@ package speechio
 
 import (
 	"testing"
-	"time"
 )
 
-func TestDirectPCMRouteCircuitRetriesOnlyAfterCooldown(t *testing.T) {
+func TestDirectPCMRouteCircuitDoesNotRetryFailedRouteInSameInstance(t *testing.T) {
 	t.Parallel()
 
 	var circuit directPCMRouteCircuit
-	now := time.Unix(1_700_000_000, 0)
-	if !circuit.begin(now) {
+	if !circuit.begin() {
 		t.Fatal("initial direct PCM probe was blocked")
 	}
-	if circuit.begin(now) {
+	if circuit.begin() {
 		t.Fatal("concurrent direct PCM probe was admitted")
 	}
-	circuit.failed(now)
-	if circuit.begin(now.Add(directPCMFailureCooldown - time.Nanosecond)) {
-		t.Fatal("direct PCM probe escaped the failure cooldown")
+	circuit.failed()
+	for range 10_000 {
+		if circuit.begin() {
+			t.Fatal("failed direct PCM route was retried in the same instance")
+		}
 	}
-	if !circuit.begin(now.Add(directPCMFailureCooldown)) {
-		t.Fatal("direct PCM probe did not recover after cooldown")
+
+	var freshInstance directPCMRouteCircuit
+	if !freshInstance.begin() {
+		t.Fatal("fresh instance did not receive one startup probe")
 	}
-	circuit.succeeded()
-	if !circuit.begin(now.Add(directPCMFailureCooldown)) {
+	freshInstance.succeeded()
+	if !freshInstance.begin() {
 		t.Fatal("successful probe did not close the circuit")
 	}
-	circuit.canceled()
-	if !circuit.begin(now.Add(directPCMFailureCooldown)) {
+	freshInstance.canceled()
+	if !freshInstance.begin() {
 		t.Fatal("canceled probe was treated as provider failure")
 	}
+	freshInstance.canceled()
 }

@@ -1,26 +1,22 @@
 package speechio
 
-import (
-	"sync"
-	"time"
-)
-
-const directPCMFailureCooldown = 5 * time.Minute
+import "sync"
 
 // directPCMRouteCircuit is content-free instance-local transport state. One
 // request may probe the unary PCM route; peers immediately use streaming. A
-// provider-shape failure opens a bounded cooldown instead of charging every
-// short reply for the same failed round trip.
+// provider-shape failure disables that optional route for this instance. A
+// fresh instance probes during its traffic-free startup warmup, so no user
+// turn is charged for periodic recovery probes.
 type directPCMRouteCircuit struct {
-	mu           sync.Mutex
-	probing      bool
-	blockedUntil time.Time
+	mu       sync.Mutex
+	probing  bool
+	disabled bool
 }
 
-func (circuit *directPCMRouteCircuit) begin(now time.Time) bool {
+func (circuit *directPCMRouteCircuit) begin() bool {
 	circuit.mu.Lock()
 	defer circuit.mu.Unlock()
-	if circuit.probing || now.Before(circuit.blockedUntil) {
+	if circuit.probing || circuit.disabled {
 		return false
 	}
 	circuit.probing = true
@@ -30,14 +26,14 @@ func (circuit *directPCMRouteCircuit) begin(now time.Time) bool {
 func (circuit *directPCMRouteCircuit) succeeded() {
 	circuit.mu.Lock()
 	circuit.probing = false
-	circuit.blockedUntil = time.Time{}
+	circuit.disabled = false
 	circuit.mu.Unlock()
 }
 
-func (circuit *directPCMRouteCircuit) failed(now time.Time) {
+func (circuit *directPCMRouteCircuit) failed() {
 	circuit.mu.Lock()
 	circuit.probing = false
-	circuit.blockedUntil = now.Add(directPCMFailureCooldown)
+	circuit.disabled = true
 	circuit.mu.Unlock()
 }
 

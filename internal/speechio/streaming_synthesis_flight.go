@@ -46,9 +46,11 @@ func (group *streamingSynthesisFlightGroup) stream(
 	flight := group.flights[key]
 	if flight != nil {
 		flight.mu.Lock()
-		abandoned := !flight.done && flight.subscribers == 0 && flight.cancel == nil
+		// Completion wakes subscribers before registry cleanup. A new attempt
+		// must not replay that completed result while the old entry remains.
+		unavailable := flight.done || (flight.subscribers == 0 && flight.cancel == nil)
 		flight.mu.Unlock()
-		if abandoned {
+		if unavailable {
 			flight = nil
 		}
 	}

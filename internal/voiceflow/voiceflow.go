@@ -932,7 +932,9 @@ func (p *Pipeline) processLive(
 			return
 		}
 		ttsPrestarted = 1
-		synthesis.await(ctx)
+		// cancel synchronously revokes the PCM buffer. Provider shutdown is
+		// independent of the committed response; a slow cancellation must not
+		// consume its remaining response budget.
 		ttsBufferedBytes = synthesis.buffer.peakBufferedBytes()
 		firstTTSChunkMS = synthesis.firstChunkMS()
 	}

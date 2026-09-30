@@ -879,6 +879,17 @@ func (prepared *preparedCloudSynthesis) StreamSynthesize(
 			return StreamingAudioContentType, nil
 		}
 	}
+	prepared.service.warmSynthesisMu.RLock()
+	_, sharedWarmAsset := prepared.service.warmSynthesisKeys[cacheKey]
+	prepared.service.warmSynthesisMu.RUnlock()
+	if sharedWarmAsset {
+		// An evicted fixed cue must rejoin the same flight as ordinary callers.
+		// Its shared provider owns an independent bounded lifetime; this
+		// turn-owned prepared RPC cannot outlive its requesting subscriber.
+		// Keep the unused RPC until this subscriber returns, because canceling
+		// prepared.ctx early would also cancel its shared-flight consumption.
+		return prepared.service.StreamSynthesize(prepared.ctx, text, onChunk)
+	}
 	_, inputRequest := streamingSynthesizeRequests(text, prepared.service.voiceName)
 	if err := prepared.stream.Send(inputRequest); err != nil {
 		return "", fmt.Errorf("send prepared streaming speech input: %w", err)

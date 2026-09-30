@@ -864,7 +864,10 @@ func (prepared *preparedCloudSynthesis) StreamSynthesize(
 	cacheKey := newStreamingPCMCacheKey(prepared.service.voiceName, text)
 	if prepared.service.streamingPCMCache != nil {
 		if cached, ok := prepared.service.streamingPCMCache.get(cacheKey); ok {
-			_ = prepared.stream.CloseSend()
+			// Cache delivery has no provider input to finish. Do not wait for
+			// CloseSend on this unused RPC before publishing ready audio. The
+			// deferred cancellation releases it after playback; canceling first
+			// would also invalidate the context checked between cached chunks.
 			for _, chunk := range cached.chunks {
 				if err := prepared.ctx.Err(); err != nil {
 					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)

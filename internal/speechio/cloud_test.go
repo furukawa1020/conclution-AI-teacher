@@ -625,8 +625,9 @@ func TestPreparedStreamingSynthesisCloseRevokesUnusedStream(t *testing.T) {
 	}
 	prepared.Close()
 	prepared.Close()
-	if len(stream.sent) != 1 || !stream.closeCalled {
-		t.Fatalf("unused prepared stream was not closed: sent=%d closed=%t", len(stream.sent), stream.closeCalled)
+	providerErr := prepared.(*preparedCloudSynthesis).ctx.Err()
+	if len(stream.sent) != 1 || stream.closeCalled || providerErr != context.Canceled {
+		t.Fatalf("unused prepared stream was not revoked: sent=%d closed=%t error=%v", len(stream.sent), stream.closeCalled, providerErr)
 	}
 	if _, err := prepared.StreamSynthesize(
 		strings.Repeat("あ", maxDirectPCMSynthesisRunes+1),

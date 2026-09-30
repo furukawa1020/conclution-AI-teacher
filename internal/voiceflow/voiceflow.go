@@ -1153,8 +1153,10 @@ func (p *Pipeline) processLive(
 	synthesisDurationMS := int64(0)
 	if !prestartedTTSDone {
 		synthesisStarted := time.Now()
-		audioMIME, synthesisErr := streamingSpeech.StreamSynthesize(
+		audioMIME, synthesisErr := streamCommittedSynthesis(
 			ctx,
+			streamingSpeech,
+			synthesisPreparation,
 			spokenReply,
 			func(chunk []byte) error {
 				if firstTTSChunkMS < 0 {

@@ -109,7 +109,8 @@ type captionHandoff struct {
 	// synthesisPreparation contains no caption, reply, UID, or conversation
 	// state. Starting only the provider configuration handshake here lets the
 	// Native caption path overlap it with the user's speech, just like the
-	// ordinary live path. Ownership moves exactly once to liveSpeculation.
+	// ordinary live path. The handoff retains unused preparation across caption
+	// revisions; ownership transfers only when synthesis takes the capability.
 	synthesisPreparation *speculativeSynthesisPreparation
 	onAudio              func([]byte) error
 	onCoachActive        func(httpapi.VoiceRespondentCheckpoint) error
@@ -231,7 +232,6 @@ func (handoff *captionHandoff) Observe(
 	}
 	handoff.speculationAttempted = true
 	preparation := handoff.synthesisPreparation
-	handoff.synthesisPreparation = nil
 	handoff.speculation = handoff.p.startLiveSpeculationWithPreparation(
 		handoff.ctx,
 		handoff.uid,
@@ -239,7 +239,7 @@ func (handoff *captionHandoff) Observe(
 		candidate,
 		handoff.streamingSpeech,
 		preparation,
-		true,
+		false,
 		handoff.deliverAudio,
 		func(decision conversation.VoiceTurnResult) (*preparedInitiative, error) {
 			return prepareRespondentInitiative(
@@ -326,6 +326,7 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 	finalCaption := handoff.latestCaption
 	finalObservedAt := handoff.finalObservedAt
 	speculation := handoff.speculation
+	preparation := handoff.synthesisPreparation
 	handoff.speculation = nil
 	handoff.latestCaption = ""
 	handoff.mu.Unlock()
@@ -534,8 +535,10 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		}
 		started := time.Now()
 		ttsChunkObserved := false
-		audioMIME, err := handoff.streamingSpeech.StreamSynthesize(
+		audioMIME, err := streamCommittedSynthesis(
 			handoff.ctx,
+			handoff.streamingSpeech,
+			preparation,
 			spokenReply,
 			func(chunk []byte) error {
 				ttsChunkObserved = true

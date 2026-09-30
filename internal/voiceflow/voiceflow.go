@@ -172,10 +172,10 @@ func (prepared *ownedPreparedSynthesis) Close() {
 		return
 	}
 	prepared.once.Do(func() {
-		prepared.PreparedStreamingSynthesis.Close()
 		if prepared.cancel != nil {
 			prepared.cancel()
 		}
+		prepared.PreparedStreamingSynthesis.Close()
 	})
 }
 
@@ -1466,7 +1466,14 @@ func startSpeculativeSynthesis(
 		var mimeType string
 		var err error
 		if prepared != nil {
-			mimeType, err = prepared.StreamSynthesize(spokenReply, onChunk)
+			// Preparation began on the enclosing turn, before this candidate
+			// existed. Bridge the candidate's shorter lifetime to its transferred
+			// provider connection so a blocked Send/Recv stops on revocation.
+			stopPreparedCancellation := context.AfterFunc(synthesisCtx, prepared.Close)
+			if err = synthesisCtx.Err(); err == nil {
+				mimeType, err = prepared.StreamSynthesize(spokenReply, onChunk)
+			}
+			stopPreparedCancellation()
 			prepared.Close()
 			// A content-free prepared stream may expire while the user is still
 			// speaking. It is only an optional latency path: if it failed before

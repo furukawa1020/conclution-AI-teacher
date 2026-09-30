@@ -92,7 +92,8 @@ type StreamingService interface {
 
 // PreparedStreamingSynthesis is a single-use, config-only provider stream.
 // Prepare sends no user or model text. StreamSynthesize owns the first and only
-// text input; Close revokes an unused preparation.
+// text input; Close revokes an unused preparation or cancels an active stream.
+// Close is safe to call concurrently with StreamSynthesize and other Close calls.
 type PreparedStreamingSynthesis interface {
 	StreamSynthesize(text string, onChunk StreamChunkHandler) (string, error)
 	Close()
@@ -902,13 +903,11 @@ func (prepared *preparedCloudSynthesis) Close() {
 		return
 	}
 	prepared.mu.Lock()
-	if prepared.used {
-		prepared.mu.Unlock()
-		return
-	}
 	prepared.used = true
 	prepared.mu.Unlock()
-	_ = prepared.stream.CloseSend()
+	// Cancel the provider even after consumption starts. CloseSend is unsafe
+	// concurrently with Send and is not needed to release a canceled RPC.
+	// Closing never waits for provider transport; its context owns cleanup.
 	prepared.cancel()
 }
 

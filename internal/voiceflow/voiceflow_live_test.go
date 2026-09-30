@@ -728,7 +728,7 @@ func TestPipelineLiveForegroundLowConfidenceDiscardsSpeculationSilently(t *testi
 		if call != 0 {
 			t.Fatalf("returned synthesis call=%d", call)
 		}
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("discarded speculative synthesis did not observe cancellation")
 	}
 
@@ -1711,12 +1711,12 @@ func TestPipelineLiveExactFinalWithoutProviderSpeechEndCannotAdoptSpeculation(
 			Text: utterance,
 		},
 	)
-	speech := &fakeLiveSpeech{
-		fakeStreamingSpeech: fakeStreamingSpeech{
-			fakeSpeech: fakeSpeech{},
-			chunks:     [][]byte{{33, 0}},
-		},
+	speech := &scriptedLiveSpeech{
 		session: session,
+		scripts: []scriptedSynthesis{
+			{chunks: [][]byte{{33, 0}}},
+			{chunks: [][]byte{{33, 0}}},
+		},
 	}
 	speculative := liveTestDecision("採用してはいけない先読み", "spec-state")
 	speculative.AnswerProofCandidate =

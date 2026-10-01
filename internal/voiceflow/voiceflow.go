@@ -981,9 +981,15 @@ func (p *Pipeline) processLive(
 		}
 	}
 	var (
-		result      httpapi.VoiceTurnResult
-		spokenReply string
+		result             httpapi.VoiceTurnResult
+		spokenReply        string
+		committedCandidate *speculativeSynthesis
 	)
+	defer func() {
+		if committedCandidate != nil {
+			committedCandidate.abort(errSpeculativeAudioDiscarded)
+		}
+	}()
 	if finalTranscript == "" {
 		if responseExpected {
 			specMiss = 1
@@ -1142,7 +1148,23 @@ func (p *Pipeline) processLive(
 			// positive confidence across final fragments follows the same audited
 			// fail-closed boundary as buffered recognition.
 			conversationStarted := time.Now()
-			result, spokenReply, err = p.prepareRecognizedTurn(
+			var process recognizedTurnProcessor
+			if sealedAgent, ok := p.agent.(conversation.SealedCandidateAgent); ok && speculationEligible {
+				process = func(callCtx context.Context, callUID string, turn conversation.VoiceTurn) (conversation.VoiceTurnResult, error) {
+					// State recovery is a new authority attempt, even for identical
+					// reply text. Revoke its predecessor before invoking the agent.
+					if committedCandidate != nil {
+						committedCandidate.abort(errSpeculativeAudioDiscarded)
+						committedCandidate = nil
+					}
+					decision, staged, processErr := processWithPrivateCandidate(
+						callCtx, sealedAgent, callUID, turn, streamingSpeech, synthesisPreparation, deliverAudio,
+					)
+					committedCandidate = staged
+					return decision, processErr
+				}
+			}
+			result, spokenReply, err = p.prepareRecognizedTurnWithProcessor(
 				ctx,
 				uid,
 				input,
@@ -1151,6 +1173,7 @@ func (p *Pipeline) processLive(
 				finalConfidenceObserved,
 				false,
 				floorEvidenceForHybridCommit(hybridFloorCommitted),
+				process,
 			)
 			conversationMS = time.Since(conversationStarted).Milliseconds()
 		}
@@ -1159,6 +1182,34 @@ func (p *Pipeline) processLive(
 	if err != nil || spokenReply == "" {
 		result.LiveTimings = liveTimings()
 		return result, err
+	}
+	if committedCandidate != nil &&
+		(committedCandidate.spokenReply != spokenReply || result.AssistanceTarget != "assistant" ||
+			result.RespondentStage != "none" || result.ResearchStatus != "none" || len(result.ResearchRecords) != 0 ||
+			(result.CoachPhase != "" && result.CoachPhase != "none") ||
+			(result.CoachAction != "" && result.CoachAction != "none")) {
+		committedCandidate.abort(errSpeculativeAudioDiscarded)
+		committedCandidate = nil
+	}
+	if committedCandidate != nil {
+		ttsPrestarted = 1
+		var releaseAttempted bool
+		var candidateErr error
+		ttsReleaseMS, releaseAttempted, candidateErr = releaseCommittedCandidate(ctx, committedCandidate)
+		ttsBufferedBytes = committedCandidate.buffer.peakBufferedBytes()
+		firstTTSChunkMS = committedCandidate.firstChunkMS()
+		if candidateErr != nil {
+			committedCandidate.abort(candidateErr)
+			if releaseAttempted || ctx.Err() != nil {
+				return httpapi.VoiceTurnResult{LiveTimings: liveTimings()}, httpapi.NewVoicePipelineFailure(
+					httpapi.VoicePipelineStageSynthesize,
+				)
+			}
+			// Before release, retry only the audited final text below; the
+			// committed model decision must never be recomputed for a TTS miss.
+		} else {
+			prestartedTTSDone = true
+		}
 	}
 
 	synthesisDurationMS := int64(0)
@@ -2140,6 +2191,21 @@ func (p *Pipeline) prepareRecognizedTurn(
 	nativeFinalCommitted bool,
 	floorEvidence conversation.FloorEvidence,
 ) (httpapi.VoiceTurnResult, string, error) {
+	return p.prepareRecognizedTurnWithProcessor(ctx, uid, input, transcript, confidence,
+		confidenceObserved, nativeFinalCommitted, floorEvidence, nil)
+}
+
+func (p *Pipeline) prepareRecognizedTurnWithProcessor(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	transcript string,
+	confidence float32,
+	confidenceObserved bool,
+	nativeFinalCommitted bool,
+	floorEvidence conversation.FloorEvidence,
+	process recognizedTurnProcessor,
+) (httpapi.VoiceTurnResult, string, error) {
 	if input.StrictCloudMinimization {
 		if p.strictBoundary == nil ||
 			p.strictBoundary.Check(ctx, transcript) != nil ||
@@ -2168,7 +2234,10 @@ func (p *Pipeline) prepareRecognizedTurn(
 	turn := conversationTurn(input, transcript, false)
 	turn.FloorEvidence = floorEvidence
 	conversationStarted := time.Now()
-	decision, err := p.agent.Process(ctx, uid, turn)
+	if process == nil {
+		process = p.agent.Process
+	}
+	decision, err := process(ctx, uid, turn)
 	if errors.Is(err, conversation.ErrExpiredStateToken) &&
 		input.StateToken != "" &&
 		input.Document == nil &&
@@ -2191,7 +2260,7 @@ func (p *Pipeline) prepareRecognizedTurn(
 		input.StateToken = ""
 		turn = conversationTurn(input, transcript, false)
 		turn.FloorEvidence = floorEvidence
-		decision, err = p.agent.Process(ctx, uid, turn)
+		decision, err = process(ctx, uid, turn)
 	}
 	if err != nil {
 		if errors.Is(err, conversation.ErrInvalidStateToken) ||

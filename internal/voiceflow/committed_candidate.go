@@ -5,10 +5,18 @@ import (
 	"sync"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/speechio"
 )
 
 type recognizedTurnProcessor func(context.Context, string, conversation.VoiceTurn) (conversation.VoiceTurnResult, error)
+
+func ordinaryCommittedCandidateMatches(candidate, final string, result httpapi.VoiceTurnResult) bool {
+	return candidate == final && result.AssistanceTarget == "assistant" &&
+		result.RespondentStage == "none" && result.ResearchStatus == "none" && len(result.ResearchRecords) == 0 &&
+		(result.CoachPhase == "" || result.CoachPhase == "none") &&
+		(result.CoachAction == "" || result.CoachAction == "none")
+}
 
 // Each invocation has its own closed flag: a late callback from an expired
 // state attempt cannot capture the next attempt's provider or private buffer.

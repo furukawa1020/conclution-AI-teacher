@@ -353,6 +353,12 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 	var result httpapi.VoiceTurnResult
 	var spokenReply string
 	var initiative *preparedInitiative
+	var committedCandidate *speculativeSynthesis
+	defer func() {
+		if committedCandidate != nil {
+			committedCandidate.abort(errSpeculativeAudioDiscarded)
+		}
+	}()
 	outputAuthorized := false
 	authorizeOutput := func() error {
 		if outputAuthorized {
@@ -511,7 +517,23 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		specMiss = 1
 		started := time.Now()
 		var err error
-		result, spokenReply, err = handoff.p.prepareRecognizedTurn(
+		var process recognizedTurnProcessor
+		if sealedAgent, ok := handoff.p.agent.(conversation.SealedCandidateAgent); ok && voiceResponseExpected(handoff.input) {
+			process = func(ctx context.Context, uid string, turn conversation.VoiceTurn) (conversation.VoiceTurnResult, error) {
+				// An expired state restarts authority, even when the next reply
+				// text matches. Revoke its private provider before the next call.
+				if committedCandidate != nil {
+					committedCandidate.abort(errSpeculativeAudioDiscarded)
+					committedCandidate = nil
+				}
+				decision, staged, processErr := processWithPrivateCandidate(
+					ctx, sealedAgent, uid, turn, handoff.streamingSpeech, preparation, handoff.deliverAudio,
+				)
+				committedCandidate = staged
+				return decision, processErr
+			}
+		}
+		result, spokenReply, err = handoff.p.prepareRecognizedTurnWithProcessor(
 			handoff.ctx,
 			handoff.uid,
 			handoff.input,
@@ -520,6 +542,7 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 			false,
 			true,
 			conversation.FloorEvidenceHybridCommitted,
+			process,
 		)
 		conversationMS = time.Since(started).Milliseconds()
 		if err != nil {
@@ -527,6 +550,33 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		}
 	} else {
 		specHit = 1
+	}
+
+	if committedCandidate != nil &&
+		!ordinaryCommittedCandidateMatches(committedCandidate.spokenReply, spokenReply, result) {
+		committedCandidate.abort(errSpeculativeAudioDiscarded)
+		committedCandidate = nil
+	}
+	if committedCandidate != nil {
+		if err := authorizeOutput(); err != nil {
+			return result, err
+		}
+		ttsPrestarted = 1
+		var releaseAttempted bool
+		var candidateErr error
+		ttsReleaseMS, releaseAttempted, candidateErr = releaseCommittedCaptionCandidate(handoff.ctx, committedCandidate)
+		firstTTSChunkMS = committedCandidate.firstChunkMS()
+		ttsBufferedBytes = committedCandidate.buffer.peakBufferedBytes()
+		if candidateErr != nil {
+			committedCandidate.abort(candidateErr)
+			if releaseAttempted || handoff.ctx.Err() != nil {
+				return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(httpapi.VoicePipelineStageSynthesize)
+			}
+			// Before release, only the approved TTS may retry below. Never
+			// recompute the committed decision or repeat a publication attempt.
+		} else {
+			prestartedTTSDone = true
+		}
 	}
 
 	if spokenReply != "" && !prestartedTTSDone {
@@ -590,6 +640,26 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		NativeCaptionHandoff:        1,
 	}
 	return result, nil
+}
+
+// Caption output accepts valid digital silence, but not an empty provider
+// stream. Its audible-latency metric still requires a meaningful PCM sample.
+// A release attempt is terminal on failure, including a rejected callback.
+func releaseCommittedCaptionCandidate(ctx context.Context, synthesis *speculativeSynthesis) (int64, bool, error) {
+	result, completed := synthesis.commitBoundary(ctx)
+	if completed {
+		if result.err != nil {
+			return -1, false, result.err
+		}
+		if synthesis.buffer.peakBufferedBytes() == 0 {
+			return -1, false, errSpeculativeAudioChunk
+		}
+	}
+	releaseMS, err := synthesis.buffer.release(ctx)
+	if err == nil && !completed {
+		err = synthesis.await(ctx).err
+	}
+	return releaseMS, true, err
 }
 
 func (handoff *captionHandoff) Cancel() {

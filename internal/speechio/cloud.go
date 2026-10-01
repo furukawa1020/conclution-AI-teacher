@@ -223,10 +223,10 @@ func (s *CloudService) Close() error {
 	return errors.Join(s.speechClient.Close(), s.ttsClient.Close())
 }
 
-// WarmStreamingSynthesis fills the ordinary bounded PCM cache for a small,
-// server-authored vocabulary. It uses the same validation, provider route and
-// cache limits as a real request. Failures are counted independently and never
-// make server readiness depend on optional warmup work.
+// WarmStreamingSynthesis protects a finite server-authored vocabulary within
+// the ordinary PCM cache's existing bounds. A cue is ready only after successful
+// meaningful delivery and final cache residency; callers may gate readiness on
+// every requested cue being retained. Failure never evicts a protected asset.
 func (s *CloudService) WarmStreamingSynthesis(
 	ctx context.Context,
 	texts []string,
@@ -258,19 +258,32 @@ func (s *CloudService) WarmStreamingSynthesis(
 	if len(unique) == 0 {
 		return result
 	}
+	keys := make([]streamingPCMCacheKey, len(unique))
+	for index, text := range unique {
+		keys[index] = newStreamingPCMCacheKey(s.voiceName, text)
+	}
 	s.warmSynthesisMu.Lock()
+	if !s.streamingPCMCache.protect(keys) {
+		s.warmSynthesisMu.Unlock()
+		result.Failed = result.Requested
+		return result
+	}
 	if s.warmSynthesisKeys == nil {
 		s.warmSynthesisKeys = make(map[streamingPCMCacheKey]struct{}, len(unique))
 	}
-	for _, text := range unique {
-		s.warmSynthesisKeys[newStreamingPCMCacheKey(s.voiceName, text)] = struct{}{}
+	for _, key := range keys {
+		s.warmSynthesisKeys[key] = struct{}{}
 	}
 	s.warmSynthesisMu.Unlock()
 	if maxConcurrent > len(unique) {
 		maxConcurrent = len(unique)
 	}
 	jobs := make(chan string)
-	results := make(chan bool, len(unique))
+	type warmOutcome struct {
+		key       streamingPCMCacheKey
+		succeeded bool
+	}
+	results := make(chan warmOutcome, len(unique))
 	var workers sync.WaitGroup
 	workers.Add(maxConcurrent)
 	for range maxConcurrent {
@@ -288,8 +301,10 @@ func (s *CloudService) WarmStreamingSynthesis(
 						return nil
 					},
 				)
-				results <- err == nil &&
-					mimeType == StreamingAudioContentType && observed
+				results <- warmOutcome{
+					key:       newStreamingPCMCacheKey(s.voiceName, text),
+					succeeded: err == nil && mimeType == StreamingAudioContentType && observed,
+				}
 			}
 		}()
 	}
@@ -307,15 +322,19 @@ func (s *CloudService) WarmStreamingSynthesis(
 		workers.Wait()
 		close(results)
 	}()
-	for warmed := range results {
-		if warmed {
-			result.Warmed++
-		} else {
-			result.Failed++
+	succeeded := make([]streamingPCMCacheKey, 0, len(unique))
+	for outcome := range results {
+		if outcome.succeeded {
+			succeeded = append(succeeded, outcome.key)
 		}
 	}
-	// Jobs not dispatched because the deadline elapsed are failures too.
-	result.Failed += result.Requested - result.Warmed - result.Failed
+	for _, key := range succeeded {
+		if s.streamingPCMCache.retainsProtected(key) {
+			result.Warmed++
+		}
+	}
+	// Unretained output and jobs not dispatched before cancellation fail too.
+	result.Failed = result.Requested - result.Warmed
 	return result
 }
 

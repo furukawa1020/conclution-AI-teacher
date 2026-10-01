@@ -367,6 +367,15 @@ func (p *Pipeline) ProcessStream(
 			httpapi.VoicePipelineStageSynthesize,
 		)
 	}
+	// HTTP fallback still has recognition and final model/audit work ahead.
+	// Overlap only content-free configuration, keeping privacy-ineligible and
+	// passive turns on their existing route. Never wait for this preparation.
+	var synthesisPreparation *speculativeSynthesisPreparation
+	if ctx != nil && ctx.Err() == nil && voiceResponseExpected(input) &&
+		!input.StrictCloudMinimization && input.Document == nil {
+		synthesisPreparation = startSpeculativeSynthesisPreparation(ctx, streamingSpeech)
+		defer synthesisPreparation.close()
+	}
 	result, spokenReply, err := p.prepareTurn(ctx, uid, input)
 	result = withStrictPrivacyStatus(input, result)
 	if err != nil || spokenReply == "" {
@@ -376,8 +385,10 @@ func (p *Pipeline) ProcessStream(
 	synthesisStarted := time.Now()
 	firstChunkAt := time.Time{}
 	chunkCount := 0
-	audioMIME, err := streamingSpeech.StreamSynthesize(
+	audioMIME, err := streamCommittedSynthesis(
 		ctx,
+		streamingSpeech,
+		synthesisPreparation,
 		spokenReply,
 		func(audio []byte) error {
 			if firstChunkAt.IsZero() {

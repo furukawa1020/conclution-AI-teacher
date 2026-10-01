@@ -1184,10 +1184,7 @@ func (p *Pipeline) processLive(
 		return result, err
 	}
 	if committedCandidate != nil &&
-		(committedCandidate.spokenReply != spokenReply || result.AssistanceTarget != "assistant" ||
-			result.RespondentStage != "none" || result.ResearchStatus != "none" || len(result.ResearchRecords) != 0 ||
-			(result.CoachPhase != "" && result.CoachPhase != "none") ||
-			(result.CoachAction != "" && result.CoachAction != "none")) {
+		!ordinaryCommittedCandidateMatches(committedCandidate.spokenReply, spokenReply, result) {
 		committedCandidate.abort(errSpeculativeAudioDiscarded)
 		committedCandidate = nil
 	}

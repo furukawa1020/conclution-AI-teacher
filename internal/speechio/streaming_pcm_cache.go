@@ -26,6 +26,7 @@ type streamingPCMCache struct {
 	totalBytes int
 	order      []streamingPCMCacheKey
 	entries    map[streamingPCMCacheKey]cachedStreamingPCM
+	protected  map[streamingPCMCacheKey]struct{}
 }
 
 func newStreamingPCMCache(maxEntries int, maxBytes int) *streamingPCMCache {
@@ -40,6 +41,52 @@ func newStreamingPCMCacheKey(voiceName string, text string) streamingPCMCacheKey
 	return sha256.Sum256(
 		[]byte(strings.TrimSpace(voiceName) + "\x00" + strings.TrimSpace(text)),
 	)
+}
+
+// protect reserves only the finite server-authored key set. Reservation is
+// atomic and does not expand either PCM capacity or the maximum protected set.
+func (cache *streamingPCMCache) protect(keys []streamingPCMCacheKey) bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	limit := min(cache.maxEntries, defaultStreamingPCMCacheEntries)
+	if limit <= 0 || cache.maxBytes <= 0 {
+		return false
+	}
+	pending := make(map[streamingPCMCacheKey]struct{})
+	for _, key := range keys {
+		if _, exists := cache.protected[key]; exists {
+			continue
+		}
+		if _, exists := pending[key]; exists {
+			continue
+		}
+		if len(cache.protected)+len(pending) >= limit {
+			return false
+		}
+		pending[key] = struct{}{}
+	}
+	if cache.protected == nil {
+		cache.protected = make(map[streamingPCMCacheKey]struct{}, len(pending))
+	}
+	for key := range pending {
+		cache.protected[key] = struct{}{}
+	}
+	return true
+}
+
+// retainsProtected checks residency without touching LRU order or copying PCM.
+func (cache *streamingPCMCache) retainsProtected(key streamingPCMCacheKey) bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	_, protected := cache.protected[key]
+	_, present := cache.entries[key]
+	return protected && present
 }
 
 func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPCM, bool) {
@@ -59,7 +106,18 @@ func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPC
 }
 
 func (cache *streamingPCMCache) put(key streamingPCMCacheKey, entry cachedStreamingPCM) {
-	if entry.size <= 0 || entry.size > cache.maxBytes || len(entry.chunks) == 0 {
+	if entry.size <= 0 || entry.size > cache.maxBytes ||
+		entry.size > maxStreamingPCMCacheEntryBytes || len(entry.chunks) == 0 {
+		return
+	}
+	actualBytes := 0
+	for _, chunk := range entry.chunks {
+		if len(chunk) > entry.size-actualBytes {
+			return
+		}
+		actualBytes += len(chunk)
+	}
+	if actualBytes != entry.size {
 		return
 	}
 	entry = cloneCachedStreamingPCM(entry)
@@ -67,22 +125,44 @@ func (cache *streamingPCMCache) put(key streamingPCMCacheKey, entry cachedStream
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 
-	if previous, ok := cache.entries[key]; ok {
+	previous, replacing := cache.entries[key]
+	plannedBytes := cache.totalBytes - previous.size + entry.size
+	plannedEntries := len(cache.entries)
+	if !replacing {
+		plannedEntries++
+	}
+	var evictions []streamingPCMCacheKey
+	for _, candidate := range cache.order {
+		if plannedEntries <= cache.maxEntries && plannedBytes <= cache.maxBytes {
+			break
+		}
+		if candidate == key {
+			continue
+		}
+		if _, protected := cache.protected[candidate]; protected {
+			continue
+		}
+		evictions = append(evictions, candidate)
+		plannedEntries--
+		plannedBytes -= cache.entries[candidate].size
+	}
+	// Reject atomically if protected assets leave insufficient room. Neither
+	// a valid previous value nor any planned LRU victim may be lost on failure.
+	if plannedEntries > cache.maxEntries || plannedBytes > cache.maxBytes {
+		return
+	}
+	for _, victim := range evictions {
+		cache.totalBytes -= cache.entries[victim].size
+		delete(cache.entries, victim)
+		cache.removeFromOrder(victim)
+	}
+	if replacing {
 		cache.totalBytes -= previous.size
 		cache.removeFromOrder(key)
 	}
 	cache.entries[key] = entry
 	cache.order = append(cache.order, key)
 	cache.totalBytes += entry.size
-
-	for len(cache.order) > cache.maxEntries || cache.totalBytes > cache.maxBytes {
-		oldest := cache.order[0]
-		cache.order = cache.order[1:]
-		if removed, ok := cache.entries[oldest]; ok {
-			cache.totalBytes -= removed.size
-			delete(cache.entries, oldest)
-		}
-	}
 }
 
 func (cache *streamingPCMCache) removeFromOrder(key streamingPCMCacheKey) {

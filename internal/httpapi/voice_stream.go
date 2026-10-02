@@ -68,10 +68,9 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flusher.Flush()
-	s.logger.InfoContext(ctx, "voice stream ready",
-		"request_id", requestIDFromContext(ctx),
-		"duration_ms", time.Since(started).Milliseconds(),
-	)
+	// Capture the ready boundary without making the first PCM wait for log I/O.
+	// Existing outcome logs carry this content-free measurement instead.
+	readyDurationMS := time.Since(started).Milliseconds()
 
 	sequence := 0
 	totalAudioBytes := 0
@@ -136,6 +135,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 			s.logger.InfoContext(ctx, "voice stream cancelled",
 				"request_id", requestIDFromContext(ctx),
 				"duration_ms", time.Since(started).Milliseconds(),
+				"ready_duration_ms", readyDurationMS,
 				"audio_chunks", sequence,
 			)
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -151,6 +151,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		logAttributes := []any{
 			"request_id", requestIDFromContext(ctx),
 			"duration_ms", time.Since(started).Milliseconds(),
+			"ready_duration_ms", readyDurationMS,
 			"error_class", "voice_pipeline_failure",
 			"audio_chunks", sequence,
 		}
@@ -178,6 +179,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	if err := validateStreamedVoiceResultForInput(input, result, spoke); err != nil {
 		s.logger.ErrorContext(ctx, "voice stream result rejected",
 			"request_id", requestIDFromContext(ctx),
+			"ready_duration_ms", readyDurationMS,
 			"error_class", "invalid_voice_result",
 			"audio_chunks", sequence,
 		)
@@ -229,6 +231,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		s.logger.WarnContext(ctx, "voice stream final write failed",
 			"request_id", requestIDFromContext(ctx),
+			"ready_duration_ms", readyDurationMS,
 			"route", result.Route,
 			"error_class", "response_write_failure",
 		)
@@ -247,6 +250,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		"route", result.Route,
 		"spoke", spoke,
 		"duration_ms", time.Since(started).Milliseconds(),
+		"ready_duration_ms", readyDurationMS,
 		"first_audio_ms", firstAudioMS,
 		"audio_chunks", sequence,
 		"audio_bytes", totalAudioBytes,

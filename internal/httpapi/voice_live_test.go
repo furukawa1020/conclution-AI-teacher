@@ -1134,6 +1134,7 @@ func writeVoiceLiveStrictStart(t *testing.T, ctx context.Context, conn *websocke
 		TurnMode:                VoiceTurnIntentional,
 		StrictCloudMinimization: true,
 		SampleRateHz:            voiceLiveSampleRateHz,
+		LatencyProofVersion:     pointerTo(1),
 	}
 	payload, err := json.Marshal(frame)
 	if err != nil {
@@ -2370,6 +2371,9 @@ func TestStrictVoiceLiveNeverReleasesAudioBeforeResultValidation(t *testing.T) {
 	}
 	if err := conn.Write(ctx, websocket.MessageText, commit); err != nil {
 		t.Fatal(err)
+	}
+	if committed := readVoiceLiveJSON(t, ctx, conn); committed["type"] != "committed" {
+		t.Fatalf("committed=%#v", committed)
 	}
 	messageType, payload, err := conn.Read(ctx)
 	if err != nil {

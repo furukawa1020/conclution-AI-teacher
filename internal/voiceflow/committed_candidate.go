@@ -61,3 +61,23 @@ func releaseCommittedCandidate(ctx context.Context, synthesis *speculativeSynthe
 	}
 	return releaseMS, true, err
 }
+
+// Caption and HTTP output accept valid digital silence, but not an empty
+// candidate stream. Audible-latency metrics still require meaningful PCM.
+// A release attempt is terminal on failure, including a rejected callback.
+func releaseCommittedPCMCandidate(ctx context.Context, synthesis *speculativeSynthesis) (int64, bool, error) {
+	result, completed := synthesis.commitBoundary(ctx)
+	if completed {
+		if result.err != nil {
+			return -1, false, result.err
+		}
+		if synthesis.buffer.peakBufferedBytes() == 0 {
+			return -1, false, errSpeculativeAudioChunk
+		}
+	}
+	releaseMS, err := synthesis.buffer.release(ctx)
+	if err == nil && !completed {
+		err = synthesis.await(ctx).err
+	}
+	return releaseMS, true, err
+}

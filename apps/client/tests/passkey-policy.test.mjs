@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import {
+  createVoiceStartupHarness,
+  flushStartupTasks,
+} from "./helpers/voice-startup-harness.mjs";
 
 import {
   base64urlEncode,
@@ -684,17 +688,32 @@ test("voice startup awaits fresh passkey credentials before microphone or AudioC
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
-  const beginStart = bridge.indexOf("async function beginTurn(");
-  const beginEnd = bridge.indexOf("async function waitForTurnEnd(", beginStart);
-  assert.notEqual(beginStart, -1);
-  assert.notEqual(beginEnd, -1);
-  const beginTurn = bridge.slice(beginStart, beginEnd);
-  const credentials = beginTurn.indexOf("await secureCredentials(true)");
-  const microphone = beginTurn.indexOf("await ensureMediaStream(");
-  const audioGraph = beginTurn.indexOf("await ensureAudioGraph(");
-  assert.ok(credentials >= 0);
-  assert.ok(microphone > credentials);
-  assert.ok(audioGraph > microphone);
+  const startup = await createVoiceStartupHarness();
+  const pending = startup.start();
+  await flushStartupTasks();
+  assert.deepEqual(startup.events, ["warmup", "credentials-start"]);
+  startup.credentials.resolve();
+  await flushStartupTasks();
+  assert.ok(startup.events.includes("microphone-start"));
+  assert.equal(startup.events.includes("graph-start"), false);
+  startup.microphone.resolve();
+  await flushStartupTasks();
+  assert.ok(startup.events.includes("graph-start"));
+  assert.equal(startup.stream.enabled, false);
+  startup.audioGraph.resolve();
+  await flushStartupTasks();
+  assert.ok(startup.events.includes("live-start"));
+  assert.equal(startup.events.includes("recording"), false);
+  startup.providerReady.resolve();
+  assert.equal((await pending).state, "listening");
+
+  const cancelled = await createVoiceStartupHarness();
+  const rejected = assert.rejects(cancelled.start(), /passkey_cancelled/u);
+  cancelled.credentials.reject(new Error("passkey_cancelled"));
+  await rejected;
+  assert.equal(cancelled.events.includes("microphone-start"), false);
+  assert.equal(cancelled.events.includes("graph-start"), false);
+  assert.equal(cancelled.events.includes("live-start"), false);
   assert.match(bridge, /passkey_required/u);
   assert.match(bridge, /signInWithCustomToken/u);
   assert.doesNotMatch(bridge, /(?:GoogleAuthProvider|signInWithPopup)/u);

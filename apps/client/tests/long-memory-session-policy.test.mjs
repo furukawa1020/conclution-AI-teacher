@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import {
+  createVoiceStartupHarness,
+  flushStartupTasks,
+} from "./helpers/voice-startup-harness.mjs";
 
 import {
   createLongMemorySessionController,
@@ -205,10 +209,21 @@ test("bridgeは認証後に非awaitで開始し、停止とpagehideで破棄す�
     ),
   ]);
   assert.match(bridge, /from "\.\/long-memory-session-policy\.mjs";/u);
-  assert.match(
-    bridge,
-    /const credentials = await secureCredentials\(true\);[\s\S]*?longMemorySession\.start\([\s\S]*?const stream = await ensureMediaStream/u,
-  );
+  const startup = await createVoiceStartupHarness();
+  const pending = startup.start();
+  await flushStartupTasks();
+  assert.equal(startup.events.includes("memory-start"), false);
+  startup.credentials.resolve();
+  await flushStartupTasks();
+  assert.equal(startup.events.filter((event) => event === "memory-start").length, 1);
+  assert.ok(startup.events.indexOf("memory-start") > startup.events.indexOf("credentials-ready"));
+  assert.ok(startup.events.includes("microphone-start"));
+  // The context request intentionally never completes. Voice preparation and
+  // Listening must still finish without borrowing its availability or deadline.
+  startup.microphone.resolve();
+  startup.audioGraph.resolve();
+  startup.providerReady.resolve();
+  assert.equal((await pending).state, "listening");
   assert.doesNotMatch(bridge, /await\s+longMemorySession\.start/u);
   assert.match(bridge, /guest: guestModeActive/u);
   assert.match(bridge, /function stopSession[\s\S]*?longMemorySession\.clear\(\);/u);

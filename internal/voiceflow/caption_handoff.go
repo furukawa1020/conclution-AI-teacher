@@ -564,7 +564,7 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		ttsPrestarted = 1
 		var releaseAttempted bool
 		var candidateErr error
-		ttsReleaseMS, releaseAttempted, candidateErr = releaseCommittedCaptionCandidate(handoff.ctx, committedCandidate)
+		ttsReleaseMS, releaseAttempted, candidateErr = releaseCommittedPCMCandidate(handoff.ctx, committedCandidate)
 		firstTTSChunkMS = committedCandidate.firstChunkMS()
 		ttsBufferedBytes = committedCandidate.buffer.peakBufferedBytes()
 		if candidateErr != nil {
@@ -640,26 +640,6 @@ func (handoff *captionHandoff) Commit() (httpapi.VoiceTurnResult, error) {
 		NativeCaptionHandoff:        1,
 	}
 	return result, nil
-}
-
-// Caption output accepts valid digital silence, but not an empty provider
-// stream. Its audible-latency metric still requires a meaningful PCM sample.
-// A release attempt is terminal on failure, including a rejected callback.
-func releaseCommittedCaptionCandidate(ctx context.Context, synthesis *speculativeSynthesis) (int64, bool, error) {
-	result, completed := synthesis.commitBoundary(ctx)
-	if completed {
-		if result.err != nil {
-			return -1, false, result.err
-		}
-		if synthesis.buffer.peakBufferedBytes() == 0 {
-			return -1, false, errSpeculativeAudioChunk
-		}
-	}
-	releaseMS, err := synthesis.buffer.release(ctx)
-	if err == nil && !completed {
-		err = synthesis.await(ctx).err
-	}
-	return releaseMS, true, err
 }
 
 func (handoff *captionHandoff) Cancel() {

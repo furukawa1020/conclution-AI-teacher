@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile as readRawFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
+import {
+  createVoiceStartupHarness,
+  deferred,
+  flushStartupTasks,
+} from "./helpers/voice-startup-harness.mjs";
 
 async function readFile(path, encoding) {
   const source = await readRawFile(path, encoding);
@@ -1037,37 +1043,78 @@ test("runtime PDF is rejected before browser file access", async () => {
 	assert.match(ui, /PDF入力[\s\S]*公開版では未提供/u);
 });
 
-test("explicit voice start preconnects without a cross-origin warmup fetch", async () => {
+test("entry only preconnects; explicit guest or voice start warms anonymously without waiting", async () => {
   const bridge = await readFile(
     new URL("../web/firebase-bridge.js", import.meta.url),
     "utf8",
   );
   const warmStart = bridge.indexOf("function primeVoiceTransportConnection()");
-  const warmEnd = bridge.indexOf("\n}\n\nasync function getStatus", warmStart);
+  const warmEnd = bridge.indexOf("async function getStatus()", warmStart);
   assert.notEqual(warmStart, -1);
   assert.notEqual(warmEnd, -1);
   const warm = bridge.slice(warmStart, warmEnd);
 
-  assert.doesNotMatch(bridge, /VOICE_WARMUP_ENDPOINT|\/healthz/u);
-  assert.match(warm, /preconnect\.rel = "preconnect"/u);
-  assert.match(warm, /preconnect\.href = VOICE_ORIGIN/u);
-  assert.doesNotMatch(warm, /fetch\(/u);
+  const response = deferred();
+  const links = [];
+  const requests = [];
+  class Link {}
+  const runtime = runInNewContext(`${warm}\n({ primeVoiceTransportConnection, warmVoiceService })`, {
+    HTMLLinkElement: Link,
+    URL,
+    VOICE_ORIGIN: "https://voice.example",
+    voiceTransportPrimed: false,
+    voiceServiceWarmupStarted: false,
+    document: {
+      getElementById: () => null,
+      createElement: (tag) => {
+        assert.equal(tag, "link");
+        return new Link();
+      },
+      head: { append: (link) => { links.push(link); } },
+    },
+    fetch: (url, options) => {
+      requests.push({ url, options });
+      return response.promise;
+    },
+  });
+  assert.equal(links.length, 1);
+  assert.equal(links[0].rel, "preconnect");
+  assert.equal(links[0].href, "https://voice.example");
+  assert.equal(links[0].crossOrigin, "anonymous");
+  assert.equal(requests.length, 0, "module entry must not wake the service");
+  runtime.primeVoiceTransportConnection();
+  assert.equal(links.length, 1);
+  assert.equal(runtime.warmVoiceService(), undefined, "a pending wake-up is not awaited");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://voice.example/health");
+  assert.deepEqual({ ...requests[0].options }, {
+    method: "GET", cache: "no-store", credentials: "omit", mode: "cors",
+    redirect: "follow", referrerPolicy: "no-referrer",
+  });
+  runtime.warmVoiceService();
+  assert.equal(requests.length, 1, "gesture-bound wake-up remains single-flight");
+  response.reject(new Error("fixture_network_failure"));
+  await flushStartupTasks();
   assert.doesNotMatch(
     warm,
-    /Authorization|audioBase64|sessionState|X-Firebase-AppCheck/u,
+    /Authorization|audioBase64|sessionState|X-Firebase-AppCheck|idToken/u,
   );
 
   const beginStart = bridge.indexOf("async function beginTurn(");
   const beginEnd = bridge.indexOf("\n}\n\nasync function waitForTurnEnd", beginStart);
   const begin = bridge.slice(beginStart, beginEnd);
   const sessionAt = begin.indexOf("sessionClock.begin()");
-  const warmAt = begin.indexOf("primeVoiceTransportConnection()");
-  const microphoneAt = begin.indexOf(
-    "const stream = await ensureMediaStream(",
-  );
+  const warmAt = begin.indexOf("warmVoiceService();");
+  const microphoneAt = begin.indexOf("const prepareMutedMedia = async () => {");
   assert.ok(sessionAt >= 0);
   assert.ok(warmAt > sessionAt);
   assert.ok(microphoneAt > warmAt);
+  const guestStart = bridge.indexOf("async function startGuestMode()");
+  const guestEnd = bridge.indexOf("async function listPasskeyCredentials()", guestStart);
+  const guest = bridge.slice(guestStart, guestEnd);
+  assert.match(guest, /if \(generation === null\) fail\("guest_start_busy"\);[\s\S]*warmVoiceService\(\);/u);
+  assert.doesNotMatch(`${begin}\n${guest}`, /await\s+warmVoiceService/u);
+  assert.equal((bridge.match(/\bwarmVoiceService\(\);/gu) ?? []).length, 2);
 });
 
 test("sample-clock time owns every same-tick normal and interrupt consumer", async () => {
@@ -1325,7 +1372,7 @@ test("Native strong ready owns Listening and PCM capture", async () => {
     beginStart,
   );
   const begin = bridge.slice(beginStart, beginEnd);
-  const muteAt = begin.indexOf("setStreamTracksEnabled(stream, false);");
+  const muteAt = begin.indexOf("setStreamTracksEnabled(preparedStream, false);");
   const startAt = begin.indexOf("await startVoiceLiveSession({");
   const unmuteAt = begin.indexOf("setStreamTracksEnabled(stream, true);");
   const vadAt = begin.indexOf("createRecording(");
@@ -1337,6 +1384,40 @@ test("Native strong ready owns Listening and PCM capture", async () => {
   assert.ok(startAt > muteAt);
   assert.ok(unmuteAt > startAt);
   assert.ok(vadAt > unmuteAt);
+  assert.match(
+    begin,
+    /setStreamTracksEnabled\(preparedStream, false\);\s*await ensureAudioGraph\(preparedStream, expectedEpoch\);\s*return preparedStream;/u,
+  );
+  for (const firstReady of ["credentials", "media"]) {
+    const startup = await createVoiceStartupHarness({ guest: true });
+    const pending = startup.start();
+    await flushStartupTasks();
+    assert.ok(startup.events.includes("credentials-start"));
+    assert.ok(startup.events.includes("microphone-start"));
+    if (firstReady === "media") {
+      startup.microphone.resolve();
+      startup.audioGraph.resolve();
+      await flushStartupTasks();
+      assert.ok(startup.events.includes("graph-ready"));
+      assert.equal(startup.stream.enabled, false);
+    } else {
+      startup.credentials.resolve();
+      await flushStartupTasks();
+      assert.ok(startup.events.includes("credentials-ready"));
+    }
+    assert.equal(startup.events.includes("live-start"), false);
+    assert.equal(startup.events.includes("recording"), false);
+    startup.credentials.resolve();
+    startup.microphone.resolve();
+    startup.audioGraph.resolve();
+    await flushStartupTasks();
+    assert.ok(startup.events.includes("live-start"));
+    assert.equal(startup.stream.enabled, false);
+    assert.equal(startup.events.includes("recording"), false);
+    startup.providerReady.resolve();
+    assert.equal((await pending).state, "listening");
+    assert.deepEqual(startup.events.slice(-3), ["live-ready", "unmute", "recording"]);
+  }
   assert.ok(clearPrepareAt >= 0);
   assert.ok(
     choosePrepareRouteAt > clearPrepareAt,
@@ -6770,11 +6851,11 @@ test("network and voice-start deadlines keep validated playback ownership separa
   );
   assert.match(
     finish,
-    /awaitVoiceTurnResult\(\s*liveSession\.commit\(/u,
+    /awaitVoiceTurnResult\(\s*Promise\.all\(\[\s*liveSession\.commit\(playback, recording\.lastVoiceAt\),\s*resumeAudioPromise,\s*\]\)\.then\(\(\[result\]\) => result\),\s*\(\) => liveSession\.cancel\(new Error\("voice_turn_timeout"\)\),\s*\)/u,
   );
   assert.match(
     finish,
-    /const responsePromise = fetch\(VOICE_ENDPOINT[\s\S]*playback\.armResponseInterruption\(\s*performance\.now\(\),\s*\{[\s\S]*onStall:[\s\S]*!playback\.hasStreamedAudio\(\)[\s\S]*requestController\.abort\(\)[\s\S]*\}\s*,?\s*\);[\s\S]*await awaitVoiceTurnResult\(\s*responsePromise/u,
+    /const responsePromise = fetch\(VOICE_ENDPOINT[\s\S]*playback\.armResponseInterruption\(\s*performance\.now\(\),\s*\{[\s\S]*onStall:[\s\S]*!playback\.hasStreamedAudio\(\)[\s\S]*requestController\.abort\(\)[\s\S]*\}\s*,?\s*\);\s*const \[response\] = await awaitVoiceTurnResult\(\s*Promise\.all\(\[responsePromise, resumeAudioPromise\]\),\s*\(\) => requestController\.abort\(\),\s*\)/u,
   );
   assert.match(
     finish,

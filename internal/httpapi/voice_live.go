@@ -1514,17 +1514,6 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	}
 
 outcomeReady:
-	if start.LatencyProofVersion != nil &&
-		!outputMetrics.latencyProofSnapshot().valid {
-		grace := time.NewTimer(voiceLiveLatencyProofGrace)
-		select {
-		case proof := <-proofChannel:
-			outputMetrics.markLatencyProof(proof)
-		case <-grace.C:
-		case <-liveCtx.Done():
-		}
-		grace.Stop()
-	}
 	if outcome.err != nil {
 		code := voiceLiveCodeAPIUnavailable
 		_, outputFrames, _ := outputMetrics.snapshot()
@@ -1611,8 +1600,18 @@ outcomeReady:
 		cancelLive()
 		return
 	}
+	// A strict-mode client cannot prove audible output until validated PCM is
+	// released. Optional telemetry must not delay that release or the final
+	// state. Failed outcomes have already returned; output without meaningful
+	// PCM does not need an audible-proof grace period.
 	s.observeSemanticShadow(liveCtx, outcome.result)
 	s.enqueueLongTermMemory(principal, outcome.result)
+	connectionOpen := true
+	if start.LatencyProofVersion != nil {
+		connectionOpen = waitForVoiceLiveLatencyProof(liveCtx, outputMetrics, proofChannel, disconnectChannel)
+	}
+	// Final was delivered successfully. A disconnect during optional telemetry
+	// must not erase its completion record or the post-response work above.
 	s.logVoiceLiveSession(
 		liveCtx,
 		started,
@@ -1626,7 +1625,43 @@ outcomeReady:
 		false,
 		outcome.result,
 	)
+	if !connectionOpen {
+		cancelLive()
+		return
+	}
 	_ = conn.Close(websocket.StatusNormalClosure, "complete")
+}
+
+func waitForVoiceLiveLatencyProof(
+	ctx context.Context,
+	metrics *voiceLiveOutputMetrics,
+	proofChannel <-chan voiceLiveLatencyFrame,
+	disconnectChannel <-chan struct{},
+) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-disconnectChannel:
+		return false
+	default:
+	}
+	firstOutputAt, _, _ := metrics.snapshot()
+	if firstOutputAt.IsZero() || metrics.latencyProofSnapshot().valid {
+		return true
+	}
+	grace := time.NewTimer(voiceLiveLatencyProofGrace)
+	defer grace.Stop()
+	select {
+	case proof := <-proofChannel:
+		metrics.markLatencyProof(proof)
+		return true
+	case <-grace.C:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-disconnectChannel:
+		return false
+	}
 }
 
 func validVoiceLiveStart(start voiceLiveStartFrame) bool {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,8 +44,8 @@ type voiceLiveOutboundWriterSnapshot struct {
 
 // voiceLiveOutboundWriter gives PCM its own bounded lane. Control traffic can
 // never fill the audio queue, and an audio frame already waiting is selected
-// before the next control frame. Callers remain synchronous so borrowed PCM
-// stays valid until websocket.Write has snapshotted it.
+// before the next control frame. Each queued request owns its bytes: cancellation
+// may return to a caller before an in-progress socket write releases the payload.
 type voiceLiveOutboundWriter struct {
 	audio              chan voiceLiveSocketWriteRequest
 	control            chan voiceLiveSocketWriteRequest
@@ -107,10 +108,16 @@ func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
 				}
 			}
 		}
+		if err := request.ctx.Err(); err != nil {
+			clear(request.payload)
+			request.done <- err
+			continue
+		}
 		dequeuedAt := time.Now()
 		queueWait := dequeuedAt.Sub(request.enqueuedAt)
 		if request.audio && queueWait > writer.audioQueueDeadline {
 			writer.observe(request.audio, queueWait, 0, true)
+			clear(request.payload)
 			request.done <- errVoiceLiveAudioQueueExpired
 			continue
 		}
@@ -122,6 +129,7 @@ func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
 		err := writer.write(writeCtx, request.messageType, request.payload)
 		writeDuration := time.Since(writeStartedAt)
 		cancel()
+		clear(request.payload)
 		writer.observe(request.audio, queueWait, writeDuration, false)
 		request.done <- err
 	}
@@ -182,19 +190,24 @@ func (writer *voiceLiveOutboundWriter) submit(
 	if ctx == nil || len(payload) == 0 {
 		return errors.New("voice live outbound frame is invalid")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	request := voiceLiveSocketWriteRequest{
 		ctx:         ctx,
 		audio:       lane == writer.audio,
 		enqueuedAt:  time.Now(),
 		messageType: messageType,
-		payload:     payload,
+		payload:     bytes.Clone(payload),
 		done:        make(chan error, 1),
 	}
 	select {
 	case lane <- request:
 	case <-ctx.Done():
+		clear(request.payload)
 		return ctx.Err()
 	case <-writer.done:
+		clear(request.payload)
 		return errors.New("voice live outbound writer is closed")
 	}
 	select {

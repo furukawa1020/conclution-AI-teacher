@@ -1978,12 +1978,14 @@ async function getStatus() {
       return Object.freeze({ state: `guest-ready` });
     }
     const { auth } = await firebaseAuth();
-    if (!auth.currentUser) {
-      return Object.freeze({ state: "identity-required" });
-    }
+    // Guest startup may finish while primary Auth is settling. Recheck that
+    // boundary before interpreting the unrelated primary account identity.
     if (guestModeActive) {
       await secureCredentials();
       return Object.freeze({ state: "guest-ready" });
+    }
+    if (!auth.currentUser) {
+      return Object.freeze({ state: "identity-required" });
     }
     const { appCheckToken, idToken } = await secureCredentials();
     if (passkeyRegistrationRecovery.isPending()) {

@@ -22,6 +22,8 @@ var errVoiceLiveAudioQueueExpired = errors.New(
 	"voice live audio frame exceeded its queue deadline",
 )
 
+var errVoiceLiveOutboundWriterClosed = errors.New("voice live outbound writer is closed")
+
 type voiceLiveSocketWriteRequest struct {
 	ctx         context.Context
 	audio       bool
@@ -50,6 +52,7 @@ type voiceLiveOutboundWriter struct {
 	audio              chan voiceLiveSocketWriteRequest
 	control            chan voiceLiveSocketWriteRequest
 	done               chan struct{}
+	enqueueMu          sync.RWMutex
 	write              func(context.Context, websocket.MessageType, []byte) error
 	audioQueueDeadline time.Duration
 	metricsMu          sync.Mutex
@@ -79,9 +82,14 @@ func newVoiceLiveOutboundWriterWithWrite(
 }
 
 func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
-	defer close(writer.done)
 	var pendingControl *voiceLiveSocketWriteRequest
+	// Cleanup runs only after an active socket write returns. Capture the final
+	// pending control, not its initial nil value, before clearing owned copies.
+	defer func() { writer.shutdown(pendingControl) }()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		var request voiceLiveSocketWriteRequest
 		if pendingControl != nil {
 			select {
@@ -108,6 +116,11 @@ func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
 				}
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			clear(request.payload)
+			request.done <- err
+			return
+		}
 		if err := request.ctx.Err(); err != nil {
 			clear(request.payload)
 			request.done <- err
@@ -125,13 +138,46 @@ func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
 			request.ctx,
 			voiceLiveSocketWriteTimeout,
 		)
+		// Requests may have independent contexts. Writer cancellation also
+		// cancels an active write, without clearing its bytes until it returns.
+		stopWriterCancellation := context.AfterFunc(ctx, cancel)
 		writeStartedAt := time.Now()
-		err := writer.write(writeCtx, request.messageType, request.payload)
+		err := ctx.Err()
+		if err == nil {
+			err = writer.write(writeCtx, request.messageType, request.payload)
+		}
 		writeDuration := time.Since(writeStartedAt)
+		stopWriterCancellation()
 		cancel()
 		clear(request.payload)
 		writer.observe(request.audio, queueWait, writeDuration, false)
 		request.done <- err
+	}
+}
+
+func (writer *voiceLiveOutboundWriter) shutdown(pendingControl *voiceLiveSocketWriteRequest) {
+	// done signals admission closure, not completed zeroization. Close it
+	// before taking the exclusive lock so full-queue submitters can unlock.
+	close(writer.done)
+	writer.enqueueMu.Lock()
+	defer writer.enqueueMu.Unlock()
+	discard := func(request voiceLiveSocketWriteRequest) {
+		clear(request.payload)
+		request.done <- errVoiceLiveOutboundWriterClosed
+	}
+	if pendingControl != nil {
+		discard(*pendingControl)
+	}
+	for _, lane := range []chan voiceLiveSocketWriteRequest{writer.audio, writer.control} {
+		for {
+			select {
+			case request := <-lane:
+				discard(request)
+			default:
+				goto drained
+			}
+		}
+	drained:
 	}
 }
 
@@ -193,6 +239,15 @@ func (writer *voiceLiveOutboundWriter) submit(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Only admission holds the read lock. Shutdown closes done first, joins
+	// every racing enqueue, then drains; no submit can leave a copy afterward.
+	writer.enqueueMu.RLock()
+	select {
+	case <-writer.done:
+		writer.enqueueMu.RUnlock()
+		return errVoiceLiveOutboundWriterClosed
+	default:
+	}
 	request := voiceLiveSocketWriteRequest{
 		ctx:         ctx,
 		audio:       lane == writer.audio,
@@ -203,12 +258,15 @@ func (writer *voiceLiveOutboundWriter) submit(
 	}
 	select {
 	case lane <- request:
+		writer.enqueueMu.RUnlock()
 	case <-ctx.Done():
 		clear(request.payload)
+		writer.enqueueMu.RUnlock()
 		return ctx.Err()
 	case <-writer.done:
 		clear(request.payload)
-		return errors.New("voice live outbound writer is closed")
+		writer.enqueueMu.RUnlock()
+		return errVoiceLiveOutboundWriterClosed
 	}
 	select {
 	case err := <-request.done:
@@ -216,7 +274,7 @@ func (writer *voiceLiveOutboundWriter) submit(
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-writer.done:
-		return errors.New("voice live outbound writer is closed")
+		return errVoiceLiveOutboundWriterClosed
 	}
 }
 

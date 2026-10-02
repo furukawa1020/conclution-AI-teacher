@@ -367,44 +367,87 @@ func (p *Pipeline) ProcessStream(
 			httpapi.VoicePipelineStageSynthesize,
 		)
 	}
-	// HTTP fallback still has recognition and final model/audit work ahead.
-	// Overlap only content-free configuration, keeping privacy-ineligible and
-	// passive turns on their existing route. Never wait for this preparation.
+	// Configuration alone overlaps recognition. After recognition, an eligible
+	// sealed reply may synthesize privately while its final audit is pending.
+	// Neither capability changes the final decision's publication authority.
 	var synthesisPreparation *speculativeSynthesisPreparation
-	if ctx != nil && ctx.Err() == nil && voiceResponseExpected(input) &&
-		!input.StrictCloudMinimization && input.Document == nil {
+	candidateEligible := ctx != nil && ctx.Err() == nil && voiceResponseExpected(input) &&
+		!input.StrictCloudMinimization && input.Document == nil
+	if candidateEligible {
 		synthesisPreparation = startSpeculativeSynthesisPreparation(ctx, streamingSpeech)
 		defer synthesisPreparation.close()
 	}
-	result, spokenReply, err := p.prepareTurn(ctx, uid, input)
+	firstChunkAt := time.Time{}
+	chunkCount := 0
+	deliverAudio := func(audio []byte) error {
+		if firstChunkAt.IsZero() {
+			firstChunkAt = time.Now()
+		}
+		if err := onAudio(audio); err != nil {
+			return err
+		}
+		chunkCount++
+		return nil
+	}
+	var committedCandidate *speculativeSynthesis
+	defer func() {
+		if committedCandidate != nil {
+			committedCandidate.abort(errSpeculativeAudioDiscarded)
+		}
+	}()
+	var process recognizedTurnProcessor
+	if sealedAgent, ok := p.agent.(conversation.SealedCandidateAgent); ok && candidateEligible {
+		process = func(callCtx context.Context, callUID string, turn conversation.VoiceTurn) (conversation.VoiceTurnResult, error) {
+			// Expired-state recovery is a new authority attempt, even when the
+			// reply is unchanged. Revoke the previous provider before retrying.
+			if committedCandidate != nil {
+				committedCandidate.abort(errSpeculativeAudioDiscarded)
+				committedCandidate = nil
+			}
+			decision, staged, processErr := processWithPrivateCandidate(
+				callCtx, sealedAgent, callUID, turn, streamingSpeech, synthesisPreparation, deliverAudio,
+			)
+			committedCandidate = staged
+			return decision, processErr
+		}
+	}
+	result, spokenReply, err := p.prepareTurnWithProcessor(ctx, uid, input, process)
 	result = withStrictPrivacyStatus(input, result)
 	if err != nil || spokenReply == "" {
 		return result, err
 	}
 
+	// Keep the existing HTTP stage/first-chunk origin: the final decision is
+	// ready. Private provider time must not be mixed into first_chunk_ms.
 	synthesisStarted := time.Now()
-	firstChunkAt := time.Time{}
-	chunkCount := 0
-	audioMIME, err := streamCommittedSynthesis(
-		ctx,
-		streamingSpeech,
-		synthesisPreparation,
-		spokenReply,
-		func(audio []byte) error {
-			if firstChunkAt.IsZero() {
-				firstChunkAt = time.Now()
+	if committedCandidate != nil &&
+		!ordinaryCommittedCandidateMatches(committedCandidate.spokenReply, spokenReply, result) {
+		committedCandidate.abort(errSpeculativeAudioDiscarded)
+		committedCandidate = nil
+	}
+	prestartedTTSDone := false
+	if committedCandidate != nil {
+		_, releaseAttempted, candidateErr := releaseCommittedPCMCandidate(ctx, committedCandidate)
+		if candidateErr != nil {
+			committedCandidate.abort(candidateErr)
+			if releaseAttempted || ctx.Err() != nil {
+				return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(httpapi.VoicePipelineStageSynthesize)
 			}
-			if err := onAudio(audio); err != nil {
-				return err
-			}
-			chunkCount++
-			return nil
-		},
-	)
-	if err != nil || audioMIME != speechio.StreamingAudioContentType {
-		return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
-			httpapi.VoicePipelineStageSynthesize,
+			// Only private failure may retry final TTS; never repeat the model
+			// decision or a publication attempt, even if its callback rejected PCM.
+		} else {
+			prestartedTTSDone = true
+		}
+	}
+	if !prestartedTTSDone {
+		audioMIME, synthesisErr := streamCommittedSynthesis(
+			ctx, streamingSpeech, synthesisPreparation, spokenReply, deliverAudio,
 		)
+		if synthesisErr != nil || audioMIME != speechio.StreamingAudioContentType {
+			return httpapi.VoiceTurnResult{}, httpapi.NewVoicePipelineFailure(
+				httpapi.VoicePipelineStageSynthesize,
+			)
+		}
 	}
 	firstChunkMS := int64(-1)
 	if !firstChunkAt.IsZero() {
@@ -1984,6 +2027,15 @@ func (p *Pipeline) prepareTurn(
 	uid string,
 	input httpapi.VoiceTurnInput,
 ) (httpapi.VoiceTurnResult, string, error) {
+	return p.prepareTurnWithProcessor(ctx, uid, input, nil)
+}
+
+func (p *Pipeline) prepareTurnWithProcessor(
+	ctx context.Context,
+	uid string,
+	input httpapi.VoiceTurnInput,
+	process recognizedTurnProcessor,
+) (httpapi.VoiceTurnResult, string, error) {
 	if input.Document != nil {
 		clearDocument(input.Document)
 		return runtimeDocumentRejectedResult(), "", nil
@@ -2102,7 +2154,7 @@ func (p *Pipeline) prepareTurn(
 		"duration_ms", time.Since(transcriptionStarted).Milliseconds(),
 		"recognized", true,
 	)
-	return p.prepareRecognizedTurn(
+	return p.prepareRecognizedTurnWithProcessor(
 		ctx,
 		uid,
 		input,
@@ -2111,6 +2163,7 @@ func (p *Pipeline) prepareTurn(
 		confidence != 0,
 		false,
 		conversation.FloorEvidenceUnknown,
+		process,
 	)
 }
 

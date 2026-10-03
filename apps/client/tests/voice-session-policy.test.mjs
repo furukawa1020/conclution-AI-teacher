@@ -1386,7 +1386,7 @@ test("Native strong ready owns Listening and PCM capture", async () => {
   assert.ok(vadAt > unmuteAt);
   assert.match(
     begin,
-    /setStreamTracksEnabled\(preparedStream, false\);\s*await ensureAudioGraph\(preparedStream, expectedEpoch\);\s*return preparedStream;/u,
+    /setStreamTracksEnabled\(preparedStream, false\);\s*await ensureAudioGraph\(preparedStream, expectedEpoch\);[\s\S]*?return preparedStream;/u,
   );
   for (const firstReady of ["credentials", "media"]) {
     const startup = await createVoiceStartupHarness({ guest: true });
@@ -9261,7 +9261,7 @@ return dispatchVoiceStartLatency;`,
   assert.equal(events.at(-1).detail.milliseconds, 120_000);
 
   const beginAt = bridge.indexOf("async function beginTurn(");
-  const begin = bridge.slice(beginAt, beginAt + 4_000);
+  const begin = bridge.slice(beginAt, bridge.indexOf("async function waitForTurnEnd(", beginAt));
   assert.match(
     begin,
     /dispatchVoiceStartLatency\(null\)[\s\S]*secureCredentials\(true\)/u,

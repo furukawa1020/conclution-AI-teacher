@@ -23,7 +23,7 @@ func pairedStreamingService(
 	return &CloudService{
 		recognizer:  "projects/project/locations/asia-northeast1/recognizers/_",
 		speechModel: "short",
-		streamRecognizeCall: func(context.Context) (streamingRecognizeClient, error) {
+		streamRecognizeCall: func(ctx context.Context) (streamingRecognizeClient, error) {
 			mutex.Lock()
 			defer mutex.Unlock()
 			if next >= len(streams) {
@@ -31,7 +31,7 @@ func pairedStreamingService(
 			}
 			stream := streams[next]
 			next++
-			return stream, nil
+			return &pcmEOFJoinedStream{streamingRecognizeClient: stream, ctx: ctx, closed: make(chan struct{})}, nil
 		},
 	}
 }
@@ -370,7 +370,7 @@ func TestTranscribePCM16UsesExplicitJapaneseLongContract(t *testing.T) {
 			},
 		}},
 	}}
-	service := streamingTestService(stream, "short")
+	service := pairedStreamingService(stream)
 	audio := make([]byte, maxStreamingPCMBytes+640)
 	text, confidence, err := service.TranscribePCM16(
 		context.Background(),

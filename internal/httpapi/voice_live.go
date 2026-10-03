@@ -293,6 +293,38 @@ func (gate *voiceLiveCoachOutputGate) snapshot() (
 	return gate.rejected, gate.checkpoint, gate.accepted
 }
 
+func (gate *voiceLiveCoachOutputGate) commitInput(
+	metrics *voiceLiveOutputMetrics,
+	strictOutput *strictAudioBuffer,
+	finishInput func() bool,
+	writeCommitted func() error,
+	cancel context.CancelFunc,
+) error {
+	// Claim the shared PCM/checkpoint boundary before publishing committed.
+	// The provider may now finish input and generate its reply while the
+	// browser acknowledgement is being written, but neither response lane may
+	// overtake it or spend its audio-queue deadline waiting for this barrier.
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	metrics.markCommitted()
+	strictOutput.markCommitted()
+	if !finishInput() {
+		gate.rejected = true
+		cancel()
+		return errors.New("voice live input reader did not finish")
+	}
+	if writeCommitted != nil {
+		if err := writeCommitted(); err != nil {
+			// Revoke output and cancel the turn before releasing waiting PCM or
+			// checkpoints. They must never escape a failed acknowledgement.
+			gate.rejected = true
+			cancel()
+			return err
+		}
+	}
+	return nil
+}
+
 func (metrics *voiceLiveOutputMetrics) markNativeCommit(at time.Time) {
 	if at.IsZero() {
 		return
@@ -916,6 +948,7 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	pipelineInput := input
 	input.Memory = nil
 	input.MemoryGeneration = 0
+	controlGate := &voiceLiveCoachOutputGate{}
 	go func() {
 		defer close(pipelineDoneSignal)
 		defer clearVoiceInput(&pipelineInput)
@@ -926,7 +959,6 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}()
-		controlGate := &voiceLiveCoachOutputGate{}
 		onAudio := func(audio []byte) error {
 			return controlGate.deliver(func() error {
 				if pipelineInput.StrictCloudMinimization {
@@ -1402,22 +1434,30 @@ func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 				if input.NativeAudio {
 					outputMetrics.markNativeCommit(commitAt)
 				}
-				outputMetrics.markCommitted()
-				strictOutput.markCommitted()
+				var writeCommitted func() error
 				if start.LatencyProofVersion != nil {
-					if err := outboundWriter.writeJSON(liveCtx, voiceLiveOutboundFrame{
-						Type: "committed", Version: voiceLiveLatencyProofVersion,
-					}); err != nil {
-						cancelLive()
-						return
+					writeCommitted = func() error {
+						return outboundWriter.writeJSON(liveCtx, voiceLiveOutboundFrame{
+							Type: "committed", Version: voiceLiveLatencyProofVersion,
+						})
 					}
 				}
-				if !acknowledgeRead(false) {
-					cancelLive()
+				if err := controlGate.commitInput(
+					outputMetrics,
+					strictOutput,
+					func() bool {
+						if !acknowledgeRead(false) {
+							return false
+						}
+						close(audioInput)
+						audioInputClosed = true
+						return true
+					},
+					writeCommitted,
+					cancelLive,
+				); err != nil {
 					return
 				}
-				close(audioInput)
-				audioInputClosed = true
 			default:
 				finishVoiceLiveWithError(
 					liveCtx,

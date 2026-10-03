@@ -537,6 +537,19 @@ func (s *Service) processLive(
 		stagedHandoff = opened
 		return nil
 	}
+	if requiresStaged {
+		// Authenticated state already requires the staged path. Open its
+		// content-free TTS preparation while input is still arriving instead of
+		// waiting for the first (possibly final-only) caption. Observe, model
+		// work, checkpoint authority, and PCM publication keep their existing
+		// caption/commit boundaries below. Ordinary Native remains lazy.
+		if err := openStagedHandoff(); err != nil {
+			pooled.session.DiscardOutput()
+			// No caption or transport commit has been validated. Do not advertise
+			// this early failure as a committed-turn fallback capability.
+			return nativeFailureResult(), errNativeFlowUnavailable
+		}
+	}
 	for !turnComplete {
 		event, receiveErr := pooled.session.Receive(ctx)
 		if receiveErr != nil {

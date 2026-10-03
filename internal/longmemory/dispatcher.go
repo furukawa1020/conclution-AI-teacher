@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -67,6 +68,10 @@ type Dispatcher struct {
 	cancel        context.CancelFunc
 	done          chan struct{}
 	once          sync.Once
+	// Admission only protects the transfer of an already prepared job. No
+	// clock, allocation, storage, or observer work runs under this lock.
+	admission sync.RWMutex
+	closed    atomic.Bool
 }
 
 func NewDispatcher(manager *Manager, source CandidateSource, options DispatcherOptions) (*Dispatcher, error) {
@@ -103,17 +108,31 @@ func NewDispatcher(manager *Manager, source CandidateSource, options DispatcherO
 	return d, nil
 }
 
-// Enqueue copies only the bounded opaque state token and never blocks. The
-// caller invokes this after the final response has been committed.
+// Enqueue copies only the bounded opaque state token and never waits for
+// background work. The caller invokes this after committing the final response.
 func (d *Dispatcher) Enqueue(uid, stateToken string) bool {
-	if d == nil || uid == "" || stateToken == "" || len(stateToken) > 16*1024 {
+	if d == nil || uid == "" || stateToken == "" || len(stateToken) > 16*1024 || d.closed.Load() {
 		return false
 	}
 	job := memoryJob{uid: uid, stateToken: append([]byte(nil), stateToken...), createdAt: d.now().UTC()}
+	return d.admit(job)
+}
+
+// admit either transfers the caller-owned copy to a worker or wipes it. A
+// shutdown rejection is not an overflow observation.
+func (d *Dispatcher) admit(job memoryJob) bool {
+	d.admission.RLock()
+	if d.closed.Load() {
+		d.admission.RUnlock()
+		clear(job.stateToken)
+		return false
+	}
 	select {
 	case d.jobs <- job:
+		d.admission.RUnlock()
 		return true
 	default:
+		d.admission.RUnlock()
 		clear(job.stateToken)
 		if d.observe != nil {
 			select {
@@ -129,7 +148,15 @@ func (d *Dispatcher) Close(ctx context.Context) error {
 	if d == nil {
 		return nil
 	}
-	d.once.Do(d.cancel)
+	d.once.Do(func() {
+		// Stop all channel ownership transfers before workers perform their
+		// final drain. Enqueue preparation can finish later and wipe its own
+		// rejected copy without holding up this shutdown deadline.
+		d.admission.Lock()
+		d.closed.Store(true)
+		d.admission.Unlock()
+		d.cancel()
+	})
 	select {
 	case <-d.done:
 		return nil

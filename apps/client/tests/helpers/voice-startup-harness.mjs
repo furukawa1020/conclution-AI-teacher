@@ -24,7 +24,14 @@ export function flushStartupTasks() {
 
 // Execute the production orchestration, replacing only its browser/provider
 // dependencies. Each external boundary stays pending until the test releases it.
-export async function createVoiceStartupHarness({ guest = false } = {}) {
+export async function createVoiceStartupHarness({
+  guest = false,
+  workletPending = false,
+  workletSupported = true,
+  aecVerified = true,
+  strictCloudMinimization = false,
+  documentPending = false,
+} = {}) {
   const bridge = await readFile(
     new URL("../../web/firebase-bridge.js", import.meta.url),
     "utf8",
@@ -32,13 +39,34 @@ export async function createVoiceStartupHarness({ guest = false } = {}) {
   const start = bridge.indexOf("async function beginTurn(");
   const end = bridge.indexOf("async function waitForTurnEnd(", start);
   assert.ok(start >= 0 && end > start);
+  const loaderStart = bridge.indexOf("function loadPcmCaptureWorklet(");
+  const loaderEnd = bridge.indexOf("function liveCredential(", loaderStart);
+  assert.ok(loaderStart >= 0 && loaderEnd > loaderStart);
+  const supportStart = bridge.indexOf("function liveVoiceSupported(");
+  const supportEnd = bridge.indexOf("function loadPcmRingModule(", supportStart);
+  assert.ok(supportStart >= 0 && supportEnd > supportStart);
   const credentials = deferred();
   const microphone = deferred();
   const audioGraph = deferred();
   const providerReady = deferred();
   const memory = deferred();
+  const worklet = deferred();
+  const ringModule = deferred();
+  if (!workletPending) {
+    worklet.resolve();
+    ringModule.resolve({});
+  }
   const events = [];
   const stream = { enabled: true };
+  const context = {
+    state: "running",
+    audioWorklet: {
+      addModule: () => {
+        events.push("worklet-load");
+        return worklet.promise;
+      },
+    },
+  };
   const credentialValue = Object.freeze({
     appCheckToken: "fixture-app-check",
     idToken: "fixture-id-token",
@@ -56,7 +84,22 @@ export async function createVoiceStartupHarness({ guest = false } = {}) {
     activeLiveSession: undefined,
     preparingLiveSession: undefined,
     pendingLiveSession: undefined,
-    pendingDocument: undefined,
+    pendingDocument: documentPending ? {} : undefined,
+    audioContext: context,
+    WebSocket: function FixtureSocket() {},
+    AudioWorkletNode: workletSupported ? function FixtureWorklet() {} : undefined,
+    pcmCaptureWorkletLoads: new WeakMap(),
+    pcmPlaybackReadyContexts: new WeakSet(),
+    PCM_CAPTURE_WORKLET_URL: "fixture-worklet.js",
+    boundedPcmWorkletLoad: (load) => load,
+    loadPcmRingModule: () => {
+      events.push("ring-load");
+      return ringModule.promise;
+    },
+    hasVerifiedEchoCancellation: (candidate) => {
+      assert.equal(candidate, stream);
+      return aecVerified;
+    },
     beginGate: createTurnGate(),
     finishGate: createTurnGate(),
     passkeyGate: createTurnGate(),
@@ -128,6 +171,16 @@ export async function createVoiceStartupHarness({ guest = false } = {}) {
       assert.ok(events.includes("credentials-ready"));
       assert.ok(events.includes("graph-ready"));
       events.push("live-start");
+      if (scope.pendingDocument || !scope.liveVoiceSupported(stream)) {
+        events.push("http-fallback");
+        return undefined;
+      }
+      try {
+        await scope.loadPcmCaptureWorklet(context);
+      } catch {
+        events.push("http-fallback");
+        return undefined;
+      }
       await providerReady.promise;
       events.push("live-ready");
       return liveSession;
@@ -135,7 +188,7 @@ export async function createVoiceStartupHarness({ guest = false } = {}) {
     createRecording: (candidate) => {
       assert.equal(candidate, stream);
       assert.equal(stream.enabled, true);
-      assert.ok(events.includes("live-ready"));
+      assert.ok(events.includes("live-ready") || events.includes("http-fallback"));
       events.push("recording");
       return {};
     },
@@ -147,9 +200,15 @@ export async function createVoiceStartupHarness({ guest = false } = {}) {
     fail: (code) => { throw new Error(code); },
     stopSession: () => { throw new Error("unexpected_stop"); },
   };
-  const beginTurn = runInNewContext(`${bridge.slice(start, end)}\nbeginTurn`, scope);
+  const beginTurn = runInNewContext(
+    `${bridge.slice(supportStart, supportEnd)}\n${bridge.slice(loaderStart, loaderEnd)}\n${bridge.slice(start, end)}\nbeginTurn`,
+    scope,
+  );
   return {
     audioGraph, credentials, events, memory, microphone, providerReady, stream,
-    start: () => beginTurn("", "intentional", false, false),
+    context, worklet, ringModule,
+    cancel: () => { scope.sessionEpoch += 1; context.state = "closed"; },
+    isPlaybackReady: () => scope.pcmPlaybackReadyContexts.has(context),
+    start: () => beginTurn("", "intentional", strictCloudMinimization, false),
   };
 }

@@ -3212,6 +3212,17 @@ async function beginTurn(
           // been selected below.
           setStreamTracksEnabled(preparedStream, false);
           await ensureAudioGraph(preparedStream, expectedEpoch);
+          if (
+            expectedEpoch === sessionEpoch &&
+            !strictCloudMinimization &&
+            !pendingDocument &&
+            liveVoiceSupported(preparedStream)
+          ) {
+            // Load only static processing code while guest credentials may
+            // still be pending. The cached live loader joins this same work;
+            // authentication and strong-ready still own capture and unmuting.
+            void loadPcmCaptureWorklet(audioContext).catch(() => {});
+          }
           return preparedStream;
         };
         let credentials;

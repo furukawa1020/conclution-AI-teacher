@@ -379,31 +379,50 @@ func (s *CloudService) TranscribePCM16(
 	// Synchronous Recognize has a shorter duration boundary than the reviewed
 	// 3m30s browser turn, so replay the bounded owner through the same explicit
 	// 16 kHz mono streaming contract used by Native recognition.
-	session, err := s.OpenStreamingTranscription(ctx)
+	recognitionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	session, err := s.OpenStreamingTranscription(recognitionCtx)
 	if err != nil {
 		return "", 0, fmt.Errorf("start regional explicit PCM recognition: %w", err)
 	}
-	for offset := 0; offset < len(audio); {
-		end := min(offset+maxStreamingPCMBytes, len(audio))
-		if err := session.SendPCM(audio[offset:end]); err != nil {
-			return "", 0, fmt.Errorf("send regional explicit PCM recognition: %w", err)
+	// Drain provider results while sending. Waiting for all writes first can
+	// deadlock bidirectional flow control. One sender owns the caller's audio;
+	// every path below joins it before returning that ownership to the caller.
+	sent := make(chan error, 1)
+	go func() {
+		var sendErr error
+		for offset := 0; offset < len(audio); {
+			end := min(offset+maxStreamingPCMBytes, len(audio))
+			if err := session.SendPCM(audio[offset:end]); err != nil {
+				sendErr = fmt.Errorf("send regional explicit PCM recognition: %w", err)
+				break
+			}
+			offset = end
 		}
-		offset = end
-	}
-	if err := session.CloseSend(); err != nil {
-		return "", 0, fmt.Errorf("close regional explicit PCM recognition: %w", err)
-	}
+		if sendErr == nil {
+			if err := session.CloseSend(); err != nil {
+				sendErr = fmt.Errorf("close regional explicit PCM recognition: %w", err)
+			}
+		}
+		if sendErr != nil {
+			cancel()
+		}
+		sent <- sendErr
+	}()
 
 	fragments := make([]string, 0, 4)
 	confidence := float32(0)
 	confidenceObserved := false
+	var receiveErr error
 	for {
 		event, err := session.RecvEvent()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return "", 0, fmt.Errorf("receive regional explicit PCM recognition: %w", err)
+			receiveErr = fmt.Errorf("receive regional explicit PCM recognition: %w", err)
+			cancel()
+			break
 		}
 		if event.Kind != StreamingTranscriptionFinal {
 			continue
@@ -417,6 +436,13 @@ func (s *CloudService) TranscribePCM16(
 			confidence = event.Confidence
 			confidenceObserved = true
 		}
+	}
+	sendErr := <-sent
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
+	if err := recognitionDuplexError(sendErr, receiveErr); err != nil {
+		return "", 0, err
 	}
 	transcript := strings.TrimSpace(strings.Join(fragments, " "))
 	if transcript == "" {

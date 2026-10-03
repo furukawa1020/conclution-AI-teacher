@@ -132,12 +132,7 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		if ctx.Err() != nil {
-			s.logger.InfoContext(ctx, "voice stream cancelled",
-				"request_id", requestIDFromContext(ctx),
-				"duration_ms", time.Since(started).Milliseconds(),
-				"ready_duration_ms", readyDurationMS,
-				"audio_chunks", sequence,
-			)
+			durationMS := time.Since(started).Milliseconds()
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				_ = encoder.Encode(voiceStreamFrame{
 					Type:    "error",
@@ -146,6 +141,13 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 				})
 				flusher.Flush()
 			}
+			// Deliver the terminal error without waiting for synchronous log I/O.
+			s.logger.InfoContext(ctx, "voice stream cancelled",
+				"request_id", requestIDFromContext(ctx),
+				"duration_ms", durationMS,
+				"ready_duration_ms", readyDurationMS,
+				"audio_chunks", sequence,
+			)
 			return
 		}
 		logAttributes := []any{
@@ -161,13 +163,13 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 				"pipeline_stage", string(pipelineStage),
 			)
 		}
-		s.logger.ErrorContext(ctx, "voice stream failed", logAttributes...)
 		_ = encoder.Encode(voiceStreamFrame{
 			Type:    "error",
 			Version: voiceStreamVersion,
 			Code:    "voice_turn_unavailable",
 		})
 		flusher.Flush()
+		s.logger.ErrorContext(ctx, "voice stream failed", logAttributes...)
 		return
 	}
 	defer clear(result.Audio)
@@ -177,18 +179,18 @@ func (s *Server) voiceTurnStream(w http.ResponseWriter, r *http.Request) {
 		spoke = strictOutput.spoke()
 	}
 	if err := validateStreamedVoiceResultForInput(input, result, spoke); err != nil {
-		s.logger.ErrorContext(ctx, "voice stream result rejected",
-			"request_id", requestIDFromContext(ctx),
-			"ready_duration_ms", readyDurationMS,
-			"error_class", "invalid_voice_result",
-			"audio_chunks", sequence,
-		)
 		_ = encoder.Encode(voiceStreamFrame{
 			Type:    "error",
 			Version: voiceStreamVersion,
 			Code:    "voice_turn_unavailable",
 		})
 		flusher.Flush()
+		s.logger.ErrorContext(ctx, "voice stream result rejected",
+			"request_id", requestIDFromContext(ctx),
+			"ready_duration_ms", readyDurationMS,
+			"error_class", "invalid_voice_result",
+			"audio_chunks", sequence,
+		)
 		return
 	}
 	if input.StrictCloudMinimization && spoke {

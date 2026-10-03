@@ -57,13 +57,16 @@ type Dispatcher struct {
 	manager *Manager
 	source  CandidateSource
 	jobs    chan memoryJob
-	now     func() time.Time
-	ttl     time.Duration
-	timeout time.Duration
-	observe Observer
-	cancel  context.CancelFunc
-	done    chan struct{}
-	once    sync.Once
+	// Overflow observation is best-effort and coalesced. The marker never
+	// contains a UID or state, and response callers never invoke the observer.
+	queueFullWake chan struct{}
+	now           func() time.Time
+	ttl           time.Duration
+	timeout       time.Duration
+	observe       Observer
+	cancel        context.CancelFunc
+	done          chan struct{}
+	once          sync.Once
 }
 
 func NewDispatcher(manager *Manager, source CandidateSource, options DispatcherOptions) (*Dispatcher, error) {
@@ -90,7 +93,7 @@ func NewDispatcher(manager *Manager, source CandidateSource, options DispatcherO
 		return nil, ErrInvalid
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &Dispatcher{manager: manager, source: source, jobs: make(chan memoryJob, capacity), now: time.Now, ttl: ttl, timeout: timeout, observe: options.Observer, cancel: cancel, done: make(chan struct{})}
+	d := &Dispatcher{manager: manager, source: source, jobs: make(chan memoryJob, capacity), queueFullWake: make(chan struct{}, 1), now: time.Now, ttl: ttl, timeout: timeout, observe: options.Observer, cancel: cancel, done: make(chan struct{})}
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
@@ -112,7 +115,12 @@ func (d *Dispatcher) Enqueue(uid, stateToken string) bool {
 		return true
 	default:
 		clear(job.stateToken)
-		d.notify(OutcomeQueueFull, 0)
+		if d.observe != nil {
+			select {
+			case d.queueFullWake <- struct{}{}:
+			default:
+			}
+		}
 		return false
 	}
 }
@@ -141,10 +149,25 @@ func (d *Dispatcher) worker(ctx context.Context) {
 		case <-ctx.Done():
 			d.zeroPending()
 			return
+		case <-d.queueFullWake:
+			if !d.notifyQueueFull(ctx) {
+				d.zeroPending()
+				return
+			}
 		case job := <-d.jobs:
 			d.process(ctx, job)
 		}
 	}
+}
+
+func (d *Dispatcher) notifyQueueFull(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	// A pending marker combines repeated rejections, so this event is not a
+	// drop counter and its zero latency is not delivery latency.
+	d.notify(OutcomeQueueFull, 0)
+	return true
 }
 
 func (d *Dispatcher) process(parent context.Context, job memoryJob) {

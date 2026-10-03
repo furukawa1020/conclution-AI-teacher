@@ -27,6 +27,11 @@ const (
 	conversationSpeechModel    = "short"
 	streamingSpeechModel       = "long"
 
+	// Bound only the optional unary attempt, leaving the parent budget for
+	// streaming fallback. This is an operational guard, not a measured optimum
+	// or a first-audio guarantee; the provider must honor context cancellation.
+	directPCMAttemptTimeout = 500 * time.Millisecond
+
 	// StreamingAudioContentType describes the raw audio bytes returned by
 	// StreamSynthesize. The stream has no container or file header.
 	StreamingAudioContentType = "audio/L16"
@@ -732,13 +737,22 @@ func (s *CloudService) streamSynthesizeUncached(
 		s.synthesizePCMCall != nil &&
 		s.directPCMCircuit.begin() {
 		started := time.Now()
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, directPCMAttemptTimeout)
 		response, directErr := s.synthesizePCMCall(
-			ctx,
+			attemptCtx,
 			directPCMSynthesizeRequest(text, s.voiceName),
 		)
+		// Snapshot before canceling: successful calls must not become failures
+		// when their attempt timer is released. Late success after the attempt
+		// deadline is never delivered or cached, even if the provider returns nil.
+		attemptErr := attemptCtx.Err()
+		cancelAttempt()
 		if err := ctx.Err(); err != nil {
 			s.directPCMCircuit.canceled()
 			return "", fmt.Errorf("direct PCM speech synthesis canceled: %w", err)
+		}
+		if attemptErr != nil {
+			directErr = attemptErr
 		}
 		if directErr == nil &&
 			response != nil &&

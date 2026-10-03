@@ -503,6 +503,16 @@ func (s *Server) finishVoiceLiveLease(
 
 func (s *Server) voiceLive(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
+	// Register before every connection/lease cleanup. A completed response must
+	// release its provider and UID ownership before a slow log sink can block.
+	// Keep the existing cleanup order: in particular, the old prepared-session
+	// cleanup must run before another turn can acquire this UID's lease.
+	var logCompletedSession func()
+	defer func() {
+		if logCompletedSession != nil {
+			logCompletedSession()
+		}
+	}()
 	origins := r.Header.Values("Origin")
 	if len(origins) != 1 || origins[0] != allowedWebOrigin {
 		writeProblem(w, http.StatusForbidden, "cross_site_request", "Cross-site requests are not allowed.")
@@ -1610,21 +1620,30 @@ outcomeReady:
 	if start.LatencyProofVersion != nil {
 		connectionOpen = waitForVoiceLiveLatencyProof(liveCtx, outputMetrics, proofChannel, disconnectChannel)
 	}
-	// Final was delivered successfully. A disconnect during optional telemetry
-	// must not erase its completion record or the post-response work above.
-	s.logVoiceLiveSession(
-		liveCtx,
-		started,
-		authReadyMS,
-		firstInputAt,
-		commitAt,
-		inputFrames,
-		inputBytes,
-		outputMetrics,
-		outcome.result.LiveTimings,
-		false,
-		outcome.result,
-	)
+	// Preserve the existing telemetry boundary after optional proof collection:
+	// total_ms must not include the close handshake or lease-store cleanup.
+	// Final was delivered successfully, so a disconnect cannot erase this one
+	// completion record. Emit it synchronously, but only after all cleanup.
+	completedAt := time.Now()
+	// Reject late provider stage callbacks at the old log-snapshot boundary,
+	// even though the immutable completed-turn counters are logged later.
+	outputMetrics.closeNativeWaterfall()
+	logCompletedSession = func() {
+		s.logVoiceLiveSessionAt(
+			liveCtx,
+			started,
+			completedAt,
+			authReadyMS,
+			firstInputAt,
+			commitAt,
+			inputFrames,
+			inputBytes,
+			outputMetrics,
+			outcome.result.LiveTimings,
+			false,
+			outcome.result,
+		)
+	}
 	if !connectionOpen {
 		cancelLive()
 		return
@@ -1916,6 +1935,26 @@ func (s *Server) logVoiceLiveSession(
 	cancelled bool,
 	results ...VoiceTurnResult,
 ) {
+	s.logVoiceLiveSessionAt(
+		ctx, started, time.Now(), authReadyMS, firstInputAt, commitAt,
+		inputFrames, inputBytes, outputMetrics, timings, cancelled, results...,
+	)
+}
+
+func (s *Server) logVoiceLiveSessionAt(
+	ctx context.Context,
+	started time.Time,
+	completedAt time.Time,
+	authReadyMS int64,
+	firstInputAt time.Time,
+	commitAt time.Time,
+	inputFrames int,
+	inputBytes int,
+	outputMetrics *voiceLiveOutputMetrics,
+	timings VoiceLiveTimings,
+	cancelled bool,
+	results ...VoiceTurnResult,
+) {
 	route := "unknown"
 	coachActive := false
 	if len(results) > 0 {
@@ -2007,7 +2046,7 @@ func (s *Server) logVoiceLiveSession(
 		"latency_proof_uncertainty_ms", latencyProofUncertaintyMS,
 		"speech_end_to_estimated_audible_ms", speechEndToEstimatedAudibleMS,
 		"speech_end_to_estimated_audible_slo", latencySLO,
-		"total_ms", finiteLatency(time.Since(started).Milliseconds()),
+		"total_ms", finiteLatency(completedAt.Sub(started).Milliseconds()),
 		"input_frames", inputFrames,
 		"input_bytes", inputBytes,
 		"output_frames", outputFrames,

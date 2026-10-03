@@ -143,6 +143,7 @@ func exerciseVoiceLiveProofCompletion(t *testing.T, strict, disconnectAfterFinal
 	// A browser cannot prove audible output before receiving PCM. Waiting for
 	// final as well also proves that optional telemetry does not hold final.
 	var writeErr error
+	var terminalErr error
 	wantProof := int64(760)
 	if disconnectAfterFinal {
 		wantProof = -1
@@ -165,6 +166,9 @@ func exerciseVoiceLiveProofCompletion(t *testing.T, strict, disconnectAfterFinal
 			t.Fatal(err)
 		}
 		writeErr = conn.Write(ctx, websocket.MessageText, proof)
+		// Consume the close handshake before awaiting the completion log. A
+		// browser acknowledges close automatically; this client does so in Read.
+		_, _, terminalErr = conn.Read(ctx)
 	}
 	select {
 	case record := <-completed:
@@ -200,9 +204,8 @@ func exerciseVoiceLiveProofCompletion(t *testing.T, strict, disconnectAfterFinal
 	if disconnectAfterFinal {
 		return
 	}
-	_, _, err = conn.Read(ctx)
-	if websocket.CloseStatus(err) != websocket.StatusNormalClosure {
-		t.Fatalf("terminal error=%v", err)
+	if websocket.CloseStatus(terminalErr) != websocket.StatusNormalClosure {
+		t.Fatalf("terminal error=%v", terminalErr)
 	}
 }
 

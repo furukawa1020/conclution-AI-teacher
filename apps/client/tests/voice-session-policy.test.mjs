@@ -1976,6 +1976,88 @@ test("sustained Thinking speech cancels the pending response and owns the foregr
   await assert.rejects(playback.completion, /voice_interrupted/u);
 });
 
+test("HTTP stream errors reject before EOF or reader cancellation settles", async (t) => {
+  for (const code of ["voice_turn_timeout", "voice_turn_unavailable"]) {
+    await t.test(code, async (t) => {
+      const { runtime } = await createExecutablePlaybackHarness();
+      const playback = runtime.createStreamingPlayback(1, false, "http");
+      const reader = new ControlledVoiceReader();
+      const cancellation = deferred();
+      let cancellationSettled = false;
+      const cancellationCompletion = cancellation.promise.then(() => {
+        cancellationSettled = true;
+      });
+      reader.cancel = (error) => {
+        reader.cancelledWith = error;
+        // Neither EOF nor cancellation completion is available to the consumer.
+        return cancellationCompletion;
+      };
+      t.after(() => {
+        reader.close();
+        cancellation.resolve();
+      });
+      reader.pushText(
+        streamLine({ type: "ready", version: 1 }) +
+          streamLine({ type: "error", version: 1, code }),
+      );
+      const consume = runtime.consumeVoiceStream(
+        fakeVoiceStreamResponse(reader),
+        playback,
+        1,
+      );
+      let settled = false;
+      void consume.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+      await waitForPlaybackState(() => settled);
+
+      await assert.rejects(consume, { message: code });
+      assert.equal(reader.closed, false, "error rejection must not require EOF");
+      assert.equal(cancellationSettled, false);
+      assert.equal(reader.cancelledWith?.message, code);
+      assert.equal(reader.released, true, "releaseLock must not wait for cancel");
+      assert.equal(reader.pendingRead, undefined);
+      assert.equal(playback.finalReceived, false);
+    });
+  }
+});
+
+test("HTTP stream success still waits for clean EOF after a parsed final", async (t) => {
+  const { runtime } = await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1, false, "http");
+  const reader = new ControlledVoiceReader();
+  t.after(() => reader.close());
+  const expectedFinal = { ...finalVoiceResult(), audioMimeType: "" };
+  reader.pushText(
+    streamLine({ type: "ready", version: 1 }) +
+      streamLine({ type: "final", version: 1, result: expectedFinal }),
+  );
+  const consume = runtime.consumeVoiceStream(
+    fakeVoiceStreamResponse(reader),
+    playback,
+    1,
+  );
+  let settled = false;
+  void consume.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  await waitForPlaybackState(() => playback.finalReceived);
+  await flushPlaybackMicrotasks();
+  assert.equal(settled, false, "a parsed final alone is not terminal success");
+  assert.equal(reader.closed, false);
+  assert.equal(reader.released, false);
+  assert.notEqual(reader.pendingRead, undefined);
+
+  reader.close();
+  const completed = await consume;
+  assert.deepEqual(completed.finalResult, expectedFinal);
+  assert.equal(completed.streamedAudio, false);
+  assert.equal(reader.cancelledWith, undefined);
+  assert.equal(reader.released, true);
+});
+
 test("an all-zero PCM response follows the recoverable no-reply path", async () => {
   const { context, runtime, state } =
     await createExecutablePlaybackHarness({

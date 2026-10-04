@@ -1062,9 +1062,12 @@ func (p *Pipeline) processLive(
 				}
 			}
 		} else if responseExpected {
+			// Without provider endpoint authority the outcome cannot be adopted.
+			// Revoke it now instead of waiting for a model result only to discard
+			// it before running the committed final-caption path below.
 			if speculation == nil {
 				specMiss = 1
-			} else if speculationTextsMatch(
+			} else if hybridFloorCommitted && speculationTextsMatch(
 				speculation.candidate,
 				finalTranscript,
 			) {

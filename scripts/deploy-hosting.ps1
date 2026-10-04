@@ -339,6 +339,159 @@ function Invoke-GcloudJson {
     return @($decoded)
 }
 
+function Get-BrowserAudioFailureCodes {
+    # Exact literals only: a browser_audio_* prefix can still contain secrets.
+    # Unknown future diagnostics remain a generic failure until reviewed here.
+    return @(
+        "browser_audio_argument_invalid", "browser_audio_argument_value_missing",
+        "browser_audio_expected_commit_invalid", "browser_audio_expected_manifest_invalid",
+        "browser_audio_expected_release_incomplete", "browser_audio_artifact_symlink",
+        "browser_audio_artifact_type_invalid", "browser_audio_dist_invalid",
+        "browser_audio_release_manifest_required", "browser_audio_artifact_not_allowed",
+        "browser_audio_artifact_too_large", "browser_audio_artifact_missing",
+        "browser_audio_artifacts_too_large", "browser_audio_release_manifest_too_large",
+        "browser_audio_release_manifest_mismatch", "browser_audio_release_manifest_invalid",
+        "browser_audio_release_commit_mismatch", "browser_audio_release_manifest_incomplete",
+        "browser_audio_release_hash_mismatch", "browser_audio_loopback_server_invalid",
+        "browser_audio_chrome_not_found", "browser_audio_chrome_exited_early",
+        "browser_audio_devtools_timeout", "browser_audio_cdp_command_failed",
+        "browser_audio_cdp_closed", "browser_audio_cdp_connect_failed",
+        "browser_audio_cdp_connect_timeout", "browser_audio_result_read_failed",
+        "browser_audio_runtime_exception", "browser_audio_fixture_timeout",
+        "browser_audio_result_invalid", "browser_audio_process_cleanup_boundary_invalid",
+        "browser_audio_process_cleanup_failed", "browser_audio_profile_cleanup_boundary_invalid",
+        "browser_audio_profile_cleanup_failed", "browser_audio_browser_pid_invalid",
+        "browser_audio_target_create_failed", "browser_audio_target_attach_failed",
+        "browser_audio_cleanup_failed", "browser_audio_result_missing", "browser_audio_gate_failed",
+        "browser_audio_fixture_failed_audio_context_unavailable",
+        "browser_audio_fixture_failed_audio_worklet_unavailable",
+        "browser_audio_fixture_failed_audio_worklet_processor_error",
+        "browser_audio_fixture_failed_browser_runtime_error",
+        "browser_audio_fixture_failed_browser_unhandled_rejection",
+        "browser_audio_fixture_failed_offline_audio_context_unavailable",
+        "browser_audio_fixture_failed_webassembly_compile_unavailable",
+        "browser_audio_fixture_failed_pcm_ring_wasm_compile_failed",
+        "browser_audio_fixture_failed_pcm_ring_wasm_fetch_failed",
+        "browser_audio_fixture_failed_pcm_ring_wasm_mime_invalid",
+        "browser_audio_fixture_failed_client_wasm_fetch_failed",
+        "browser_audio_fixture_failed_client_wasm_mime_invalid",
+        "browser_audio_fixture_failed_sample_rate_invalid",
+        "browser_audio_fixture_failed_confirmed_frames_timeout",
+        "browser_audio_fixture_failed_fresh_generation_frames_timeout",
+        "browser_audio_fixture_failed_same_context_frames_timeout"
+    )
+}
+
+function Invoke-BrowserAudioGateProcess {
+    param(
+        [Parameter(Mandatory)] [string] $NodePath,
+        [Parameter(Mandatory)] [string[]] $CommandArguments
+    )
+
+    $allowedCodes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($code in (Get-BrowserAudioFailureCodes)) { $null = $allowedCodes.Add($code) }
+    $quotedArguments = foreach ($argument in $CommandArguments) {
+        # ProcessStartInfo.ArgumentList is unavailable in Windows PowerShell 5.1.
+        # Quote argv directly; never invoke a shell or interpolate a command.
+        $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
+        '"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"'
+    }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo.FileName = $NodePath
+    $process.StartInfo.Arguments = $quotedArguments -join ' '
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    $stdout = [System.Text.StringBuilder]::new()
+    $stderrLine = [System.Text.StringBuilder]::new()
+    $stdoutBuffer = [char[]]::new(4096)
+    $stderrBuffer = [char[]]::new(4096)
+    $stdoutOverflow = $false
+    $stderrLineOverflow = $false
+    $diagnostic = "browser_audio_gate_failed"
+    $started = $false
+    try {
+        $started = $process.Start()
+        if (-not $started) { throw "browser_audio_gate_failed" }
+        $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+        $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+        while ($null -ne $stdoutRead -or $null -ne $stderrRead) {
+            $reads = @($stdoutRead, $stderrRead | Where-Object { $null -ne $_ })
+            $null = [System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]] $reads)
+            if ($null -ne $stdoutRead -and $stdoutRead.IsCompleted) {
+                $count = $stdoutRead.GetAwaiter().GetResult()
+                if ($count -eq 0) {
+                    $stdoutRead = $null
+                } else {
+                    if ($stdout.Length + $count -gt 65536) { $stdoutOverflow = $true }
+                    if (-not $stdoutOverflow) { $null = $stdout.Append($stdoutBuffer, 0, $count) }
+                    $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+                }
+            }
+            if ($null -ne $stderrRead -and $stderrRead.IsCompleted) {
+                $count = $stderrRead.GetAwaiter().GetResult()
+                # Flush a final unterminated line too, without ReadLine's
+                # unbounded allocation. Long lines are discarded in full.
+                $limit = $count
+                if ($count -eq 0) { $limit = 1 }
+                for ($index = 0; $index -lt $limit; $index++) {
+                    $character = if ($count -eq 0) { [char] 10 } else { $stderrBuffer[$index] }
+                    if ($character -eq [char] 10) {
+                        if (-not $stderrLineOverflow) {
+                            $line = $stderrLine.ToString().TrimEnd([char] 13)
+                            if ($allowedCodes.Contains($line)) { $diagnostic = $line }
+                        }
+                        $null = $stderrLine.Clear()
+                        $stderrLineOverflow = $false
+                    } elseif (-not $stderrLineOverflow) {
+                        if ($stderrLine.Length -eq 192) {
+                            $stderrLineOverflow = $true
+                            $null = $stderrLine.Clear()
+                        } else {
+                            $null = $stderrLine.Append($character)
+                        }
+                    }
+                }
+                if ($count -eq 0) {
+                    $stderrRead = $null
+                } else {
+                    $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+                }
+            }
+        }
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Json = $stdout.ToString()
+            OutputOverflow = $stdoutOverflow
+            Diagnostic = $diagnostic
+        }
+    } catch {
+        # Native exceptions may contain an executable path or environment data.
+        throw "The real-browser AudioWorklet release gate failed: browser_audio_gate_failed."
+    } finally {
+        $cleanupFailed = $false
+        try {
+            if ($started) {
+                if (-not $process.HasExited) { $process.Kill() }
+                $process.WaitForExit()
+            }
+        } catch {
+            $cleanupFailed = $true
+        } finally {
+            try { $process.Dispose() } catch { $cleanupFailed = $true }
+            [System.Array]::Clear($stdoutBuffer, 0, $stdoutBuffer.Length)
+            [System.Array]::Clear($stderrBuffer, 0, $stderrBuffer.Length)
+            $null = $stdout.Clear()
+            $null = $stderrLine.Clear()
+        }
+        if ($cleanupFailed) {
+            throw "The real-browser AudioWorklet release gate failed: browser_audio_gate_failed."
+        }
+    }
+}
+
 function Assert-BrowserAudioGate {
     param(
         [Parameter(Mandatory)]
@@ -358,22 +511,15 @@ function Assert-BrowserAudioGate {
         "--expected-manifest-sha256", $ExpectedManifestSha256
     )
 
-    # Windows PowerShell can surface native stderr as terminating errors. The
-    # browser gate is authoritative through its native exit code and JSON.
-    $previousErrorActionPreference = $ErrorActionPreference
-    $jsonLines = @()
-    $commandExitCode = -1
-    try {
-        $ErrorActionPreference = "Continue"
-        $jsonLines = @(& $node.Source @browserArguments 2>$null)
-        $commandExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $captured = Invoke-BrowserAudioGateProcess -NodePath $node.Source -CommandArguments $browserArguments
+    $commandExitCode = $captured.ExitCode
     if ($commandExitCode -ne 0) {
-        throw "The real-browser AudioWorklet release gate failed."
+        throw "The real-browser AudioWorklet release gate failed: $($captured.Diagnostic)."
     }
-    $jsonText = ($jsonLines -join [System.Environment]::NewLine).Trim()
+    if ($captured.OutputOverflow) {
+        throw "The real-browser AudioWorklet release gate returned oversized JSON."
+    }
+    $jsonText = $captured.Json.Trim()
     if ([string]::IsNullOrWhiteSpace($jsonText)) {
         throw "The real-browser AudioWorklet release gate returned no JSON."
     }

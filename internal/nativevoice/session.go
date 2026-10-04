@@ -332,6 +332,14 @@ func (s *liveSession) Receive(ctx context.Context) (Event, error) {
 	}
 	for {
 		s.queueMu.Lock()
+		// Cancellation owns this receive, not the provider session. Check it
+		// at the dequeue boundary so a ready event (or a simultaneous wakeup)
+		// cannot advance a canceled caller's caption/route work. Leave queued
+		// bytes and caption-delivery authority intact for another caller.
+		if err := ctx.Err(); err != nil {
+			s.queueMu.Unlock()
+			return Event{}, safeContextError("receive", err)
+		}
 		if len(s.ready) > 0 {
 			event := s.ready[0]
 			s.ready[0] = Event{}

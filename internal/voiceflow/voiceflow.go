@@ -520,6 +520,26 @@ func (p *Pipeline) processLive(
 			httpapi.VoicePipelineStageTranscribe,
 		)
 	}
+	responseExpected := voiceResponseExpected(input)
+	// A speculative agent run must never share a PDF byte slice with a normal
+	// fallback. The current live protocol has no document frame, but keep this
+	// boundary explicit so a future protocol extension cannot accidentally
+	// race the agent's mandatory document wipe.
+	speculationEligible := responseExpected && input.Document == nil &&
+		!input.StrictCloudMinimization
+	// Both provider handshakes are independent. Start only the content-free
+	// TTS configuration before opening STT, whose connection/configuration may
+	// block. No transcript, model decision, reply text, or PCM moves earlier.
+	// A failed recognizer still reclaims this preparation through the defer;
+	// the response path never waits for an unfinished configuration.
+	synthesisPreparation := (*speculativeSynthesisPreparation)(nil)
+	if speculationEligible && ctx != nil && ctx.Err() == nil {
+		synthesisPreparation = startSpeculativeSynthesisPreparation(
+			ctx,
+			streamingSpeech,
+		)
+		defer synthesisPreparation.close()
+	}
 	var firstOutputMu sync.Mutex
 	firstOutputAt := time.Time{}
 	outputDelivered := false
@@ -672,26 +692,6 @@ func (p *Pipeline) processLive(
 		}
 	}()
 
-	responseExpected := voiceResponseExpected(input)
-	// A speculative agent run must never share a PDF byte slice with a normal
-	// fallback. The current live protocol has no document frame, but keep this
-	// boundary explicit so a future protocol extension cannot accidentally
-	// race the agent's mandatory document wipe.
-	speculationEligible := responseExpected && input.Document == nil &&
-		!input.StrictCloudMinimization
-	// Open only the content-free TTS configuration stream while the person is
-	// still speaking. Stable transcript text and reply text remain unavailable
-	// to this capability until the existing speculative decision boundary.
-	// This moves provider setup off the speech-end critical path without
-	// publishing or even preparing user-derived PCM early.
-	synthesisPreparation := (*speculativeSynthesisPreparation)(nil)
-	if speculationEligible {
-		synthesisPreparation = startSpeculativeSynthesisPreparation(
-			ctx,
-			streamingSpeech,
-		)
-		defer synthesisPreparation.close()
-	}
 	finalFragments := make([]string, 0, 4)
 	finalConfidence := float32(0)
 	finalConfidenceObserved := false

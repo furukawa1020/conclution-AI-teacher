@@ -1728,6 +1728,9 @@ func TestPipelineLiveExactFinalWithoutProviderSpeechEndCannotAdoptSpeculation(
 		normalResult:      normal,
 		started:           make(chan struct{}),
 	}
+	// Ensure there is an in-flight model before testing its rejection. The
+	// committed path no longer joins an ineligible speculative outcome.
+	session.eventGates = map[int]<-chan struct{}{2: agent.started}
 	pipeline, err := New(speech, agent)
 	if err != nil {
 		t.Fatal(err)

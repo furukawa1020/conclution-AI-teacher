@@ -1462,7 +1462,7 @@ test("reviewed Native failure transfers quiet Rust PCM once before cancelling", 
   const finish = bridge.slice(start, end);
 
   const takeAt = finish.indexOf(
-    "quietHttpAudioBuffer = await liveSession.takeHttpFallback()",
+    "const quietFallbackPromise = liveSession.takeHttpFallback()",
   );
   const cancelAt = finish.indexOf("liveSession.cancel(", takeAt);
   assert.ok(takeAt >= 0);

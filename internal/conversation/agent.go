@@ -1489,7 +1489,13 @@ func (agent *vertexAgent) process(
 		}
 	} else if !verificationUnavailable {
 		criticPolicy := criticPolicyFor(normalized, finalPlan, route)
-		if !contextHasTimeBudget(
+		if err := ctx.Err(); err != nil {
+			return VoiceTurnResult{}, err
+		}
+		readyAssessment, readyAudit := readySpeculativeAudit(
+			ctx, earlyAudit, normalized, finalPlan, route, criticPolicy,
+		)
+		if !readyAudit && !contextHasTimeBudget(
 			ctx,
 			criticPolicy.timeout+voiceResponseReserve,
 		) {
@@ -1524,7 +1530,10 @@ func (agent *vertexAgent) process(
 			var assessment answercontract.Assessment
 			var criticErr error
 			criticRetried := false
-			if criticOverlapped {
+			if readyAudit {
+				assessment = readyAssessment
+				earlyAudit.cancel()
+			} else if criticOverlapped {
 				assessment, criticErr = awaitSpeculativeAudit(ctx, earlyAudit)
 			} else {
 				if earlyAudit != nil {
@@ -3856,6 +3865,37 @@ func canConsumeSpeculativeAudit(
 		audit.candidate.RespondentStage == plan.RespondentStage &&
 		audit.candidate.AnswerAttempt == plan.AnswerAttempt &&
 		audit.candidate.SpokenReply == plan.SpokenReply
+}
+
+// A successful, completed audit needs no budget for another critic call. Keep
+// the same candidate/policy boundary and the full voice response reserve. This
+// probe never joins unfinished work or consumes the result needed by another
+// reader; non-Keep assessments still go through the ordinary decision logic.
+func readySpeculativeAudit(
+	ctx context.Context,
+	audit *speculativeAudit,
+	turn VoiceTurn,
+	plan modelPlan,
+	route string,
+	policy criticPolicy,
+) (answercontract.Assessment, bool) {
+	if ctx == nil || ctx.Err() != nil ||
+		!canConsumeSpeculativeAudit(audit, turn, plan, route, policy) {
+		return answercontract.Assessment{}, false
+	}
+	select {
+	case <-audit.done:
+	default:
+		return answercontract.Assessment{}, false
+	}
+	audit.mu.Lock()
+	result := audit.result
+	audit.mu.Unlock()
+	if result.err != nil || ctx.Err() != nil ||
+		!contextHasTimeBudget(ctx, voiceResponseReserve) {
+		return answercontract.Assessment{}, false
+	}
+	return result.assessment, true
 }
 
 func awaitSpeculativeAudit(

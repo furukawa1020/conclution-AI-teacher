@@ -4242,6 +4242,7 @@ async function startVoiceLiveSession({
   let captureSealResolve;
   let captureSealTimer;
   let captureSealing = false;
+  let quietFallbackTransfer;
   let authReadyMs = preflightAuthReadyMs;
   let authReadyTimer;
   let commitAt;
@@ -4315,6 +4316,7 @@ async function startVoiceLiveSession({
   ) {
     if (captureStopped || (preserveQuietFallback && captureSealed &&
       quietHttpFallbackEligible && captureNode)) return;
+    quietFallbackTransfer?.cancel(error);
     captureStopped = true;
     if (guestComparisonTurnSerial > 0 && !guestComparisonTurnFinished) {
       guestVoiceComparison.clear();
@@ -4418,18 +4420,63 @@ async function startVoiceLiveSession({
     ) {
       return undefined;
     }
+    if (quietFallbackTransfer) {
+      throw new Error("voice_api_unavailable");
+    }
     const chunks = [];
     const baselineChunks = [];
     const weakChunks = [];
     let expectedSequence = 0;
     let receivedFrames = 0;
     let timer;
+    let transferSettled = false;
+    let transferError;
+    let transferPayload;
+    let rejectTransfer;
+    function clearTransferBuffers() {
+      for (const chunk of chunks) zeroizeCaptureFrame(chunk);
+      for (const chunk of baselineChunks) zeroizeCaptureFrame(chunk);
+      for (const chunk of weakChunks) zeroizeCaptureFrame(chunk);
+    }
+    const transfer = Object.freeze({
+      cancel(error) {
+        if (quietFallbackTransfer !== transfer) return;
+        transferError ??= error;
+        const pending = !transferSettled;
+        transferSettled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        captureNode.port.onmessage = discardCaptureMessage;
+        clearTransferBuffers();
+        // A seal may already have resolved the inner promise, while its
+        // continuation has not handed the assembled payload to the caller.
+        zeroizeCaptureFrame(transferPayload?.baseline);
+        zeroizeCaptureFrame(transferPayload?.enhanced);
+        zeroizeCaptureFrame(transferPayload?.weak);
+        if (pending) rejectTransfer?.(transferError);
+      },
+    });
+    quietFallbackTransfer = transfer;
     const result = new Promise((resolve, reject) => {
+      rejectTransfer = reject;
+      function settle(error, payload) {
+        if (transferSettled) return;
+        transferSettled = true;
+        if (error) {
+          reject(error);
+        } else {
+          transferPayload = payload;
+          resolve(payload);
+        }
+      }
       timer = setTimeout(
-        () => reject(new Error("voice_api_unavailable")),
+        () => settle(new Error("voice_api_unavailable")),
         QUIET_HTTP_FALLBACK_TIMEOUT_MS,
       );
       captureNode.port.onmessage = (event) => {
+        if (transferSettled || quietFallbackTransfer !== transfer) {
+          discardCaptureMessage(event);
+          return;
+        }
         const message = event?.data;
         try {
           if (message?.type === "fallback-frame") {
@@ -4482,12 +4529,12 @@ async function startVoiceLiveSession({
             zeroizeCaptureFrame(baseline);
             throw error;
           }
-          resolve(Object.freeze({ baseline, enhanced, weak }));
+          settle(undefined, Object.freeze({ baseline, enhanced, weak }));
         } catch (error) {
           zeroizeCaptureFrame(message?.pcm);
           zeroizeCaptureFrame(message?.baselinePcm);
           zeroizeCaptureFrame(message?.weakPcm);
-          reject(error);
+          settle(error);
         }
       };
       try {
@@ -4497,16 +4544,20 @@ async function startVoiceLiveSession({
           version: 1,
         }));
       } catch {
-        reject(new Error("voice_api_unavailable"));
+        settle(new Error("voice_api_unavailable"));
       }
     });
     try {
-      return await result;
+      const payload = await result;
+      if (transferError) throw transferError;
+      return payload;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
-      for (const chunk of chunks) zeroizeCaptureFrame(chunk);
-      for (const chunk of baselineChunks) zeroizeCaptureFrame(chunk);
-      for (const chunk of weakChunks) zeroizeCaptureFrame(chunk);
+      clearTransferBuffers();
+      if (quietFallbackTransfer === transfer) {
+        quietFallbackTransfer = undefined;
+      }
+      transferPayload = undefined;
       captureStopped = true;
       captureNode.port.onmessage = discardCaptureMessage;
       try {
@@ -5003,6 +5054,9 @@ async function startVoiceLiveSession({
     },
     cancel(error = new Error("request_cancelled")) {
       clearSlowReplayCandidateTimer();
+      // Native failure can preserve sealed PCM for HTTP even after the live
+      // transport is terminal. Cancellation still owns that pending transfer.
+      stopCapture(error);
       if (
         state === "cancelled" ||
         state === "failed" ||
@@ -5012,7 +5066,6 @@ async function startVoiceLiveSession({
       }
       state = "cancelled";
       clientTransport.close();
-      stopCapture(error);
       settleReady(error);
       settleResult(error);
       closeSocket(4001, "cancelled");
@@ -7663,7 +7716,26 @@ async function finishTurn(
         coachActive =
           coachActive ||
           liveSession.requiresStatefulHTTPFallback();
-        quietHttpAudioBuffer = await liveSession.takeHttpFallback();
+        const quietFallbackPromise = liveSession.takeHttpFallback().then((buffer) => {
+          if (turnTimedOut || voiceStartTimedOut || expectedEpoch !== sessionEpoch) {
+            zeroizeCaptureFrame(buffer?.baseline);
+            zeroizeCaptureFrame(buffer?.enhanced);
+            zeroizeCaptureFrame(buffer?.weak);
+            if (expectedEpoch !== sessionEpoch) {
+              throw new Error(stoppedSessionCode(expectedEpoch));
+            }
+            return;
+          }
+          // Own a successful payload before entering the deadline race. If
+          // cancellation wins its next microtask, the outer finally wipes it;
+          // a payload arriving after cancellation is wiped above instead.
+          quietHttpAudioBuffer = buffer;
+        });
+        void quietFallbackPromise.catch(() => {});
+        await awaitVoiceTurnResult(
+          quietFallbackPromise,
+          () => liveSession.cancel(new Error("voice_turn_timeout")),
+        );
         liveSession.cancel(
           error instanceof Error
             ? error

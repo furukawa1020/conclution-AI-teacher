@@ -241,6 +241,31 @@ test("the existing speech-end deadline still cancels pending auth and clears PCM
   assert.equal(f.posts.length, 0);
 });
 
+for (const arrival of ["after-timeout", "same-turn-as-timeout", "owned-before-timeout"]) {
+  test(`the speech-end deadline cancels a pending quiet transfer and wipes PCM arriving ${arrival}`, async () => {
+    const f = await fixture();
+    const gate = deferred();
+    f.context.activeLiveSession.takeHttpFallback = () => gate.promise;
+    let failure;
+    const pending = f.start().catch((error) => { failure = error.message; });
+    await flush();
+    if (arrival !== "after-timeout") gate.resolve(f.pcm);
+    if (arrival === "owned-before-timeout") await Promise.resolve();
+    const [timer, callback] = [...f.timers.entries()][0];
+    f.timers.delete(timer);
+    callback();
+    await flush();
+    assert.equal(failure, "voice_turn_timeout");
+    assert.ok(f.events.includes("live-cancel"));
+    if (arrival === "after-timeout") gate.resolve(f.pcm);
+    await flush();
+    await pending;
+    assertCleared(f.pcm);
+    assert.equal(f.posts.length, 0);
+    assert.equal(f.timers.size, 0);
+  });
+}
+
 test("credentials arriving after an epoch change cannot upload the old PCM or revoke the new owner", async () => {
   const f = await fixture({ credentials: false });
   const pending = f.start();

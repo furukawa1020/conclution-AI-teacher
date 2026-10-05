@@ -877,12 +877,18 @@ func (p *Pipeline) processLive(
 			}
 		}
 	}
+	if receiveErr != nil {
+		// A terminal receive failure cannot produce a committed response. Wake
+		// an idle or blocked sender before joining it; the session may cancel
+		// only its own child context. Normal EOF still waits for input commit.
+		cancelTranscription(receiveErr)
+	}
 	sendResult := <-sendDone
 	hybridFloorCommitted := sendResult.committed && providerSpeechEndPending
 	processingBudget := liveProcessingBudget{
 		reserveTimer: sendResult.reserveTimer,
 	}
-	if sendResult.committed && input.ProcessingTimeout > 0 {
+	if receiveErr == nil && sendResult.committed && input.ProcessingTimeout > 0 {
 		if input.ProcessingDeadline != nil {
 			select {
 			case processingBudget = <-processingBudgetReady:

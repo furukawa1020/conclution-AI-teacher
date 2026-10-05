@@ -387,6 +387,16 @@ func (s *Service) processLive(
 		}
 		return missingTimingResult, httpapi.ErrVoiceNativeFallback
 	}
+	if requiresStaged {
+		// A handoff may now prepare while Native setup is still pending. Its
+		// lifetime follows both the request and service shutdown, including an
+		// opening session that has not yet been installed in the pool.
+		stagedCtx, cancelStaged := context.WithCancel(ctx)
+		stopServiceCancellation := context.AfterFunc(s.ctx, cancelStaged)
+		defer stopServiceCancellation()
+		defer cancelStaged()
+		ctx = stagedCtx
+	}
 
 	conversationContext := ""
 	if s.continuity != nil && !requiresStaged {
@@ -398,39 +408,8 @@ func (s *Service) processLive(
 			return httpapi.VoiceTurnResult{}, httpapi.ErrVoiceStateInvalid
 		}
 	}
-	pooled, err := s.acquire(ctx, uid, conversationContext)
-	if err != nil {
-		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
-	}
-	healthy := false
-	defer func() {
-		s.release(uid, pooled, healthy)
-	}()
-
-	started := s.now()
-	if err := pooled.session.StartActivity(ctx); err != nil {
-		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
-	}
-	// Opener.Open returns only after the provider's SetupComplete frame. Do not
-	// let the browser capture a byte until both that boundary and this turn's
-	// StartActivity write have succeeded. Re-check cancellation because a test
-	// or alternate provider may return success concurrently with cancellation.
-	if ctx.Err() != nil || s.ctx.Err() != nil {
-		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
-	}
-	publishNativeInputReady(&input)
-
+	var started time.Time
 	sendDone := make(chan streamInputResult, 1)
-	go streamInput(
-		ctx,
-		pooled.session,
-		audio,
-		input.ProcessingCommittedAt,
-		input.OnNativeWaterfall,
-		s.now,
-		sendDone,
-	)
-
 	var caption []byte
 	var inputCaption []byte
 	var continuityInput []byte
@@ -496,11 +475,14 @@ func (s *Service) processLive(
 		return nil
 	}
 	var stagedHandoff httpapi.VoiceCaptionHandoff
+	var pooled *pooledSession
+	healthy := false
 	var respondentCheckpointAuthorized atomic.Bool
 	defer func() {
 		if stagedHandoff != nil {
 			stagedHandoff.Cancel()
 		}
+		s.release(uid, pooled, healthy)
 	}()
 	openStagedHandoff := func() error {
 		if stagedHandoff != nil {
@@ -537,19 +519,39 @@ func (s *Service) processLive(
 		stagedHandoff = opened
 		return nil
 	}
+	var onAcquired func() error
 	if requiresStaged {
-		// Authenticated state already requires the staged path. Open its
-		// content-free TTS preparation while input is still arriving instead of
-		// waiting for the first (possibly final-only) caption. Observe, model
-		// work, checkpoint authority, and PCM publication keep their existing
-		// caption/commit boundaries below. Ordinary Native remains lazy.
-		if err := openStagedHandoff(); err != nil {
-			pooled.session.DiscardOutput()
-			// No caption or transport commit has been validated. Do not advertise
-			// this early failure as a committed-turn fallback capability.
-			return nativeFailureResult(), errNativeFlowUnavailable
-		}
+		// Only an admitted, authenticated staged turn overlaps content-free
+		// TTS configuration with Native setup and StartActivity. No caption,
+		// model work, checkpoint, or PCM moves before its existing boundary.
+		onAcquired = openStagedHandoff
 	}
+	pooled, err = s.acquire(ctx, uid, conversationContext, onAcquired)
+	if err != nil {
+		// Setup and preparation errors are not committed-turn fallback authority.
+		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+	}
+	started = s.now()
+	if err := pooled.session.StartActivity(ctx); err != nil {
+		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+	}
+	// Opener.Open returns only after the provider's SetupComplete frame. Do not
+	// let the browser capture a byte until both that boundary and this turn's
+	// StartActivity write have succeeded. Re-check cancellation because a test
+	// or alternate provider may return success concurrently with cancellation.
+	if ctx.Err() != nil || s.ctx.Err() != nil {
+		return httpapi.VoiceTurnResult{}, errNativeFlowUnavailable
+	}
+	publishNativeInputReady(&input)
+	go streamInput(
+		ctx,
+		pooled.session,
+		audio,
+		input.ProcessingCommittedAt,
+		input.OnNativeWaterfall,
+		s.now,
+		sendDone,
+	)
 	for !turnComplete {
 		event, receiveErr := pooled.session.Receive(ctx)
 		if receiveErr != nil {
@@ -1124,11 +1126,31 @@ func (s *Service) acquire(
 	ctx context.Context,
 	uid string,
 	conversationContext string,
+	onAcquired func() error,
 ) (*pooledSession, error) {
 	if ctx == nil || uid == "" || ctx.Err() != nil || s.ctx.Err() != nil {
 		return nil, errNativeFlowUnavailable
 	}
 	var retired *pooledSession
+	prepare := func(pooled *pooledSession) error {
+		completed := false
+		defer func() {
+			// A failing or panicking external hook cannot strand its new lease.
+			if !completed {
+				s.release(uid, pooled, false)
+			}
+		}()
+		if ctx.Err() != nil || s.ctx.Err() != nil {
+			return errNativeFlowUnavailable
+		}
+		if onAcquired != nil {
+			if err := onAcquired(); err != nil {
+				return err
+			}
+		}
+		completed = true
+		return nil
+	}
 	s.mu.Lock()
 	if existing := s.sessions[uid]; existing != nil {
 		if existing.prepared && existing.session != nil &&
@@ -1140,6 +1162,9 @@ func (s *Service) acquire(
 				existing.timer = nil
 			}
 			s.mu.Unlock()
+			if err := prepare(existing); err != nil {
+				return nil, errNativeFlowUnavailable
+			}
 			return existing, nil
 		}
 		if !existing.prepared {
@@ -1158,6 +1183,10 @@ func (s *Service) acquire(
 	s.sessions[uid] = pooled
 	s.mu.Unlock()
 	closePooledSession(retired, false)
+	// Run external preparation only after admission and outside the pool lock.
+	if err := prepare(pooled); err != nil {
+		return nil, errNativeFlowUnavailable
+	}
 
 	var session nativevoice.Session
 	var err error

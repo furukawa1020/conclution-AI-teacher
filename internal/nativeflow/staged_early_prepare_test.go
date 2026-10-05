@@ -214,7 +214,8 @@ func TestNativeKnownStagedOpenFailureDoesNotWaitForCaption(t *testing.T) {
 				defer cancel()
 				session := &earlyCaptionSession{scriptedSession: newScriptedSession(), captionReady: make(chan struct{})}
 				handoff := &recordingCaptionHandoffService{openErr: failure}
-				service, err := NewWithCaptionHandoff(&fakeOpener{session: session}, fakePreparer{requiresStaged: true}, handoff)
+				opener := &fakeOpener{session: session}
+				service, err := NewWithCaptionHandoff(opener, fakePreparer{requiresStaged: true}, handoff)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -244,8 +245,8 @@ func TestNativeKnownStagedOpenFailureDoesNotWaitForCaption(t *testing.T) {
 				session.mu.Lock()
 				closed, committed := session.closes, session.commits
 				session.mu.Unlock()
-				if closed != 1 || committed != 0 {
-					t.Fatalf("native close=%d commit=%d", closed, committed)
+				if opener.opens != 0 || closed != 0 || committed != 0 || len(service.sessions) != 0 {
+					t.Fatalf("native opens=%d close=%d commit=%d leases=%d", opener.opens, closed, committed, len(service.sessions))
 				}
 			})
 		})

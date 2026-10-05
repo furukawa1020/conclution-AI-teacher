@@ -1350,8 +1350,9 @@ func TestNativeFlowFailsClosedWhenCaptionHandoffOpensNil(t *testing.T) {
 		CaptionFinal: true,
 	})
 	handoffService := &orderedCaptionHandoffService{returnNil: true}
+	opener := &fakeOpener{session: session}
 	service, err := NewWithCaptionHandoff(
-		&fakeOpener{session: session},
+		opener,
 		fakePreparer{requiresStaged: true},
 		handoffService,
 	)
@@ -1376,15 +1377,19 @@ func TestNativeFlowFailsClosedWhenCaptionHandoffOpensNil(t *testing.T) {
 	opens, _ := handoffService.snapshot()
 	if err == nil || errors.Is(err, httpapi.ErrVoiceNativeFallback) ||
 		opens != 1 || audioCalls != 0 || checkpointCalls != 0 ||
-		session.commits != 0 || session.discards == 0 {
+		session.commits != 0 || session.discards != 0 || opener.opens != 0 ||
+		session.closes != 0 || len(service.sessions) != 0 {
 		t.Fatalf(
-			"err=%v opens=%d audio=%d checkpoint=%d commits=%d discards=%d",
+			"err=%v opens=%d audio=%d checkpoint=%d commits=%d discards=%d native_opens=%d closes=%d leases=%d",
 			err,
 			opens,
 			audioCalls,
 			checkpointCalls,
 			session.commits,
 			session.discards,
+			opener.opens,
+			session.closes,
+			len(service.sessions),
 		)
 	}
 }

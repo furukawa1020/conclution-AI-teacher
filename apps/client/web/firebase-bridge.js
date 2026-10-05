@@ -7683,22 +7683,6 @@ async function finishTurn(
       }
     }
     finishPhase = `fallback_capture`;
-    capture = await awaitVoiceTurnResult(
-      recording.endPromise,
-      () => rejectRecording(recording, "voice_turn_timeout"),
-    );
-    if (!capture.hasSpeech) {
-      fail("no_speech");
-    }
-    if (!quietHttpAudioBuffer && capture.blob.size > AUDIO_MAX_BYTES) {
-      fail("voice_turn_too_large");
-    }
-    if (!quietHttpAudioBuffer && capture.fallbackAudioComplete !== true) {
-      // Never upload an empty suffix or prefix after the bounded recorder
-      // fallback was invalidated. The live primary already had its chance to
-      // finish above; a failed primary now ends explicitly.
-      fail("voice_turn_too_large");
-    }
     usesQuietHttpPcm =
       quietHttpAudioBuffer !== null &&
       typeof quietHttpAudioBuffer === "object" &&
@@ -7714,6 +7698,44 @@ async function finishTurn(
         quietHttpAudioBuffer.enhanced.byteLength;
     if (quietHttpAudioBuffer && !usesQuietHttpPcm) {
       fail("voice_api_unavailable");
+    }
+    if (usesQuietHttpPcm) {
+      if (expectedEpoch !== sessionEpoch) {
+        fail(stoppedSessionCode(expectedEpoch));
+      }
+      // The positive endpoint was checked above, but recorder.stop can fail
+      // immediately after publishing it. Never revive an already rejected turn.
+      if (recording.discard) {
+        fail(recording.stopReason === "too-large"
+          ? "voice_turn_too_large"
+          : "voice_turn_invalid");
+      }
+      if (!recording.settled) {
+        // Complete, sealed worklet PCM owns this upload. Retire the unused
+        // Blob candidate so delayed recorder tasks cannot erase credentials,
+        // session context, or the next microphone owner's state.
+        if (!discardCurrentCandidate(recording, "pcm-fallback-selected")) {
+          fail("voice_turn_invalid");
+        }
+        resolveRecording(recording, undefined);
+      }
+    } else {
+      capture = await awaitVoiceTurnResult(
+        recording.endPromise,
+        () => rejectRecording(recording, "voice_turn_timeout"),
+      );
+      if (!capture.hasSpeech) {
+        fail("no_speech");
+      }
+      if (capture.blob.size > AUDIO_MAX_BYTES) {
+        fail("voice_turn_too_large");
+      }
+      if (capture.fallbackAudioComplete !== true) {
+        // Never upload an empty suffix or prefix after the bounded recorder
+        // fallback was invalidated. The live primary already had its chance to
+        // finish above; a failed primary now ends explicitly.
+        fail("voice_turn_too_large");
+      }
     }
     finishPhase = `fallback_encode`;
     const turnCredentials = sameTurnCredentials(
@@ -7953,6 +7975,12 @@ async function finishTurn(
     }
     finishGate.release(finishToken);
     audioBase64 = "";
+    baselineAudioBase64 = "";
+    weakAudioBase64 = "";
+    zeroizeCaptureFrame(quietHttpAudioBuffer?.baseline);
+    zeroizeCaptureFrame(quietHttpAudioBuffer?.enhanced);
+    zeroizeCaptureFrame(quietHttpAudioBuffer?.weak);
+    quietHttpAudioBuffer = undefined;
     recording.sessionContext = undefined;
     recording.turnCredentials = undefined;
     if (activeRequestController === requestController) {

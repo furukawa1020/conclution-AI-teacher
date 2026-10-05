@@ -36,6 +36,7 @@ import {
   shouldShowVoiceReceipt,
   shouldStopSessionForLifecycle,
   turnModeForGestureEpoch,
+  zeroizeCaptureFrame,
   QUIET_EVIDENCE_FLAGS,
   VOICE_RECEIPT_LIMITS,
   VOICE_SESSION_LIMITS,
@@ -9095,6 +9096,7 @@ const shouldAbortPlaybackTransportOnInterrupt = () => false;
 const beginSession = () => {};
 const secureCredentials = async () => { throw new Error("unexpected_fallback"); };
 const arrayBufferToBase64 = () => { throw new Error("unexpected_fallback"); };
+const zeroizeCaptureFrame = dependencies.zeroizeCaptureFrame;
 const fetch = () => { throw new Error("unexpected_fallback"); };
 const VOICE_ENDPOINT = "https://invalid.example";
 const consumeVoiceStream = async () => { throw new Error("unexpected_fallback"); };
@@ -9106,6 +9108,7 @@ return Object.freeze({
 });`,
   )({
     createStreamingPlayback: () => ({ interrupted: false }),
+    zeroizeCaptureFrame,
     finishGate: {
       acquire: () => 1,
       isBusy: () => false,

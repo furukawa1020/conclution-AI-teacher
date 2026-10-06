@@ -471,6 +471,8 @@ func (s *CloudService) TranscribePairedPCM16(
 	}
 	results := make([]outcome, 3)
 	inputs := [][]byte{baseline, weak, enhanced}
+	recognitionCtx, cancelRecognition := context.WithCancel(ctx)
+	defer cancelRecognition()
 	var group sync.WaitGroup
 	group.Add(len(inputs))
 	for index := range inputs {
@@ -478,7 +480,12 @@ func (s *CloudService) TranscribePairedPCM16(
 		go func() {
 			defer group.Done()
 			results[index].text, results[index].confidence, results[index].err =
-				s.TranscribePCM16(ctx, inputs[index])
+				s.TranscribePCM16(recognitionCtx, inputs[index])
+			if err := results[index].err; err != nil && !errors.Is(err, ErrNoSpeech) {
+				// Any provider failure already invalidates the three-view result.
+				// Stop its peers, but still join every caller-owned PCM reader below.
+				cancelRecognition()
+			}
 		}()
 	}
 	group.Wait()

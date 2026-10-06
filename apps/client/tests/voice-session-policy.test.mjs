@@ -1358,13 +1358,23 @@ test("Native strong ready owns Listening and PCM capture", async () => {
   );
   assert.match(
     live,
-    /if \(nativeAudio\) \{\s*clientTransport\.openPreflight\(expectedEpoch \+ 1\);\s*preflightState = "awaiting-preflight-ready";\s*\} else \{\s*clientTransport\.open\(\);/u,
+    /function openLiveTransport\(\) \{\s*if \(nativeAudio\) \{\s*clientTransport\.openPreflight\(expectedEpoch \+ 1\);\s*return "awaiting-preflight-ready";\s*\}\s*clientTransport\.open\(\);\s*return "awaiting-ready";/u,
     "only Native audio must use the content-free preflight handshake",
   );
   assert.match(
     live,
-    /preflightState === "awaiting-preflight-ready"[\s\S]*clientTransport\.acceptPreflightReady\([\s\S]*preflightState = "awaiting-ready"/u,
+    /function activatePreflight\(data\) \{[\s\S]*clientTransport\.acceptPreflightReady\(preflightMessage, activatedAt\);\s*preflightActivatedAt = activatedAt;\s*return "awaiting-ready";/u,
     "Native activation must wait for an authenticated bound lease",
+  );
+  assert.match(live, /preflightState = openLiveTransport\(\);/u);
+  assert.match(live, /state = openLiveTransport\(\);/u);
+  assert.match(
+    live,
+    /if \(preflightState === "awaiting-preflight-ready"\) \{\s*preflightState = activatePreflight\(event\.data\);\s*return;/u,
+  );
+  assert.match(
+    live,
+    /if \(state === "awaiting-preflight-ready"\) \{\s*state = activatePreflight\(event\.data\);\s*return;/u,
   );
 
   const beginStart = bridge.indexOf("async function beginTurn(");

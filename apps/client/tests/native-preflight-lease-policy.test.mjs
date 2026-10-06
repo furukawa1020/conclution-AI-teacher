@@ -182,7 +182,12 @@ test("browser lifecycle has one centralized preflight invalidation path", async 
   );
   assert.match(
     bridge,
-    /coldMs: preflightAuthReadyMs,[\s\S]*warmMs: strongReadyAt - preflightActivatedAt/u,
+    /function publishPreflightReadyLatency\(strongReadyAt\) \{[\s\S]*coldMs: strongReadyAt - liveStartedAt,[\s\S]*warmMs: strongReadyAt - preflightActivatedAt/u,
+  );
+  assert.equal(
+    bridge.match(/publishPreflightReadyLatency\(strongReadyAt\);/gu)?.length,
+    2,
+    "both strong-ready listener owners must publish through the same helper",
   );
 });
 

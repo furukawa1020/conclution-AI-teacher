@@ -4044,6 +4044,37 @@ async function startVoiceLiveSession({
       },
     );
   }
+  // Static processing can finish at any handshake stage. Both listener owners
+  // use the same Native transport transitions so moving ownership never skips
+  // preflight or abandons a still-valid provider preparation.
+  function openLiveTransport() {
+    if (nativeAudio) {
+      clientTransport.openPreflight(expectedEpoch + 1);
+      return "awaiting-preflight-ready";
+    }
+    clientTransport.open();
+    return "awaiting-ready";
+  }
+  function activatePreflight(data) {
+    const preflightMessage = JSON.parse(data);
+    if (preflightMessage?.type === "error") {
+      const message = protocol.acceptText(data);
+      fail(message.code);
+    }
+    const activatedAt = performance.now();
+    clientTransport.acceptPreflightReady(preflightMessage, activatedAt);
+    preflightActivatedAt = activatedAt;
+    return "awaiting-ready";
+  }
+  function publishPreflightReadyLatency(strongReadyAt) {
+    if (nativeAudio && preflightActivatedAt !== undefined) {
+      dispatchNativePreflightLatency({
+        coldMs: strongReadyAt - liveStartedAt,
+        generation: expectedEpoch + 1,
+        warmMs: strongReadyAt - preflightActivatedAt,
+      });
+    }
+  }
   const acceptPreflightOpen = () => {
     socketOpenedAt ??= performance.now();
     if (expectedEpoch !== sessionEpoch) {
@@ -4051,13 +4082,7 @@ async function startVoiceLiveSession({
       return;
     }
     try {
-      if (nativeAudio) {
-        clientTransport.openPreflight(expectedEpoch + 1);
-        preflightState = "awaiting-preflight-ready";
-      } else {
-        clientTransport.open();
-        preflightState = "awaiting-ready";
-      }
+      preflightState = openLiveTransport();
     } catch {
       failPreflight(new Error("voice_api_unavailable"));
     }
@@ -4069,19 +4094,7 @@ async function startVoiceLiveSession({
         fail("voice_response_invalid");
       }
       if (preflightState === "awaiting-preflight-ready") {
-        const preflightMessage = JSON.parse(event.data);
-        if (preflightMessage?.type === "error") {
-          const message = protocol.acceptText(event.data);
-          failPreflight(new Error(message.code));
-          return;
-        }
-        const activatedAt = performance.now();
-        clientTransport.acceptPreflightReady(
-          preflightMessage,
-          activatedAt,
-        );
-        preflightActivatedAt = activatedAt;
-        preflightState = "awaiting-ready";
+        preflightState = activatePreflight(event.data);
         return;
       }
       const message = protocol.acceptText(event.data);
@@ -4105,13 +4118,7 @@ async function startVoiceLiveSession({
       clientTransport.markReady();
       const strongReadyAt = performance.now();
       preflightAuthReadyMs = strongReadyAt - liveStartedAt;
-      if (nativeAudio && preflightActivatedAt !== undefined) {
-        dispatchNativePreflightLatency({
-          coldMs: preflightAuthReadyMs,
-          generation: expectedEpoch + 1,
-          warmMs: strongReadyAt - preflightActivatedAt,
-        });
-      }
+      publishPreflightReadyLatency(strongReadyAt);
       preflightState = "ready";
     } catch (error) {
       failPreflight(
@@ -4665,6 +4672,7 @@ async function startVoiceLiveSession({
   function selectPreparationFallback() {
     if (
       state !== "connecting" &&
+      state !== "awaiting-preflight-ready" &&
       state !== "awaiting-ready"
     ) {
       return false;
@@ -4780,6 +4788,10 @@ async function startVoiceLiveSession({
     }
     try {
       if (typeof event.data === "string") {
+        if (state === "awaiting-preflight-ready") {
+          state = activatePreflight(event.data);
+          return;
+        }
         const message = protocol.acceptText(event.data);
         if (message.type === "error") {
           const snapshot = protocol.snapshot();
@@ -4808,8 +4820,10 @@ async function startVoiceLiveSession({
             return;
           }
           state = "ready";
-          authReadyMs = performance.now() - liveStartedAt;
+          const strongReadyAt = performance.now();
+          authReadyMs = strongReadyAt - liveStartedAt;
           clientTransport.markReady();
+          publishPreflightReadyLatency(strongReadyAt);
           settleReady();
           return;
         }
@@ -5266,10 +5280,9 @@ async function startVoiceLiveSession({
       return;
     }
     try {
-      clientTransport.open();
+      state = openLiveTransport();
       wsOpenMs =
         (socketOpenedAt ?? performance.now()) - liveStartedAt;
-      state = "awaiting-ready";
     } catch {
       selectPreparationFallback();
     }
@@ -5346,7 +5359,8 @@ async function startVoiceLiveSession({
       return undefined;
     }
   } else if (
-    state !== "awaiting-ready" ||
+    (state !== "awaiting-ready" &&
+      state !== "awaiting-preflight-ready") ||
     socket.readyState !== WebSocket.OPEN
   ) {
     failLive(new Error("voice_api_unavailable"));

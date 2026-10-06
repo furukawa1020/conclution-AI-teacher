@@ -728,13 +728,8 @@ func (s *CloudService) StreamSynthesize(
 	cacheKey := newStreamingPCMCacheKey(s.voiceName, text)
 	if s.streamingPCMCache != nil {
 		if cached, ok := s.streamingPCMCache.get(cacheKey); ok {
-			for _, chunk := range cached.chunks {
-				if err := ctx.Err(); err != nil {
-					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
-				}
-				if err := onChunk(chunk); err != nil {
-					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
-				}
+			if err := deliverCachedStreamingPCM(ctx, cached, onChunk); err != nil {
+				return "", err
 			}
 			slog.InfoContext(ctx, "streaming speech PCM cache hit",
 				"audio_bytes", cached.size,
@@ -753,10 +748,48 @@ func (s *CloudService) StreamSynthesize(
 		ctx,
 		cacheKey,
 		func(providerCtx context.Context, publish StreamChunkHandler) (string, error) {
-			return s.streamSynthesizeUncached(providerCtx, text, publish)
+			return s.streamSynthesizeSharedOwner(providerCtx, text, publish)
 		},
 		onChunk,
 	)
+}
+
+// A caller can miss the cache just before a previous owner caches its complete
+// PCM and leaves the flight registry. Recheck only after becoming the new
+// shared owner, without reviving any completed or abandoned flight result.
+func (s *CloudService) streamSynthesizeSharedOwner(
+	ctx context.Context,
+	text string,
+	onChunk StreamChunkHandler,
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("streaming speech synthesis canceled: %w", err)
+	}
+	if s.streamingPCMCache != nil {
+		if cached, ok := s.streamingPCMCache.get(newStreamingPCMCacheKey(s.voiceName, text)); ok {
+			if err := deliverCachedStreamingPCM(ctx, cached, onChunk); err != nil {
+				return "", err
+			}
+			return StreamingAudioContentType, nil
+		}
+	}
+	return s.streamSynthesizeUncached(ctx, text, onChunk)
+}
+
+func deliverCachedStreamingPCM(
+	ctx context.Context,
+	cached cachedStreamingPCM,
+	onChunk StreamChunkHandler,
+) error {
+	for _, chunk := range cached.chunks {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("deliver cached streaming speech audio: %w", err)
+		}
+		if err := onChunk(chunk); err != nil {
+			return fmt.Errorf("deliver cached streaming speech audio: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *CloudService) streamSynthesizeUncached(
@@ -934,13 +967,8 @@ func (prepared *preparedCloudSynthesis) StreamSynthesize(
 			// CloseSend on this unused RPC before publishing ready audio. The
 			// deferred cancellation releases it after playback; canceling first
 			// would also invalidate the context checked between cached chunks.
-			for _, chunk := range cached.chunks {
-				if err := prepared.ctx.Err(); err != nil {
-					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
-				}
-				if err := onChunk(chunk); err != nil {
-					return "", fmt.Errorf("deliver cached streaming speech audio: %w", err)
-				}
+			if err := deliverCachedStreamingPCM(prepared.ctx, cached, onChunk); err != nil {
+				return "", err
 			}
 			return StreamingAudioContentType, nil
 		}

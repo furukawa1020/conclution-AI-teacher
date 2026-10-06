@@ -6755,10 +6755,12 @@ function createStreamingPlayback(
     source.buffer = buffer;
     source.connect(gainNode);
 
-    const startAt = Math.max(
-      nextStartAt,
-      audioContext.currentTime + 0.015,
-    );
+    const currentTime = audioContext.currentTime;
+    // Preserve the exact future queue boundary. Reapplying the initial lead
+    // to an in-time chunk would insert silence into audio already scheduled.
+    const startAt = nextStartAt > currentTime
+      ? nextStartAt
+      : currentTime + 0.015;
     const meaningfulOffset = firstMeaningfulOffsetSeconds(buffer);
     let outputTimestamp;
     if (typeof audioContext.getOutputTimestamp === "function") {

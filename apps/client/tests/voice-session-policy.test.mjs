@@ -1629,6 +1629,106 @@ test("validated playback drain follows scheduled audio with a protocol-sized cap
   }
 });
 
+test("buffer playback appends late-arriving chunks without gaps while queued audio remains", async (t) => {
+  for (const transport of ["http", "live"]) {
+    await t.test(transport, async () => {
+      const { context, runtime } = await createExecutablePlaybackHarness();
+      const playback = runtime.createStreamingPlayback(1, transport === "live", transport);
+      const schedule = (sequence) => transport === "live"
+        ? playback.schedulePcm(fakePcmEvent(sequence, 960))
+        : playback.schedule({ audioBase64: "fixture", decodedBytes: 960, sampleRateHz: 24_000, sequence });
+
+      for (const [sequence, arrivedAt] of [0, 0.025, 0.052, 0.061].entries()) {
+        context.currentTime = arrivedAt;
+        schedule(sequence);
+        const source = context.sources[sequence];
+        if (sequence === 0) {
+          assert.equal(source.startedAt, 0.015, "the first buffer keeps its 15 ms lead");
+        } else {
+          const previous = context.sources[sequence - 1];
+          const previousEnd = previous.startedAt + previous.buffer.duration;
+          assert.ok(previousEnd > arrivedAt, "the next chunk arrives before queue exhaustion");
+          assert.equal(source.startedAt, previousEnd, "future audio must join the existing end exactly");
+        }
+      }
+      playback.finalReceived = true;
+      playback.seal();
+      for (const source of context.sources) source.end();
+      await playback.completion;
+    });
+  }
+});
+
+test("buffer playback retains its 15 ms lead at and after real queue exhaustion", async (t) => {
+  for (const elapsedAfterEnd of [0, 0.005, 1]) {
+    await t.test(String(elapsedAfterEnd), async () => {
+      const { context, runtime } = await createExecutablePlaybackHarness();
+      context.currentTime = 4.5;
+      const playback = runtime.createStreamingPlayback(1);
+      playback.schedulePcm(fakePcmEvent(0, 960));
+      assert.equal(context.sources[0].startedAt, 4.515);
+      context.currentTime = context.sources[0].startedAt + 0.020 + elapsedAfterEnd;
+      // Keep ended queued: an outstanding source callback cannot prove that
+      // its audio is still ahead of the AudioContext clock.
+      playback.schedulePcm(fakePcmEvent(1, 960));
+      assert.equal(context.sources[1].startedAt, context.currentTime + 0.015);
+      playback.finalReceived = true;
+      playback.seal();
+      for (const source of context.sources) source.end();
+      await playback.completion;
+    });
+  }
+});
+
+test("contiguous buffers keep the first meaningful sample and its single audible proof aligned", async () => {
+  const silent = new Float32Array(480);
+  const meaningful = new Float32Array(480);
+  meaningful[240] = 0.25;
+  const audible = [];
+  const { context, runtime, state } = await createExecutablePlaybackHarness({
+    pcmSamples: [silent, meaningful], performanceNow: 1_000,
+  });
+  context.getOutputTimestamp = () => ({ contextTime: 0, performanceTime: 1_000 });
+  const playback = runtime.createStreamingPlayback(1, false, "http", false, 1_000, false, (at) => audible.push(at));
+  playback.armResponseInterruption(1_000);
+  assert.equal(playback.schedulePcm(fakePcmEvent(0, 960)), undefined);
+  assert.equal(playback.hasStreamedAudio(), false);
+  context.currentTime = 0.025;
+  assert.equal(playback.schedulePcm(fakePcmEvent(1, 960)), 1_045);
+  context.currentTime = 0.050;
+  playback.schedulePcm(fakePcmEvent(2, 960));
+  assert.deepEqual(audible, [1_045]);
+  assert.deepEqual(state.startLatencyEvents, [45]);
+  assert.deepEqual(state.bargeResetAt, [1_045]);
+  assert.deepEqual(state.pauseEvents.filter((event) => event.type === "kotae:first-audio").map((event) => event.detail.sequence), [1]);
+  playback.finalReceived = true;
+  playback.seal();
+  for (const source of context.sources) source.end();
+  await playback.completion;
+  assert.deepEqual(audible, [1_045], "ended cannot publish another first-audible proof");
+});
+
+test("a stopped buffer owner cannot append into the next epoch's playback queue", async () => {
+  const { context, runtime } = await createExecutablePlaybackHarness();
+  const playback = runtime.createStreamingPlayback(1);
+  playback.schedulePcm(fakePcmEvent(0, 960));
+  context.currentTime = 0.025;
+  playback.schedulePcm(fakePcmEvent(1, 960));
+  runtime.stopSession("pagehide");
+  await assert.rejects(playback.completion, /request_cancelled/u);
+  assert.equal(context.sources.every((source) => source.stopped), true);
+  const nextPlayback = runtime.createStreamingPlayback(runtime.getSessionEpoch());
+  context.currentTime = 0.040;
+  assert.throws(() => playback.schedulePcm(fakePcmEvent(2, 960)), /request_cancelled/u);
+  assert.equal(context.sources.length, 2);
+  nextPlayback.schedulePcm(fakePcmEvent(0, 960));
+  assert.equal(context.sources[2].startedAt, 0.055, "a new owner starts with its own 15 ms lead");
+  nextPlayback.finalReceived = true;
+  nextPlayback.seal();
+  context.sources[2].end();
+  await nextPlayback.completion;
+});
+
 test("leading silent PCM does not start Speaking or barge monitoring", async () => {
   const silentSamples = new Float32Array(2_400);
   const meaningfulSamples = new Float32Array(2_400);

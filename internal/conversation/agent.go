@@ -4329,6 +4329,13 @@ func earlyCandidateFromJSON(raw []byte) (modelPlan, bool) {
 			if !validEarlyCandidate(candidate) {
 				return modelPlan{}, false
 			}
+			// Match the final planner's representation before independent audit
+			// and private synthesis. Keep the raw guard above so normalization
+			// cannot admit an otherwise oversized or unsafe early candidate.
+			candidate.SpokenReply = collapseSpace(candidate.SpokenReply)
+			if !validEarlyCandidate(candidate) {
+				return modelPlan{}, false
+			}
 			return candidate, true
 		}
 	}

@@ -21,6 +21,11 @@ func streamCommittedSynthesis(
 	}
 	prepared := preparation.takeReady()
 	if prepared == nil {
+		// This is the final, authorized synthesis route: no later candidate
+		// can use a preparation that missed this handoff. Revoke it before
+		// opening the ordinary stream, without waiting for provider setup.
+		// A connection returned after cancellation is closed by its owner.
+		preparation.close()
 		return speech.StreamSynthesize(ctx, text, onAudio)
 	}
 	// Preparation belongs to the enclosing turn; the committed processing

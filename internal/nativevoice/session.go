@@ -746,6 +746,7 @@ func (s *liveSession) enqueueEvents(events []Event, interrupted bool) error {
 		return ErrPendingLimit
 	}
 
+	wasReadable := len(s.ready) > 0
 	for _, event := range events {
 		if isGatedOutput(event.Kind) && !s.outputCommitted {
 			s.held = append(s.held, event)
@@ -754,7 +755,12 @@ func (s *liveSession) enqueueEvents(events []Event, interrupted bool) error {
 		}
 	}
 	s.bufferedBytes += batchBytes
-	s.signalLocked()
+	// A receiver checks ready under this same lock before waiting. Only an
+	// empty-to-readable transition needs a wake; held/discarded output cannot
+	// advance it, and an already-readable queue has no new waiter to notify.
+	if !wasReadable && len(s.ready) > 0 {
+		s.signalLocked()
+	}
 	s.queueMu.Unlock()
 	return nil
 }

@@ -1152,6 +1152,10 @@ func (s *Service) acquire(
 		return nil
 	}
 	s.mu.Lock()
+	if s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, errNativeFlowUnavailable
+	}
 	if existing := s.sessions[uid]; existing != nil {
 		if existing.prepared && existing.session != nil &&
 			conversationContext == "" && s.now().Before(existing.expiresAt) {
@@ -1179,7 +1183,10 @@ func (s *Service) acquire(
 		closePooledSession(retired, false)
 		return nil, errNativeFlowUnavailable
 	}
-	pooled := &pooledSession{}
+	// Publish cancellation with the reservation, before setup can block.
+	// Shutdown can then revoke an in-flight Open without canceling its caller.
+	providerCtx, cancelProvider := context.WithCancel(ctx)
+	pooled := &pooledSession{cancel: cancelProvider}
 	s.sessions[uid] = pooled
 	s.mu.Unlock()
 	closePooledSession(retired, false)
@@ -1191,16 +1198,17 @@ func (s *Service) acquire(
 	var session nativevoice.Session
 	var err error
 	if conversationContext == "" {
-		session, err = s.opener.Open(ctx)
+		session, err = s.opener.Open(providerCtx)
 	} else {
 		contextual, ok := s.opener.(nativevoice.ContextualOpener)
 		if !ok {
 			err = errNativeFlowUnavailable
 		} else {
-			session, err = contextual.OpenWithContext(ctx, conversationContext)
+			session, err = contextual.OpenWithContext(providerCtx, conversationContext)
 		}
 	}
-	if err != nil || ctx.Err() != nil {
+	if err != nil || providerCtx.Err() != nil {
+		cancelProvider()
 		s.mu.Lock()
 		if s.sessions[uid] == pooled {
 			delete(s.sessions, uid)
@@ -1212,6 +1220,7 @@ func (s *Service) acquire(
 	s.mu.Lock()
 	if s.sessions[uid] != pooled || s.ctx.Err() != nil {
 		s.mu.Unlock()
+		cancelProvider()
 		closePooledSession(&pooledSession{session: session}, false)
 		return nil, errNativeFlowUnavailable
 	}

@@ -1075,6 +1075,7 @@ class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
     this.generation = generation;
     this.expectedSequence = 0;
     this.chunks = [];
+    this.headIndex = 0;
     this.headOffset = 0;
     this.queuedSamples = 0;
     this.sourcePosition = 0;
@@ -1118,10 +1119,11 @@ class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
   }
 
   clearAudio() {
-    for (const chunk of this.chunks) {
-      chunk.fill(0);
+    for (let index = this.headIndex; index < this.chunks.length; index += 1) {
+      this.chunks[index].fill(0);
     }
     this.chunks.length = 0;
+    this.headIndex = 0;
     this.headOffset = 0;
     this.queuedSamples = 0;
     this.sourcePosition = 0;
@@ -1172,6 +1174,13 @@ class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
         samples.fill(0);
         throw new Error("playback_queue_full");
       }
+      // Compact only on control delivery, never inside the render loop.
+      // Consumed slots retain no PCM; this bounds unused reference slots
+      // without moving every queued chunk each time one is consumed.
+      if (this.headIndex >= 64 && this.headIndex * 2 >= this.chunks.length) {
+        this.chunks.splice(0, this.headIndex);
+        this.headIndex = 0;
+      }
       this.chunks.push(samples);
       this.queuedSamples += samples.length;
       this.expectedSequence += 1;
@@ -1214,7 +1223,8 @@ class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
 
   peek(relativeIndex) {
     let remaining = this.headOffset + relativeIndex;
-    for (const chunk of this.chunks) {
+    for (let index = this.headIndex; index < this.chunks.length; index += 1) {
+      const chunk = this.chunks[index];
       if (remaining < chunk.length) return chunk[remaining];
       remaining -= chunk.length;
     }
@@ -1226,8 +1236,8 @@ class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
       throw new Error("playback_consume_invalid");
     }
     let remaining = count;
-    while (remaining > 0 && this.chunks.length > 0) {
-      const head = this.chunks[0];
+    while (remaining > 0 && this.headIndex < this.chunks.length) {
+      const head = this.chunks[this.headIndex];
       const available = head.length - this.headOffset;
       const consumed = Math.min(remaining, available);
       head.fill(0, this.headOffset, this.headOffset + consumed);
@@ -1235,8 +1245,13 @@ class KotaePcmPlaybackProcessor extends AudioWorkletProcessor {
       this.queuedSamples -= consumed;
       remaining -= consumed;
       if (this.headOffset === head.length) {
-        this.chunks.shift();
+        this.chunks[this.headIndex] = undefined;
+        this.headIndex += 1;
         this.headOffset = 0;
+        if (this.headIndex === this.chunks.length) {
+          this.chunks.length = 0;
+          this.headIndex = 0;
+        }
       }
     }
     if (remaining !== 0 || this.queuedSamples < 0) {

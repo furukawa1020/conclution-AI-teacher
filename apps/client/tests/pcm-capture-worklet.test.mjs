@@ -447,6 +447,72 @@ test("playback processor rejects sequence gaps and zeroizes retained PCM", () =>
   assert.equal(harness.render().keepAlive, false);
 });
 
+test("fragmented playback never shifts its queue while rendering and preserves PCM", () => {
+  for (const sampleRateHz of [24_000, 44_100, 48_000, 192_000]) {
+    const split = createPlaybackHarness({ sampleRateHz });
+    const whole = createPlaybackHarness({ sampleRateHz });
+    const retained = [];
+    const samples = Int16Array.from({ length: 768 }, (_, i) => (i * 197) % 16_384 - 8_192);
+    function push(harness, pcm, sequence) {
+      retained.push(pcm);
+      harness.control({ generation: harness.generation, pcm, sequence, sampleRateHz: 24_000, type: "push", version: 1 });
+    }
+    for (let i = 0; i < 128; i++) push(split, samples.slice(i * 3, i * 3 + 3).buffer, i);
+    push(whole, samples.slice(0, 384).buffer, 0);
+    split.processor.chunks.shift = () => { throw new Error("render_queue_shift"); };
+    let renderActive = false;
+    const splice = split.processor.chunks.splice;
+    let compactions = 0;
+    split.processor.chunks.splice = function (...args) {
+      assert.equal(renderActive, false, "compaction must not run in process");
+      compactions++;
+      return splice.apply(this, args);
+    };
+    function renderPair() {
+      renderActive = true;
+      const a = split.render();
+      renderActive = false;
+      const b = whole.render();
+      assert.equal(a.keepAlive, b.keepAlive);
+      assert.deepEqual(a.pcm, b.pcm, `PCM mismatch at ${sampleRateHz}Hz`);
+      return a.keepAlive;
+    }
+    // Consume 256-ish input samples, including a partial three-sample chunk.
+    const quanta = Math.floor((256 * sampleRateHz / 24_000) / 128);
+    for (let i = 0; i < quanta; i++) renderPair();
+    for (let i = 128; i < 256; i++) push(split, samples.slice(i * 3, i * 3 + 3).buffer, i);
+    push(whole, samples.slice(384).buffer, 1);
+    assert.equal(compactions, 1);
+    for (const harness of [split, whole]) harness.control({ generation: harness.generation, type: "seal", version: 1 });
+    for (let i = 0; i < 100 && renderPair(); i++) {}
+    assert.equal(split.processor.queuedSamples, 0);
+    assert.equal(split.processor.chunks.length, 0);
+    assert.equal(retained.every(isZero), true);
+    assert.deepEqual(split.output.map(({ type }) => type), ["started", "ended"]);
+    assert.equal(split.output[0].contextFrame, whole.output[0].contextFrame);
+  }
+});
+
+test("playback stop after queue compaction zeroizes every retained chunk", () => {
+  const harness = createPlaybackHarness();
+  const retained = [];
+  function push(sequence) {
+    const pcm = new Int16Array([4000, 5000, 6000]).buffer;
+    retained.push(pcm);
+    harness.control({ generation: harness.generation, pcm, sequence, sampleRateHz: 24_000, type: "push", version: 1 });
+  }
+  for (let i = 0; i < 128; i++) push(i);
+  for (let i = 0; i < 4; i++) harness.render();
+  push(128);
+  assert.equal(harness.processor.headIndex, 0);
+  assert.equal(harness.processor.headOffset, 1);
+  harness.control({ generation: harness.generation, type: "stop", version: 1 });
+  assert.equal(retained.every(isZero), true);
+  assert.equal(harness.processor.queuedSamples, 0);
+  assert.equal(harness.processor.chunks.length, 0);
+  assert.equal(harness.render().keepAlive, false);
+});
+
 function isZero(value) {
   return [...new Uint8Array(value)].every((byte) => byte === 0);
 }

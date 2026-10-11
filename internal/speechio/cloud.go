@@ -789,7 +789,7 @@ func deliverCachedStreamingPCM(
 			return fmt.Errorf("deliver cached streaming speech audio: %w", err)
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (s *CloudService) streamSynthesizeUncached(
@@ -826,6 +826,9 @@ func (s *CloudService) streamSynthesizeUncached(
 			len(response.AudioContent) <= maxStreamingAudioTotalSize {
 			s.directPCMCircuit.succeeded()
 			if err := onChunk(response.AudioContent); err != nil {
+				return "", fmt.Errorf("deliver direct PCM speech audio: %w", err)
+			}
+			if err := ctx.Err(); err != nil {
 				return "", fmt.Errorf("deliver direct PCM speech audio: %w", err)
 			}
 			if s.streamingPCMCache != nil &&
@@ -1100,6 +1103,9 @@ func receiveStreamingAudio(
 
 		response, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("receive regional streaming speech audio: %w", err)
+			}
 			if chunkCount == 0 {
 				return ErrNoStreamingAudio
 			}

@@ -91,10 +91,10 @@ func (cache *streamingPCMCache) retainsProtected(key streamingPCMCacheKey) bool 
 
 func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPCM, bool) {
 	cache.mu.Lock()
-	defer cache.mu.Unlock()
 
 	entry, ok := cache.entries[key]
 	if !ok {
+		cache.mu.Unlock()
 		return cachedStreamingPCM{}, false
 	}
 	// A successful delivery is real use, not a passive lookup. Move it to the
@@ -102,6 +102,10 @@ func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPC
 	// one-off replies instead of being evicted in insertion (FIFO) order.
 	cache.removeFromOrder(key)
 	cache.order = append(cache.order, key)
+	cache.mu.Unlock()
+	// put owns an immutable PCM copy; replacement and eviction only remove
+	// references. Keep this snapshot alive while cloning outside the shared
+	// lock, so a large delivery copy cannot block unrelated cache operations.
 	return cloneCachedStreamingPCM(entry), true
 }
 

@@ -40,6 +40,10 @@ func (group *streamingSynthesisFlightGroup) stream(
 	onChunk StreamChunkHandler,
 ) (string, error) {
 	group.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		group.mu.Unlock()
+		return "", err
+	}
 	if group.flights == nil {
 		group.flights = make(map[streamingPCMCacheKey]*streamingSynthesisFlight)
 	}
@@ -89,7 +93,7 @@ func (flight *streamingSynthesisFlight) publish(chunk []byte) error {
 	cloned := append([]byte(nil), chunk...)
 	flight.mu.Lock()
 	defer flight.mu.Unlock()
-	if flight.done {
+	if flight.done || (flight.subscribers == 0 && flight.cancel == nil) {
 		return context.Canceled
 	}
 	if len(cloned) > maxStreamingPCMCacheEntryBytes-flight.buffered {
@@ -157,9 +161,18 @@ func (flight *streamingSynthesisFlight) unsubscribe() {
 	if flight.subscribers > 0 {
 		flight.subscribers--
 	}
-	if flight.subscribers == 0 && !flight.done && flight.cancel != nil {
-		flight.cancel()
-		flight.cancel = nil
+	if flight.subscribers == 0 {
+		if !flight.done && flight.cancel != nil {
+			flight.cancel()
+			flight.cancel = nil
+		}
+		// No current subscriber needs replay, and new attempts replace this
+		// completed or abandoned flight. Do not wait for provider shutdown.
+		for _, chunk := range flight.chunks {
+			clear(chunk)
+		}
+		flight.chunks = nil
+		flight.buffered = 0
 	}
 	flight.mu.Unlock()
 }

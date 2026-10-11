@@ -230,13 +230,22 @@ func (s *cloudStreamingTranscriptionSession) RecvEvent() (
 	}
 	if len(s.pending) > 0 {
 		event := s.pending[0]
+		s.pending[0] = StreamingTranscriptionEvent{}
 		s.pending = s.pending[1:]
+		if len(s.pending) == 0 {
+			s.pending = nil
+		}
 		return event, nil
 	}
 
 	for {
 		response, err := s.stream.Recv()
 		if errors.Is(err, io.EOF) {
+			if err := s.ctx.Err(); err != nil {
+				return s.finishReceive(fmt.Errorf(
+					"receive regional streaming transcription event: %w", err,
+				))
+			}
 			return s.finishReceive(io.EOF)
 		}
 		if err != nil {
@@ -286,6 +295,8 @@ func (s *cloudStreamingTranscriptionSession) finishReceive(err error) (
 ) {
 	s.recvDone = true
 	s.terminalErr = err
+	clear(s.pending)
+	s.pending = nil
 	s.cancel()
 	return StreamingTranscriptionEvent{}, err
 }

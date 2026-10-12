@@ -11,20 +11,23 @@ import (
 type strictAudioBuffer struct {
 	mu        sync.Mutex
 	committed bool
+	closed    bool
 	chunks    [][]byte
 	bytes     int
 }
 
 func (buffer *strictAudioBuffer) markCommitted() {
 	buffer.mu.Lock()
-	buffer.committed = true
+	if !buffer.closed {
+		buffer.committed = true
+	}
 	buffer.mu.Unlock()
 }
 
 func (buffer *strictAudioBuffer) append(audio []byte) error {
 	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
-	if !buffer.committed ||
+	if buffer.closed || !buffer.committed ||
 		len(audio) == 0 ||
 		len(audio)%2 != 0 ||
 		len(audio) > voiceStreamMaxChunkBytes ||
@@ -51,6 +54,7 @@ func (buffer *strictAudioBuffer) release(deliver func([]byte) error) error {
 	}
 	buffer.mu.Lock()
 	chunks := buffer.chunks
+	buffer.closed = true
 	buffer.chunks = nil
 	buffer.bytes = 0
 	buffer.mu.Unlock()
@@ -65,6 +69,7 @@ func (buffer *strictAudioBuffer) release(deliver func([]byte) error) error {
 
 func (buffer *strictAudioBuffer) clear() {
 	buffer.mu.Lock()
+	buffer.closed = true
 	chunks := buffer.chunks
 	buffer.chunks = nil
 	buffer.bytes = 0

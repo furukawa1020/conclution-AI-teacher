@@ -146,6 +146,15 @@ func (writer *voiceLiveOutboundWriter) run(ctx context.Context) {
 		if err == nil {
 			err = writer.write(writeCtx, request.messageType, request.payload)
 		}
+		// A transport can finish concurrently with cancellation and return nil.
+		// Preserve explicit transport errors, but never report that race as a
+		// successful send. Check before our own cleanup cancels writeCtx.
+		if err == nil {
+			err = writeCtx.Err()
+			if err == nil {
+				err = ctx.Err()
+			}
+		}
 		writeDuration := time.Since(writeStartedAt)
 		stopWriterCancellation()
 		cancel()

@@ -90,18 +90,38 @@ func (group *streamingSynthesisFlightGroup) stream(
 }
 
 func (flight *streamingSynthesisFlight) publish(chunk []byte) error {
+	flight.mu.Lock()
+	if err := flight.validatePublicationLocked(len(chunk)); err != nil {
+		flight.mu.Unlock()
+		return err
+	}
+	if len(chunk) == 0 {
+		flight.mu.Unlock()
+		return nil
+	}
+	flight.mu.Unlock()
+	// Keep accepted PCM copying outside the shared publication lock. State may
+	// change during the copy, so admission must be checked again before append.
 	cloned := append([]byte(nil), chunk...)
 	flight.mu.Lock()
 	defer flight.mu.Unlock()
-	if flight.done || (flight.subscribers == 0 && flight.cancel == nil) {
-		return context.Canceled
-	}
-	if len(cloned) > maxStreamingPCMCacheEntryBytes-flight.buffered {
-		return ErrStreamingAudioTooLarge
+	if err := flight.validatePublicationLocked(len(cloned)); err != nil {
+		clear(cloned)
+		return err
 	}
 	flight.chunks = append(flight.chunks, cloned)
 	flight.buffered += len(cloned)
 	flight.changed.Broadcast()
+	return nil
+}
+
+func (flight *streamingSynthesisFlight) validatePublicationLocked(size int) error {
+	if flight.done || (flight.subscribers == 0 && flight.cancel == nil) {
+		return context.Canceled
+	}
+	if size > maxStreamingPCMCacheEntryBytes-flight.buffered {
+		return ErrStreamingAudioTooLarge
+	}
 	return nil
 }
 

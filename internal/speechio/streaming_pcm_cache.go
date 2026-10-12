@@ -90,6 +90,17 @@ func (cache *streamingPCMCache) retainsProtected(key streamingPCMCacheKey) bool 
 }
 
 func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPCM, bool) {
+	entry, ok := cache.snapshot(key)
+	if !ok {
+		return cachedStreamingPCM{}, false
+	}
+	return cloneCachedStreamingPCM(entry), true
+}
+
+// snapshot returns immutable cache-owned PCM. It must never be exposed to a
+// callback or modified; delivery clones one chunk at a time after cancellation
+// checks. Eviction and replacement remove references, not the underlying bytes.
+func (cache *streamingPCMCache) snapshot(key streamingPCMCacheKey) (cachedStreamingPCM, bool) {
 	cache.mu.Lock()
 
 	entry, ok := cache.entries[key]
@@ -106,7 +117,7 @@ func (cache *streamingPCMCache) get(key streamingPCMCacheKey) (cachedStreamingPC
 	// put owns an immutable PCM copy; replacement and eviction only remove
 	// references. Keep this snapshot alive while cloning outside the shared
 	// lock, so a large delivery copy cannot block unrelated cache operations.
-	return cloneCachedStreamingPCM(entry), true
+	return entry, true
 }
 
 func (cache *streamingPCMCache) put(key streamingPCMCacheKey, entry cachedStreamingPCM) {

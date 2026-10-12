@@ -727,7 +727,7 @@ func (s *CloudService) StreamSynthesize(
 
 	cacheKey := newStreamingPCMCacheKey(s.voiceName, text)
 	if s.streamingPCMCache != nil {
-		if cached, ok := s.streamingPCMCache.get(cacheKey); ok {
+		if cached, ok := s.streamingPCMCache.snapshot(cacheKey); ok {
 			if err := deliverCachedStreamingPCM(ctx, cached, onChunk); err != nil {
 				return "", err
 			}
@@ -766,7 +766,7 @@ func (s *CloudService) streamSynthesizeSharedOwner(
 		return "", fmt.Errorf("streaming speech synthesis canceled: %w", err)
 	}
 	if s.streamingPCMCache != nil {
-		if cached, ok := s.streamingPCMCache.get(newStreamingPCMCacheKey(s.voiceName, text)); ok {
+		if cached, ok := s.streamingPCMCache.snapshot(newStreamingPCMCacheKey(s.voiceName, text)); ok {
 			if err := deliverCachedStreamingPCM(ctx, cached, onChunk); err != nil {
 				return "", err
 			}
@@ -785,7 +785,7 @@ func deliverCachedStreamingPCM(
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("deliver cached streaming speech audio: %w", err)
 		}
-		if err := onChunk(chunk); err != nil {
+		if err := onChunk(append([]byte(nil), chunk...)); err != nil {
 			return fmt.Errorf("deliver cached streaming speech audio: %w", err)
 		}
 	}
@@ -965,7 +965,7 @@ func (prepared *preparedCloudSynthesis) StreamSynthesize(
 
 	cacheKey := newStreamingPCMCacheKey(prepared.service.voiceName, text)
 	if prepared.service.streamingPCMCache != nil {
-		if cached, ok := prepared.service.streamingPCMCache.get(cacheKey); ok {
+		if cached, ok := prepared.service.streamingPCMCache.snapshot(cacheKey); ok {
 			// Cache delivery has no provider input to finish. Do not wait for
 			// CloseSend on this unused RPC before publishing ready audio. The
 			// deferred cancellation releases it after playback; canceling first

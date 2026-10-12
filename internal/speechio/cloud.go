@@ -268,6 +268,11 @@ func (s *CloudService) WarmStreamingSynthesis(
 		keys[index] = newStreamingPCMCacheKey(s.voiceName, text)
 	}
 	s.warmSynthesisMu.Lock()
+	if ctx.Err() != nil {
+		s.warmSynthesisMu.Unlock()
+		result.Failed = result.Requested
+		return result
+	}
 	if !s.streamingPCMCache.protect(keys) {
 		s.warmSynthesisMu.Unlock()
 		result.Failed = result.Requested

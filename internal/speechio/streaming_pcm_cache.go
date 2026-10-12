@@ -215,6 +215,9 @@ func newStreamingPCMCollector(maxBytes int) *streamingPCMCollector {
 }
 
 func (collector *streamingPCMCollector) add(chunk []byte) {
+	if len(chunk) == 0 {
+		return
+	}
 	if !collector.completeEnough || len(chunk) > collector.maxBytes-collector.size {
 		collector.completeEnough = false
 		collector.chunks = nil

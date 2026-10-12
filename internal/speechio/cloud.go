@@ -926,9 +926,17 @@ func (s *CloudService) PrepareStreamingSynthesis(
 		return nil, errors.New("regional streaming speech synthesis returned no stream")
 	}
 	configRequest, _ := streamingSynthesizeRequests("", s.voiceName)
+	if err := streamContext.Err(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("prepare streaming speech synthesis canceled: %w", err)
+	}
 	if err := stream.Send(configRequest); err != nil {
 		cancel()
 		return nil, fmt.Errorf("prepare regional streaming speech configuration: %w", err)
+	}
+	if err := streamContext.Err(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("prepare streaming speech synthesis canceled: %w", err)
 	}
 	return &preparedCloudSynthesis{
 		service: s,

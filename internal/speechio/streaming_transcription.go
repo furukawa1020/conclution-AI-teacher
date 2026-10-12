@@ -130,6 +130,10 @@ func (s *CloudService) OpenStreamingTranscription(
 		cancelStream()
 		return nil, fmt.Errorf("send regional streaming transcription configuration: %w", err)
 	}
+	if err := streamContext.Err(); err != nil {
+		cancelStream()
+		return nil, fmt.Errorf("send regional streaming transcription configuration: %w", err)
+	}
 	return session, nil
 }
 

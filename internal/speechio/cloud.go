@@ -889,6 +889,7 @@ func (s *CloudService) streamSynthesizeUncached(
 		return "", fmt.Errorf("close regional streaming speech input: %w", err)
 	}
 	collector := newStreamingPCMCollector(maxStreamingPCMCacheEntryBytes)
+	defer collector.discard()
 	if err := receiveStreamingAudio(ctx, stream, func(audio []byte) error {
 		collector.add(audio)
 		return onChunk(audio)
@@ -1008,6 +1009,7 @@ func (prepared *preparedCloudSynthesis) StreamSynthesize(
 		return "", fmt.Errorf("close prepared streaming speech input: %w", err)
 	}
 	collector := newStreamingPCMCollector(maxStreamingPCMCacheEntryBytes)
+	defer collector.discard()
 	if err := receiveStreamingAudio(prepared.ctx, prepared.stream, func(audio []byte) error {
 		collector.add(audio)
 		return onChunk(audio)

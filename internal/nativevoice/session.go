@@ -483,7 +483,16 @@ func zeroizeRealtimeInput(input *genai.LiveRealtimeInput) {
 
 func (s *liveSession) receiverLoop() {
 	for {
+		if err := s.ctx.Err(); err != nil {
+			s.terminate(safeContextError("receive", err))
+			return
+		}
 		message, err := s.raw.Receive()
+		if contextErr := s.ctx.Err(); contextErr != nil {
+			scrubProviderMessage(message)
+			s.terminate(safeContextError("receive", contextErr))
+			return
+		}
 		if err != nil {
 			if s.ctx.Err() != nil {
 				s.terminate(safeContextError("receive", s.ctx.Err()))

@@ -211,9 +211,15 @@ func (d *Dispatcher) process(parent context.Context, job memoryJob) {
 	}
 	ctx, cancel := context.WithTimeout(parent, d.timeout)
 	defer cancel()
+	if ctx.Err() != nil {
+		return
+	}
 	consent, err := d.manager.Status(ctx, job.uid)
 	if err != nil || !consent.Enabled {
 		d.notify(OutcomeDisabled, d.now().Sub(started))
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	payload, ok, err := d.source.LongTermMemoryCandidate(job.uid, string(job.stateToken))
@@ -223,6 +229,9 @@ func (d *Dispatcher) process(parent context.Context, job memoryJob) {
 	}
 	if !ok {
 		d.notify(OutcomeEmpty, d.now().Sub(started))
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	err = d.manager.Save(ctx, job.uid, consent.Generation, payload)

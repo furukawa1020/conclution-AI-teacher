@@ -1043,7 +1043,7 @@ func newNativeLiveTimings(
 }
 
 func mergeCaption(current []byte, next []byte) []byte {
-	if len(next) == 0 {
+	if len(next) == 0 || (len(current) == len(next) && bytes.Equal(current, next)) {
 		return current
 	}
 	if len(current) <= len(next) && bytes.HasPrefix(next, current) {

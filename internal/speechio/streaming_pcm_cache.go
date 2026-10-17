@@ -219,15 +219,24 @@ func (collector *streamingPCMCollector) add(chunk []byte) {
 		return
 	}
 	if !collector.completeEnough || len(chunk) > collector.maxBytes-collector.size {
-		collector.completeEnough = false
-		collector.chunks = nil
-		collector.size = 0
+		collector.discard()
 		return
 	}
 	collector.chunks = append(collector.chunks, append([]byte(nil), chunk...))
 	collector.size += len(chunk)
 }
 
+func (collector *streamingPCMCollector) discard() {
+	for _, chunk := range collector.chunks {
+		clear(chunk)
+	}
+	clear(collector.chunks)
+	collector.chunks = nil
+	collector.size = 0
+	collector.completeEnough = false
+}
+
+// complete lends the owned PCM until discard. Cache put makes its own copy.
 func (collector *streamingPCMCollector) complete() (cachedStreamingPCM, bool) {
 	if !collector.completeEnough || collector.size == 0 || len(collector.chunks) == 0 {
 		return cachedStreamingPCM{}, false

@@ -29,11 +29,14 @@ type observation struct {
 }
 
 type Dispatcher struct {
-	exporter Exporter
-	queue    chan observation
-	done     chan struct{}
-	once     sync.Once
-	stats    dispatcherStats
+	exporter  Exporter
+	queue     chan observation
+	done      chan struct{}
+	once      sync.Once
+	stats     dispatcherStats
+	admission sync.RWMutex
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 type dispatcherStats struct {
@@ -63,7 +66,10 @@ func NewDispatcher(exporter Exporter) (*Dispatcher, error) {
 	if exporter == nil {
 		return nil, errors.New("semantic shadow exporter is required")
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dispatcher{
+		ctx:      ctx,
+		cancel:   cancel,
 		exporter: exporter,
 		queue:    make(chan observation, defaultQueueCapacity),
 		done:     make(chan struct{}),
@@ -78,6 +84,8 @@ func (d *Dispatcher) Observe(turnDigest string, signals Signals) bool {
 	if d == nil {
 		return false
 	}
+	d.admission.RLock()
+	defer d.admission.RUnlock()
 	select {
 	case <-d.done:
 		d.stats.droppedClosed.Add(1)
@@ -113,7 +121,21 @@ func (d *Dispatcher) Close() {
 	if d == nil {
 		return
 	}
-	d.once.Do(func() { close(d.done) })
+	d.once.Do(func() {
+		d.admission.Lock()
+		defer d.admission.Unlock()
+		close(d.done)
+		d.cancel()
+		// No new observation can enter after this bounded drain. Do not join
+		// the exporter: Close must not wait for network cooperation.
+		for {
+			select {
+			case <-d.queue:
+			default:
+				return
+			}
+		}
+	})
 }
 
 func (d *Dispatcher) run() {
@@ -122,12 +144,19 @@ func (d *Dispatcher) run() {
 		case <-d.done:
 			return
 		case item := <-d.queue:
+			if d.ctx.Err() != nil {
+				return
+			}
 			graph, err := Build(item.turnDigest, item.signals)
 			if err != nil {
 				d.stats.invalidGraph.Add(1)
 				continue
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), defaultExportTimeout)
+			ctx, cancel := context.WithTimeout(d.ctx, defaultExportTimeout)
+			if ctx.Err() != nil {
+				cancel()
+				return
+			}
 			err = d.exporter.Export(ctx, graph)
 			cancel()
 			if err == nil {

@@ -330,7 +330,7 @@ const GUEST_MODE_ACTION: &str = "30秒で違いを試す　パスキー不要";
 const GUEST_MODE_PROMISE: &str = "一問だけ。AIは答えを作らず、あなたの最初の一言を待ちます。音声も文字も保存せず、ページを閉じると戻れません。";
 const GUEST_SPRINT_QUESTION: &str = "今、いちばん減らしたい負担は？";
 const GUEST_SPRINT_INSTRUCTION: &str =
-    "答えだけを先に、小声で一言。理由はあとで大丈夫。『わからない』も答えです。";
+    "思いつくままに話してください。途中で考えても、『わからない』でも大丈夫です。";
 const QUIET_VOICE_COPY: &str =
     "叫ばなくて大丈夫。小声や、ぼそっとした『うん』『いや』もそのまま話してみてください。";
 const SEPARATE_PASSKEY_ACCOUNT_WARNING: &str =

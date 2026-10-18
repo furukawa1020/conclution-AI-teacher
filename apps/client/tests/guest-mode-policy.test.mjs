@@ -64,5 +64,5 @@ test("guest mode is one-tap, ephemeral, and App Check-bound", async () => {
   assert.match(ui, /あなたの最初の一言/u);
   assert.match(agent, /guest_word_mining/u);
   assert.match(agent, /AI自身の答え・候補・助言を作らない/u);
-  assert.match(agent, /今の一言はあなたが先に言った/u);
+  assert.match(agent, /二往復目も成立したら講評せず終了する/u);
 });

@@ -17,7 +17,7 @@ func (agent *vertexAgent) LongTermMemoryCandidate(
 	if agent == nil || agent.codec == nil || stateToken == "" {
 		return longmemory.Payload{}, false, ErrInvalidStateToken
 	}
-	state, err := agent.codec.open(uid, stateToken)
+	state, err := agent.openConversationState(uid, stateToken)
 	if err != nil {
 		return longmemory.Payload{}, false, err
 	}

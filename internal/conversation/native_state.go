@@ -71,7 +71,7 @@ func (agent *vertexAgent) openNativeState(
 	}
 	if token != "" {
 		var err error
-		state, err = agent.codec.open(uid, token)
+		state, err = agent.openConversationState(uid, token)
 		if err != nil {
 			return conversationState{}, err
 		}
@@ -170,7 +170,7 @@ func (agent *vertexAgent) validatePreparedNativeStateTransition(
 	if agent == nil || agent.codec == nil || preparedToken == "" {
 		return conversationState{}, ErrInvalidStateToken
 	}
-	prepared, err := agent.codec.open(uid, preparedToken)
+	prepared, err := agent.openConversationState(uid, preparedToken)
 	if err != nil {
 		return conversationState{}, ErrInvalidStateToken
 	}

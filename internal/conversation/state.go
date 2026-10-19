@@ -42,6 +42,7 @@ type conversationState struct {
 	ExpiresAt               int64                 `json:"exp"`
 	SessionID               string                `json:"sid,omitempty"`
 	Turn                    int                   `json:"turn"`
+	GuestTrial              *guestTrial           `json:"guest_trial,omitempty"`
 	MemoryGeneration        int64                 `json:"memory_generation,omitempty"`
 	SessionMemory           *longmemory.Payload   `json:"session_memory,omitempty"`
 	VoiceCheckpointTag      string                `json:"voice_checkpoint_tag,omitempty"`
@@ -202,6 +203,11 @@ func (codec *StateCodec) newSessionID() (string, error) {
 }
 
 func normalizeConversationState(state conversationState) (conversationState, error) {
+	trial, trialErr := normalizeGuestTrial(state.GuestTrial)
+	if trialErr != nil || (trial != nil && !validSessionID(state.SessionID)) {
+		return conversationState{}, ErrInvalidStateToken
+	}
+	state.GuestTrial = trial
 	if state.SessionID != "" && !validSessionID(state.SessionID) {
 		return conversationState{}, ErrInvalidStateToken
 	}

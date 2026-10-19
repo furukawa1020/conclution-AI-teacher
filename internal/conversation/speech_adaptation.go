@@ -278,7 +278,7 @@ func (agent *vertexAgent) IssueQuestionBoundPhraseCapability(
 		!validSpeechTurnGeneration(turnGeneration) {
 		return QuestionBoundPhraseCapability{}, ErrInvalidStateToken
 	}
-	state, err := agent.codec.open(uid, token)
+	state, err := agent.openConversationState(uid, token)
 	if err != nil {
 		return QuestionBoundPhraseCapability{}, err
 	}

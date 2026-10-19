@@ -575,6 +575,10 @@ func (agent *vertexAgent) sealState(
 	if agent == nil || agent.codec == nil {
 		return "", ErrInvalidStateToken
 	}
+	// Read-first rollout: normal conversation must not issue trial tokens.
+	if state.GuestTrial != nil {
+		return "", ErrInvalidStateToken
+	}
 	if !agent.answerProofWrites {
 		// Reader-first rollout boundary for this additive JSON field. The first
 		// revision can decode it but cannot emit it; a following revision enables
@@ -643,7 +647,7 @@ func (agent *vertexAgent) ValidateStateToken(uid string, token string) error {
 	if agent == nil || agent.codec == nil || token == "" {
 		return ErrInvalidStateToken
 	}
-	_, err := agent.codec.open(uid, token)
+	_, err := agent.openConversationState(uid, token)
 	return err
 }
 
@@ -664,7 +668,7 @@ func (agent *vertexAgent) ValidateRespondentCheckpointTransition(
 		!validRespondentCheckpointControl(coachPhase, coachAction) {
 		return ErrInvalidStateToken
 	}
-	next, err := agent.codec.open(uid, nextToken)
+	next, err := agent.openConversationState(uid, nextToken)
 	if err != nil || next.VoiceCheckpointTag == "" ||
 		next.VoiceCheckpointScopeTag == "" {
 		return ErrInvalidStateToken
@@ -841,7 +845,7 @@ func (agent *vertexAgent) process(
 		},
 	}
 	if normalized.StateToken != "" {
-		state, err = agent.codec.open(uid, normalized.StateToken)
+		state, err = agent.openConversationState(uid, normalized.StateToken)
 		if err != nil {
 			return VoiceTurnResult{}, err
 		}

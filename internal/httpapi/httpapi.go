@@ -23,6 +23,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guesttrial"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/research"
@@ -391,6 +392,7 @@ type VoiceRespondentCheckpointValidator interface {
 }
 
 type VoiceOptions struct {
+	GuestTrials          guesttrial.Control
 	Service              VoiceTurnService
 	NativeLiveService    VoiceTurnLiveService
 	RateLimiter          guard.Limiter
@@ -604,6 +606,12 @@ func NewWithVoiceAndPasskeys(
 	mux.Handle("POST "+longTermMemoryContextConsumePath, server.requirePasskeyManagementIdentity(http.HandlerFunc(server.consumeLongTermMemoryContext)))
 	mux.HandleFunc("OPTIONS "+longTermMemoryContextBeginPath, server.memoryContextPreflight)
 	mux.HandleFunc("OPTIONS "+longTermMemoryContextConsumePath, server.memoryContextPreflight)
+	// Not registered until the composition root explicitly connects the trial
+	// service after the voice/UI rollout gates have passed.
+	if voice.GuestTrials != nil {
+		mux.Handle("POST "+guestTrialControlPath, server.requireVoiceIdentity(http.HandlerFunc(server.guestTrialControl)))
+		mux.HandleFunc("OPTIONS "+guestTrialControlPath, server.guestTrialPreflight)
+	}
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(
@@ -1486,6 +1494,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		if (r.URL.Path == "/health" ||
 			r.URL.Path == voiceStreamPath ||
 			r.URL.Path == voiceLivePath ||
+			r.URL.Path == guestTrialControlPath ||
 			r.URL.Path == longTermMemoryContextBeginPath ||
 			r.URL.Path == longTermMemoryContextConsumePath) &&
 			r.Header.Get("Origin") == allowedWebOrigin {
@@ -1504,6 +1513,7 @@ func (s *Server) rejectCrossSiteWrites(next http.Handler) http.Handler {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 			origins := r.Header.Values("Origin")
 			directBrowserAPI := (r.URL.Path == voiceStreamPath ||
+				r.URL.Path == guestTrialControlPath ||
 				r.URL.Path == longTermMemoryContextBeginPath ||
 				r.URL.Path == longTermMemoryContextConsumePath) &&
 				len(origins) == 1 &&

@@ -52,7 +52,7 @@ func TestFirestoreEmulatorConcurrentGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	t.Cleanup(func() { _ = client.Close() })
 	s, _ := NewFirestoreStore(client)
 	random := make([]byte, 32)
 	if _, err := rand.Read(random); err != nil {
@@ -63,7 +63,9 @@ func TestFirestoreEmulatorConcurrentGeneration(t *testing.T) {
 	t.Cleanup(func() {
 		cleanup, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
-		_, _ = ref.Delete(cleanup)
+		if _, err := ref.Delete(cleanup); err != nil {
+			t.Error("remove emulator test record:", err)
+		}
 	})
 	r := initial()
 	if err := s.Create(ctx, key, r); err != nil {

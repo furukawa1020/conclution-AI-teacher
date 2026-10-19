@@ -22,7 +22,7 @@ func trialHandler(t *testing.T, enabled bool, principal identity.Principal) http
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := VoiceOptions{GuestModeEnabled: true, GuestRateLimiter: &fakeLimiter{}, GuestAppRateLimiter: &fakeLimiter{}, RequestTimeout: time.Second}
+	opts := VoiceOptions{GuestModeEnabled: true, GuestRateLimiter: &fakeLimiter{wantKey: principal.UID}, GuestAppRateLimiter: &fakeLimiter{wantKey: "app:" + principal.AppID}, RequestTimeout: time.Second}
 	if enabled {
 		opts.GuestTrials = service
 	}

@@ -4,11 +4,12 @@ package conversation
 // API, transport and UI all enforce the same question and assistance scope.
 // These are observations of one trial, never a learning or ability score.
 type guestTrial struct {
-	Version  int    `json:"version"`
-	Question string `json:"question"`
-	Scope    string `json:"scope"`
-	Assisted bool   `json:"assisted"`
-	Outcome  string `json:"outcome"`
+	Version  int                `json:"version"`
+	Question string             `json:"question"`
+	Scope    string             `json:"scope"`
+	Assisted bool               `json:"assisted"`
+	Outcome  string             `json:"outcome"`
+	Binding  *guestTrialBinding `json:"binding,omitempty"`
 }
 
 const (
@@ -50,6 +51,13 @@ func normalizeGuestTrial(trial *guestTrial) (*guestTrial, error) {
 		return nil, ErrInvalidStateToken
 	}
 	copy := *trial
+	if trial.Binding != nil {
+		if !validGuestTrialBinding(*trial.Binding, trial.Assisted, trial.Outcome) {
+			return nil, ErrInvalidStateToken
+		}
+		binding := *trial.Binding
+		copy.Binding = &binding
+	}
 	return &copy, nil
 }
 
@@ -84,7 +92,13 @@ func requestGuestTrialHelp(trial *guestTrial, scope string) (*guestTrial, error)
 	if err != nil {
 		return nil, err
 	}
+	if next.Assisted {
+		return nil, ErrInvalidStateToken
+	}
 	next.Assisted = true
+	if next.Binding != nil {
+		next.Binding.Generation++
+	}
 	return next, nil
 }
 
@@ -117,6 +131,9 @@ func completeGuestTrial(trial *guestTrial, scope string, turn VoiceTurn, frame P
 	default:
 		return nil, ErrInvalidTurn
 	}
+	if next.Binding != nil {
+		next.Binding.Generation++
+	}
 	return next, nil
 }
 
@@ -126,5 +143,8 @@ func stopGuestTrial(trial *guestTrial, scope string) (*guestTrial, error) {
 		return nil, err
 	}
 	next.Outcome = guestTrialStopped
+	if next.Binding != nil {
+		next.Binding.Generation++
+	}
 	return next, nil
 }

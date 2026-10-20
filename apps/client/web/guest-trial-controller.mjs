@@ -3,8 +3,134 @@
 const QUESTION_ID = "rest_activity_v1";
 const QUESTION = "少し休めるとしたら、何をしたいですか？";
 const KEYS = ["version", "id", "questionId", "question", "generation", "assisted", "status", "expiresAt"];
+const CONTROL_PATH = "/api/v1/guest-trials/control";
+const MAX_CONTROL_RESPONSE_BYTES = 2048;
 
 function invalid() { throw new Error("guest_trial_invalid"); }
+
+function controlPayload(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
+  const keys = value.action === "begin" ? ["action"] : value.action === "read"
+    ? ["action", "id"] : ["help", "stop"].includes(value.action) ? ["action", "id", "generation"] : [];
+  if (!keys.length || Object.keys(value).length !== keys.length ||
+      keys.some(key => !Object.hasOwn(value, key))) invalid();
+  if (value.action !== "begin" && (typeof value.id !== "string" || !/^[a-f0-9]{64}$/u.test(value.id))) invalid();
+  if (keys.includes("generation") && ![1, 2].includes(value.generation)) invalid();
+  return JSON.stringify(Object.fromEntries(keys.map(key => [key, value[key]])));
+}
+
+// Only the composition root supplies origin and credentials. Never accept a
+// destination from a trial response. No mutation is automatically retried,
+// including after an expired credential or an ambiguous network failure.
+export function createGuestTrialTransport({
+  origin, credentials, isCurrentGuest, request = (...args) => fetch(...args),
+  now = Date.now, timeoutMs = 5000,
+}) {
+  let url;
+  try { url = new URL(origin); } catch { invalid(); }
+  if (url.protocol !== "https:" || url.origin !== origin ||
+      typeof credentials !== "function" || typeof isCurrentGuest !== "function" ||
+      typeof request !== "function" || typeof now !== "function" ||
+      !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) invalid();
+  const endpoint = `${origin}${CONTROL_PATH}`;
+
+  return async (payload, { signal } = {}) => {
+    const body = controlPayload(payload);
+    if (!signal || typeof signal.addEventListener !== "function") invalid();
+    const owned = new AbortController();
+    const cancel = () => owned.abort();
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    const timer = setTimeout(cancel, timeoutMs);
+    let rejectAbort;
+    const cancelled = new Promise((_, reject) => {
+      rejectAbort = () => reject(new Error("guest_trial_cancelled"));
+      owned.signal.addEventListener("abort", rejectAbort, { once: true });
+      if (owned.signal.aborted) rejectAbort();
+    });
+    const check = () => {
+      if (owned.signal.aborted) throw new Error("guest_trial_cancelled");
+      if (isCurrentGuest() !== true) throw new Error("guest_trial_session_changed");
+    };
+    const send = async () => {
+      check();
+      const tokens = await credentials({ signal: owned.signal });
+      check();
+      for (const key of ["idToken", "appCheckToken"]) {
+        if (typeof tokens?.[key] !== "string" || tokens[key].length < 1 ||
+            tokens[key].length > 16384 || /[^\x21-\x7e]/u.test(tokens[key])) {
+          throw new Error("guest_trial_authentication_failed");
+        }
+      }
+      const response = await request(endpoint, {
+        method: "POST", mode: "cors", credentials: "omit", cache: "no-store",
+        redirect: "error", referrerPolicy: "no-referrer", signal: owned.signal,
+        headers: {
+          Authorization: `Bearer ${tokens.idToken}`,
+          "X-Firebase-AppCheck": tokens.appCheckToken,
+          "Content-Type": "application/json",
+        },
+        body,
+      });
+      try {
+        check();
+      } catch (error) {
+        void response?.body?.cancel().catch(() => {});
+        throw error;
+      }
+      if (!response || response.redirected || response.url !== endpoint ||
+          response.status !== 200 ||
+          !/^application\/json(?:\s*;|$)/iu.test(response.headers?.get("Content-Type") ?? "") ||
+          !response.body || typeof response.body.getReader !== "function") {
+        void response?.body?.cancel().catch(() => {});
+        const code = response?.status === 401 || response?.status === 403
+          ? "guest_trial_authentication_failed" : response?.status === 409
+          ? "guest_trial_conflict" : response?.status === 410
+          ? "guest_trial_expired" : "guest_trial_unavailable";
+        throw new Error(code);
+      }
+      const reader = response.body.getReader();
+      const cancelRead = () => { void reader.cancel().catch(() => {}); };
+      owned.signal.addEventListener("abort", cancelRead, { once: true });
+      try {
+        const decoder = new TextDecoder("utf-8", { fatal: true });
+        let bytes = 0;
+        let text = "";
+        while (true) {
+          check();
+          const chunk = await reader.read();
+          check();
+          if (chunk.done) break;
+          if (!(chunk.value instanceof Uint8Array)) invalid();
+          bytes += chunk.value.byteLength;
+          if (bytes > MAX_CONTROL_RESPONSE_BYTES) invalid();
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+        text += decoder.decode();
+        return validateGuestTrial(JSON.parse(text), now());
+      } finally {
+        owned.signal.removeEventListener("abort", cancelRead);
+        cancelRead();
+        reader.releaseLock();
+      }
+    };
+    try {
+      return await Promise.race([send(), cancelled]);
+    } catch (error) {
+      // Provider/body failures may contain credential-bearing URLs or content.
+      // Only finite local errors leave this boundary.
+      const allowed = [
+        "guest_trial_cancelled", "guest_trial_session_changed", "guest_trial_authentication_failed",
+        "guest_trial_conflict", "guest_trial_expired", "guest_trial_unavailable", "guest_trial_invalid",
+      ];
+      throw new Error(allowed.includes(error?.message) ? error.message : "guest_trial_unavailable");
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", cancel);
+      owned.signal.removeEventListener("abort", rejectAbort);
+    }
+  };
+}
 
 export function validateGuestTrial(value, now = Date.now()) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||

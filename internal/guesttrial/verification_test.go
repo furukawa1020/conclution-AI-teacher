@@ -67,7 +67,7 @@ func TestVerificationCommitsOnlyOwnedSnapshot(t *testing.T) {
 				got.ExpiresAt != first.ExpiresAt || (got.Status == AnswerFirst) != (verdict == VerdictAnswerFirst) {
 				t.Fatal(got, err)
 			}
-			if _, err := service.Evaluate(context.Background(), owner, first.ID, got.Generation, verify); !errors.Is(err, ErrConflict) {
+			if _, err := service.Evaluate(context.Background(), owner, first.ID, first.Generation, verify); !errors.Is(err, ErrConflict) {
 				t.Fatal("terminal retry", err)
 			}
 			if calls != 1 {

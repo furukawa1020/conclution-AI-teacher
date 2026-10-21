@@ -44,6 +44,8 @@ func TestGuestTrialEvidenceRequiresAgreementAndOriginalAnswerFirst(t *testing.T)
 		{"散歩したい。今日は疲れました。", "散歩したい", "散歩したい", "own_answer", guesttrial.VerdictAnswerFirst},
 		{"散歩", "散歩", "散歩", "own_answer", guesttrial.VerdictAnswerFirst},
 		{"散歩したいです。", "散歩", "散歩したいです", "own_answer", guesttrial.VerdictAnswerFirst},
+		{"散歩したいです。", "散歩したいです。", "散歩したいです", "own_answer", guesttrial.VerdictAnswerFirst},
+		{"散歩したい？説明。散歩したい。", "散歩したい。", "散歩したい。", "own_answer", guesttrial.VerdictUnverified},
 		{"今日は疲れました。散歩したい。", "散歩したい", "散歩したい", "own_answer", guesttrial.VerdictUnverified},
 		{"散歩したい。読書したい。", "散歩したい", "読書したい", "own_answer", guesttrial.VerdictUnverified},
 		{"散歩したい。", "散歩したい", "", "uncertain", guesttrial.VerdictUnverified},

@@ -98,9 +98,17 @@ func guestTrialEvidenceVerdict(utterance string, evidence [2]guestTrialEvidence)
 		if item.Span == "" || !strings.Contains(utterance, item.Span) {
 			return guesttrial.VerdictUnverified
 		}
+		// The clause-position gate removes delimiters from clauses. An exact
+		// extraction ending in a full stop must use the same delimiter-free view.
+		// Keep its original occurrence: trimming must not bind a later answer
+		// to an earlier question/quotation with the same words.
+		span := strings.TrimRight(item.Span, "。．.!！?？;；、，, \t\r\n")
+		if span == "" || strings.Index(utterance, span) != strings.Index(utterance, item.Span) {
+			return guesttrial.VerdictUnverified
+		}
 		gate := respondent.Gate(respondent.Input{
 			Frame:                         respondent.QuestionFrame{Operator: respondent.OperatorState, Subject: guesttrial.QuestionText, RequiredSlots: []respondent.Slot{respondent.SlotState}},
-			Attempt:                       respondent.AnswerAttempt{Text: utterance, SlotEvidence: []respondent.SlotBinding{{Slot: respondent.SlotState, Span: item.Span}}},
+			Attempt:                       respondent.AnswerAttempt{Text: utterance, SlotEvidence: []respondent.SlotBinding{{Slot: respondent.SlotState, Span: span}}},
 			RequireTargetAtUtteranceFront: true,
 		})
 		if gate.Outcome != respondent.OutcomeKeep || !gate.TargetSatisfied || gate.OriginalCommitmentPosition != respondent.PositionFirst {

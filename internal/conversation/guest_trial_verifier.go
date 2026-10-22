@@ -126,7 +126,7 @@ func (agent *vertexAgent) extractGuestTrialEvidence(ctx context.Context, model s
 	if role == 1 {
 		roleInstruction = "独立監査者として、発話が固定質問への本人自身の希望を表すか検査し、その最短の完結した回答節だけを原文から抽出してください。他者の引用や質問文を本人の回答と取り違えないでください。"
 	}
-	response, err := agent.generator.GenerateContent(ctx, model,
+	response, err := agent.generateGuestTrialEvidence(ctx, model,
 		[]*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)},
 		&genai.GenerateContentConfig{
 			SystemInstruction: genai.NewContentFromText(guestTrialEvidenceInstruction+roleInstruction, genai.RoleUser),

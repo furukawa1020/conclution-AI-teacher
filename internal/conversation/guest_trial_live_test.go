@@ -64,7 +64,9 @@ func TestGuestTrialLiveSemanticCases(t *testing.T) {
 				}
 			}
 			agent, owner, snapshot, turn := trialVerifierFixture(t)
-			statuses := make(chan int, 2)
+			// Two initial calls and at most one retry for each role. Keep room
+			// for late cancellation completions without blocking provider workers.
+			statuses := make(chan int, 4)
 			agent.generator = trialEvidenceGenerator(func(callCtx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 				response, callErr := client.Models.GenerateContent(callCtx, model, contents, config)
 				code, _ := providerStatusCode(callErr)

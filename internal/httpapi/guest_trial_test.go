@@ -16,6 +16,10 @@ import (
 )
 
 func trialHandler(t *testing.T, enabled bool, principal identity.Principal) http.Handler {
+	return trialHandlerWithVoice(t, enabled, principal, nil)
+}
+
+func trialHandlerWithVoice(t *testing.T, enabled bool, principal identity.Principal, voice GuestTrialVoiceService) http.Handler {
 	t.Helper()
 	store, _ := guesttrial.NewMemoryStore(16)
 	service, err := guesttrial.NewService(store, bytes.Repeat([]byte{7}, 32))
@@ -23,6 +27,7 @@ func trialHandler(t *testing.T, enabled bool, principal identity.Principal) http
 		t.Fatal(err)
 	}
 	opts := VoiceOptions{GuestModeEnabled: true, GuestRateLimiter: &fakeLimiter{wantKey: principal.UID}, GuestAppRateLimiter: &fakeLimiter{wantKey: "app:" + principal.AppID}, RequestTimeout: time.Second}
+	opts.GuestTrialVoice = voice
 	if enabled {
 		opts.GuestTrials = service
 	}

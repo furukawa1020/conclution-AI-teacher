@@ -20,6 +20,14 @@ function transport(overrides = {}) {
 }
 function options() { return {signal: new AbortController().signal}; }
 
+test("control and its voice capability arrive in one authenticated response", async () => {
+  const state = "v2." + "a".repeat(3000);
+  let calls = 0;
+  const send = transport({request:async () => {calls++; return response(JSON.stringify({...snapshot, state}));}});
+  assert.equal((await send({action:"begin"}, options())).state, state);
+  assert.equal(calls, 1);
+});
+
 test("trial transport sends one bounded authenticated POST without redirects or cookies", async () => {
   let calls = 0;
   const send = transport({ request: async (url, init) => {
@@ -88,7 +96,7 @@ test("cancellation or account change while acquiring credentials cannot send a l
 test("response byte limit cancels streamed bodies without buffering arbitrary content", async () => {
   let cancelled = false;
   const body = new ReadableStream({
-    start(c) { c.enqueue(new Uint8Array(2049)); },
+    start(c) { c.enqueue(new Uint8Array(2048 + 16384 + 1)); },
     cancel() { cancelled = true; },
   });
   await assert.rejects(transport({request:async () => response(body)})({action:"begin"}, options()), /invalid/u);

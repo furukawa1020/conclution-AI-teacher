@@ -394,6 +394,7 @@ type VoiceRespondentCheckpointValidator interface {
 type VoiceOptions struct {
 	GuestTrials          guesttrial.Control
 	GuestTrialVoice      GuestTrialVoiceService
+	GuestTrialState      GuestTrialStateIssuer
 	Service              VoiceTurnService
 	NativeLiveService    VoiceTurnLiveService
 	RateLimiter          guard.Limiter

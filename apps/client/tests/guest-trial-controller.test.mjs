@@ -12,6 +12,15 @@ function make(send, discardPrevious = async () => {}) {
   return createGuestTrialController({ send, discardPrevious, now: () => NOW, timeoutMs: 100 });
 }
 
+test("pending control can carry a bounded voice capability but terminal control cannot", () => {
+  const state = "v2." + "a".repeat(3000);
+  assert.equal(validateGuestTrial(trial({state}), NOW).state, state);
+  for (const state of [null, "", "v1.foo", "v2.a\n", "v2." + "a".repeat(16384), 123]) {
+    assert.throws(() => validateGuestTrial(trial({state}), NOW), /invalid/u);
+  }
+  assert.throws(() => validateGuestTrial(trial({state, status:"stopped", generation:2}), NOW), /invalid/u);
+});
+
 test("trial schema rejects altered questions, extra content, expiry and inconsistent generations", () => {
   assert.ok(Object.isFrozen(validateGuestTrial(trial(), NOW)));
   for (const bad of [trial({question: "別の質問"}), trial({generation: 2}), trial({caption: "私の答え"}),

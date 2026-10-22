@@ -13,6 +13,15 @@ import (
 
 const guestTrialControlPath = "/api/v1/guest-trials/control"
 
+type GuestTrialStateIssuer interface {
+	IssueGuestTrialState(guesttrial.Owner, guesttrial.Snapshot) (string, error)
+}
+
+type guestTrialControlResponse struct {
+	guesttrial.Snapshot
+	State string `json:"state,omitempty"`
+}
+
 func (s *Server) guestTrialPreflight(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != allowedWebOrigin || r.Header.Get("Access-Control-Request-Method") != http.MethodPost ||
 		!validMemoryContextPreflightHeaders(r.Header.Get("Access-Control-Request-Headers"), true) {
@@ -94,5 +103,18 @@ func (s *Server) guestTrialControl(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, code, kind, "The trial operation was not accepted.")
 		return
 	}
-	_ = writeJSON(w, http.StatusOK, result)
+	response := guestTrialControlResponse{Snapshot: result}
+	if s.voice.GuestTrialState != nil && result.Status == guesttrial.Pending {
+		// The snapshot above came from the owner-bound ledger, not request JSON.
+		response.State, err = s.voice.GuestTrialState.IssueGuestTrialState(owner, result)
+		if err != nil || response.State == "" || len(response.State) > maxStateBytes {
+			writeProblem(w, http.StatusServiceUnavailable, "guest_trial_unavailable", "Trial state issuance is unavailable.")
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		writeProblem(w, http.StatusGatewayTimeout, "guest_trial_timeout", "Trial control timed out.")
+		return
+	}
+	_ = writeJSON(w, http.StatusOK, response)
 }

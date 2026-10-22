@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func TestGuestTrialDoesNotRetryOtherFailuresOrInsufficientBudget(t *testing.T) {
 				defer cancel()
 			}
 			_, err := agent.generateGuestTrialEvidence(ctx, "fast", nil, nil)
-			if calls != 1 || !errors.Is(err, tc.err) {
+			if calls != 1 || !reflect.DeepEqual(err, tc.err) {
 				t.Fatal(calls, err)
 			}
 		})

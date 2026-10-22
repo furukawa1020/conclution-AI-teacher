@@ -8,6 +8,64 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guesttrial"
 )
 
+func TestGuestTrialReissuePreservesQuestionWithoutExtendingExpiry(t *testing.T) {
+	agent := guestTrialAgent(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	agent.codec.now = func() time.Time { return now }
+	owner := guesttrial.Owner{UID: "guest", AppID: "app"}
+	s := guesttrial.Snapshot{Version: 1, ID: strings.Repeat("a", 64), QuestionID: guesttrial.QuestionID, Question: guesttrial.QuestionText, Generation: 1, Status: guesttrial.Pending, ExpiresAt: now.Add(guesttrial.TTL)}
+	issue := func(o guesttrial.Owner, snapshot guesttrial.Snapshot) (string, conversationState) {
+		t.Helper()
+		token, err := agent.issueGuestTrialState(o, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := agent.openGuestTrialState(o, token, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token, state
+	}
+	originalToken, first := issue(owner, s)
+	now = now.Add(time.Minute)
+	_, again := issue(owner, s)
+	if first.SessionID != again.SessionID || first.GuestTrial.Scope != again.GuestTrial.Scope || again.GuestTrial.Binding.ExpiresAt != s.ExpiresAt.UnixMicro() {
+		t.Fatal("reissue changed question or expiry")
+	}
+	help := s
+	help.Assisted = true
+	help.Generation = 2
+	helpedToken, helped := issue(owner, help)
+	if helped.SessionID != first.SessionID || helped.GuestTrial.Scope != first.GuestTrial.Scope || !helped.GuestTrial.Assisted {
+		t.Fatal("help changed question or erased assistance")
+	}
+	if _, err := agent.openGuestTrialState(owner, originalToken, help); err == nil {
+		t.Fatal("old generation accepted")
+	}
+	for _, o := range []guesttrial.Owner{{UID: "other", AppID: "app"}, {UID: "guest", AppID: "other"}} {
+		_, other := issue(o, s)
+		if other.SessionID == first.SessionID || other.GuestTrial.Scope == first.GuestTrial.Scope {
+			t.Fatal("cross owner scope reused")
+		}
+	}
+	otherTrial := s
+	otherTrial.ID = strings.Repeat("b", 64)
+	_, other := issue(owner, otherTrial)
+	if other.SessionID == first.SessionID || other.GuestTrial.Scope == first.GuestTrial.Scope {
+		t.Fatal("cross trial scope reused")
+	}
+	if _, err := agent.openConversationState(owner.UID, helpedToken); err == nil {
+		t.Fatal("trial entered ordinary dialogue")
+	}
+	now = s.ExpiresAt
+	if _, err := agent.issueGuestTrialState(owner, help); err == nil {
+		t.Fatal("reissue extended ledger expiry")
+	}
+	if _, err := agent.openGuestTrialState(owner, helpedToken, help); err == nil {
+		t.Fatal("expired reissue accepted")
+	}
+}
+
 func TestGuestTrialTokenBoundToSharedSnapshot(t *testing.T) {
 	agent := guestTrialAgent(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)

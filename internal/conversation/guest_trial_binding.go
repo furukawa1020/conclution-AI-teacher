@@ -89,6 +89,16 @@ func (agent *vertexAgent) issueGuestTrialState(owner guesttrial.Owner, snapshot 
 	if err != nil {
 		return "", err
 	}
+	// Reissuing after a lost HTTP response must retain this question instance.
+	// Keep the domain separate from owner tags and ordinary session IDs; no raw
+	// owner identity is emitted. Generation is deliberately excluded so help
+	// changes assistance state, not the identity of the question being answered.
+	mac := hmac.New(sha256.New, agent.continuityKey)
+	_, _ = mac.Write([]byte("guest-trial-session-v1\x00" + binding.AppTag + "\x00" + binding.ID))
+	full := mac.Sum(nil)
+	defer wipe(full)
+	state.SessionID = base64.RawURLEncoding.EncodeToString(full[:sessionIDBytes])
+	state.GuestTrial.Scope = agent.coachQuestionInstanceTag(state.SessionID, guestTransferQuestion)
 	state.GuestTrial.Binding = &binding
 	state.GuestTrial.Assisted = snapshot.Assisted
 	return agent.codec.seal(owner.UID, state)

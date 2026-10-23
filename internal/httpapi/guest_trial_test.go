@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,11 +16,72 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 )
 
+type trialStateFunc func(guesttrial.Owner, guesttrial.Snapshot) (string, error)
+
+func (f trialStateFunc) IssueGuestTrialState(o guesttrial.Owner, s guesttrial.Snapshot) (string, error) {
+	return f(o, s)
+}
+
+func TestGuestTrialControlIssuesOnlyOwnerBoundPendingState(t *testing.T) {
+	calls := 0
+	issuer := trialStateFunc(func(o guesttrial.Owner, s guesttrial.Snapshot) (string, error) {
+		calls++
+		if o.UID != "guest" || o.AppID != "app" || s.Status != guesttrial.Pending || s.Question != guesttrial.QuestionText || len(s.ID) != 64 {
+			t.Fatal("untrusted snapshot")
+		}
+		return "v2.sealed", nil
+	})
+	h := trialHandlerWithCapabilities(t, true, trialGuest(), nil, issuer)
+	w := trialPost(h, `{"action":"begin"}`, nil)
+	var initial guestTrialControlResponse
+	if json.Unmarshal(w.Body.Bytes(), &initial) != nil || w.Code != 200 || initial.State != "v2.sealed" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, action := range []string{"read", "help", "stop", "read"} {
+		body := `{"action":"` + action + `","id":"` + initial.ID + `"`
+		if action == "help" {
+			body += `,"generation":1`
+		}
+		if action == "stop" {
+			body += `,"generation":2`
+		}
+		body += `}`
+		w = trialPost(h, body, nil)
+		var reply guestTrialControlResponse
+		if json.Unmarshal(w.Body.Bytes(), &reply) != nil || w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if (reply.State != "") != (reply.Status == guesttrial.Pending) {
+			t.Fatal("terminal capability issued")
+		}
+	}
+	if calls != 3 {
+		t.Fatal("unexpected issuance count", calls)
+	}
+}
+
+func TestGuestTrialControlIssuanceFailureIsNotSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		token string
+		err   error
+	}{{"", nil}, {strings.Repeat("a", maxStateBytes+1), nil}, {"", errors.New("private issuer detail")}} {
+		issuer := trialStateFunc(func(guesttrial.Owner, guesttrial.Snapshot) (string, error) { return tc.token, tc.err })
+		w := trialPost(trialHandlerWithCapabilities(t, true, trialGuest(), nil, issuer), `{"action":"begin"}`, nil)
+		if w.Code != 503 || strings.Contains(w.Body.String(), "private") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+}
+
 func trialHandler(t *testing.T, enabled bool, principal identity.Principal) http.Handler {
 	return trialHandlerWithVoice(t, enabled, principal, nil)
 }
 
 func trialHandlerWithVoice(t *testing.T, enabled bool, principal identity.Principal, voice GuestTrialVoiceService) http.Handler {
+	return trialHandlerWithCapabilities(t, enabled, principal, voice, nil)
+}
+
+func trialHandlerWithCapabilities(t *testing.T, enabled bool, principal identity.Principal, voice GuestTrialVoiceService, issuer GuestTrialStateIssuer) http.Handler {
 	t.Helper()
 	store, _ := guesttrial.NewMemoryStore(16)
 	service, err := guesttrial.NewService(store, bytes.Repeat([]byte{7}, 32))
@@ -28,6 +90,7 @@ func trialHandlerWithVoice(t *testing.T, enabled bool, principal identity.Princi
 	}
 	opts := VoiceOptions{GuestModeEnabled: true, GuestRateLimiter: &fakeLimiter{wantKey: principal.UID}, GuestAppRateLimiter: &fakeLimiter{wantKey: "app:" + principal.AppID}, RequestTimeout: time.Second}
 	opts.GuestTrialVoice = voice
+	opts.GuestTrialState = issuer
 	if enabled {
 		opts.GuestTrials = service
 	}

@@ -4,7 +4,7 @@ const QUESTION_ID = "rest_activity_v1";
 const QUESTION = "少し休めるとしたら、何をしたいですか？";
 const KEYS = ["version", "id", "questionId", "question", "generation", "assisted", "status", "expiresAt"];
 const CONTROL_PATH = "/api/v1/guest-trials/control";
-const MAX_CONTROL_RESPONSE_BYTES = 2048;
+const MAX_CONTROL_RESPONSE_BYTES = 2048 + 16384;
 
 function invalid() { throw new Error("guest_trial_invalid"); }
 
@@ -133,8 +133,9 @@ export function createGuestTrialTransport({
 }
 
 export function validateGuestTrial(value, now = Date.now()) {
+  const keys = value && Object.hasOwn(value, "state") ? [...KEYS, "state"] : KEYS;
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      Object.keys(value).length !== KEYS.length || KEYS.some(key => !Object.hasOwn(value, key)) ||
+      Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key)) ||
       value.version !== 1 || typeof value.id !== "string" || !/^[a-f0-9]{64}$/u.test(value.id) ||
       value.questionId !== QUESTION_ID || value.question !== QUESTION ||
       typeof value.assisted !== "boolean" ||
@@ -144,7 +145,9 @@ export function validateGuestTrial(value, now = Date.now()) {
   const expires = Date.parse(value.expiresAt);
   if (value.generation !== expected || !Number.isFinite(now) || !Number.isFinite(expires) ||
       expires <= now || expires > now + 16 * 60_000) invalid();
-  return Object.freeze(Object.fromEntries(KEYS.map(key => [key, value[key]])));
+  if (keys.includes("state") && (value.status !== "pending" || typeof value.state !== "string" ||
+      value.state.length > 16384 || !/^v2\.[A-Za-z0-9_-]+$/u.test(value.state))) invalid();
+  return Object.freeze(Object.fromEntries(keys.map(key => [key, value[key]])));
 }
 
 // send receives a finite control payload and an AbortSignal. The composition

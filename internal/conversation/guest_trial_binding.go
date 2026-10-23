@@ -21,6 +21,12 @@ type guestTrialBinding struct {
 	ExpiresAt  int64  `json:"expires_at_us"`
 }
 
+// IssueGuestTrialState accepts only a snapshot read from the authenticated
+// owner's shared ledger. HTTP callers must never supply browser snapshots.
+func (agent *vertexAgent) IssueGuestTrialState(owner guesttrial.Owner, snapshot guesttrial.Snapshot) (string, error) {
+	return agent.issueGuestTrialState(owner, snapshot)
+}
+
 // ValidateGuestTrialState is for the dedicated voice path, before recognition.
 // Ordinary/native token validators intentionally continue rejecting trials.
 func (agent *vertexAgent) ValidateGuestTrialState(owner guesttrial.Owner, snapshot guesttrial.Snapshot, token string) error {

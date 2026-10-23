@@ -14,7 +14,8 @@ import (
 
 // GuestTrialVerifier consumes only a server-authored committed voice turn and
 // an owner-bound ledger snapshot. Its result is private until the ledger CAS.
-// Independent model judgments are fallible; agreement is not a proof of
+// Isolated calls to the same fast model are not statistically independent.
+// Their judgments are fallible; agreement is not a proof of
 // factual correctness, identity, or improvement in speaking ability.
 type GuestTrialVerifier interface {
 	EvaluateGuestTrial(context.Context, guesttrial.Owner, guesttrial.Snapshot, VoiceTurn) (guesttrial.Verdict, error)
@@ -26,7 +27,7 @@ type guestTrialEvidence struct {
 }
 
 func (agent *vertexAgent) EvaluateGuestTrial(ctx context.Context, owner guesttrial.Owner, snapshot guesttrial.Snapshot, turn VoiceTurn) (guesttrial.Verdict, error) {
-	if ctx == nil || agent == nil || agent.generator == nil || agent.fastModel == "" || agent.precisionModel == "" {
+	if ctx == nil || agent == nil || agent.generator == nil || agent.fastModel == "" {
 		return 0, ErrInvalidTurn
 	}
 	if err := ctx.Err(); err != nil {
@@ -60,7 +61,9 @@ func (agent *vertexAgent) EvaluateGuestTrial(ctx context.Context, owner guesttri
 		err      error
 	}
 	results := make(chan outcome, 2)
-	for index, model := range []string{agent.fastModel, agent.precisionModel} {
+	// This bounded extraction task does not use the slower general-purpose
+	// precision planner. Keep the two prompts separate and preserve both gates.
+	for index, model := range []string{agent.fastModel, agent.fastModel} {
 		go func(index int, model string) {
 			evidence, err := agent.extractGuestTrialEvidence(verifyCtx, model, index, prompt, turn.Utterance)
 			results <- outcome{evidence, err}
@@ -85,17 +88,27 @@ func (agent *vertexAgent) EvaluateGuestTrial(ctx context.Context, owner guesttri
 }
 
 func guestTrialEvidenceVerdict(utterance string, evidence [2]guestTrialEvidence) guesttrial.Verdict {
-	if evidence[0].Relation != "own_answer" || evidence[1].Relation != "own_answer" ||
-		collapseSpace(evidence[0].Span) != collapseSpace(evidence[1].Span) {
+	// Independent extractors may select "散歩" and "散歩したいです" from the
+	// same leading answer. Do not require byte-identical extraction boundaries:
+	// each span must independently pass the original-utterance front gate.
+	if evidence[0].Relation != "own_answer" || evidence[1].Relation != "own_answer" {
 		return guesttrial.VerdictUnverified
 	}
 	for _, item := range evidence {
 		if item.Span == "" || !strings.Contains(utterance, item.Span) {
 			return guesttrial.VerdictUnverified
 		}
+		// The clause-position gate removes delimiters from clauses. An exact
+		// extraction ending in a full stop must use the same delimiter-free view.
+		// Keep its original occurrence: trimming must not bind a later answer
+		// to an earlier question/quotation with the same words.
+		span := strings.TrimRight(item.Span, "。．.!！?？;；、，, \t\r\n")
+		if span == "" || strings.Index(utterance, span) != strings.Index(utterance, item.Span) {
+			return guesttrial.VerdictUnverified
+		}
 		gate := respondent.Gate(respondent.Input{
 			Frame:                         respondent.QuestionFrame{Operator: respondent.OperatorState, Subject: guesttrial.QuestionText, RequiredSlots: []respondent.Slot{respondent.SlotState}},
-			Attempt:                       respondent.AnswerAttempt{Text: utterance, SlotEvidence: []respondent.SlotBinding{{Slot: respondent.SlotState, Span: item.Span}}},
+			Attempt:                       respondent.AnswerAttempt{Text: utterance, SlotEvidence: []respondent.SlotBinding{{Slot: respondent.SlotState, Span: span}}},
 			RequireTargetAtUtteranceFront: true,
 		})
 		if gate.Outcome != respondent.OutcomeKeep || !gate.TargetSatisfied || gate.OriginalCommitmentPosition != respondent.PositionFirst {
@@ -145,7 +158,7 @@ func (agent *vertexAgent) extractGuestTrialEvidence(ctx context.Context, model s
 }
 
 func decodeGuestTrialEvidence(raw []byte, utterance string) (guestTrialEvidence, error) {
-	if len(raw) == 0 || len(raw) > 4096 {
+	if len(raw) == 0 || len(raw) > 4096 || !utf8.Valid(raw) {
 		return guestTrialEvidence{}, ErrModelOutputInvalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))

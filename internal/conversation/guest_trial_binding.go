@@ -21,6 +21,13 @@ type guestTrialBinding struct {
 	ExpiresAt  int64  `json:"expires_at_us"`
 }
 
+// ValidateGuestTrialState is for the dedicated voice path, before recognition.
+// Ordinary/native token validators intentionally continue rejecting trials.
+func (agent *vertexAgent) ValidateGuestTrialState(owner guesttrial.Owner, snapshot guesttrial.Snapshot, token string) error {
+	_, err := agent.openGuestTrialState(owner, token, snapshot)
+	return err
+}
+
 func validGuestTrialBinding(b guestTrialBinding, assisted bool, outcome string) bool {
 	raw, err := hex.DecodeString(b.ID)
 	expected := int64(1)

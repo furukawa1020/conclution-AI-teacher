@@ -53,7 +53,7 @@ function voicePayload(value, now) {
 }
 
 function createTrialTransport({
-  origin, credentials, isCurrentGuest, request = (...args) => fetch(...args),
+  origin, credentials, isCurrentGuest, getSessionEpoch, request = (...args) => fetch(...args),
   now = Date.now, timeoutMs,
 }, voice) {
   timeoutMs ??= voice ? 15000 : 5000;
@@ -61,6 +61,7 @@ function createTrialTransport({
   try { url = new URL(origin); } catch { invalid(); }
   if (url.protocol !== "https:" || url.origin !== origin ||
       typeof credentials !== "function" || typeof isCurrentGuest !== "function" ||
+      typeof getSessionEpoch !== "function" ||
       typeof request !== "function" || typeof now !== "function" ||
       !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (voice ? 15000 : 10000)) invalid();
   const endpoint = `${origin}${voice ? VOICE_PATH : CONTROL_PATH}`;
@@ -68,6 +69,10 @@ function createTrialTransport({
   return async (payload, { signal } = {}) => {
     const encoded = voice ? voicePayload(payload, now()) : {body: controlPayload(payload)};
     const body = encoded.body;
+    // The root increments this on sign-out, account replacement and guest
+    // replacement, not ordinary token refresh. It never crosses the network.
+    const sessionEpoch = getSessionEpoch();
+    if (!Number.isSafeInteger(sessionEpoch) || sessionEpoch < 0) invalid();
     if (!signal || typeof signal.addEventListener !== "function") invalid();
     const owned = new AbortController();
     const cancel = () => owned.abort();
@@ -83,6 +88,7 @@ function createTrialTransport({
     const check = () => {
       if (owned.signal.aborted) throw new Error("guest_trial_cancelled");
       if (isCurrentGuest() !== true) throw new Error("guest_trial_session_changed");
+      if (getSessionEpoch() !== sessionEpoch) throw new Error("guest_trial_session_changed");
     };
     const send = async () => {
       check();

@@ -4,6 +4,7 @@ const QUESTION_ID = "rest_activity_v1";
 const QUESTION = "少し休めるとしたら、何をしたいですか？";
 const KEYS = ["version", "id", "questionId", "question", "generation", "assisted", "status", "expiresAt"];
 const CONTROL_PATH = "/api/v1/guest-trials/control";
+const VOICE_PATH = "/api/v1/guest-trials/voice";
 const MAX_CONTROL_RESPONSE_BYTES = 2048 + 16384;
 
 function invalid() { throw new Error("guest_trial_invalid"); }
@@ -22,20 +23,51 @@ function controlPayload(value) {
 // Only the composition root supplies origin and credentials. Never accept a
 // destination from a trial response. No mutation is automatically retried,
 // including after an expired credential or an ambiguous network failure.
-export function createGuestTrialTransport({
+export function createGuestTrialTransport(options) {
+  return createTrialTransport(options, false);
+}
+
+export function createGuestTrialVoiceTransport(options) {
+  return createTrialTransport(options, true);
+}
+
+// Consumes the provided view, including rejection. Its encoded request is
+// transient; neither audio nor tokens are written to browser storage.
+function voicePayload(value, now) {
+  const audio = value?.audio;
+  try {
+    if (!value || Object.keys(value).length !== 2 || !Object.hasOwn(value, "trial") ||
+        !(audio instanceof Uint8Array) || !(audio.buffer instanceof ArrayBuffer) ||
+        audio.byteLength < 2 || audio.byteLength > 960000 || audio.byteLength % 2) invalid();
+    const trial = validateGuestTrial(value.trial, now);
+    if (trial.status !== "pending" || !trial.state) invalid();
+    const chunks = [];
+    for (let offset = 0; offset < audio.length; offset += 8192) {
+      chunks.push(String.fromCharCode(...audio.subarray(offset, offset + 8192)));
+    }
+    return { trial, body: JSON.stringify({id: trial.id, generation: trial.generation,
+      state: trial.state, pcm16: btoa(chunks.join(""))}) };
+  } finally {
+    if (audio instanceof Uint8Array) audio.fill(0);
+  }
+}
+
+function createTrialTransport({
   origin, credentials, isCurrentGuest, request = (...args) => fetch(...args),
-  now = Date.now, timeoutMs = 5000,
-}) {
+  now = Date.now, timeoutMs,
+}, voice) {
+  timeoutMs ??= voice ? 15000 : 5000;
   let url;
   try { url = new URL(origin); } catch { invalid(); }
   if (url.protocol !== "https:" || url.origin !== origin ||
       typeof credentials !== "function" || typeof isCurrentGuest !== "function" ||
       typeof request !== "function" || typeof now !== "function" ||
-      !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) invalid();
-  const endpoint = `${origin}${CONTROL_PATH}`;
+      !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (voice ? 15000 : 10000)) invalid();
+  const endpoint = `${origin}${voice ? VOICE_PATH : CONTROL_PATH}`;
 
   return async (payload, { signal } = {}) => {
-    const body = controlPayload(payload);
+    const encoded = voice ? voicePayload(payload, now()) : {body: controlPayload(payload)};
+    const body = encoded.body;
     if (!signal || typeof signal.addEventListener !== "function") invalid();
     const owned = new AbortController();
     const cancel = () => owned.abort();
@@ -107,7 +139,12 @@ export function createGuestTrialTransport({
           text += decoder.decode(chunk.value, { stream: true });
         }
         text += decoder.decode();
-        return validateGuestTrial(JSON.parse(text), now());
+        const result = validateGuestTrial(JSON.parse(text), now());
+        if (voice && (result.id !== encoded.trial.id ||
+            result.expiresAt !== encoded.trial.expiresAt || result.assisted !== encoded.trial.assisted ||
+            result.generation !== encoded.trial.generation + 1 ||
+            !["answer_first", "unverified"].includes(result.status))) invalid();
+        return result;
       } finally {
         owned.signal.removeEventListener("abort", cancelRead);
         cancelRead();

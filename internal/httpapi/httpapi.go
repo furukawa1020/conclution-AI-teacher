@@ -393,6 +393,7 @@ type VoiceRespondentCheckpointValidator interface {
 
 type VoiceOptions struct {
 	GuestTrials          guesttrial.Control
+	GuestTrialVoice      GuestTrialVoiceService
 	Service              VoiceTurnService
 	NativeLiveService    VoiceTurnLiveService
 	RateLimiter          guard.Limiter
@@ -611,6 +612,10 @@ func NewWithVoiceAndPasskeys(
 	if voice.GuestTrials != nil {
 		mux.Handle("POST "+guestTrialControlPath, server.requireVoiceIdentity(http.HandlerFunc(server.guestTrialControl)))
 		mux.HandleFunc("OPTIONS "+guestTrialControlPath, server.guestTrialPreflight)
+	}
+	if voice.GuestTrials != nil && voice.GuestTrialVoice != nil {
+		mux.Handle("POST "+guestTrialVoicePath, server.requireVoiceIdentity(http.HandlerFunc(server.guestTrialVoice)))
+		mux.HandleFunc("OPTIONS "+guestTrialVoicePath, server.guestTrialPreflight)
 	}
 
 	return server.voiceStreamCORS(
@@ -1495,6 +1500,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			r.URL.Path == voiceStreamPath ||
 			r.URL.Path == voiceLivePath ||
 			r.URL.Path == guestTrialControlPath ||
+			r.URL.Path == guestTrialVoicePath ||
 			r.URL.Path == longTermMemoryContextBeginPath ||
 			r.URL.Path == longTermMemoryContextConsumePath) &&
 			r.Header.Get("Origin") == allowedWebOrigin {
@@ -1514,6 +1520,7 @@ func (s *Server) rejectCrossSiteWrites(next http.Handler) http.Handler {
 			origins := r.Header.Values("Origin")
 			directBrowserAPI := (r.URL.Path == voiceStreamPath ||
 				r.URL.Path == guestTrialControlPath ||
+				r.URL.Path == guestTrialVoicePath ||
 				r.URL.Path == longTermMemoryContextBeginPath ||
 				r.URL.Path == longTermMemoryContextConsumePath) &&
 				len(origins) == 1 &&

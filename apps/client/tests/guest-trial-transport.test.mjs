@@ -16,6 +16,7 @@ function response(body = JSON.stringify(snapshot), status = 200) {
 }
 function transport(overrides = {}) {
   return createGuestTrialTransport({ origin, credentials, isCurrentGuest: () => true,
+    getSessionEpoch:()=>1,
     now: () => now, request: async () => response(), ...overrides });
 }
 function options() { return {signal: new AbortController().signal}; }
@@ -28,9 +29,48 @@ function voiceResponse(overrides = {}) {
 }
 function voiceTransport(overrides = {}) {
   return createGuestTrialVoiceTransport({origin, credentials, isCurrentGuest:()=>true,
+    getSessionEpoch:()=>1,
     now:()=>now, request:async()=>voiceResponse(), ...overrides});
 }
 function voiceInput() { return {trial:{...snapshot,state:"v2.sealed"},audio:new Uint8Array([1,2,3,4])}; }
+
+test("guest-to-guest replacement cannot send previously acquired credentials",async()=>{
+  for(const voice of [false,true]) {
+    let epoch=1,release,calls=0;
+    const send=(voice?voiceTransport:transport)({getSessionEpoch:()=>epoch,
+      credentials:()=>new Promise(resolve=>{release=resolve;}),
+      request:async()=>{calls++;return voice?voiceResponse():response();}});
+    const pending=send(voice?voiceInput():{action:"begin"},options());
+    const rejected=assert.rejects(pending,/session_changed/u);
+    epoch=2;release(await credentials());await rejected;assert.equal(calls,0);
+  }
+});
+
+test("guest replacement discards old response even when guest status stays true",async()=>{
+  for(const voice of [false,true]) {
+    let epoch=1,release;
+    const send=(voice?voiceTransport:transport)({getSessionEpoch:()=>epoch,
+      request:()=>new Promise(resolve=>{release=resolve;})});
+    const pending=send(voice?voiceInput():{action:"begin"},options());
+    const rejected=assert.rejects(pending,/session_changed/u);
+    while(!release) await Promise.resolve();
+    epoch=2;release(voice?voiceResponse():response());await rejected;
+  }
+});
+
+test("session epoch is required, finite and not sent in the request",async()=>{
+  assert.throws(()=>transport({getSessionEpoch:undefined}),/invalid/u);
+  for(const epoch of [null,-1,NaN,Infinity,"uid",Number.MAX_SAFE_INTEGER+1]) {
+    let calls=0;
+    await assert.rejects(transport({getSessionEpoch:()=>epoch,request:async()=>{calls++;return response();}})({action:"begin"},options()),/invalid/u);
+    assert.equal(calls,0);
+  }
+  await transport({getSessionEpoch:()=>42,request:async(_,init)=>{
+    assert.equal(init.body,'{"action":"begin"}');
+    assert.ok(!Object.keys(init.headers).some(x=>/epoch|session/iu.test(x)));
+    return response();
+  }})({action:"begin"},options());
+});
 
 test("dedicated voice uses guest credentials, consumes PCM and returns only bound completion",async()=>{
   const input=voiceInput();let calls=0;

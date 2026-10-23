@@ -12,6 +12,52 @@ function make(send, discardPrevious = async () => {}) {
   return createGuestTrialController({ send, discardPrevious, now: () => NOW, timeoutMs: 100 });
 }
 
+function voiceController(sendVoice, send = async ({action}) => action === "stop"
+  ? trial({status:"stopped",generation:2}) : trial({state:"v2.sealed"})) {
+  return createGuestTrialController({send,sendVoice,discardPrevious:async()=>{},now:()=>NOW});
+}
+
+test("voice completion ends the same trial and clears consumed PCM",async()=>{
+  const c=voiceController(async ({trial:previous})=>{
+    assert.equal(previous.id,"a".repeat(64));
+    return trial({status:"answer_first",generation:2});
+  });
+  await c.begin();const audio=new Uint8Array([1,2]);await c.submit(audio);
+  assert.equal(c.state().phase,"ended");assert.ok(audio.every(x=>x===0));
+  await assert.rejects(c.submit(new Uint8Array([1,2])),/reconcile/u);
+});
+
+test("stop cancels pending voice and a late answer cannot overwrite stopped state",async()=>{
+  let release;let signal;
+  const c=voiceController((_,opts)=>{signal=opts.signal;return new Promise(resolve=>{release=resolve;});});
+  await c.begin();const audio=new Uint8Array([1,2]);const pending=c.submit(audio);
+  const rejected=assert.rejects(pending,/cancelled/u);
+  await assert.rejects(c.submit(new Uint8Array([1,2])),/busy/u);
+  await c.stop();assert.equal(signal.aborted,true);
+  release(trial({status:"answer_first",generation:2}));await rejected;
+  assert.equal(c.state().trial.status,"stopped");assert.ok(audio.every(x=>x===0));
+});
+
+test("ambiguous voice failure is reconciled without automatically replaying audio",async()=>{
+  let calls=0;
+  const c=voiceController(async()=>{calls++;throw new Error("guest_trial_unavailable");},async ({action})=>
+    action==="read"?trial({status:"answer_first",generation:2}):trial({state:"v2.sealed"}));
+  await c.begin();await assert.rejects(c.submit(new Uint8Array([1,2])),/unavailable/u);
+  assert.equal(c.state().phase,"uncertain");
+  await assert.rejects(c.submit(new Uint8Array([1,2])),/reconcile/u);
+  await c.read();assert.equal(c.state().trial.status,"answer_first");assert.equal(calls,1);
+});
+
+test("reset cancels late voice without changing a new trial",async()=>{
+  let release;let begins=0;
+  const c=voiceController(()=>new Promise(resolve=>{release=resolve;}),async()=>
+    trial({id:(++begins===1?"a":"b").repeat(64),state:"v2.sealed"}));
+  await c.begin();const pending=c.submit(new Uint8Array([1,2]));
+  const rejected=assert.rejects(pending,/cancelled/u);c.reset();await c.begin();
+  release(trial({status:"answer_first",generation:2}));await rejected;
+  assert.equal(c.state().trial.id,"b".repeat(64));assert.equal(c.state().phase,"active");
+});
+
 test("pending control can carry a bounded voice capability but terminal control cannot", () => {
   const state = "v2." + "a".repeat(3000);
   assert.equal(validateGuestTrial(trial({state}), NOW).state, state);

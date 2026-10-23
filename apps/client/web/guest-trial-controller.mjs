@@ -190,13 +190,17 @@ export function validateGuestTrial(value, now = Date.now()) {
 // send receives a finite control payload and an AbortSignal. The composition
 // root supplies authenticated transport. discardPrevious MUST stop capture and
 // destroy comparison audio before the new trial request is sent.
-export function createGuestTrialController({ send, discardPrevious, now = Date.now, timeoutMs = 5000 }) {
+export function createGuestTrialController({ send, sendVoice, discardPrevious, now = Date.now,
+  timeoutMs = 5000, voiceTimeoutMs = 15000 }) {
   if (typeof send !== "function" || typeof discardPrevious !== "function" ||
-      typeof now !== "function" || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) invalid();
+      (sendVoice !== undefined && typeof sendVoice !== "function") ||
+      typeof now !== "function" || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000 ||
+      !Number.isInteger(voiceTimeoutMs) || voiceTimeoutMs < 1 || voiceTimeoutMs > 15000) invalid();
   let epoch = 0;
   let current = null;
   let phase = "idle";
   let active = null;
+  let activeKind = null;
   let disposalTail = Promise.resolve();
 
   function state() { return Object.freeze({ phase, trial: current }); }
@@ -204,12 +208,21 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
     epoch++;
     active?.abort();
     active = null;
+    activeKind = null;
     current = null;
     phase = "idle";
   }
 
-  async function operation(action) {
+  async function operation(action, audio) {
+    if (action === "stop" && activeKind === "submit") {
+      epoch++;
+      active?.abort();
+      active = null;
+      activeKind = null;
+      phase = "active";
+    }
     if (active) throw new Error("guest_trial_busy");
+    if (action === "submit" && typeof sendVoice !== "function") invalid();
     if (action === "begin") {
       if (current || phase !== "idle") throw new Error("guest_trial_reset_required");
     } else if (!current || (phase === "uncertain" && action !== "read") ||
@@ -221,6 +234,7 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
     const ownedEpoch = epoch;
     const controller = new AbortController();
     active = controller;
+    activeKind = action;
     phase = "busy";
     let timer;
     let abortListener;
@@ -228,7 +242,7 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
       const cancelled = new Promise((_, reject) => {
         abortListener = () => reject(new Error("guest_trial_cancelled"));
         controller.signal.addEventListener("abort", abortListener, { once: true });
-        timer = setTimeout(() => controller.abort(), timeoutMs);
+        timer = setTimeout(() => controller.abort(), action === "submit" ? voiceTimeoutMs : timeoutMs);
       });
       const request = (async () => {
         if (action === "begin") {
@@ -242,6 +256,9 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
           await disposal;
         }
         if (controller.signal.aborted || ownedEpoch !== epoch) throw new Error("guest_trial_cancelled");
+        if (action === "submit") {
+          return sendVoice(Object.freeze({trial:previous, audio}), {signal:controller.signal});
+        }
         const payload = action === "begin" ? { action } : action === "read"
           ? { action, id: previous.id }
           : { action, id: previous.id, generation: previous.generation };
@@ -255,6 +272,8 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
       if (action === "begin" && (next.generation !== 1 || next.status !== "pending" || next.assisted)) invalid();
       if (action === "help" && (!next.assisted || next.status !== "pending" || next.generation !== previous.generation + 1)) invalid();
       if (action === "stop" && (next.status !== "stopped" || next.assisted !== previous.assisted || next.generation !== previous.generation + 1)) invalid();
+      if (action === "submit" && (!["answer_first", "unverified"].includes(next.status) ||
+          next.assisted !== previous.assisted || next.generation !== previous.generation + 1)) invalid();
       // A read may observe an independently committed result but may never
       // reopen or replace an already terminal result in this controller.
       if (previous && previous.status !== "pending" &&
@@ -268,7 +287,7 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
     } finally {
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", abortListener);
-      if (active === controller) active = null;
+      if (active === controller) { active = null; activeKind = null; }
     }
   }
 
@@ -277,5 +296,9 @@ export function createGuestTrialController({ send, discardPrevious, now = Date.n
     read: () => operation("read"),
     help: () => operation("help"),
     stop: () => operation("stop"),
+    submit: async audio => {
+      try { return await operation("submit", audio); }
+      finally { if (audio instanceof Uint8Array) audio.fill(0); }
+    },
   });
 }

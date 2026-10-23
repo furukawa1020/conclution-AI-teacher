@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGuestTrialTransport } from "../web/guest-trial-controller.mjs";
+import { createGuestTrialTransport, createGuestTrialVoiceTransport } from "../web/guest-trial-controller.mjs";
 
 const origin = "https://voice.example";
 const endpoint = `${origin}/api/v1/guest-trials/control`;
@@ -19,6 +19,61 @@ function transport(overrides = {}) {
     now: () => now, request: async () => response(), ...overrides });
 }
 function options() { return {signal: new AbortController().signal}; }
+
+function voiceResponse(overrides = {}) {
+  const result = new Response(JSON.stringify({...snapshot, status:"answer_first", generation:2, ...overrides}),
+    {headers:{"Content-Type":"application/json"}});
+  Object.defineProperty(result,"url",{value:`${origin}/api/v1/guest-trials/voice`});
+  return result;
+}
+function voiceTransport(overrides = {}) {
+  return createGuestTrialVoiceTransport({origin, credentials, isCurrentGuest:()=>true,
+    now:()=>now, request:async()=>voiceResponse(), ...overrides});
+}
+function voiceInput() { return {trial:{...snapshot,state:"v2.sealed"},audio:new Uint8Array([1,2,3,4])}; }
+
+test("dedicated voice uses guest credentials, consumes PCM and returns only bound completion",async()=>{
+  const input=voiceInput();let calls=0;
+  const send=voiceTransport({request:async(url,init)=>{
+    calls++;
+    assert.equal(url,`${origin}/api/v1/guest-trials/voice`);
+    assert.equal(init.headers.Authorization,"Bearer id.secret");
+    assert.equal(init.headers["X-Firebase-AppCheck"],"app.secret");
+    assert.equal(init.redirect,"error");assert.equal(init.credentials,"omit");
+    assert.deepEqual(JSON.parse(init.body),{id:snapshot.id,generation:1,state:"v2.sealed",pcm16:"AQIDBA=="});
+    assert.deepEqual([...input.audio],[0,0,0,0]);
+    return voiceResponse();
+  }});
+  assert.equal((await send(input,options())).status,"answer_first");assert.equal(calls,1);
+});
+
+test("voice rejects foreign, stale, pending or relabelled results",async()=>{
+  for(const bad of [{id:"b".repeat(64)},{status:"pending",generation:1},{status:"stopped"},
+    {assisted:true,generation:3},{expiresAt:"2026-10-20T00:14:00Z"}]) {
+    await assert.rejects(voiceTransport({request:async()=>voiceResponse(bad)})(voiceInput(),options()),/invalid/u);
+  }
+});
+
+test("voice rejects invalid input and cancellation before sending; consumes rejected audio",async()=>{
+  let calls=0;const send=voiceTransport({request:async()=>{calls++;return voiceResponse();}});
+  for(const change of [x=>{delete x.trial.state;},x=>{x.audio=new Uint8Array(3);},
+    x=>{x.audio=new Uint8Array(960002);},x=>{x.extra=true;},x=>{x.trial.status="stopped";x.trial.generation=2;}]) {
+    const input=voiceInput();change(input);
+    await assert.rejects(send(input,options()),/invalid/u);
+    assert.ok(input.audio.every(x=>x===0));
+  }
+  const aborted=new AbortController();aborted.abort();
+  await assert.rejects(send(voiceInput(),{signal:aborted.signal}),/cancelled/u);
+  assert.equal(calls,0);
+});
+
+test("voice failure never replays PCM or routes to normal dialogue",async()=>{
+  let calls=0;
+  const send=voiceTransport({request:async()=>{calls++;throw new Error("private transport URL");}});
+  const input=voiceInput();
+  await assert.rejects(send(input,options()),/^Error: guest_trial_unavailable$/u);
+  assert.equal(calls,1);assert.ok(input.audio.every(x=>x===0));
+});
 
 test("control and its voice capability arrive in one authenticated response", async () => {
   const state = "v2." + "a".repeat(3000);

@@ -392,29 +392,31 @@ type VoiceRespondentCheckpointValidator interface {
 }
 
 type VoiceOptions struct {
-	GuestTrials          guesttrial.Control
-	GuestTrialVoice      GuestTrialVoiceService
-	GuestTrialState      GuestTrialStateIssuer
-	Service              VoiceTurnService
-	NativeLiveService    VoiceTurnLiveService
-	RateLimiter          guard.Limiter
-	AppRateLimiter       guard.Limiter
-	GuestRateLimiter     guard.Limiter
-	GuestAppRateLimiter  guard.Limiter
-	LiveLeaseManager     guard.VoiceLiveLeaseManager
-	LiveHandshakeGate    *VoiceLiveHandshakeGate
-	CoachStateValidator  VoiceRespondentCheckpointValidator
-	RequestTimeout       time.Duration
-	MaxRequestBytes      int64
-	RequireRecentPasskey bool
-	GuestModeEnabled     bool
-	SemanticShadow       *semanticshadow.Dispatcher
-	SemanticShadowKey    []byte
-	LongTermMemory       longmemory.Control
-	LongTermMemoryQueue  longmemory.Enqueuer
-	MemoryContext        longmemory.ContextIssuer
-	SessionContext       longmemory.SessionContextIssuer
-	SessionContextOpener longmemory.SessionContextOpener
+	GuestTrials                 guesttrial.Control
+	GuestTrialVoice             GuestTrialVoiceService
+	GuestTrialState             GuestTrialStateIssuer
+	GuestTrialControlLimiter    guard.Limiter
+	GuestTrialControlAppLimiter guard.Limiter
+	Service                     VoiceTurnService
+	NativeLiveService           VoiceTurnLiveService
+	RateLimiter                 guard.Limiter
+	AppRateLimiter              guard.Limiter
+	GuestRateLimiter            guard.Limiter
+	GuestAppRateLimiter         guard.Limiter
+	LiveLeaseManager            guard.VoiceLiveLeaseManager
+	LiveHandshakeGate           *VoiceLiveHandshakeGate
+	CoachStateValidator         VoiceRespondentCheckpointValidator
+	RequestTimeout              time.Duration
+	MaxRequestBytes             int64
+	RequireRecentPasskey        bool
+	GuestModeEnabled            bool
+	SemanticShadow              *semanticshadow.Dispatcher
+	SemanticShadowKey           []byte
+	LongTermMemory              longmemory.Control
+	LongTermMemoryQueue         longmemory.Enqueuer
+	MemoryContext               longmemory.ContextIssuer
+	SessionContext              longmemory.SessionContextIssuer
+	SessionContextOpener        longmemory.SessionContextOpener
 
 	// livePipelineJoinTimeout is test-configurable inside this package. The
 	// public constructor clamps it to the production safety maximum.
@@ -782,6 +784,13 @@ func (s *Server) consumeVoiceQuota(
 	at time.Time,
 ) bool {
 	uidLimiter, appLimiter, uidScope, appScope := s.voiceQuotaLimiters(principal)
+	return s.consumeScopedQuota(w, ctx, principal, at, uidLimiter, appLimiter, uidScope, appScope)
+}
+
+// Control operations use their own bounded budget, so exhausting speech
+// capacity does not prevent reading a result or explicitly stopping a trial.
+func (s *Server) consumeScopedQuota(w http.ResponseWriter, ctx context.Context, principal identity.Principal, at time.Time,
+	uidLimiter, appLimiter guard.Limiter, uidScope, appScope string) bool {
 	if uidLimiter == nil || appLimiter == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "rate_limit_unavailable", "The voice service cannot safely accept this request.")
 		return false

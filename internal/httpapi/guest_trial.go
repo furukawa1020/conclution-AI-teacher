@@ -46,7 +46,8 @@ func (s *Server) guestTrialControl(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	if !s.consumeVoiceQuota(w, ctx, principal, time.Now().UTC()) {
+	if !s.consumeScopedQuota(w, ctx, principal, time.Now().UTC(),
+		s.voice.GuestTrialControlLimiter, s.voice.GuestTrialControlAppLimiter, "guest_trial_control_uid", "guest_trial_control_app") {
 		return
 	}
 	if r.URL.RawQuery != "" || !isJSONContentType(r) {

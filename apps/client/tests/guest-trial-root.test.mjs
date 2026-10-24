@@ -5,7 +5,7 @@ import {runInNewContext} from "node:vm";
 
 const bridge = await readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8");
 const root = bridge.slice(bridge.indexOf("let guestTrialRoot;"), bridge.indexOf("let guestVoiceComparisonRequested"));
-function setup(capture) {
+function setup(capture, extra = {}) {
   const auth = {currentUser: {uid: "guest-a", isAnonymous: true}};
   let options, resets = 0, submissions = 0, cancellations = 0;
   const trial = {question: "質問", status: "pending", state: "private", assisted: false, id: "private-id"};
@@ -18,9 +18,9 @@ function setup(capture) {
       reset: () => resets++, begin: async () => {}, stop: async () => {},
       submit: async () => {submissions++;}}),
     openGuestTrialCapture: capture ?? (async () => ({cancel: () => cancellations++, finish: async () => new Uint8Array([1,2])})),
-    loadPcmCaptureWorklet() {},
+    loadPcmCaptureWorklet() {}, setTimeout, clearTimeout, ...extra,
   };
-  const api = runInNewContext(`${root}\nfunction stopSession(){invalidateGuestTrial();}\n({guestTrialAction,invalidateGuestTrial})`, context);
+  const api = runInNewContext(`${root}\nfunction stopSession(){invalidateGuestTrial();}\n({guestTrialAction,invalidateGuestTrial,guestTrialAvailable})`, context);
   return {...api, auth, options: () => options, counts: () => ({resets, submissions, cancellations})};
 }
 
@@ -56,4 +56,24 @@ test("late finished PCM is erased and never submitted after reset", async () => 
 test("trial participates in lifecycle and identity cancellation", () => {
   assert.match(bridge.slice(bridge.indexOf("function hasActiveVoiceSession()")), /guestTrialRoot \|\| guestTrialCaptureAbort/u);
   assert.match(bridge, /function stopSession\(reason = "request_cancelled"\) \{\s*invalidateGuestTrial\(\)/u);
+});
+
+test("availability requires exact no-content endpoint and never retries", async () => {
+  for (const status of [204, 200, 401, 403, 404, 503]) {
+    let calls = 0;
+    const env = setup(undefined, {fetch: async (url, options) => {
+      calls++; assert.equal(options.credentials, "omit"); assert.equal(options.redirect, "error");
+      return {status, url};
+    }});
+    assert.equal(await env.guestTrialAvailable(), status === 204);
+    assert.equal(calls, 1);
+  }
+});
+
+test("availability cannot use credentials acquired before guest reset", async () => {
+  let resolve;
+  const env = setup(undefined, {secureCredentials: () => new Promise(r => {resolve = r;}),
+    fetch: async () => {assert.fail("stale credentials sent");}});
+  const pending = env.guestTrialAvailable(); env.invalidateGuestTrial(); resolve({});
+  assert.equal(await pending, false);
 });

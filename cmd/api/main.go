@@ -16,6 +16,7 @@ import (
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/evaluation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guesttrial"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/httpapi"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/longmemory"
@@ -84,6 +85,7 @@ func main() {
 	var semanticDispatcher *semanticshadow.Dispatcher
 	var longTermMemory *longmemory.Manager
 	var longTermMemoryDispatcher *longmemory.Dispatcher
+	var trialRuntime guestTrialRuntime
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
@@ -369,6 +371,16 @@ func main() {
 		}
 		speechWarmupService = speechService
 		closeSpeech = speechService.Close
+		if cfg.GuestTrialEnabled {
+			trialStore, trialErr := guesttrial.NewFirestoreStore(firestoreClient)
+			if trialErr == nil {
+				trialRuntime, trialErr = connectGuestTrial(true, cfg.StateKey, trialStore, speechService, conversationAgent)
+			}
+			if trialErr != nil {
+				logger.Error("initialize guest trial runtime", "error_class", "guest_trial_configuration_failure")
+				os.Exit(1)
+			}
+		}
 		voiceService, err = voiceflow.NewWithPrivacy(
 			speechService,
 			conversationAgent,
@@ -459,6 +471,9 @@ func main() {
 		cfg.RequestTimeout,
 		cfg.MaxRequestBytes,
 		httpapi.VoiceOptions{
+			GuestTrials:          trialRuntime.control,
+			GuestTrialVoice:      trialRuntime.voice,
+			GuestTrialState:      trialRuntime.state,
 			Service:              voiceService,
 			NativeLiveService:    nativeLiveService,
 			RateLimiter:          voiceRateLimiter,

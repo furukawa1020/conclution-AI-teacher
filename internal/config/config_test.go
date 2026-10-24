@@ -33,6 +33,7 @@ func setTestEnvironment(t *testing.T) {
 	t.Setenv("KOTAE_PASSKEY_ORIGIN", "")
 	t.Setenv("KOTAE_REQUIRE_RECENT_PASSKEY_FOR_VOICE", "")
 	t.Setenv("KOTAE_GUEST_MODE_ENABLED", "")
+	t.Setenv("KOTAE_GUEST_TRIAL_ENABLED", "")
 	t.Setenv("KOTAE_SEMANTICA_SHADOW_ENABLED", "")
 	t.Setenv("KOTAE_SEMANTICA_SHADOW_URL", "")
 	t.Setenv("KOTAE_MAX_VOICE_BYTES", "")
@@ -137,6 +138,9 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	if cfg.GuestModeEnabled {
 		t.Fatal("guest mode must default off")
 	}
+	if cfg.GuestTrialEnabled {
+		t.Fatal("dedicated guest trial must default off")
+	}
 	if cfg.MaxVoiceBytes != 13*1024*1024 {
 		t.Fatalf("max voice bytes = %d; want 13 MiB", cfg.MaxVoiceBytes)
 	}
@@ -179,6 +183,31 @@ func TestLoadUsesConservativeRateLimitDefaults(t *testing.T) {
 	}
 	if cfg.RetrievalPolicyEnabled {
 		t.Fatal("retrieval behavior must remain opt-in for a separate canary")
+	}
+}
+
+func TestGuestTrialRequiresExplicitAuthenticatedProductionConfig(t *testing.T) {
+	for _, raw := range []string{"true", "yes", "1"} {
+		setTestEnvironment(t)
+		t.Setenv("KOTAE_GUEST_MODE_ENABLED", "true")
+		t.Setenv("KOTAE_GUEST_TRIAL_ENABLED", raw)
+		if _, err := Load(); err == nil {
+			t.Fatal("insecure/invalid trial config accepted")
+		}
+	}
+	setTestEnvironment(t)
+	t.Setenv("KOTAE_ALLOW_INSECURE_DEV", "false")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+	t.Setenv("KOTAE_ALLOWED_APP_IDS", "test-app")
+	t.Setenv("KOTAE_STATE_KEY_BASE64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("KOTAE_GUEST_TRIAL_ENABLED", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("trial without guest authentication accepted")
+	}
+	t.Setenv("KOTAE_GUEST_MODE_ENABLED", "true")
+	cfg, err := Load()
+	if err != nil || !cfg.GuestTrialEnabled {
+		t.Fatal("explicit production configuration rejected", err)
 	}
 }
 

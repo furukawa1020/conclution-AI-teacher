@@ -77,6 +77,68 @@ export function createGuestTrialPcmCollector({port, generation, sampleRate, cont
 
 function invalid() { throw new Error("guest_trial_invalid"); }
 
+// Microphone ownership is separate from normal dialogue. Dependencies are
+// supplied by the browser root and can be exercised without recording people.
+export async function openGuestTrialCapture({getUserMedia, createContext, loadWorklet, createNode,
+  signal, generation, setupTimeoutMs = 8000}) {
+  if ([getUserMedia, createContext, loadWorklet, createNode].some(fn => typeof fn !== "function") ||
+      !signal || typeof signal.addEventListener !== "function" ||
+      !Number.isSafeInteger(generation) || generation < 1 ||
+      !Number.isInteger(setupTimeoutMs) || setupTimeoutMs < 1 || setupTimeoutMs > 8000) invalid();
+  let context, stream, source, node, collector, disposed = false, timer, captureTimer, rejectSetup;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    clearTimeout(timer); clearTimeout(captureTimer);
+    signal.removeEventListener("abort", dispose);
+    collector?.cancel();
+    try { source?.disconnect(); } catch {}
+    try { node?.disconnect(); } catch {}
+    for (const track of stream?.getTracks() ?? []) track.stop();
+    try { void context?.close().catch(() => {}); } catch {}
+    rejectSetup?.(new Error("guest_trial_capture_unavailable"));
+  }
+  signal.addEventListener("abort", dispose, {once: true});
+  try {
+    if (signal.aborted) { dispose(); throw new Error("guest_trial_capture_unavailable"); }
+    context = createContext();
+    const cancelled = new Promise((_, reject) => { rejectSetup = reject; });
+    timer = setTimeout(dispose, setupTimeoutMs);
+    const setup = (async () => {
+      const media = Promise.resolve().then(() => getUserMedia({audio: {
+        channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: true,
+      }})).then(value => {
+        if (disposed) { for (const track of value.getTracks()) track.stop(); throw new Error("guest_trial_capture_unavailable"); }
+        stream = value;
+      });
+      const [, module] = await Promise.all([media,
+        Promise.resolve().then(() => loadWorklet(context)), Promise.resolve().then(() => context.resume())]);
+      if (disposed || signal.aborted) throw new Error("guest_trial_capture_unavailable");
+      node = createNode(context, {channelCount: 1, channelCountMode: "explicit", numberOfInputs: 1,
+        numberOfOutputs: 0, processorOptions: {generation, maximumPreConfirmFrames: 1,
+          maximumQueuedFrames: 200, pcmRingModule: module}});
+      collector = createGuestTrialPcmCollector({port: node.port, generation, sampleRate: context.sampleRate});
+      node.onprocessorerror = dispose;
+      for (const track of stream.getTracks()) track.addEventListener?.("ended", dispose, {once: true});
+      source = context.createMediaStreamSource(stream);
+      source.connect(node);
+    })();
+    await Promise.race([setup, cancelled]);
+    clearTimeout(timer);
+    captureTimer = setTimeout(dispose, 30000);
+    return Object.freeze({cancel: dispose, async finish() {
+      if (disposed) throw new Error("guest_trial_capture_unavailable");
+      let audio;
+      try {
+        audio = await collector.finish();
+        if (disposed || signal.aborted) throw new Error("guest_trial_capture_unavailable");
+        return audio;
+      } catch (error) { audio?.fill(0); throw error; }
+      finally { dispose(); }
+    }});
+  } catch (error) { dispose(); throw error; }
+}
+
 function controlPayload(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
   const keys = value.action === "begin" ? ["action"] : value.action === "read"

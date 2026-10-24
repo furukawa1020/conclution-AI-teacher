@@ -148,6 +148,12 @@ func TestGuestTrialControlBudgetRemainsBoundedAndFailsClosed(t *testing.T) {
 		{"store unavailable", &fakeLimiter{err: errors.New("private storage detail")}, &fakeLimiter{}, 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if limiter, ok := tc.uid.(*fakeLimiter); ok {
+				limiter.wantKey = "guest"
+			}
+			if limiter, ok := tc.app.(*fakeLimiter); ok {
+				limiter.wantKey = "app:app"
+			}
 			h := trialHandlerWithOptions(t, true, trialGuest(), nil, nil, func(o *VoiceOptions) {
 				o.GuestTrialControlLimiter, o.GuestTrialControlAppLimiter = tc.uid, tc.app
 			})

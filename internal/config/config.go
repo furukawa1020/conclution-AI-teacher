@@ -71,6 +71,7 @@ type Config struct {
 	PasskeyOrigin                string
 	RequireRecentPasskeyForVoice bool
 	GuestModeEnabled             bool
+	GuestTrialEnabled            bool
 	SemanticaShadowEnabled       bool
 	SemanticaShadowURL           string
 	AllowInsecureDev             bool
@@ -266,6 +267,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	guestTrialEnabled, err := envStrictBool("KOTAE_GUEST_TRIAL_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	if guestTrialEnabled && (!guestModeEnabled || allowInsecureDev) {
+		return Config{}, errors.New("KOTAE_GUEST_TRIAL_ENABLED requires authenticated production guest mode")
+	}
 	semanticaShadowEnabled, err := envStrictBool("KOTAE_SEMANTICA_SHADOW_ENABLED", false)
 	if err != nil {
 		return Config{}, err
@@ -322,6 +330,7 @@ func Load() (Config, error) {
 		PasskeyOrigin:                envOr("KOTAE_PASSKEY_ORIGIN", defaultPasskeyOrigin),
 		RequireRecentPasskeyForVoice: requireRecentPasskey,
 		GuestModeEnabled:             guestModeEnabled,
+		GuestTrialEnabled:            guestTrialEnabled,
 		SemanticaShadowEnabled:       semanticaShadowEnabled,
 		SemanticaShadowURL:           strings.TrimSpace(os.Getenv("KOTAE_SEMANTICA_SHADOW_URL")),
 		AllowInsecureDev:             allowInsecureDev,

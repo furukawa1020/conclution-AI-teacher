@@ -7,6 +7,74 @@ const CONTROL_PATH = "/api/v1/guest-trials/control";
 const VOICE_PATH = "/api/v1/guest-trials/voice";
 const MAX_CONTROL_RESPONSE_BYTES = 2048 + 16384;
 
+// Dedicated explicit recording: no loudness threshold, VAD admission, Native
+// transport or answer generation. The root owns the microphone and worklet.
+export function createGuestTrialPcmCollector({port, generation, sampleRate, contextFrame = 0,
+  maximumMs = 30000, sealTimeoutMs = 1000}) {
+  if (!port || typeof port.postMessage !== "function" ||
+      !Number.isSafeInteger(generation) || generation < 1 ||
+      !Number.isSafeInteger(sampleRate) || sampleRate < 16000 || sampleRate > 192000 || sampleRate % 50 ||
+      !Number.isSafeInteger(contextFrame) || contextFrame < 0 ||
+      !Number.isInteger(maximumMs) || maximumMs < 1 || maximumMs > 30000 ||
+      !Number.isInteger(sealTimeoutMs) || sealTimeoutMs < 1 || sealTimeoutMs > 1000) invalid();
+  const frames = [];
+  let phase = "recording", previousFrame, sealTimer, finishPromise, resolveFinish, rejectFinish;
+  const wipe = value => { if (value instanceof ArrayBuffer) new Uint8Array(value).fill(0); };
+  const send = (type, fields = {}) => port.postMessage({type, version: 1, generation, ...fields});
+  const clearFrames = () => { for (const frame of frames) frame.fill(0); frames.length = 0; };
+  const deadline = setTimeout(() => cancel(), maximumMs);
+  function cancel() {
+    if (phase === "closed") return;
+    phase = "closed";
+    clearTimeout(deadline); clearTimeout(sealTimer); clearFrames();
+    try { send("stop"); } catch { /* local erasure still occurs */ }
+    rejectFinish?.(new Error("guest_trial_capture_unavailable"));
+  }
+  port.onmessage = ({data: message}) => {
+    const pcm = message?.pcm;
+    if (phase === "closed") { wipe(pcm); return; }
+    if (message?.version !== 1 || message?.generation !== generation) {
+      wipe(pcm); cancel(); return;
+    }
+    if (message.type === "frame") {
+      if (!(pcm instanceof ArrayBuffer) || pcm.byteLength !== 640 || frames.length >= 1500 ||
+          message.sequence !== frames.length || !Number.isSafeInteger(message.contextFrame) ||
+          message.contextFrame < contextFrame ||
+          (previousFrame !== undefined && message.contextFrame !== previousFrame + sampleRate / 50)) {
+        wipe(pcm); cancel(); return;
+      }
+      previousFrame = message.contextFrame;
+      frames.push(new Uint8Array(pcm));
+      try { send("credit", {frames: 1}); } catch { cancel(); }
+      return;
+    }
+    if (message.type !== "sealed" || phase !== "sealing" || frames.length === 0 ||
+        message.lastSequence !== frames.length - 1) { wipe(pcm); cancel(); return; }
+    const audio = new Uint8Array(frames.length * 640);
+    frames.forEach((frame, i) => audio.set(frame, i * 640));
+    clearFrames(); clearTimeout(deadline); clearTimeout(sealTimer);
+    phase = "closed";
+    resolveFinish(audio);
+  };
+  try {
+    send("confirm", {candidateContextFrame: contextFrame, leadInFrames: 0,
+      initialCredit: 1, aecVerified: false, quietConfirmed: false});
+  } catch { cancel(); throw new Error("guest_trial_capture_unavailable"); }
+  return Object.freeze({
+    cancel,
+    state: () => phase,
+    finish() {
+      if (finishPromise) return finishPromise;
+      if (phase !== "recording") return Promise.reject(new Error("guest_trial_capture_unavailable"));
+      phase = "sealing";
+      finishPromise = new Promise((resolve, reject) => { resolveFinish = resolve; rejectFinish = reject; });
+      sealTimer = setTimeout(cancel, sealTimeoutMs);
+      try { send("seal"); } catch { cancel(); }
+      return finishPromise;
+    },
+  });
+}
+
 function invalid() { throw new Error("guest_trial_invalid"); }
 
 function controlPayload(value) {

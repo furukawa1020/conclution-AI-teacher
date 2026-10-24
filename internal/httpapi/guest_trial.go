@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,71 @@ type GuestTrialStateIssuer interface {
 type guestTrialControlResponse struct {
 	guesttrial.Snapshot
 	State string `json:"state,omitempty"`
+}
+
+type guestTrialControlInput struct {
+	Action     string
+	ID         string
+	Generation int64
+}
+
+func decodeGuestTrialControl(r io.Reader) (guestTrialControlInput, error) {
+	var input guestTrialControlInput
+	d := json.NewDecoder(r)
+	token, err := d.Token()
+	if err != nil || token != json.Delim('{') {
+		return input, guesttrial.ErrInvalid
+	}
+	seen := make(map[string]bool, 3)
+	for d.More() {
+		token, err = d.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || seen[key] {
+			return input, guesttrial.ErrInvalid
+		}
+		seen[key] = true
+		var raw json.RawMessage
+		if d.Decode(&raw) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return input, guesttrial.ErrInvalid
+		}
+		switch key {
+		case "action":
+			err = json.Unmarshal(raw, &input.Action)
+		case "id":
+			err = json.Unmarshal(raw, &input.ID)
+		case "generation":
+			err = json.Unmarshal(raw, &input.Generation)
+		default:
+			return input, guesttrial.ErrInvalid
+		}
+		if err != nil {
+			return input, guesttrial.ErrInvalid
+		}
+	}
+	if token, err = d.Token(); err != nil || token != json.Delim('}') || !errors.Is(d.Decode(&struct{}{}), io.EOF) {
+		return input, guesttrial.ErrInvalid
+	}
+	want := 0
+	switch input.Action {
+	case "begin":
+		want = 1
+	case "read":
+		want = 2
+		if !seen["id"] {
+			return input, guesttrial.ErrInvalid
+		}
+	case "help", "stop":
+		want = 3
+		if !seen["id"] || !seen["generation"] {
+			return input, guesttrial.ErrInvalid
+		}
+	default:
+		return input, guesttrial.ErrInvalid
+	}
+	if !seen["action"] || len(seen) != want {
+		return input, guesttrial.ErrInvalid
+	}
+	return input, nil
 }
 
 func (s *Server) guestTrialPreflight(w http.ResponseWriter, r *http.Request) {
@@ -50,19 +116,13 @@ func (s *Server) guestTrialControl(w http.ResponseWriter, r *http.Request) {
 		s.voice.GuestTrialControlLimiter, s.voice.GuestTrialControlAppLimiter, "guest_trial_control_uid", "guest_trial_control_app") {
 		return
 	}
-	if r.URL.RawQuery != "" || !isJSONContentType(r) {
+	if r.URL.RawQuery != "" || !isJSONContentType(r) || r.Header.Get("Content-Encoding") != "" {
 		writeProblem(w, http.StatusBadRequest, "guest_trial_invalid", "Invalid trial control.")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 512)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	var input struct {
-		Action     string `json:"action"`
-		ID         string `json:"id"`
-		Generation int64  `json:"generation"`
-	}
-	if decoder.Decode(&input) != nil || !errors.Is(decoder.Decode(&struct{}{}), io.EOF) {
+	input, decodeErr := decodeGuestTrialControl(r.Body)
+	if decodeErr != nil {
 		writeProblem(w, http.StatusBadRequest, "guest_trial_invalid", "Invalid trial control.")
 		return
 	}

@@ -10,6 +10,10 @@ param(
     [ValidateRange(60, 3600)]
     [int] $WaitTimeoutSeconds = 1800,
 
+    [switch] $GuestTrialsOnly,
+
+    [switch] $CheckOnly,
+
     [string] $GcloudPath = ".tools/gcloud-577.0.0/google-cloud-sdk/bin/gcloud.cmd"
 )
 
@@ -23,6 +27,8 @@ $requiredCollectionGroups = @(
     "evaluationRateLimits",
     "voiceRateLimits",
     "guestVoiceRateLimits",
+    "guestTrialControls",
+    "guestTrialControlRateLimits",
     "passkey_account_deletions_v1",
     "passkey_recovery_accounts_v1",
     "passkey_recovery_codes_v1",
@@ -33,6 +39,12 @@ $requiredCollectionGroups = @(
     "conversation_memories_v1",
     "conversation_memory_capability_uses_v1"
 )
+
+# Limit rollout to the new metadata collections without rewriting existing
+# retention policies. CheckOnly performs no cloud mutations.
+if ($GuestTrialsOnly) {
+    $requiredCollectionGroups = @("guestTrialControls", "guestTrialControlRateLimits")
+}
 
 $workspace = Split-Path -Parent $PSScriptRoot
 if ([System.IO.Path]::IsPathRooted($GcloudPath)) {
@@ -110,6 +122,7 @@ function Get-TtlPolicies {
 }
 
 foreach ($collectionGroup in $requiredCollectionGroups) {
+    if ($CheckOnly) { continue }
     Invoke-GcloudQuiet `
         -Operation "enabling the required Firestore TTL policy" `
         -CommandArguments @(
@@ -171,6 +184,10 @@ while ($true) {
         $waitTimer.Stop()
         Write-Host "All required Firestore TTL policies are ACTIVE."
         break
+    }
+
+    if ($CheckOnly) {
+        throw "One or more required Firestore TTL policies are not ACTIVE. No policies were changed."
     }
 
     $repairGroups = @(

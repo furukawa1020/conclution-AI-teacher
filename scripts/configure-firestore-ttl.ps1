@@ -130,6 +130,7 @@ foreach ($collectionGroup in $requiredCollectionGroups) {
             "--collection-group=$collectionGroup",
             "--database=$databaseId",
             "--enable-ttl",
+            "--async",
             "--project=$ProjectId",
             "--quiet",
             "--verbosity=error"

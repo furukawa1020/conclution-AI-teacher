@@ -86,6 +86,7 @@ func main() {
 	var longTermMemory *longmemory.Manager
 	var longTermMemoryDispatcher *longmemory.Dispatcher
 	var trialRuntime guestTrialRuntime
+	var trialControlLimiter, trialControlAppLimiter guard.Limiter
 
 	if cfg.AllowInsecureDev {
 		logger.Warn("local authentication bypass is enabled")
@@ -374,6 +375,12 @@ func main() {
 		if cfg.GuestTrialEnabled {
 			trialStore, trialErr := guesttrial.NewFirestoreStore(firestoreClient)
 			if trialErr == nil {
+				trialControlLimiter, trialErr = guard.NewFirestoreLimiterForScope(firestoreClient, guard.Limits{PerMinute: 10, PerDay: 80}, "guest-trial-control")
+			}
+			if trialErr == nil {
+				trialControlAppLimiter, trialErr = guard.NewFirestoreLimiterForScope(firestoreClient, guard.Limits{PerMinute: 20, PerDay: 200}, "guest-trial-control")
+			}
+			if trialErr == nil {
 				trialRuntime, trialErr = connectGuestTrial(true, cfg.StateKey, trialStore, speechService, conversationAgent)
 			}
 			if trialErr != nil {
@@ -471,29 +478,31 @@ func main() {
 		cfg.RequestTimeout,
 		cfg.MaxRequestBytes,
 		httpapi.VoiceOptions{
-			GuestTrials:          trialRuntime.control,
-			GuestTrialVoice:      trialRuntime.voice,
-			GuestTrialState:      trialRuntime.state,
-			Service:              voiceService,
-			NativeLiveService:    nativeLiveService,
-			RateLimiter:          voiceRateLimiter,
-			AppRateLimiter:       voiceAppRateLimiter,
-			GuestRateLimiter:     guestVoiceRateLimiter,
-			GuestAppRateLimiter:  guestVoiceAppRateLimiter,
-			LiveLeaseManager:     voiceLiveLeaseManager,
-			LiveHandshakeGate:    voiceLiveHandshakeGate,
-			CoachStateValidator:  coachStateValidator,
-			RequestTimeout:       cfg.VoiceTimeout,
-			MaxRequestBytes:      cfg.MaxVoiceBytes,
-			RequireRecentPasskey: cfg.RequireRecentPasskeyForVoice,
-			GuestModeEnabled:     cfg.GuestModeEnabled,
-			SemanticShadow:       semanticDispatcher,
-			SemanticShadowKey:    cfg.StateKey,
-			LongTermMemory:       longTermMemory,
-			LongTermMemoryQueue:  longTermMemoryDispatcher,
-			MemoryContext:        longTermMemory,
-			SessionContext:       longTermMemory,
-			SessionContextOpener: longTermMemory,
+			GuestTrials:                 trialRuntime.control,
+			GuestTrialVoice:             trialRuntime.voice,
+			GuestTrialState:             trialRuntime.state,
+			GuestTrialControlLimiter:    trialControlLimiter,
+			GuestTrialControlAppLimiter: trialControlAppLimiter,
+			Service:                     voiceService,
+			NativeLiveService:           nativeLiveService,
+			RateLimiter:                 voiceRateLimiter,
+			AppRateLimiter:              voiceAppRateLimiter,
+			GuestRateLimiter:            guestVoiceRateLimiter,
+			GuestAppRateLimiter:         guestVoiceAppRateLimiter,
+			LiveLeaseManager:            voiceLiveLeaseManager,
+			LiveHandshakeGate:           voiceLiveHandshakeGate,
+			CoachStateValidator:         coachStateValidator,
+			RequestTimeout:              cfg.VoiceTimeout,
+			MaxRequestBytes:             cfg.MaxVoiceBytes,
+			RequireRecentPasskey:        cfg.RequireRecentPasskeyForVoice,
+			GuestModeEnabled:            cfg.GuestModeEnabled,
+			SemanticShadow:              semanticDispatcher,
+			SemanticShadowKey:           cfg.StateKey,
+			LongTermMemory:              longTermMemory,
+			LongTermMemoryQueue:         longTermMemoryDispatcher,
+			MemoryContext:               longTermMemory,
+			SessionContext:              longTermMemory,
+			SessionContextOpener:        longTermMemory,
 		},
 		passkeyService,
 		passkeyClientRateLimiter,

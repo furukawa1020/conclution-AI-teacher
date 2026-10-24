@@ -27,6 +27,7 @@ const (
 	evaluationRateLimitCollection        = "evaluationRateLimits"
 	voiceRateLimitCollection             = "voiceRateLimits"
 	guestVoiceRateLimitCollection        = "guestVoiceRateLimits"
+	guestTrialControlRateLimitCollection = "guestTrialControlRateLimits"
 	passkeyClientRateLimitCollection     = "passkeyClientRateLimits"
 	passkeyAppRateLimitCollection        = "passkeyAppRateLimits"
 	rateLimitTTLField                    = "expiresAt"
@@ -154,6 +155,8 @@ func NewFirestoreLimiterForScope(
 		collection = voiceRateLimitCollection
 	case "guest-voice":
 		collection = guestVoiceRateLimitCollection
+	case "guest-trial-control":
+		collection = guestTrialControlRateLimitCollection
 	default:
 		return nil, errors.New("unsupported rate-limit scope")
 	}

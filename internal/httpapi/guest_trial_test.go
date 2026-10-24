@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/furukawa1020/conclution-ai-teacher/internal/guard"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guesttrial"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/identity"
 )
@@ -82,6 +83,10 @@ func trialHandlerWithVoice(t *testing.T, enabled bool, principal identity.Princi
 }
 
 func trialHandlerWithCapabilities(t *testing.T, enabled bool, principal identity.Principal, voice GuestTrialVoiceService, issuer GuestTrialStateIssuer) http.Handler {
+	return trialHandlerWithOptions(t, enabled, principal, voice, issuer, nil)
+}
+
+func trialHandlerWithOptions(t *testing.T, enabled bool, principal identity.Principal, voice GuestTrialVoiceService, issuer GuestTrialStateIssuer, configure func(*VoiceOptions)) http.Handler {
 	t.Helper()
 	store, _ := guesttrial.NewMemoryStore(16)
 	service, err := guesttrial.NewService(store, bytes.Repeat([]byte{7}, 32))
@@ -91,6 +96,11 @@ func trialHandlerWithCapabilities(t *testing.T, enabled bool, principal identity
 	opts := VoiceOptions{GuestModeEnabled: true, GuestRateLimiter: &fakeLimiter{wantKey: principal.UID}, GuestAppRateLimiter: &fakeLimiter{wantKey: "app:" + principal.AppID}, RequestTimeout: time.Second}
 	opts.GuestTrialVoice = voice
 	opts.GuestTrialState = issuer
+	opts.GuestTrialControlLimiter = &fakeLimiter{wantKey: principal.UID}
+	opts.GuestTrialControlAppLimiter = &fakeLimiter{wantKey: "app:" + principal.AppID}
+	if configure != nil {
+		configure(&opts)
+	}
 	if enabled {
 		opts.GuestTrials = service
 	}
@@ -99,6 +109,60 @@ func trialHandlerWithCapabilities(t *testing.T, enabled bool, principal identity
 
 func trialGuest() identity.Principal {
 	return identity.Principal{UID: "guest", AppID: "app", Provider: "anonymous", AuthMethod: "guest-v1"}
+}
+
+func TestGuestTrialControlDoesNotConsumeExhaustedVoiceBudget(t *testing.T) {
+	voiceUID := &fakeLimiter{err: guard.ErrRateLimitExceeded}
+	voiceApp := &fakeLimiter{err: guard.ErrRateLimitExceeded}
+	h := trialHandlerWithOptions(t, true, trialGuest(), nil, nil, func(o *VoiceOptions) {
+		o.GuestRateLimiter, o.GuestAppRateLimiter = voiceUID, voiceApp
+	})
+	w := trialPost(h, `{"action":"begin"}`, nil)
+	var first guesttrial.Snapshot
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &first) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, body := range []string{
+		`{"action":"read","id":"` + first.ID + `"}`,
+		`{"action":"stop","id":"` + first.ID + `","generation":1}`,
+	} {
+		if w := trialPost(h, body, nil); w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	if voiceUID.calls != 0 || voiceApp.calls != 0 {
+		t.Fatal("control consumed voice quota")
+	}
+}
+
+func TestGuestTrialControlBudgetRemainsBoundedAndFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		uid, app guard.Limiter
+		want     int
+	}{
+		{"missing uid", nil, &fakeLimiter{}, 503},
+		{"missing app", &fakeLimiter{}, nil, 503},
+		{"uid exceeded", &fakeLimiter{err: guard.ErrRateLimitExceeded}, &fakeLimiter{}, 429},
+		{"app exceeded", &fakeLimiter{}, &fakeLimiter{err: guard.ErrRateLimitExceeded}, 429},
+		{"store unavailable", &fakeLimiter{err: errors.New("private storage detail")}, &fakeLimiter{}, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if limiter, ok := tc.uid.(*fakeLimiter); ok {
+				limiter.wantKey = "guest"
+			}
+			if limiter, ok := tc.app.(*fakeLimiter); ok {
+				limiter.wantKey = "app:app"
+			}
+			h := trialHandlerWithOptions(t, true, trialGuest(), nil, nil, func(o *VoiceOptions) {
+				o.GuestTrialControlLimiter, o.GuestTrialControlAppLimiter = tc.uid, tc.app
+			})
+			w := trialPost(h, `{"action":"begin"}`, nil)
+			if w.Code != tc.want || strings.Contains(w.Body.String(), "private") {
+				t.Fatal(w.Code, w.Body.String())
+			}
+		})
+	}
 }
 
 func trialPost(handler http.Handler, body string, alter func(*http.Request)) *httptest.ResponseRecorder {

@@ -1,4 +1,6 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+import { createGuestTrialController, createGuestTrialTransport, createGuestTrialVoiceTransport,
+  openGuestTrialCapture } from "./guest-trial-controller.mjs";
 import {
   browserSessionPersistence,
   getIdToken,
@@ -811,6 +813,7 @@ function observeAuthInvalidation(auth) {
     const changed = authIdentityChanged(previousUid, nextUid);
     previousUid = nextUid;
     if (!changed) return;
+    invalidateGuestTrial();
     if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
   });
   observedAuthInstances.add(auth);
@@ -877,6 +880,95 @@ function verifiedGuestAppCheckToken(result) {
 }
 
 let guestModeActive = false;
+let guestTrialRoot;
+let guestTrialCapture;
+let guestTrialCaptureAbort;
+let guestTrialIdentityEpoch = 0;
+let guestTrialActionBusy = false;
+
+function discardGuestTrialCapture() {
+  guestTrialCaptureAbort?.abort();
+  guestTrialCaptureAbort = undefined;
+  guestTrialCapture?.cancel();
+  guestTrialCapture = undefined;
+}
+
+function invalidateGuestTrial() {
+  guestTrialIdentityEpoch++;
+  discardGuestTrialCapture();
+  guestTrialRoot?.reset();
+  guestTrialRoot = undefined;
+  guestTrialActionBusy = false;
+}
+
+function guestTrialView() {
+  const current = guestTrialRoot?.state();
+  // Never expose the encrypted capability, trial ID, PCM or transcript to UI.
+  return JSON.stringify({phase: guestTrialCapture ? "recording" : current?.phase ?? "idle",
+    question: current?.trial?.question ?? "", status: current?.trial?.status ?? "",
+    assisted: current?.trial?.assisted ?? false});
+}
+
+async function guestTrialAction(action) {
+  if (!guestModeActive || guestAuthInstance?.currentUser?.isAnonymous !== true || document.hidden) {
+    invalidateGuestTrial(); fail("guest_trial_unavailable");
+  }
+  if (action === "state") return guestTrialView();
+  if (!["begin", "record", "submit", "read", "help", "stop", "reset"].includes(action)) fail("guest_trial_invalid");
+  if (action === "reset") { invalidateGuestTrial(); return guestTrialView(); }
+  if (guestTrialActionBusy && action !== "stop") fail("guest_trial_busy");
+  if (action === "begin") {
+    // Retire normal conversation, pending output and comparison recordings
+    // before issuing a fresh independent question. No ordinary reply resumes.
+    stopSession("request_cancelled");
+    const owner = guestAuthInstance.currentUser.uid;
+    const options = {origin: VOICE_ORIGIN, credentials: () => secureCredentials(),
+      getSessionEpoch: () => guestTrialIdentityEpoch,
+      isCurrentGuest: () => guestModeActive && guestAuthInstance?.currentUser?.isAnonymous === true &&
+        guestAuthInstance.currentUser.uid === owner};
+    guestTrialRoot = createGuestTrialController({send: createGuestTrialTransport(options),
+      sendVoice: createGuestTrialVoiceTransport(options), discardPrevious: async () => {
+        discardGuestTrialCapture(); guestVoiceComparison.clear(); stopGuestVoiceComparisonPlayback();
+      }});
+  }
+  const root = guestTrialRoot;
+  if (!root) fail("guest_trial_unavailable");
+  const epoch = guestTrialIdentityEpoch;
+  guestTrialActionBusy = true;
+  try {
+    if (action === "record") {
+      if (root.state().phase !== "active" || !root.state().trial?.state || guestTrialCapture) fail("guest_trial_invalid");
+      const abort = new AbortController();
+      guestTrialCaptureAbort = abort;
+      const capture = await openGuestTrialCapture({signal: abort.signal, generation: nextPcmCaptureGeneration(),
+        getUserMedia: constraints => navigator.mediaDevices.getUserMedia(constraints),
+        createContext: () => new AudioContext({sampleRate: 48000}), loadWorklet: loadPcmCaptureWorklet,
+        createNode: (context, options) => new AudioWorkletNode(context, "kotae-pcm-capture", options)});
+      if (epoch !== guestTrialIdentityEpoch || root !== guestTrialRoot) { capture.cancel(); fail("guest_trial_cancelled"); }
+      guestTrialCapture = capture;
+    } else if (action === "submit") {
+      const capture = guestTrialCapture;
+      if (!capture) fail("guest_trial_invalid");
+      const audio = await capture.finish();
+      try {
+        if (epoch !== guestTrialIdentityEpoch || root !== guestTrialRoot) fail("guest_trial_cancelled");
+        guestTrialCapture = undefined;
+        guestTrialCaptureAbort = undefined;
+        await root.submit(audio);
+      } finally { audio.fill(0); }
+    } else {
+      if (action === "help" || action === "stop") discardGuestTrialCapture();
+      await root[action]();
+    }
+    if (epoch !== guestTrialIdentityEpoch || root !== guestTrialRoot) fail("guest_trial_cancelled");
+    return guestTrialView();
+  } catch (error) {
+    if (epoch === guestTrialIdentityEpoch && (action === "record" || action === "submit")) discardGuestTrialCapture();
+    throw error;
+  } finally {
+    if (epoch === guestTrialIdentityEpoch) guestTrialActionBusy = false;
+  }
+}
 let guestVoiceComparisonRequested = false;
 const guestVoiceComparison = createGuestVoiceComparison();
 let guestVoiceComparisonPlayback;
@@ -3119,6 +3211,7 @@ async function beginTurn(
   strictCloudMinimization,
   coachActive = false,
 ) {
+  if (guestTrialRoot) fail("guest_trial_active");
   if (document.hidden) {
     stopSession("hidden");
     fail("request_cancelled");
@@ -8103,6 +8196,7 @@ async function attachDocument(inputId) {
 }
 
 function stopSession(reason = "request_cancelled") {
+  invalidateGuestTrial();
   try {
     if (hasActiveVoiceSession()) reportVoiceStop(reason);
   } catch {
@@ -8195,6 +8289,7 @@ function stopSession(reason = "request_cancelled") {
 
 function hasActiveVoiceSession() {
   return Boolean(
+    guestTrialRoot || guestTrialCaptureAbort ||
     sessionClock.isStarted() ||
     activeRecording ||
     beginGate.isBusy() ||
@@ -8212,6 +8307,7 @@ function hasActiveVoiceSession() {
 
 function hasIdentityBoundVoiceSession() {
   return Boolean(
+    guestTrialRoot || guestTrialCaptureAbort ||
     nativePreflightInvalidation.hasActive() ||
     activeRecording ||
     activeRequestController ||
@@ -8227,6 +8323,7 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 });
 
 globalThis.addEventListener("kotae:account-boundary-changed", () => {
+  invalidateGuestTrial();
   if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
 });
 
@@ -8292,6 +8389,7 @@ async function deletePasskeyAccount(confirmation) {
 }
 
 const publicBridge = Object.freeze({
+  guestTrialAction,
   addPasskeyCredential,
   attachDocument,
   beginTurn,

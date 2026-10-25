@@ -26,7 +26,7 @@ function setup(capture, extra = {}) {
 
 test("browser root binds transport to the guest and exposes no capability or trial ID", async () => {
   const env = setup(); const raw = await env.guestTrialAction("begin");
-  assert.doesNotMatch(raw, /private/u);
+  assert.doesNotMatch(JSON.stringify(raw), /private/u);
   assert.equal(env.options().isCurrentGuest(), true);
   const epoch = env.options().getSessionEpoch();
   env.auth.currentUser = {uid: "guest-b", isAnonymous: true};
@@ -40,7 +40,7 @@ test("late microphone setup is cancelled after an identity boundary", async () =
   await env.guestTrialAction("begin"); const recording = env.guestTrialAction("record");
   env.invalidateGuestTrial(); resolve({cancel: () => cancelled++});
   await assert.rejects(recording, /cancelled/u); assert.equal(cancelled, 1);
-  assert.equal(JSON.parse(await env.guestTrialAction("state")).phase, "idle");
+  assert.equal((await env.guestTrialAction("state")).phase, "idle");
 });
 
 test("late finished PCM is erased and never submitted after reset", async () => {

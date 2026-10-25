@@ -13,6 +13,32 @@ import (
 )
 
 const guestTrialControlPath = "/api/v1/guest-trials/control"
+const guestTrialAvailabilityPath = "/api/v1/guest-trials/availability"
+
+func (s *Server) guestTrialAvailability(w http.ResponseWriter, r *http.Request) {
+	principal, ok := principalFromContext(r.Context())
+	if !ok || !principal.IsGuest() || r.Header.Get("Origin") != allowedWebOrigin {
+		writeProblem(w, http.StatusForbidden, "guest_trial_forbidden", "A guest session is required.")
+		return
+	}
+	if r.URL.RawQuery != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) guestTrialAvailabilityPreflight(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != allowedWebOrigin || r.Header.Get("Access-Control-Request-Method") != http.MethodGet ||
+		!validMemoryContextPreflightHeaders(r.Header.Get("Access-Control-Request-Headers"), false) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, X-Firebase-AppCheck")
+	w.Header().Set("Access-Control-Allow-Methods", http.MethodGet)
+	w.Header().Set("Access-Control-Max-Age", "600")
+	w.WriteHeader(http.StatusNoContent)
+}
 
 type GuestTrialStateIssuer interface {
 	IssueGuestTrialState(guesttrial.Owner, guesttrial.Snapshot) (string, error)

@@ -909,6 +909,30 @@ function guestTrialView() {
     assisted: current?.trial?.assisted ?? false});
 }
 
+async function guestTrialAvailable() {
+  if (!guestModeActive || guestAuthInstance?.currentUser?.isAnonymous !== true) return false;
+  const epoch = guestTrialIdentityEpoch;
+  const abort = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      (async () => {
+        const {idToken, appCheckToken} = await secureCredentials();
+        if (abort.signal.aborted || epoch !== guestTrialIdentityEpoch || !guestModeActive) return false;
+        const endpoint = `${VOICE_ORIGIN}/api/v1/guest-trials/availability`;
+        const response = await fetch(endpoint, {method: "GET", mode: "cors", credentials: "omit",
+          redirect: "error", cache: "no-store", referrerPolicy: "no-referrer", signal: abort.signal,
+          headers: {Authorization: `Bearer ${idToken}`, "X-Firebase-AppCheck": appCheckToken}});
+        void response.body?.cancel().catch(() => {});
+        return !abort.signal.aborted && epoch === guestTrialIdentityEpoch && guestModeActive &&
+          response.status === 204 && response.url === endpoint;
+      })(),
+      new Promise(resolve => {timer = setTimeout(() => {abort.abort(); resolve(false);}, 3000);}),
+    ]);
+  } catch { return false; }
+  finally { clearTimeout(timer); abort.abort(); }
+}
+
 async function guestTrialAction(action) {
   if (!guestModeActive || guestAuthInstance?.currentUser?.isAnonymous !== true || document.hidden) {
     invalidateGuestTrial(); fail("guest_trial_unavailable");
@@ -8389,6 +8413,7 @@ async function deletePasskeyAccount(confirmation) {
 }
 
 const publicBridge = Object.freeze({
+  guestTrialAvailable,
   guestTrialAction,
   addPasskeyCredential,
   attachDocument,

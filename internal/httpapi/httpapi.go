@@ -620,6 +620,11 @@ func NewWithVoiceAndPasskeys(
 		mux.Handle("POST "+guestTrialVoicePath, server.requireVoiceIdentity(http.HandlerFunc(server.guestTrialVoice)))
 		mux.HandleFunc("OPTIONS "+guestTrialVoicePath, server.guestTrialPreflight)
 	}
+	if voice.GuestTrials != nil && voice.GuestTrialVoice != nil && voice.GuestTrialState != nil &&
+		voice.GuestTrialControlLimiter != nil && voice.GuestTrialControlAppLimiter != nil && voice.GuestModeEnabled {
+		mux.Handle("GET "+guestTrialAvailabilityPath, server.requireVoiceIdentity(http.HandlerFunc(server.guestTrialAvailability)))
+		mux.HandleFunc("OPTIONS "+guestTrialAvailabilityPath, server.guestTrialAvailabilityPreflight)
+	}
 
 	return server.voiceStreamCORS(
 		server.recoverPanic(
@@ -1511,6 +1516,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			r.URL.Path == voiceLivePath ||
 			r.URL.Path == guestTrialControlPath ||
 			r.URL.Path == guestTrialVoicePath ||
+			r.URL.Path == guestTrialAvailabilityPath ||
 			r.URL.Path == longTermMemoryContextBeginPath ||
 			r.URL.Path == longTermMemoryContextConsumePath) &&
 			r.Header.Get("Origin") == allowedWebOrigin {

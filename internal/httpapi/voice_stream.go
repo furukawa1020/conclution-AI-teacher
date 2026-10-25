@@ -367,6 +367,7 @@ func (s *Server) voiceStreamCORS(next http.Handler) http.Handler {
 		if (r.URL.Path == "/health" ||
 			r.URL.Path == guestTrialControlPath ||
 			r.URL.Path == guestTrialVoicePath ||
+			r.URL.Path == guestTrialAvailabilityPath ||
 			r.URL.Path == voiceStreamPath ||
 			r.URL.Path == longTermMemoryContextBeginPath ||
 			r.URL.Path == longTermMemoryContextConsumePath) &&

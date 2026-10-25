@@ -1,3 +1,4 @@
+mod guest_trial_ui;
 mod longitudinal;
 
 use dioxus::prelude::*;
@@ -1431,6 +1432,13 @@ mod cloud {
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = startGuestMode)]
         async fn start_guest_mode_js() -> Result<JsValue, JsValue>;
 
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = guestTrialAvailable)]
+        async fn guest_trial_available_js() -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = guestTrialAction)]
+        async fn guest_trial_action_js(action: &str) -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(js_namespace = kotaeCloud, js_name = resetGuestTrial)]
+        fn reset_guest_trial_js();
+
         #[wasm_bindgen(catch, js_namespace = kotaeCloud, js_name = setGuestVoiceComparisonOptIn)]
         fn set_guest_voice_comparison_opt_in_js(enabled: bool) -> Result<JsValue, JsValue>;
 
@@ -1516,6 +1524,27 @@ mod cloud {
             .await
             .map(|_| ())
             .map_err(user_message)
+    }
+
+    pub async fn guest_trial_available() -> bool {
+        guest_trial_available_js()
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub async fn guest_trial_action(
+        action: &str,
+    ) -> Result<crate::guest_trial_ui::TrialView, &'static str> {
+        let value = guest_trial_action_js(action)
+            .await
+            .map_err(|_| "操作を確認できませんでした。状態を確認するか中止してください。")?;
+        serde_wasm_bindgen::from_value(value).map_err(|_| "状態を確認できませんでした。")
+    }
+
+    pub fn reset_guest_trial() {
+        reset_guest_trial_js();
     }
 
     impl Drop for GuestVoiceComparisonReadyListener {
@@ -2647,6 +2676,16 @@ mod cloud {
     pub async fn start_guest_mode() -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
     }
+
+    pub async fn guest_trial_available() -> bool {
+        false
+    }
+    pub async fn guest_trial_action(
+        _action: &str,
+    ) -> Result<crate::guest_trial_ui::TrialView, &'static str> {
+        Err("WebAssembly版で使ってください")
+    }
+    pub fn reset_guest_trial() {}
 
     pub fn set_guest_voice_comparison_opt_in(_enabled: bool) -> Result<(), &'static str> {
         Err("WebAssembly版で使ってみて")
@@ -4948,6 +4987,9 @@ fn App() -> Element {
                         }
                     }
                     p { class: "quiet-voice-guide", {QUIET_VOICE_COPY} }
+                    if *guest_sprint_active.read() {
+                        guest_trial_ui::GuestTrialPanel {}
+                    }
                     section {
                         class: if state_snapshot.session_active() {
                             "capability-strip is-collapsed"

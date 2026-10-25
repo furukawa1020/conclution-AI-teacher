@@ -76,6 +76,7 @@ export async function createVoiceStartupHarness({
     cancel: () => { events.push("live-cancel"); },
   };
   const scope = {
+    guestTrialRoot: undefined,
     document: { hidden: false },
     nativePreflightInvalidation: { hasActive: () => false },
     SESSION_STATE_MAX_CHARS: 100_000,

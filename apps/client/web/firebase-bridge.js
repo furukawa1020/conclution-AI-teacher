@@ -894,17 +894,21 @@ function discardGuestTrialCapture() {
 }
 
 function invalidateGuestTrial() {
+  const hadTrial = Boolean(guestTrialRoot || guestTrialCaptureAbort);
   guestTrialIdentityEpoch++;
   discardGuestTrialCapture();
   guestTrialRoot?.reset();
   guestTrialRoot = undefined;
   guestTrialActionBusy = false;
+  if (hadTrial && typeof globalThis.dispatchEvent === "function") {
+    globalThis.dispatchEvent(new Event("kotae:guest-trial-reset"));
+  }
 }
 
 function guestTrialView() {
   const current = guestTrialRoot?.state();
   // Never expose the encrypted capability, trial ID, PCM or transcript to UI.
-  return JSON.stringify({phase: guestTrialCapture ? "recording" : current?.phase ?? "idle",
+  return Object.freeze({phase: guestTrialCapture ? "recording" : current?.phase ?? "idle",
     question: current?.trial?.question ?? "", status: current?.trial?.status ?? "",
     assisted: current?.trial?.assisted ?? false});
 }
@@ -8413,6 +8417,7 @@ async function deletePasskeyAccount(confirmation) {
 }
 
 const publicBridge = Object.freeze({
+  resetGuestTrial: invalidateGuestTrial,
   guestTrialAvailable,
   guestTrialAction,
   addPasskeyCredential,

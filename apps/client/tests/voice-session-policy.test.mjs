@@ -709,6 +709,7 @@ let audioContext = dependencies.audioContext;
 let documentEpoch = 0;
 let mediaStream = dependencies.mediaStream;
 let sessionEpoch = 1;
+const invalidateGuestTrial = () => {};
 const stoppedSessionCodes = new Map();
 const CustomEvent = dependencies.CustomEvent;
 const BARGE_PCM_LIMITS = dependencies.BARGE_PCM_LIMITS;
@@ -5359,7 +5360,7 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
     /authReadyTimer\s*=\s*setTimeout\(/u,
   );
   const metricAt = bridge.indexOf("function dispatchVoiceLatency(");
-  const metricEnd = bridge.indexOf("function isPlainRecord(", metricAt);
+  const metricEnd = bridge.indexOf("\n}\n", metricAt) + 2;
   const metric = bridge.slice(metricAt, metricEnd);
   assert.match(metric, /ws_open_ms/u);
   assert.match(metric, /auth_ready_ms/u);
@@ -5403,6 +5404,7 @@ test("live bridge keeps credentials out of URL and latency detail", async () => 
   assert.match(audioContextFactory, /latencyHint:\s*"interactive"/u);
   const microphoneAt = bridge.indexOf(
     "navigator.mediaDevices.getUserMedia",
+    bridge.indexOf("async function ensureMediaStream("),
   );
   const microphoneConstraints = bridge.slice(
     microphoneAt,

@@ -57,8 +57,24 @@ test("native and compatibility PCM encoders preserve every byte and erase the in
 test("native encoding failure still erases all PCM and never sends", async () => {
   const input = voiceInput();
   input.audio.toBase64 = () => { throw new Error("encoder failed"); };
-  await assert.rejects(voiceTransport({request: () => assert.fail("unexpected request")})(input, options()));
+  await assert.rejects(voiceTransport({request: () => assert.fail("unexpected request")})(input, options()),
+    {message: "guest_trial_unavailable"});
   assert.ok(input.audio.every(byte => byte === 0));
+});
+
+test("already cancelled or replaced guest never starts PCM encoding or credentials", async () => {
+  for (const cancelled of [true, false]) {
+    const input = voiceInput();
+    input.audio.toBase64 = () => assert.fail("encoding after cancellation");
+    const abort = new AbortController();
+    if (cancelled) abort.abort();
+    await assert.rejects(voiceTransport({isCurrentGuest: () => cancelled,
+      credentials: () => assert.fail("credentials after cancellation"),
+      request: () => assert.fail("send after cancellation"),
+    })(input, {signal: abort.signal}),
+    {message: cancelled ? "guest_trial_cancelled" : "guest_trial_session_changed"});
+    assert.ok(input.audio.every(byte => byte === 0));
+  }
 });
 
 test("guest-to-guest replacement cannot send previously acquired credentials",async()=>{

@@ -228,13 +228,22 @@ function createTrialTransport({
   const endpoint = `${origin}${voice ? VOICE_PATH : CONTROL_PATH}`;
 
   return async (payload, { signal } = {}) => {
-    const encoded = voice ? voicePayload(payload, now()) : {body: controlPayload(payload)};
+    let encoded, sessionEpoch;
+    try {
+      if (!signal || typeof signal.addEventListener !== "function") invalid();
+      if (signal.aborted) throw new Error("guest_trial_cancelled");
+      if (isCurrentGuest() !== true) throw new Error("guest_trial_session_changed");
+      sessionEpoch = getSessionEpoch();
+      if (!Number.isSafeInteger(sessionEpoch) || sessionEpoch < 0) invalid();
+      encoded = voice ? voicePayload(payload, now()) : {body: controlPayload(payload)};
+    } catch (error) {
+      if (voice && payload?.audio instanceof Uint8Array) payload.audio.fill(0);
+      const codes = ["guest_trial_invalid", "guest_trial_cancelled", "guest_trial_session_changed"];
+      throw new Error(codes.includes(error?.message) ? error.message : "guest_trial_unavailable");
+    }
     const body = encoded.body;
     // The root increments this on sign-out, account replacement and guest
     // replacement, not ordinary token refresh. It never crosses the network.
-    const sessionEpoch = getSessionEpoch();
-    if (!Number.isSafeInteger(sessionEpoch) || sessionEpoch < 0) invalid();
-    if (!signal || typeof signal.addEventListener !== "function") invalid();
     const owned = new AbortController();
     const cancel = () => owned.abort();
     signal.addEventListener("abort", cancel, { once: true });

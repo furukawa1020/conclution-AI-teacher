@@ -34,6 +34,15 @@ function voiceTransport(overrides = {}) {
 }
 function voiceInput() { return {trial:{...snapshot,state:"v2.sealed"},audio:new Uint8Array([1,2,3,4])}; }
 
+test("only a bound voice 422 is a definite non-committing recognition failure", async () => {
+  for (const validURL of [true, false]) {
+    const response = new Response(null, {status:422});
+    Object.defineProperty(response, "url", {value:validURL ? `${origin}/api/v1/guest-trials/voice` : "https://other.example"});
+    await assert.rejects(voiceTransport({request: async () => response})(voiceInput(), options()),
+      {message: validURL ? "guest_trial_not_recognized" : "guest_trial_unavailable"});
+  }
+});
+
 test("native and compatibility PCM encoders preserve every byte and erase the input", async () => {
   for (const native of [true, false]) {
     for (const size of [2, 4, 8192, 960000]) {

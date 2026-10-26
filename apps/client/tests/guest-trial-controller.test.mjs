@@ -48,6 +48,23 @@ test("ambiguous voice failure is reconciled without automatically replaying audi
   await c.read();assert.equal(c.state().trial.status,"answer_first");assert.equal(calls,1);
 });
 
+test("definite ASR rejection permits fresh recording without read or automatic replay", async () => {
+  let voiceCalls = 0, controls = 0;
+  const c = voiceController(async () => {
+    voiceCalls++; throw new Error("guest_trial_not_recognized");
+  }, async () => {controls++; return trial({state:"v2.sealed"});});
+  await c.begin();
+  for (let i = 0; i < 2; i++) {
+    const pcm = new Uint8Array([1,2]);
+    await assert.rejects(c.submit(pcm), /not_recognized/u);
+    assert.ok(pcm.every(value => value === 0));
+    assert.equal(c.state().phase, "active");
+    assert.equal(c.state().trial.generation, 1);
+    assert.equal(voiceCalls, i + 1);
+  }
+  assert.equal(controls, 1);
+});
+
 test("reset cancels late voice without changing a new trial",async()=>{
   let release;let begins=0;
   const c=voiceController(()=>new Promise(resolve=>{release=resolve;}),async()=>

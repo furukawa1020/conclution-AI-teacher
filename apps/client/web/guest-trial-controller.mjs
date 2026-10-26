@@ -291,7 +291,8 @@ function createTrialTransport({
           !/^application\/json(?:\s*;|$)/iu.test(response.headers?.get("Content-Type") ?? "") ||
           !response.body || typeof response.body.getReader !== "function") {
         void response?.body?.cancel().catch(() => {});
-        const code = response?.status === 401 || response?.status === 403
+        const code = voice && response?.status === 422 && response.url === endpoint && !response.redirected
+          ? "guest_trial_not_recognized" : response?.status === 401 || response?.status === 403
           ? "guest_trial_authentication_failed" : response?.status === 409
           ? "guest_trial_conflict" : response?.status === 410
           ? "guest_trial_expired" : "guest_trial_unavailable";
@@ -335,6 +336,7 @@ function createTrialTransport({
       const allowed = [
         "guest_trial_cancelled", "guest_trial_session_changed", "guest_trial_authentication_failed",
         "guest_trial_conflict", "guest_trial_expired", "guest_trial_unavailable", "guest_trial_invalid",
+        "guest_trial_not_recognized",
       ];
       throw new Error(allowed.includes(error?.message) ? error.message : "guest_trial_unavailable");
     } finally {
@@ -458,7 +460,11 @@ export function createGuestTrialController({ send, sendVoice, discardPrevious, n
       phase = next.status === "pending" ? "active" : "ended";
       return state();
     } catch (error) {
-      if (ownedEpoch === epoch) phase = "uncertain";
+      if (ownedEpoch === epoch) {
+        // Only this explicit server rejection guarantees no verdict was committed.
+        phase = action === "submit" && !controller.signal.aborted &&
+          error?.message === "guest_trial_not_recognized" ? "active" : "uncertain";
+      }
       throw error;
     } finally {
       clearTimeout(timer);

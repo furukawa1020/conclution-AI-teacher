@@ -196,12 +196,18 @@ function voicePayload(value, now) {
         audio.byteLength < 2 || audio.byteLength > 960000 || audio.byteLength % 2) invalid();
     const trial = validateGuestTrial(value.trial, now);
     if (trial.status !== "pending" || !trial.state) invalid();
-    const chunks = [];
-    for (let offset = 0; offset < audio.length; offset += 8192) {
-      chunks.push(String.fromCharCode(...audio.subarray(offset, offset + 8192)));
+    let pcm16;
+    if (typeof audio.toBase64 === "function") {
+      pcm16 = audio.toBase64();
+    } else {
+      const chunks = [];
+      for (let offset = 0; offset < audio.length; offset += 8192) {
+        chunks.push(String.fromCharCode(...audio.subarray(offset, offset + 8192)));
+      }
+      pcm16 = btoa(chunks.join(""));
     }
     return { trial, body: JSON.stringify({id: trial.id, generation: trial.generation,
-      state: trial.state, pcm16: btoa(chunks.join(""))}) };
+      state: trial.state, pcm16}) };
   } finally {
     if (audio instanceof Uint8Array) audio.fill(0);
   }

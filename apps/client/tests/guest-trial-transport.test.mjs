@@ -34,6 +34,33 @@ function voiceTransport(overrides = {}) {
 }
 function voiceInput() { return {trial:{...snapshot,state:"v2.sealed"},audio:new Uint8Array([1,2,3,4])}; }
 
+test("native and compatibility PCM encoders preserve every byte and erase the input", async () => {
+  for (const native of [true, false]) {
+    for (const size of [2, 4, 8192, 960000]) {
+      const input = voiceInput();
+      input.audio = Uint8Array.from({length: size}, (_, i) => i % 256);
+      const expected = Buffer.from(input.audio).toString("base64");
+      let nativeCalls = 0;
+      input.audio.toBase64 = native ? function() {
+        nativeCalls++; return Buffer.from(this).toString("base64");
+      } : undefined;
+      await voiceTransport({request: async (_, init) => {
+        assert.equal(JSON.parse(init.body).pcm16, expected);
+        return voiceResponse();
+      }})(input, options());
+      assert.equal(nativeCalls, Number(native));
+      assert.ok(input.audio.every(byte => byte === 0));
+    }
+  }
+});
+
+test("native encoding failure still erases all PCM and never sends", async () => {
+  const input = voiceInput();
+  input.audio.toBase64 = () => { throw new Error("encoder failed"); };
+  await assert.rejects(voiceTransport({request: () => assert.fail("unexpected request")})(input, options()));
+  assert.ok(input.audio.every(byte => byte === 0));
+});
+
 test("guest-to-guest replacement cannot send previously acquired credentials",async()=>{
   for(const voice of [false,true]) {
     let epoch=1,release,calls=0;

@@ -78,6 +78,29 @@ test("availability cannot use credentials acquired before guest reset", async ()
   assert.equal(await pending, false);
 });
 
+test("availability fences a changed auth user even before the identity callback runs", async () => {
+  for (const replacement of [{uid:"guest-b",isAnonymous:true}, {uid:"guest-a",isAnonymous:false}, null]) {
+    let resolve;
+    const env = setup(undefined, {secureCredentials: () => new Promise(r => {resolve = r;}),
+      fetch: async () => assert.fail("credentials for an old guest must not be sent")});
+    const pending = env.guestTrialAvailable();
+    env.auth.currentUser = replacement; resolve({});
+    assert.equal(await pending, false);
+  }
+});
+
+test("availability response cannot enable a replacement guest before epoch update", async () => {
+  let resolve, requested;
+  const started = new Promise(r => {requested = r;});
+  const env = setup(undefined, {fetch: url => new Promise(r => {
+    resolve = () => r({status:204,url}); requested();
+  })});
+  const pending = env.guestTrialAvailable();
+  await started;
+  env.auth.currentUser = {uid:"guest-b",isAnonymous:true}; resolve();
+  assert.equal(await pending, false);
+});
+
 test("capture interruption updates the view without sending audio and fences old callbacks", async () => {
   const callbacks = [], events = [];
   const env = setup(async options => {

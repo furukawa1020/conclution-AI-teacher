@@ -916,19 +916,22 @@ function guestTrialView() {
 async function guestTrialAvailable() {
   if (!guestModeActive || guestAuthInstance?.currentUser?.isAnonymous !== true) return false;
   const epoch = guestTrialIdentityEpoch;
+  const owner = guestAuthInstance.currentUser.uid;
+  const ownsSession = () => epoch === guestTrialIdentityEpoch && guestModeActive &&
+    guestAuthInstance?.currentUser?.isAnonymous === true && guestAuthInstance.currentUser.uid === owner;
   const abort = new AbortController();
   let timer;
   try {
     return await Promise.race([
       (async () => {
         const {idToken, appCheckToken} = await secureCredentials();
-        if (abort.signal.aborted || epoch !== guestTrialIdentityEpoch || !guestModeActive) return false;
+        if (abort.signal.aborted || !ownsSession()) return false;
         const endpoint = `${VOICE_ORIGIN}/api/v1/guest-trials/availability`;
         const response = await fetch(endpoint, {method: "GET", mode: "cors", credentials: "omit",
           redirect: "error", cache: "no-store", referrerPolicy: "no-referrer", signal: abort.signal,
           headers: {Authorization: `Bearer ${idToken}`, "X-Firebase-AppCheck": appCheckToken}});
         void response.body?.cancel().catch(() => {});
-        return !abort.signal.aborted && epoch === guestTrialIdentityEpoch && guestModeActive &&
+        return !abort.signal.aborted && ownsSession() &&
           response.status === 204 && response.url === endpoint;
       })(),
       new Promise(resolve => {timer = setTimeout(() => {abort.abort(); resolve(false);}, 3000);}),

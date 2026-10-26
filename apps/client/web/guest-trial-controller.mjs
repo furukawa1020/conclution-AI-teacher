@@ -88,6 +88,12 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
       !Number.isSafeInteger(generation) || generation < 1 ||
       !Number.isInteger(setupTimeoutMs) || setupTimeoutMs < 1 || setupTimeoutMs > 8000) invalid();
   let context, stream, source, node, collector, disposed = false, timer, captureTimer, rejectSetup;
+  function stopTracks(value) {
+    for (const track of value?.getTracks() ?? []) {
+      try { track.removeEventListener?.("ended", interrupt); } catch {}
+      try { track.stop(); } catch { /* one failed device cannot retain others */ }
+    }
+  }
   function interrupt() {
     if (disposed) return;
     dispose();
@@ -101,7 +107,8 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
     collector?.cancel();
     try { source?.disconnect(); } catch {}
     try { node?.disconnect(); } catch {}
-    for (const track of stream?.getTracks() ?? []) track.stop();
+    if (node) node.onprocessorerror = null;
+    stopTracks(stream);
     try { void context?.close().catch(() => {}); } catch {}
     rejectSetup?.(new Error("guest_trial_capture_unavailable"));
   }
@@ -115,7 +122,7 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
       const media = Promise.resolve().then(() => getUserMedia({audio: {
         channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: true,
       }})).then(value => {
-        if (disposed) { for (const track of value.getTracks()) track.stop(); throw new Error("guest_trial_capture_unavailable"); }
+        if (disposed) { stopTracks(value); throw new Error("guest_trial_capture_unavailable"); }
         stream = value;
       });
       const [, module] = await Promise.all([media,

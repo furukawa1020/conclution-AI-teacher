@@ -71,3 +71,28 @@ test("explicit cancellation does not report an unexpected interruption", async (
   capture.cancel(); env.controller.abort();
   assert.equal(interrupted, 0);
 });
+
+test("a failing device stop does not prevent other devices and context from closing", async () => {
+  let removed = 0, stopped = 0;
+  const tracks = [
+    {stop() { throw new Error("device detached"); }, removeEventListener() { removed++; }},
+    {stop() { stopped++; }, removeEventListener() { removed++; }},
+  ];
+  const env = environment({getUserMedia: async () => ({getTracks: () => tracks})});
+  const capture = await openGuestTrialCapture(env.options);
+  capture.cancel();
+  assert.equal(stopped, 1); assert.equal(removed, 2);
+  assert.equal(env.counts().closed, 1);
+  await assert.rejects(capture.finish(), /capture_unavailable/u);
+});
+
+test("late permission cleanup isolates stop errors too", async () => {
+  let grant, stopped = 0;
+  const env = environment({getUserMedia: () => new Promise(resolve => { grant = resolve; })});
+  const pending = openGuestTrialCapture(env.options);
+  await Promise.resolve(); env.controller.abort();
+  await assert.rejects(pending, /capture_unavailable/u);
+  grant({getTracks: () => [{stop() {throw new Error("detached");}}, {stop() {stopped++;}}]});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, 1);
+});

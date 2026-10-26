@@ -77,3 +77,20 @@ test("availability cannot use credentials acquired before guest reset", async ()
   const pending = env.guestTrialAvailable(); env.invalidateGuestTrial(); resolve({});
   assert.equal(await pending, false);
 });
+
+test("capture interruption updates the view without sending audio and fences old callbacks", async () => {
+  const callbacks = [], events = [];
+  const env = setup(async options => {
+    callbacks.push(options.onInterrupted);
+    return {cancel() {}, finish() { assert.fail("unexpected submission"); }};
+  }, {Event, dispatchEvent: event => events.push(event.type)});
+  await env.guestTrialAction("begin"); await env.guestTrialAction("record");
+  callbacks[0]();
+  assert.equal((await env.guestTrialAction("state")).phase, "active");
+  assert.deepEqual(events, ["kotae:guest-trial-capture-interrupted"]);
+  await env.guestTrialAction("record"); callbacks[0]();
+  assert.equal((await env.guestTrialAction("state")).phase, "recording");
+  assert.equal(events.length, 1); assert.equal(env.counts().submissions, 0);
+  env.invalidateGuestTrial(); callbacks[1]();
+  assert.equal(events.length, 2);
+});

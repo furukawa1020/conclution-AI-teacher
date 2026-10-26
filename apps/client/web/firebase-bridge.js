@@ -969,10 +969,20 @@ async function guestTrialAction(action) {
       const abort = new AbortController();
       guestTrialCaptureAbort = abort;
       const capture = await openGuestTrialCapture({signal: abort.signal, generation: nextPcmCaptureGeneration(),
+        onInterrupted: () => {
+          if (epoch !== guestTrialIdentityEpoch || root !== guestTrialRoot || guestTrialCaptureAbort !== abort) return;
+          guestTrialCapture = undefined;
+          guestTrialCaptureAbort = undefined;
+          if (!guestTrialActionBusy && typeof globalThis.dispatchEvent === "function") {
+            globalThis.dispatchEvent(new Event("kotae:guest-trial-capture-interrupted"));
+          }
+        },
         getUserMedia: constraints => navigator.mediaDevices.getUserMedia(constraints),
         createContext: () => new AudioContext({sampleRate: 48000}), loadWorklet: loadPcmCaptureWorklet,
         createNode: (context, options) => new AudioWorkletNode(context, "kotae-pcm-capture", options)});
-      if (epoch !== guestTrialIdentityEpoch || root !== guestTrialRoot) { capture.cancel(); fail("guest_trial_cancelled"); }
+      if (epoch !== guestTrialIdentityEpoch || root !== guestTrialRoot || guestTrialCaptureAbort !== abort) {
+        capture.cancel(); fail("guest_trial_cancelled");
+      }
       guestTrialCapture = capture;
     } else if (action === "submit") {
       const capture = guestTrialCapture;

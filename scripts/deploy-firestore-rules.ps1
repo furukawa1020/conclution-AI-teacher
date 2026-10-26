@@ -21,7 +21,11 @@ $expectedRulesSha256 = "cd5089e4e5116dbb994013dc5fd5e7e411ec348935b8d06d13acd001
 $workspace = Split-Path -Parent $PSScriptRoot
 $rulesFile = [System.IO.Path]::GetFullPath((Join-Path $workspace $RulesPath))
 $expectedRulesFile = [System.IO.Path]::GetFullPath((Join-Path $workspace "firestore.rules"))
-$gcloud = [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
+$gcloud = if ([System.IO.Path]::IsPathRooted($GcloudPath)) {
+    [System.IO.Path]::GetFullPath($GcloudPath)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
+}
 
 if ($ProjectId -cne $expectedProjectId) {
     throw "Refusing to deploy project '$ProjectId'; expected '$expectedProjectId'."

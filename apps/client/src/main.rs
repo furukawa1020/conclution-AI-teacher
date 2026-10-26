@@ -1539,7 +1539,9 @@ mod cloud {
     ) -> Result<crate::guest_trial_ui::TrialView, &'static str> {
         let value = guest_trial_action_js(action)
             .await
-            .map_err(|_| "操作を確認できませんでした。状態を確認するか中止してください。")?;
+            .map_err(|error| crate::guest_trial_ui::action_feedback(
+                error_code(error).as_deref().unwrap_or("unknown"),
+            ))?;
         serde_wasm_bindgen::from_value(value).map_err(|_| "状態を確認できませんでした。")
     }
 

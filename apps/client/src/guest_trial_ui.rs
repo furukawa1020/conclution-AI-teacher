@@ -1,6 +1,33 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+pub fn action_feedback(code: &str) -> &'static str {
+    match code {
+        "guest_trial_not_recognized" => "音声を認識できませんでした。答えの判定はしていません。もう一度録音できます。",
+        "guest_trial_capture_unavailable" => "録音を続けられませんでした。マイクの接続と許可を確認して、もう一度録音してください。",
+        "guest_trial_cancelled" => "操作を中止しました。音声は自動で送り直しません。",
+        "guest_trial_expired" => "この試行の期限が切れました。中止して、新しい試行を始めてください。",
+        "guest_trial_authentication_failed" | "guest_trial_session_changed" => "ゲスト接続を確認できませんでした。中止して入り直してください。",
+        _ => "操作を確認できませんでした。状態を確認するか中止してください。",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_feedback;
+
+    #[test]
+    fn action_feedback_is_finite_and_distinguishes_recovery() {
+        assert!(action_feedback("guest_trial_not_recognized").contains("もう一度録音"));
+        assert!(action_feedback("guest_trial_capture_unavailable").contains("マイク"));
+        assert!(action_feedback("guest_trial_expired").contains("新しい試行"));
+        assert!(action_feedback("guest_trial_cancelled").contains("自動で送り直しません"));
+        assert_eq!(action_feedback("guest_trial_session_changed"), action_feedback("guest_trial_authentication_failed"));
+        assert_eq!(action_feedback("https://private.example?token=secret"), action_feedback("unknown"));
+        assert!(!action_feedback("https://private.example?token=secret").contains("secret"));
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrialView {

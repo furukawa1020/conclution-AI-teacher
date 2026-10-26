@@ -99,11 +99,15 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
     dispose();
     try { onInterrupted(); } catch { /* cleanup has already completed */ }
   }
+  function contextChanged() {
+    if (context?.state !== undefined && context.state !== "running") interrupt();
+  }
   function dispose() {
     if (disposed) return;
     disposed = true;
     clearTimeout(timer); clearTimeout(captureTimer);
     signal.removeEventListener("abort", dispose);
+    context?.removeEventListener?.("statechange", contextChanged);
     collector?.cancel();
     try { source?.disconnect(); } catch {}
     try { node?.disconnect(); } catch {}
@@ -128,6 +132,11 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
       const [, module] = await Promise.all([media,
         Promise.resolve().then(() => loadWorklet(context)), Promise.resolve().then(() => context.resume())]);
       if (disposed || signal.aborted) throw new Error("guest_trial_capture_unavailable");
+      if ((context.state !== undefined && context.state !== "running") ||
+          stream.getTracks().some(track => track.readyState === "ended")) {
+        throw new Error("guest_trial_capture_unavailable");
+      }
+      context.addEventListener?.("statechange", contextChanged);
       node = createNode(context, {channelCount: 1, channelCountMode: "explicit", numberOfInputs: 1,
         numberOfOutputs: 0, processorOptions: {generation, maximumPreConfirmFrames: 1,
           maximumQueuedFrames: 200, pcmRingModule: module}});

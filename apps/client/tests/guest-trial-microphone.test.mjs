@@ -96,3 +96,38 @@ test("late permission cleanup isolates stop errors too", async () => {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(stopped, 1);
 });
+
+test("an ended input cannot enter recording", async () => {
+  let stopped = 0;
+  const env = environment({getUserMedia: async () => ({getTracks: () => [
+    {readyState: "ended", stop() {stopped++;}},
+  ]})});
+  await assert.rejects(openGuestTrialCapture(env.options), /capture_unavailable/u);
+  assert.equal(stopped, 1); assert.equal(env.counts().closed, 1);
+});
+
+test("a suspended audio context cannot enter recording even if resume resolves", async () => {
+  let closed = 0;
+  const env = environment({createContext: () => ({state: "suspended",
+    resume: async () => {}, close: async () => {closed++;}})});
+  await assert.rejects(openGuestTrialCapture(env.options), /capture_unavailable/u);
+  assert.equal(closed, 1); assert.equal(env.counts().stopped, 1);
+});
+
+test("OS context interruption releases capture and removes the observer", async () => {
+  for (const state of ["suspended", "interrupted", "closed"]) {
+    let listener, closed = 0, interrupted = 0;
+    const context = {state: "running", sampleRate: 48000, resume: async () => {},
+      close: async () => {closed++;},
+      createMediaStreamSource: () => ({connect() {}, disconnect() {}}),
+      addEventListener: (type, fn) => {assert.equal(type, "statechange"); listener = fn;},
+      removeEventListener: (type, fn) => {assert.equal(listener, fn); listener = undefined;},
+    };
+    const env = environment({createContext: () => context, onInterrupted: () => interrupted++});
+    const capture = await openGuestTrialCapture(env.options);
+    context.state = state; listener();
+    assert.equal(listener, undefined); assert.equal(closed, 1); assert.equal(interrupted, 1);
+    await assert.rejects(capture.finish(), /capture_unavailable/u);
+    assert.equal(env.counts().stopped, 1);
+  }
+});

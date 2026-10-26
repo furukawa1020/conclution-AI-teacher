@@ -35,6 +35,10 @@ impl Drop for ResetListener {
             "kotae:guest-trial-reset",
             self.callback.as_ref().unchecked_ref(),
         );
+        let _ = self.window.remove_event_listener_with_callback(
+            "kotae:guest-trial-capture-interrupted",
+            self.callback.as_ref().unchecked_ref(),
+        );
     }
 }
 
@@ -50,8 +54,20 @@ pub fn GuestTrialPanel() -> Element {
     let _listener = use_hook(move || {
         use wasm_bindgen::JsCast;
         let window = web_sys::window()?;
-        let callback = wasm_bindgen::closure::Closure::wrap(Box::new(move |_: web_sys::Event| {
+        let callback = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::Event| {
             epoch += 1;
+            if event.type_() == "kotae:guest-trial-capture-interrupted" {
+                let owned = *epoch.read();
+                busy.set(true);
+                spawn(async move {
+                    let recovered = crate::cloud::guest_trial_action("state").await;
+                    if *epoch.read() != owned { return; }
+                    view.set(recovered.unwrap_or_default());
+                    feedback.set("録音が停止しました。音声は送信していません。もう一度録音できます。".into());
+                    busy.set(false);
+                });
+                return;
+            }
             view.set(TrialView::default());
             busy.set(false);
             feedback.set(String::new());
@@ -63,6 +79,14 @@ pub fn GuestTrialPanel() -> Element {
                 callback.as_ref().unchecked_ref(),
             )
             .ok()?;
+        if window.add_event_listener_with_callback(
+            "kotae:guest-trial-capture-interrupted", callback.as_ref().unchecked_ref(),
+        ).is_err() {
+            let _ = window.remove_event_listener_with_callback(
+                "kotae:guest-trial-reset", callback.as_ref().unchecked_ref(),
+            );
+            return None;
+        }
         Some(std::rc::Rc::new(ResetListener { window, callback }))
     });
     if availability.read().as_ref() != Some(&true) {

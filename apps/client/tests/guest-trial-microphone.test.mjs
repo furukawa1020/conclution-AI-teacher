@@ -50,7 +50,9 @@ test("setup deadline is finite even if permission never resolves", async () => {
 });
 
 test("invalid PCM immediately releases the microphone and rejects later submission", async () => {
-  const env = environment(); const capture = await openGuestTrialCapture(env.options);
+  let interrupted = 0;
+  const env = environment({onInterrupted: () => interrupted++});
+  const capture = await openGuestTrialCapture(env.options);
   const pcm = new Uint8Array(640).fill(9);
   env.port.onmessage({data: {type: "frame", version: 1, generation: 1,
     sequence: 2, contextFrame: 0, pcm: pcm.buffer}});
@@ -59,4 +61,13 @@ test("invalid PCM immediately releases the microphone and rejects later submissi
   await assert.rejects(capture.finish(), /capture_unavailable/u);
   capture.cancel(); env.controller.abort();
   assert.equal(env.counts().stopped, 1);
+  assert.equal(interrupted, 1);
+});
+
+test("explicit cancellation does not report an unexpected interruption", async () => {
+  let interrupted = 0;
+  const env = environment({onInterrupted: () => interrupted++});
+  const capture = await openGuestTrialCapture(env.options);
+  capture.cancel(); env.controller.abort();
+  assert.equal(interrupted, 0);
 });

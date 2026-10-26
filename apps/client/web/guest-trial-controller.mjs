@@ -82,12 +82,17 @@ function invalid() { throw new Error("guest_trial_invalid"); }
 // Microphone ownership is separate from normal dialogue. Dependencies are
 // supplied by the browser root and can be exercised without recording people.
 export async function openGuestTrialCapture({getUserMedia, createContext, loadWorklet, createNode,
-  signal, generation, setupTimeoutMs = 8000}) {
+  signal, generation, setupTimeoutMs = 8000, onInterrupted = () => {}}) {
   if ([getUserMedia, createContext, loadWorklet, createNode].some(fn => typeof fn !== "function") ||
-      !signal || typeof signal.addEventListener !== "function" ||
+      typeof onInterrupted !== "function" || !signal || typeof signal.addEventListener !== "function" ||
       !Number.isSafeInteger(generation) || generation < 1 ||
       !Number.isInteger(setupTimeoutMs) || setupTimeoutMs < 1 || setupTimeoutMs > 8000) invalid();
   let context, stream, source, node, collector, disposed = false, timer, captureTimer, rejectSetup;
+  function interrupt() {
+    if (disposed) return;
+    dispose();
+    try { onInterrupted(); } catch { /* cleanup has already completed */ }
+  }
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -120,16 +125,16 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
         numberOfOutputs: 0, processorOptions: {generation, maximumPreConfirmFrames: 1,
           maximumQueuedFrames: 200, pcmRingModule: module}});
       collector = createGuestTrialPcmCollector({port: node.port, generation,
-        sampleRate: context.sampleRate, onCancel: dispose});
+        sampleRate: context.sampleRate, onCancel: interrupt});
       if (disposed) throw new Error("guest_trial_capture_unavailable");
-      node.onprocessorerror = dispose;
-      for (const track of stream.getTracks()) track.addEventListener?.("ended", dispose, {once: true});
+      node.onprocessorerror = interrupt;
+      for (const track of stream.getTracks()) track.addEventListener?.("ended", interrupt, {once: true});
       source = context.createMediaStreamSource(stream);
       source.connect(node);
     })();
     await Promise.race([setup, cancelled]);
     clearTimeout(timer);
-    captureTimer = setTimeout(dispose, 30000);
+    captureTimer = setTimeout(interrupt, 30000);
     return Object.freeze({cancel: dispose, async finish() {
       if (disposed) throw new Error("guest_trial_capture_unavailable");
       let audio;

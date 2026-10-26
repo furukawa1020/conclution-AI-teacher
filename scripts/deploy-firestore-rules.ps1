@@ -6,6 +6,8 @@ param(
 
     [string] $RulesPath = "firestore.rules",
 
+    [switch] $CheckOnly,
+
     [string] $GcloudPath = ".tools/gcloud-577.0.0/google-cloud-sdk/bin/gcloud.cmd"
 )
 
@@ -19,7 +21,11 @@ $expectedRulesSha256 = "cd5089e4e5116dbb994013dc5fd5e7e411ec348935b8d06d13acd001
 $workspace = Split-Path -Parent $PSScriptRoot
 $rulesFile = [System.IO.Path]::GetFullPath((Join-Path $workspace $RulesPath))
 $expectedRulesFile = [System.IO.Path]::GetFullPath((Join-Path $workspace "firestore.rules"))
-$gcloud = [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
+$gcloud = if ([System.IO.Path]::IsPathRooted($GcloudPath)) {
+    [System.IO.Path]::GetFullPath($GcloudPath)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $workspace $GcloudPath))
+}
 
 if ($ProjectId -cne $expectedProjectId) {
     throw "Refusing to deploy project '$ProjectId'; expected '$expectedProjectId'."
@@ -77,6 +83,24 @@ if (
     $cloudProject.state -cne "ACTIVE"
 ) {
     throw "Google Cloud project identity check failed."
+}
+
+if ($CheckOnly) {
+    $publishedName = "projects/$ProjectId/releases/cloud.firestore"
+    $published = Invoke-RestMethod -Method Get -Uri "$apiRoot/$publishedName" -Headers $headers
+    $rulesetPrefix = "projects/$ProjectId/rulesets/"
+    if ($published.name -cne $publishedName -or
+        $published.rulesetName -cnotmatch ("^" + [regex]::Escape($rulesetPrefix) + "[a-zA-Z0-9-]+$")) {
+        throw "Published Firestore rules identity is invalid."
+    }
+    $activeRuleset = Invoke-RestMethod -Method Get -Uri "$apiRoot/$($published.rulesetName)" -Headers $headers
+    $activeFiles = @($activeRuleset.source.files)
+    if ($activeRuleset.name -cne $published.rulesetName -or $activeFiles.Count -ne 1 -or
+        $activeFiles[0].name -cne "firestore.rules" -or $activeFiles[0].content -cne $content) {
+        throw "Published Firestore rules differ from the reviewed deny-all ruleset."
+    }
+    Write-Output "FIRESTORE_DENY_ALL_MATCH=true"
+    return
 }
 
 $rulesetBody = @{

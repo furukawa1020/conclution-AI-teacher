@@ -48,3 +48,15 @@ test("setup deadline is finite even if permission never resolves", async () => {
   await assert.rejects(openGuestTrialCapture(env.options), /capture_unavailable/u);
   assert.equal(env.counts().closed, 1);
 });
+
+test("invalid PCM immediately releases the microphone and rejects later submission", async () => {
+  const env = environment(); const capture = await openGuestTrialCapture(env.options);
+  const pcm = new Uint8Array(640).fill(9);
+  env.port.onmessage({data: {type: "frame", version: 1, generation: 1,
+    sequence: 2, contextFrame: 0, pcm: pcm.buffer}});
+  assert.ok(pcm.every(v => v === 0));
+  assert.deepEqual(env.counts(), {stopped: 1, closed: 1, disconnected: 2});
+  await assert.rejects(capture.finish(), /capture_unavailable/u);
+  capture.cancel(); env.controller.abort();
+  assert.equal(env.counts().stopped, 1);
+});

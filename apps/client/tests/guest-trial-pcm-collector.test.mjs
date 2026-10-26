@@ -67,3 +67,24 @@ test("30 second byte ceiling cannot grow with delayed main-thread delivery", asy
   assert.equal(collector.state(), "closed"); assert.ok(first.every(v => v === 0));
   await assert.rejects(collector.finish(), /capture_unavailable/u);
 });
+
+test("cancellation notifies the owner once after erasure even with reentrant disposal", () => {
+  let notifications = 0, pcm, collector;
+  const env = setup({onCancel: () => {
+    notifications++;
+    assert.ok(pcm.every(v => v === 0));
+    collector.cancel();
+  }});
+  collector = env.collector; pcm = env.frame(0, 3);
+  collector.cancel(); collector.cancel();
+  assert.equal(notifications, 1);
+});
+
+test("successful seal does not notify cancellation", async () => {
+  let notifications = 0;
+  const env = setup({onCancel: () => notifications++});
+  env.frame(0); const pending = env.collector.finish();
+  env.emit({type: "sealed", lastSequence: 0});
+  (await pending).fill(0); env.collector.cancel();
+  assert.equal(notifications, 0);
+});

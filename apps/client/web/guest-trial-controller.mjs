@@ -10,8 +10,8 @@ const MAX_CONTROL_RESPONSE_BYTES = 2048 + 16384;
 // Dedicated explicit recording: no loudness threshold, VAD admission, Native
 // transport or answer generation. The root owns the microphone and worklet.
 export function createGuestTrialPcmCollector({port, generation, sampleRate, contextFrame = 0,
-  maximumMs = 30000, sealTimeoutMs = 1000}) {
-  if (!port || typeof port.postMessage !== "function" ||
+  maximumMs = 30000, sealTimeoutMs = 1000, onCancel = () => {}}) {
+  if (!port || typeof port.postMessage !== "function" || typeof onCancel !== "function" ||
       !Number.isSafeInteger(generation) || generation < 1 ||
       !Number.isSafeInteger(sampleRate) || sampleRate < 16000 || sampleRate > 192000 || sampleRate % 50 ||
       !Number.isSafeInteger(contextFrame) || contextFrame < 0 ||
@@ -29,6 +29,8 @@ export function createGuestTrialPcmCollector({port, generation, sampleRate, cont
     clearTimeout(deadline); clearTimeout(sealTimer); clearFrames();
     try { send("stop"); } catch { /* local erasure still occurs */ }
     rejectFinish?.(new Error("guest_trial_capture_unavailable"));
+    // Notify only after erasure and rejection; reentrant disposal is harmless.
+    try { onCancel(); } catch { /* observer failure cannot retain audio */ }
   }
   port.onmessage = ({data: message}) => {
     const pcm = message?.pcm;
@@ -117,7 +119,9 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
       node = createNode(context, {channelCount: 1, channelCountMode: "explicit", numberOfInputs: 1,
         numberOfOutputs: 0, processorOptions: {generation, maximumPreConfirmFrames: 1,
           maximumQueuedFrames: 200, pcmRingModule: module}});
-      collector = createGuestTrialPcmCollector({port: node.port, generation, sampleRate: context.sampleRate});
+      collector = createGuestTrialPcmCollector({port: node.port, generation,
+        sampleRate: context.sampleRate, onCancel: dispose});
+      if (disposed) throw new Error("guest_trial_capture_unavailable");
       node.onprocessorerror = dispose;
       for (const track of stream.getTracks()) track.addEventListener?.("ended", dispose, {once: true});
       source = context.createMediaStreamSource(stream);

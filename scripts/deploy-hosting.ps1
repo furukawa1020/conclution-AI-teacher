@@ -30,6 +30,7 @@ if (-not (Test-Path -LiteralPath $releaseProvenancePath -PathType Leaf)) {
     throw "The release provenance policy is missing."
 }
 . $releaseProvenancePath
+. (Join-Path $PSScriptRoot "guest-trial-release-policy.ps1")
 $toolchainPolicyPath = Join-Path $PSScriptRoot "rust-wasm-toolchain.ps1"
 if (-not (Test-Path -LiteralPath $toolchainPolicyPath -PathType Leaf)) {
     throw "The Rust/Wasm release toolchain policy is missing."
@@ -684,8 +685,20 @@ function Assert-PromotedBackendBoundary {
             throw "The promoted Cloud Run service contains a duplicate environment entry."
         }
         $valueProperty = $entry.PSObject.Properties["value"]
+        if ($name -ceq "KOTAE_GUEST_TRIAL_ENABLED" -and $null -eq $valueProperty) {
+            throw "Guest trial activation must be a literal reviewed flag."
+        }
         if ($null -ne $valueProperty) {
             $environment[$name] = [string] $valueProperty.Value
+        }
+    }
+
+    $guestTrialRequirements = Get-GuestTrialReleaseRequirements -Environment $environment
+    $releaseTtlCollectionGroups = @($requiredTtlCollectionGroups) + @($guestTrialRequirements.Collections)
+    if ($guestTrialRequirements.VerifyRules) {
+        $rulesResult = & (Join-Path $PSScriptRoot "deploy-firestore-rules.ps1") -ProjectId $ProjectId -GcloudPath $gcloud -CheckOnly
+        if ($rulesResult -cne "FIRESTORE_DENY_ALL_MATCH=true") {
+            throw "Guest trial requires deployed rules to match reviewed deny-all rules."
         }
     }
 
@@ -759,7 +772,7 @@ function Assert-PromotedBackendBoundary {
     $activeTtlGroups = @{}
     foreach ($policy in $ttlPolicies) {
         $resourceName = [string] $policy.name
-        foreach ($collectionGroup in $requiredTtlCollectionGroups) {
+        foreach ($collectionGroup in $releaseTtlCollectionGroups) {
             $suffix = "/collectionGroups/$collectionGroup/fields/expiresAt"
             if (-not $resourceName.EndsWith($suffix, [System.StringComparison]::Ordinal)) {
                 continue
@@ -770,7 +783,7 @@ function Assert-PromotedBackendBoundary {
             $activeTtlGroups[$collectionGroup] = [string] $policy.ttlConfig.state
         }
     }
-    foreach ($collectionGroup in $requiredTtlCollectionGroups) {
+    foreach ($collectionGroup in $releaseTtlCollectionGroups) {
         if (
             -not $activeTtlGroups.ContainsKey($collectionGroup) -or
             [string] $activeTtlGroups[$collectionGroup] -cne "ACTIVE"

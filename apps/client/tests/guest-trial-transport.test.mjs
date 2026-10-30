@@ -34,6 +34,29 @@ function voiceTransport(overrides = {}) {
 }
 function voiceInput() { return {trial:{...snapshot,state:"v2.sealed"},audio:new Uint8Array([1,2,3,4])}; }
 
+test("successful voice exposes only validated timings and observer failure cannot fail the turn", async () => {
+  let calls = 0;
+  const response = voiceResponse();
+  response.headers.set("Server-Timing", "asr;dur=12, verify;dur=34, pipeline;dur=50");
+  let ticks = 0;
+  await voiceTransport({clock: () => ticks++ ? 100 : 10, request: async () => response,
+    onTiming: value => {
+      calls++;
+      assert.deepEqual(value, {roundtripMs:90, server:{asr:12,verify:34,pipeline:50}});
+      throw new Error("observer failure");
+    },
+  })(voiceInput(), options());
+  assert.equal(calls, 1);
+});
+
+test("unknown timing content is not passed to diagnostics", async () => {
+  let observed;
+  const response = voiceResponse(); response.headers.set("Server-Timing", "secret;dur=1");
+  await voiceTransport({request: async () => response, onTiming: value => {observed=value;}})(voiceInput(), options());
+  assert.equal(observed.server, null);
+  assert.doesNotMatch(JSON.stringify(observed), /secret/u);
+});
+
 test("only a bound voice 422 is a definite non-committing recognition failure", async () => {
   for (const validURL of [true, false]) {
     const response = new Response(null, {status:422});

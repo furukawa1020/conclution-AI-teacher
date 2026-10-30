@@ -1,4 +1,6 @@
-// Not mounted by the guest UI until the committed-voice route is connected.
+import {parseGuestTrialServerTiming} from "./guest-trial-timing.mjs";
+
+// Mounted only when the authenticated availability endpoint permits it.
 // Control state is memory-only and must never contain transcripts or audio.
 const QUESTION_ID = "rest_activity_v1";
 const QUESTION = "少し休めるとしたら、何をしたいですか？";
@@ -216,6 +218,7 @@ function voicePayload(value, now) {
 function createTrialTransport({
   origin, credentials, isCurrentGuest, getSessionEpoch, request = (...args) => fetch(...args),
   now = Date.now, timeoutMs,
+  clock = () => performance.now(), onTiming = () => {},
 }, voice) {
   timeoutMs ??= voice ? 15000 : 5000;
   let url;
@@ -224,12 +227,15 @@ function createTrialTransport({
       typeof credentials !== "function" || typeof isCurrentGuest !== "function" ||
       typeof getSessionEpoch !== "function" ||
       typeof request !== "function" || typeof now !== "function" ||
+      typeof clock !== "function" || typeof onTiming !== "function" ||
       !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (voice ? 15000 : 10000)) invalid();
   const endpoint = `${origin}${voice ? VOICE_PATH : CONTROL_PATH}`;
 
   return async (payload, { signal } = {}) => {
-    let encoded, sessionEpoch;
+    let encoded, sessionEpoch, started;
     try {
+      started = clock();
+      if (!Number.isFinite(started)) invalid();
       if (!signal || typeof signal.addEventListener !== "function") invalid();
       if (signal.aborted) throw new Error("guest_trial_cancelled");
       if (isCurrentGuest() !== true) throw new Error("guest_trial_session_changed");
@@ -321,6 +327,17 @@ function createTrialTransport({
             result.expiresAt !== encoded.trial.expiresAt || result.assisted !== encoded.trial.assisted ||
             result.generation !== encoded.trial.generation + 1 ||
             !["answer_first", "unverified"].includes(result.status))) invalid();
+        if (voice) {
+          // Observability cannot fail the operation or disclose response content.
+          try {
+            check();
+            const elapsed = clock() - started;
+            if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 60000) {
+              onTiming(Object.freeze({roundtripMs: Math.floor(elapsed),
+                server: parseGuestTrialServerTiming(response.headers.get("Server-Timing"))}));
+            }
+          } catch { /* ignore diagnostic failures */ }
+        }
         return result;
       } finally {
         owned.signal.removeEventListener("abort", cancelRead);

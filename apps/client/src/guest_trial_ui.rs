@@ -147,6 +147,7 @@ pub fn GuestTrialPanel() -> Element {
             p { role: "status", aria_live: "polite",
                 if *busy.read() { "確認中です。中止できます。" }
                 else if snapshot.phase == "recording" { "録音中です。30秒以内に「ここまでを送る」を押してください。" }
+                else if snapshot.phase == "expired" { "試行の期限が切れました。閉じて、新しい試行を始めてください。音声は自動で送り直しません。" }
                 else if snapshot.status == "answer_first" {
                     if snapshot.assisted { "促しのあと、あなたの答えが一言目にありました。" }
                     else { "この質問では、促しなしであなたの答えが一言目にありました。" }

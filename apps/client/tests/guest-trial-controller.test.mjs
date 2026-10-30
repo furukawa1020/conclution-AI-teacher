@@ -3,6 +3,34 @@ import test from "node:test";
 import { createGuestTrialController, validateGuestTrial } from "../web/guest-trial-controller.mjs";
 
 const NOW = Date.parse("2026-10-19T00:00:00Z");
+test("local expiry discards capability and audio before encoding or transport", async () => {
+  let clock = NOW, controls = 0, voices = 0;
+  const c = createGuestTrialController({
+    send: async () => { controls++; return trial({state:"v2.sealed"}); },
+    sendVoice: async () => { voices++; throw new Error("must not send"); },
+    discardPrevious: async () => {}, now: () => clock,
+  });
+  await c.begin();
+  clock += 15 * 60 * 1000;
+  const pcm = new Uint8Array([1, 2]);
+  await assert.rejects(c.submit(pcm), /guest_trial_expired/u);
+  assert.deepEqual([...pcm], [0, 0]);
+  assert.deepEqual(c.state(), {phase:"expired", trial:null});
+  for (const action of ["read", "help", "stop", "begin"]) {
+    await assert.rejects(c[action](), /guest_trial_expired/u);
+  }
+  assert.equal(controls, 1); assert.equal(voices, 0);
+  c.reset(); assert.equal(c.state().phase, "idle");
+  clock = NOW; await c.begin(); assert.equal(controls, 2);
+});
+
+test("reading idle state also releases expired capabilities", async () => {
+  let clock = NOW;
+  const c = createGuestTrialController({send:async()=>trial({state:"v2.sealed"}),
+    discardPrevious:async()=>{}, now:()=>clock});
+  await c.begin(); clock += 15 * 60 * 1000;
+  assert.deepEqual(c.state(), {phase:"expired", trial:null});
+});
 function trial(overrides = {}) {
   return { version: 1, id: "a".repeat(64), questionId: "rest_activity_v1",
     question: "少し休めるとしたら、何をしたいですか？", generation: 1, assisted: false,

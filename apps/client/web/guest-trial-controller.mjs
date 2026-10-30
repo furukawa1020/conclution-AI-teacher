@@ -12,12 +12,13 @@ const MAX_CONTROL_RESPONSE_BYTES = 2048 + 16384;
 // Dedicated explicit recording: no loudness threshold, VAD admission, Native
 // transport or answer generation. The root owns the microphone and worklet.
 export function createGuestTrialPcmCollector({port, generation, sampleRate, contextFrame = 0,
-  maximumMs = 30000, sealTimeoutMs = 1000, onCancel = () => {}}) {
+  maximumMs = 30000, sealTimeoutMs = 1000, frameTimeoutMs = 2000, onCancel = () => {}}) {
   if (!port || typeof port.postMessage !== "function" || typeof onCancel !== "function" ||
       !Number.isSafeInteger(generation) || generation < 1 ||
       !Number.isSafeInteger(sampleRate) || sampleRate < 16000 || sampleRate > 192000 || sampleRate % 50 ||
       !Number.isSafeInteger(contextFrame) || contextFrame < 0 ||
       !Number.isInteger(maximumMs) || maximumMs < 1 || maximumMs > 30000 ||
+      !Number.isInteger(frameTimeoutMs) || frameTimeoutMs < 1 || frameTimeoutMs > 5000 ||
       !Number.isInteger(sealTimeoutMs) || sealTimeoutMs < 1 || sealTimeoutMs > 1000) invalid();
   const frames = [];
   let phase = "recording", previousFrame, sealTimer, finishPromise, resolveFinish, rejectFinish;
@@ -25,10 +26,11 @@ export function createGuestTrialPcmCollector({port, generation, sampleRate, cont
   const send = (type, fields = {}) => port.postMessage({type, version: 1, generation, ...fields});
   const clearFrames = () => { for (const frame of frames) frame.fill(0); frames.length = 0; };
   const deadline = setTimeout(() => cancel(), maximumMs);
+  let frameTimer = setTimeout(cancel, frameTimeoutMs);
   function cancel() {
     if (phase === "closed") return;
     phase = "closed";
-    clearTimeout(deadline); clearTimeout(sealTimer); clearFrames();
+    clearTimeout(deadline); clearTimeout(sealTimer); clearTimeout(frameTimer); clearFrames();
     try { send("stop"); } catch { /* local erasure still occurs */ }
     rejectFinish?.(new Error("guest_trial_capture_unavailable"));
     // Notify only after erasure and rejection; reentrant disposal is harmless.
@@ -49,6 +51,9 @@ export function createGuestTrialPcmCollector({port, generation, sampleRate, cont
       }
       previousFrame = message.contextFrame;
       frames.push(new Uint8Array(pcm));
+      if (phase === "recording") {
+        clearTimeout(frameTimer); frameTimer = setTimeout(cancel, frameTimeoutMs);
+      }
       try { send("credit", {frames: 1}); } catch { cancel(); }
       return;
     }
@@ -56,7 +61,7 @@ export function createGuestTrialPcmCollector({port, generation, sampleRate, cont
         message.lastSequence !== frames.length - 1) { wipe(pcm); cancel(); return; }
     const audio = new Uint8Array(frames.length * 640);
     frames.forEach((frame, i) => audio.set(frame, i * 640));
-    clearFrames(); clearTimeout(deadline); clearTimeout(sealTimer);
+    clearFrames(); clearTimeout(deadline); clearTimeout(sealTimer); clearTimeout(frameTimer);
     phase = "closed";
     resolveFinish(audio);
   };
@@ -71,6 +76,7 @@ export function createGuestTrialPcmCollector({port, generation, sampleRate, cont
       if (finishPromise) return finishPromise;
       if (phase !== "recording") return Promise.reject(new Error("guest_trial_capture_unavailable"));
       phase = "sealing";
+      clearTimeout(frameTimer);
       finishPromise = new Promise((resolve, reject) => { resolveFinish = resolve; rejectFinish = reject; });
       sealTimer = setTimeout(cancel, sealTimeoutMs);
       try { send("seal"); } catch { cancel(); }

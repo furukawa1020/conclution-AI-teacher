@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
@@ -74,7 +75,13 @@ func TestGuestTrialVoiceCommitsFinalPCMWithoutDialogueOrSynthesis(t *testing.T) 
 		t.Fatal(err)
 	}
 	audio := []byte{1, 2, 3, 4}
-	got, err := p.ProcessPCM(context.Background(), owner, s.ID, 1, "bound", audio)
+	timedCtx, timings := guesttrial.WithTimings(context.Background())
+	got, err := p.ProcessPCM(timedCtx, owner, s.ID, 1, "bound", audio)
+	for _, stage := range []string{"asr;dur=", "verify;dur=", "pipeline;dur="} {
+		if !strings.Contains(timings.ServerTiming(), stage) {
+			t.Fatal("missing timing", stage)
+		}
+	}
 	if err != nil || got.Status != guesttrial.AnswerFirst || recognized != 1 || evaluated != 1 || !bytes.Equal(audio, make([]byte, 4)) {
 		t.Fatal(got, err, audio)
 	}
@@ -170,7 +177,11 @@ func TestGuestTrialVoiceUnrecognizedIsNotACompletedNegativeAnswer(t *testing.T) 
 		return 0, nil
 	}}
 	p, _ := NewGuestTrialPipeline(trialPCMRecognizer(func(context.Context, []byte) (string, float32, error) { return "", 0, speechio.ErrNoSpeech }), verifier, service)
-	_, err := p.ProcessPCM(context.Background(), owner, s.ID, 1, "bound", []byte{1, 2})
+	ctx, timings := guesttrial.WithTimings(context.Background())
+	_, err := p.ProcessPCM(ctx, owner, s.ID, 1, "bound", []byte{1, 2})
+	if strings.Contains(timings.ServerTiming(), "verify;") || !strings.Contains(timings.ServerTiming(), "asr;") {
+		t.Fatal("unrecognized input timing is invalid", timings.ServerTiming())
+	}
 	if !errors.Is(err, httpapi.ErrVoiceNotRecognized) {
 		t.Fatal(err)
 	}

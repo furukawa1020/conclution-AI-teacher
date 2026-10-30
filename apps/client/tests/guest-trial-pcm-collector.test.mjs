@@ -15,6 +15,24 @@ function setup(options = {}) {
   return {collector, commands, emit, frame};
 }
 
+test("a missing PCM stream stops after a finite grace, not the 30 second recording ceiling", t => {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  let cancelled=0;
+  const {collector}=setup({onCancel:()=>cancelled++});
+  t.mock.timers.tick(1999); assert.equal(collector.state(),"recording");
+  t.mock.timers.tick(1); assert.equal(collector.state(),"closed"); assert.equal(cancelled,1);
+});
+
+test("silent and tiny frames refresh liveness without an amplitude gate", t => {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  const {collector,frame}=setup();
+  t.mock.timers.tick(1500); const silent=frame(0,0);
+  t.mock.timers.tick(1500); const tiny=frame(1,1);
+  t.mock.timers.tick(1999); assert.equal(collector.state(),"recording");
+  t.mock.timers.tick(1); assert.equal(collector.state(),"closed");
+  assert.ok(tiny.every(v=>v===0)); assert.ok(silent.every(v=>v===0));
+});
+
 test("explicit recording preserves even tiny samples and sends only after seal", async () => {
   const {collector, commands, emit, frame} = setup();
   const first = frame(0), second = frame(1, 0);

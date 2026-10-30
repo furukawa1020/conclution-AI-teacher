@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/furukawa1020/conclution-ai-teacher/internal/conversation"
 	"github.com/furukawa1020/conclution-ai-teacher/internal/guesttrial"
@@ -47,11 +48,15 @@ func TestGuestTrialVoiceIdentityAndAudioOwnership(t *testing.T) {
 			t.Fatal("unbounded work")
 		}
 		held = pcm
+		guesttrial.RecordTiming(ctx, guesttrial.TimingASR, 2*time.Millisecond)
 		return guesttrial.Snapshot{Status: guesttrial.AnswerFirst}, nil
 	})
 	w := voiceTrialPost(trialHandlerWithVoice(t, true, trialGuest(), f), trialVoiceBody(), nil)
 	if w.Code != 200 || calls != 1 || string(held) != "\x00\x00" {
 		t.Fatal(w.Code, calls, held)
+	}
+	if w.Header().Get("Server-Timing") != "asr;dur=2" || w.Header().Get("Access-Control-Expose-Headers") != "Server-Timing" {
+		t.Fatal("missing bounded timing header")
 	}
 	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Access-Control-Allow-Origin") != allowedWebOrigin || w.Header().Get("Cross-Origin-Resource-Policy") != "cross-origin" {
 		t.Fatal("missing privacy/CORS headers")

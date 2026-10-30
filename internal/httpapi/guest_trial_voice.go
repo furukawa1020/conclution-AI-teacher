@@ -111,8 +111,13 @@ func (s *Server) guestTrialVoice(w http.ResponseWriter, r *http.Request) {
 		writeGuestTrialVoiceError(w, err)
 		return
 	}
+	ctx, timings := guesttrial.WithTimings(ctx)
 	result, err := s.voice.GuestTrialVoice.ProcessPCM(ctx,
 		guesttrial.Owner{UID: principal.UID, AppID: principal.AppID}, input.ID, input.Generation, input.State, input.PCM)
+	if value := timings.ServerTiming(); value != "" {
+		w.Header().Set("Server-Timing", value)
+		w.Header().Set("Access-Control-Expose-Headers", "Server-Timing")
+	}
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}

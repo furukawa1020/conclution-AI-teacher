@@ -1,6 +1,7 @@
 import { getApp, getApps, initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
 import { createGuestTrialController, createGuestTrialTransport, createGuestTrialVoiceTransport,
   openGuestTrialCapture } from "./guest-trial-controller.mjs";
+import {createGuestTrialLatency} from "./guest-trial-latency.mjs";
 import {
   browserSessionPersistence,
   getIdToken,
@@ -813,6 +814,7 @@ function observeAuthInvalidation(auth) {
     const changed = authIdentityChanged(previousUid, nextUid);
     previousUid = nextUid;
     if (!changed) return;
+    clearGuestTrialDiagnostics();
     invalidateGuestTrial();
     if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
   });
@@ -881,6 +883,16 @@ function verifiedGuestAppCheckToken(result) {
 
 let guestModeActive = false;
 let guestTrialRoot;
+const guestTrialLatency = createGuestTrialLatency();
+let guestTrialTimingOwner;
+function clearGuestTrialDiagnostics() {
+  guestTrialLatency.clear(); guestTrialTimingOwner = undefined;
+}
+function guestTrialDiagnostics() {
+  if (!guestModeActive || guestAuthInstance?.currentUser?.isAnonymous !== true ||
+      guestAuthInstance.currentUser.uid !== guestTrialTimingOwner) clearGuestTrialDiagnostics();
+  return guestTrialLatency.snapshot();
+}
 let guestTrialCapture;
 let guestTrialCaptureAbort;
 let guestTrialIdentityEpoch = 0;
@@ -953,12 +965,16 @@ async function guestTrialAction(action) {
     // before issuing a fresh independent question. No ordinary reply resumes.
     stopSession("request_cancelled");
     const owner = guestAuthInstance.currentUser.uid;
+    if (guestTrialTimingOwner !== owner) clearGuestTrialDiagnostics();
+    guestTrialTimingOwner = owner;
     const options = {origin: VOICE_ORIGIN, credentials: () => secureCredentials(),
       getSessionEpoch: () => guestTrialIdentityEpoch,
       isCurrentGuest: () => guestModeActive && guestAuthInstance?.currentUser?.isAnonymous === true &&
         guestAuthInstance.currentUser.uid === owner};
     guestTrialRoot = createGuestTrialController({send: createGuestTrialTransport(options),
-      sendVoice: createGuestTrialVoiceTransport(options), discardPrevious: async () => {
+      sendVoice: createGuestTrialVoiceTransport({...options, onTiming: value => {
+        if (options.isCurrentGuest() && guestTrialTimingOwner === owner) guestTrialLatency.observe(value);
+      }}), discardPrevious: async () => {
         discardGuestTrialCapture(); guestVoiceComparison.clear(); stopGuestVoiceComparisonPlayback();
       }});
   }
@@ -8364,6 +8380,7 @@ navigator.mediaDevices?.addEventListener?.("devicechange", () => {
 });
 
 globalThis.addEventListener("kotae:account-boundary-changed", () => {
+  clearGuestTrialDiagnostics();
   invalidateGuestTrial();
   if (hasIdentityBoundVoiceSession()) stopSession("identity_changed");
 });
@@ -8383,6 +8400,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 globalThis.addEventListener("pagehide", () => {
+  clearGuestTrialDiagnostics();
   longMemorySession.clear();
   if (typeof silenceReceiptGate !== "undefined") {
     silenceReceiptGate.clear();
@@ -8432,6 +8450,7 @@ async function deletePasskeyAccount(confirmation) {
 const publicBridge = Object.freeze({
   resetGuestTrial: invalidateGuestTrial,
   guestTrialAvailable,
+  guestTrialDiagnostics,
   guestTrialAction,
   addPasskeyCredential,
   attachDocument,

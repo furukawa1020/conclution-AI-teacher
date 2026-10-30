@@ -2,27 +2,41 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {readFile} from "node:fs/promises";
 import {runInNewContext} from "node:vm";
+import {createGuestTrialLatency} from "../web/guest-trial-latency.mjs";
 
 const bridge = await readFile(new URL("../web/firebase-bridge.js", import.meta.url), "utf8");
 const root = bridge.slice(bridge.indexOf("let guestTrialRoot;"), bridge.indexOf("let guestVoiceComparisonRequested"));
 function setup(capture, extra = {}) {
   const auth = {currentUser: {uid: "guest-a", isAnonymous: true}};
-  let options, resets = 0, submissions = 0, cancellations = 0;
+  let options, voiceOptions, resets = 0, submissions = 0, cancellations = 0;
   const trial = {question: "質問", status: "pending", state: "private", assisted: false, id: "private-id"};
   const context = {guestModeActive: true, guestAuthInstance: auth, document: {hidden: false},
-    AbortController, VOICE_ORIGIN: "https://example.test", secureCredentials: async () => ({}),
+    AbortController, createGuestTrialLatency, VOICE_ORIGIN: "https://example.test", secureCredentials: async () => ({}),
     guestVoiceComparison: {clear() {}}, stopGuestVoiceComparisonPlayback() {},
     fail: code => {throw new Error(code);}, nextPcmCaptureGeneration: () => 1,
-    createGuestTrialTransport: o => { options = o; }, createGuestTrialVoiceTransport: () => {},
+    createGuestTrialTransport: o => { options = o; }, createGuestTrialVoiceTransport: o => {voiceOptions=o;},
     createGuestTrialController: () => ({state: () => ({phase: "active", trial}),
       reset: () => resets++, begin: async () => {}, stop: async () => {},
       submit: async () => {submissions++;}}),
     openGuestTrialCapture: capture ?? (async () => ({cancel: () => cancellations++, finish: async () => new Uint8Array([1,2])})),
     loadPcmCaptureWorklet() {}, setTimeout, clearTimeout, ...extra,
   };
-  const api = runInNewContext(`${root}\nfunction stopSession(){invalidateGuestTrial();}\n({guestTrialAction,invalidateGuestTrial,guestTrialAvailable})`, context);
-  return {...api, auth, options: () => options, counts: () => ({resets, submissions, cancellations})};
+  const api = runInNewContext(`${root}\nfunction stopSession(){invalidateGuestTrial();}\n({guestTrialAction,invalidateGuestTrial,guestTrialAvailable,guestTrialDiagnostics,clearGuestTrialDiagnostics})`, context);
+  return {...api, auth, options: () => options, voiceOptions: () => voiceOptions, counts: () => ({resets, submissions, cancellations})};
 }
+
+test("diagnostics aggregate across same-guest trials and erase at identity boundaries", async () => {
+  const env=setup(); await env.guestTrialAction("begin");
+  env.voiceOptions().onTiming({roundtripMs:20,server:null});
+  await env.guestTrialAction("reset"); await env.guestTrialAction("begin");
+  env.voiceOptions().onTiming({roundtripMs:40,server:null});
+  assert.equal(env.guestTrialDiagnostics().retained,2);
+  env.auth.currentUser={uid:"guest-b",isAnonymous:true};
+  env.voiceOptions().onTiming({roundtripMs:100,server:null});
+  assert.equal(env.guestTrialDiagnostics().retained,0);
+  env.clearGuestTrialDiagnostics();
+  assert.equal(env.guestTrialDiagnostics().retained,0);
+});
 
 test("browser root binds transport to the guest and exposes no capability or trial ID", async () => {
   const env = setup(); const raw = await env.guestTrialAction("begin");

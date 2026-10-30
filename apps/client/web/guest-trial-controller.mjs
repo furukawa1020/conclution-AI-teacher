@@ -423,7 +423,16 @@ export function createGuestTrialController({ send, sendVoice, discardPrevious, n
   let activeKind = null;
   let disposalTail = Promise.resolve();
 
-  function state() { return Object.freeze({ phase, trial: current }); }
+  function expireIfIdle() {
+    if (!active && current && Date.parse(current.expiresAt) <= now()) {
+      current = null;
+      phase = "expired";
+    }
+  }
+  function state() {
+    expireIfIdle();
+    return Object.freeze({ phase, trial: current });
+  }
   function reset() {
     epoch++;
     active?.abort();
@@ -442,6 +451,8 @@ export function createGuestTrialController({ send, sendVoice, discardPrevious, n
       phase = "active";
     }
     if (active) throw new Error("guest_trial_busy");
+    expireIfIdle();
+    if (phase === "expired") throw new Error("guest_trial_expired");
     if (action === "submit" && typeof sendVoice !== "function") invalid();
     if (action === "begin") {
       if (current || phase !== "idle") throw new Error("guest_trial_reset_required");

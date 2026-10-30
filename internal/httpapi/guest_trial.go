@@ -146,9 +146,19 @@ func (s *Server) guestTrialControl(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "guest_trial_invalid", "Invalid trial control.")
 		return
 	}
+	if err := guestTrialBodyContextError(ctx); err != nil {
+		writeGuestTrialVoiceError(w, err)
+		return
+	}
+	releaseBodyDeadline := boundGuestTrialBody(ctx, w)
+	defer releaseBodyDeadline()
 	r.Body = http.MaxBytesReader(w, r.Body, 512)
 	input, decodeErr := decodeGuestTrialControl(r.Body)
 	if decodeErr != nil {
+		if err := guestTrialBodyContextError(ctx); err != nil {
+			writeGuestTrialVoiceError(w, err)
+			return
+		}
 		writeProblem(w, http.StatusBadRequest, "guest_trial_invalid", "Invalid trial control.")
 		return
 	}

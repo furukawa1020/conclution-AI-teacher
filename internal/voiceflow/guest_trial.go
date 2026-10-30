@@ -47,6 +47,8 @@ func (p *GuestTrialPipeline) ProcessPCM(ctx context.Context, owner guesttrial.Ow
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
+	started := time.Now()
+	defer func() { guesttrial.RecordTiming(ctx, guesttrial.TimingPipeline, time.Since(started)) }()
 	return p.trials.Evaluate(ctx, owner, id, generation, func(ctx context.Context, snapshot guesttrial.Snapshot) (guesttrial.Verdict, error) {
 		// An expired/tampered state must never restart with an empty state.
 		if err := p.verifier.ValidateGuestTrialState(owner, snapshot, token); err != nil {
@@ -55,7 +57,9 @@ func (p *GuestTrialPipeline) ProcessPCM(ctx context.Context, owner guesttrial.Ow
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
+		asrStarted := time.Now()
 		transcript, confidence, err := p.speech.TranscribePCM16(ctx, audio)
+		guesttrial.RecordTiming(ctx, guesttrial.TimingASR, time.Since(asrStarted))
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
@@ -71,6 +75,8 @@ func (p *GuestTrialPipeline) ProcessPCM(ctx context.Context, owner guesttrial.Ow
 			// answer or synthesize an unsolicited "please speak again" cue.
 			return 0, httpapi.ErrVoiceNotRecognized
 		}
+		verifyStarted := time.Now()
+		defer func() { guesttrial.RecordTiming(ctx, guesttrial.TimingVerify, time.Since(verifyStarted)) }()
 		return p.verifier.EvaluateGuestTrial(ctx, owner, snapshot, conversation.VoiceTurn{
 			SchemaVersion: conversation.SchemaVersion, Utterance: transcript, StateToken: token,
 			GuestExperience: true, InputOrigin: conversation.InputOriginCommittedVoice,

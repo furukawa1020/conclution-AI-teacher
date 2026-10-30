@@ -39,6 +39,8 @@ const REQUIRED_ARTIFACTS = Object.freeze([
   "firebase-bridge.js",
   "guest-a-first-slo-policy.mjs",
   "guest-trial-controller.mjs",
+  "guest-trial-timing.mjs",
+  "guest-trial-latency.mjs",
   "long-memory-session-policy.mjs",
   "native-preflight-lease-policy.mjs",
   "passkey-policy.mjs",

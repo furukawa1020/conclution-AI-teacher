@@ -81,7 +81,7 @@ test("a failing device stop does not prevent other devices and context from clos
   const env = environment({getUserMedia: async () => ({getTracks: () => tracks})});
   const capture = await openGuestTrialCapture(env.options);
   capture.cancel();
-  assert.equal(stopped, 1); assert.equal(removed, 2);
+  assert.equal(stopped, 1); assert.equal(removed, 6);
   assert.equal(env.counts().closed, 1);
   await assert.rejects(capture.finish(), /capture_unavailable/u);
 });
@@ -130,4 +130,23 @@ test("OS context interruption releases capture and removes the observer", async 
     await assert.rejects(capture.finish(), /capture_unavailable/u);
     assert.equal(env.counts().stopped, 1);
   }
+});
+
+test("device mute has a grace period and brief unmute does not stop quiet capture", async t => {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  let stopped=0, interrupted=0;
+  const listeners=new Map();
+  const track={muted:false,stop(){stopped++;},
+    addEventListener:(name,fn)=>listeners.set(name,fn), removeEventListener:name=>listeners.delete(name)};
+  const env=environment({getUserMedia:async()=>({getTracks:()=>[track]}),onInterrupted:()=>interrupted++});
+  const capture=await openGuestTrialCapture(env.options);
+  track.muted=true; listeners.get("mute")(); t.mock.timers.tick(500);
+  track.muted=false; listeners.get("unmute")(); t.mock.timers.tick(500);
+  assert.equal(stopped,0);
+  track.muted=true; listeners.get("mute")(); t.mock.timers.tick(999);
+  // Keep the transport alive independently of audio amplitude.
+  env.port.onmessage({data:{type:"frame",version:1,generation:1,sequence:0,contextFrame:0,pcm:new ArrayBuffer(640)}});
+  t.mock.timers.tick(1);
+  assert.equal(stopped,1); assert.equal(interrupted,1); assert.equal(listeners.size,0);
+  await assert.rejects(capture.finish(),/capture_unavailable/u);
 });

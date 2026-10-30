@@ -95,10 +95,12 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
       typeof onInterrupted !== "function" || !signal || typeof signal.addEventListener !== "function" ||
       !Number.isSafeInteger(generation) || generation < 1 ||
       !Number.isInteger(setupTimeoutMs) || setupTimeoutMs < 1 || setupTimeoutMs > 8000) invalid();
-  let context, stream, source, node, collector, disposed = false, timer, captureTimer, rejectSetup;
+  let context, stream, source, node, collector, disposed = false, timer, captureTimer, muteTimer, rejectSetup;
   function stopTracks(value) {
     for (const track of value?.getTracks() ?? []) {
       try { track.removeEventListener?.("ended", interrupt); } catch {}
+      try { track.removeEventListener?.("mute", trackMuted); } catch {}
+      try { track.removeEventListener?.("unmute", trackUnmuted); } catch {}
       try { track.stop(); } catch { /* one failed device cannot retain others */ }
     }
   }
@@ -110,10 +112,22 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
   function contextChanged() {
     if (context?.state !== undefined && context.state !== "running") interrupt();
   }
+  function trackMuted() {
+    if (disposed || muteTimer !== undefined) return;
+    muteTimer = setTimeout(() => {
+      muteTimer = undefined;
+      if (stream?.getTracks().some(track => track.muted === true)) interrupt();
+    }, 1000);
+  }
+  function trackUnmuted() {
+    if (!stream?.getTracks().some(track => track.muted === true)) {
+      clearTimeout(muteTimer); muteTimer = undefined;
+    }
+  }
   function dispose() {
     if (disposed) return;
     disposed = true;
-    clearTimeout(timer); clearTimeout(captureTimer);
+    clearTimeout(timer); clearTimeout(captureTimer); clearTimeout(muteTimer);
     signal.removeEventListener("abort", dispose);
     context?.removeEventListener?.("statechange", contextChanged);
     collector?.cancel();
@@ -152,7 +166,12 @@ export async function openGuestTrialCapture({getUserMedia, createContext, loadWo
         sampleRate: context.sampleRate, onCancel: interrupt});
       if (disposed) throw new Error("guest_trial_capture_unavailable");
       node.onprocessorerror = interrupt;
-      for (const track of stream.getTracks()) track.addEventListener?.("ended", interrupt, {once: true});
+      for (const track of stream.getTracks()) {
+        track.addEventListener?.("ended", interrupt, {once: true});
+        track.addEventListener?.("mute", trackMuted);
+        track.addEventListener?.("unmute", trackUnmuted);
+      }
+      if (stream.getTracks().some(track => track.muted === true)) trackMuted();
       source = context.createMediaStreamSource(stream);
       source.connect(node);
     })();

@@ -99,11 +99,20 @@ func (s *Server) guestTrialVoice(w http.ResponseWriter, r *http.Request) {
 		writeGuestTrialVoiceError(w, guesttrial.ErrInvalid)
 		return
 	}
+	if err := guestTrialBodyContextError(ctx); err != nil {
+		writeGuestTrialVoiceError(w, err)
+		return
+	}
+	releaseBodyDeadline := boundGuestTrialBody(ctx, w)
+	defer releaseBodyDeadline()
 	r.Body = http.MaxBytesReader(w, r.Body, guestTrialMaxRequestBytes)
 	var input guestTrialVoiceInput
 	// Clear even partial decodes and errors; the pipeline also consumes its PCM.
 	defer func() { clear(input.PCM) }()
 	if err := decodeGuestTrialVoice(r.Body, &input); err != nil {
+		if contextErr := guestTrialBodyContextError(ctx); contextErr != nil {
+			err = contextErr
+		}
 		writeGuestTrialVoiceError(w, err)
 		return
 	}

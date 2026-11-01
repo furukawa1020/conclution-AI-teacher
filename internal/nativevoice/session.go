@@ -191,7 +191,7 @@ type liveSession struct {
 
 	writeCh chan writeRequest
 
-	sendMu          sync.Mutex
+	sendMu          inputLock
 	inputActive     bool
 	activityStarted bool
 	activityEnded   bool
@@ -215,8 +215,11 @@ type liveSession struct {
 }
 
 func (s *liveSession) StartActivity(ctx context.Context) error {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	ctx, release, err := s.lockInput(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.currentTerminalError(); err != nil {
 		return err
 	}
@@ -243,8 +246,11 @@ func (s *liveSession) SendPCM20ms(ctx context.Context, pcm []byte) error {
 		return ErrPCMFrameSize
 	}
 
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	ctx, release, err := s.lockInput(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.currentTerminalError(); err != nil {
 		return err
 	}
@@ -274,8 +280,11 @@ func (s *liveSession) SendPCM20ms(ctx context.Context, pcm []byte) error {
 // latency waterfall. A nil return means SendRealtimeInput(ActivityEnd) has
 // completed; provider transcription finalization remains a later event.
 func (s *liveSession) EndActivity(ctx context.Context) error {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	ctx, release, err := s.lockInput(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.currentTerminalError(); err != nil {
 		return err
 	}
@@ -297,7 +306,9 @@ func (s *liveSession) EndActivity(ctx context.Context) error {
 // proves that provider input transcription is final; the caller remains
 // responsible for completing its deterministic risk and route checks first.
 func (s *liveSession) CommitOutput() error {
-	s.sendMu.Lock()
+	if err := s.sendMu.LockContext(s.ctx); err != nil {
+		return safeContextError("commit", err)
+	}
 	defer s.sendMu.Unlock()
 
 	s.queueMu.Lock()

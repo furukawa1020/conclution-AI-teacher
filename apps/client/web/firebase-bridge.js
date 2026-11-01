@@ -2372,6 +2372,34 @@ function hasLiveAudioTrack(stream) {
   );
 }
 
+function acquireMicrophoneWithinDeadline(acquire) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      const error = new Error("microphone_unavailable");
+      error.name = "NotReadableError";
+      reject(error);
+    }, 30_000);
+    Promise.resolve().then(acquire).then(stream => {
+      if (settled) {
+        for (const track of stream.getTracks()) {
+          try { track.stop(); } catch { /* still release other tracks */ }
+        }
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(stream);
+    }, error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    }).catch(() => { /* late device cleanup cannot own the settled request */ });
+  });
+}
+
 async function ensureMediaStream(expectedEpoch, allowAcquisition) {
   if (hasLiveAudioTrack(mediaStream)) {
     return mediaStream;
@@ -2397,7 +2425,7 @@ async function ensureMediaStream(expectedEpoch, allowAcquisition) {
 
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
+    stream = await acquireMicrophoneWithinDeadline(() => navigator.mediaDevices.getUserMedia({
       audio: {
         autoGainControl: true,
         channelCount: 1,
@@ -2405,7 +2433,7 @@ async function ensureMediaStream(expectedEpoch, allowAcquisition) {
         noiseSuppression: true,
       },
       video: false,
-    });
+    }));
   } catch (error) {
     fail(classifyMicrophoneError(error));
   }

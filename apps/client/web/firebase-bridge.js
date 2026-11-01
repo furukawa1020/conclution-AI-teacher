@@ -7481,12 +7481,16 @@ async function consumeVoiceStream(
   expectedEpoch,
   expectedStrictCloudMinimization,
 ) {
+  function rejectResponse() {
+    try { void response.body?.cancel().catch(() => {}); } catch { /* rejection remains authoritative */ }
+    fail("voice_response_invalid");
+  }
   if (
     !isNdjsonContentType(response.headers.get("Content-Type")) ||
     !response.body ||
     typeof response.body.getReader !== "function"
   ) {
-    fail("voice_response_invalid");
+    rejectResponse();
   }
   const contentLength = response.headers.get("Content-Length");
   if (
@@ -7494,7 +7498,7 @@ async function consumeVoiceStream(
     (!/^[0-9]+$/u.test(contentLength) ||
       Number(contentLength) > VOICE_STREAM_LIMITS.maximumResponseBytes)
   ) {
-    fail("voice_response_invalid");
+    rejectResponse();
   }
 
   const parser = createVoiceStreamParser((result) =>
@@ -7532,6 +7536,9 @@ async function consumeVoiceStream(
   try {
     for (;;) {
       const { done, value } = await reader.read();
+      if (expectedEpoch !== sessionEpoch) {
+        fail(stoppedSessionCode(expectedEpoch));
+      }
       if (done) break;
       if (
         !(value instanceof Uint8Array) ||

@@ -76,14 +76,22 @@ func (group *streamingSynthesisFlightGroup) stream(
 	group.mu.Unlock()
 
 	if owner {
-		go func() {
-			mimeType, err := produce(providerCtx, flight.publish)
-			flight.complete(mimeType, err)
+		retire := func() {
 			group.mu.Lock()
 			if group.flights[key] == flight {
 				delete(group.flights, key)
 			}
 			group.mu.Unlock()
+		}
+		stopExpiry := context.AfterFunc(providerCtx, func() {
+			flight.complete("", providerCtx.Err())
+			retire()
+		})
+		go func() {
+			defer stopExpiry()
+			mimeType, err := produce(providerCtx, flight.publish)
+			flight.complete(mimeType, err)
+			retire()
 		}()
 	}
 	return flight.consume(ctx, onChunk)

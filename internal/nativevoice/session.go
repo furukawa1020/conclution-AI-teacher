@@ -539,6 +539,7 @@ func (s *liveSession) receiverLoop() {
 			return
 		}
 		if err != nil {
+			scrubProviderMessage(message)
 			if s.ctx.Err() != nil {
 				s.terminate(safeContextError("receive", s.ctx.Err()))
 			} else {

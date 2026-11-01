@@ -2094,6 +2094,8 @@ function warmVoiceService() {
   primeVoiceTransportConnection();
   if (voiceServiceWarmupStarted) return;
   voiceServiceWarmupStarted = true;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 4000);
   void fetch(`${VOICE_ORIGIN}/health`, {
     method: "GET",
     cache: "no-store",
@@ -2101,14 +2103,16 @@ function warmVoiceService() {
     mode: "cors",
     redirect: "follow",
     referrerPolicy: "no-referrer",
+    signal: controller.signal,
   })
     .then((response) => {
-      if (!response.ok) throw new Error("voice_warmup_failed");
-      return response.text();
+      // Only waking the service matters here; never retain its response body.
+      return response.body?.cancel();
     })
     .catch(() => {
       // Warm-up availability never owns authentication or voice availability.
-    });
+    })
+    .finally(() => clearTimeout(deadline));
 }
 
 // Establish DNS/TLS while the person is still reading the entry screen. The

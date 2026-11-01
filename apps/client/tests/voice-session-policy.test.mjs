@@ -1060,7 +1060,12 @@ test("entry only preconnects; explicit guest or voice start warms anonymously wi
   const links = [];
   const requests = [];
   class Link {}
+  let warmDeadline;
+  const clearedWarmTimers = [];
   const runtime = runInNewContext(`${warm}\n({ primeVoiceTransportConnection, warmVoiceService })`, {
+    AbortController,
+    setTimeout: (fn, ms) => { assert.equal(ms, 4000); warmDeadline=fn; return 1; },
+    clearTimeout: id => clearedWarmTimers.push(id),
     HTMLLinkElement: Link,
     URL,
     VOICE_ORIGIN: "https://voice.example",
@@ -1092,11 +1097,15 @@ test("entry only preconnects; explicit guest or voice start warms anonymously wi
   assert.deepEqual({ ...requests[0].options }, {
     method: "GET", cache: "no-store", credentials: "omit", mode: "cors",
     redirect: "follow", referrerPolicy: "no-referrer",
+    signal: requests[0].options.signal,
   });
   runtime.warmVoiceService();
   assert.equal(requests.length, 1, "gesture-bound wake-up remains single-flight");
+  warmDeadline();
+  assert.equal(requests[0].options.signal.aborted,true);
   response.reject(new Error("fixture_network_failure"));
   await flushStartupTasks();
+  assert.deepEqual(clearedWarmTimers,[1]);
   assert.doesNotMatch(
     warm,
     /Authorization|audioBase64|sessionState|X-Firebase-AppCheck|idToken/u,

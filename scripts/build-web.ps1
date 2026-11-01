@@ -711,6 +711,11 @@ function decodeText(ptr, len) {
         throw "index.html must contain only the external bootstrap.js module script."
     }
 
+    & node --experimental-vm-modules (Join-Path $PSScriptRoot "check-web-module-dependencies.mjs") --dist $stagingRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Generated web module dependencies are incomplete."
+    }
+
     $totalBytes = 0L
     $releaseArtifacts = @()
     foreach ($entry in @(Get-ChildItem -LiteralPath $stagingRoot -Recurse -Force | Sort-Object FullName)) {

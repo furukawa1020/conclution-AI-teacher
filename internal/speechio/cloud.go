@@ -598,7 +598,10 @@ func (s *CloudService) recognizeWithAdaptation(
 	model string,
 	adaptation *speechpb.SpeechAdaptation,
 ) (*speechpb.RecognizeResponse, error) {
-	return s.recognizeCall(ctx, &speechpb.RecognizeRequest{
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	response, err := s.recognizeCall(ctx, &speechpb.RecognizeRequest{
 		Recognizer: s.recognizer,
 		Config: &speechpb.RecognitionConfig{
 			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
@@ -611,6 +614,10 @@ func (s *CloudService) recognizeWithAdaptation(
 		},
 		AudioSource: &speechpb.RecognizeRequest_Content{Content: audio},
 	})
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
+	}
+	return response, err
 }
 
 func reviewedJapaneseRecognitionFeatures() *speechpb.RecognitionFeatures {

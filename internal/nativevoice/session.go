@@ -133,27 +133,38 @@ func (s *Service) connect(
 }
 
 func awaitSetupComplete(ctx context.Context, raw ProviderSession) error {
-	resultCh := make(chan receiveResult, 1)
+	if err := ctx.Err(); err != nil {
+		return safeContextError("setup", err)
+	}
+	// Never leave provider content in an abandoned result channel. The receive
+	// owner scrubs even error-associated and late messages before publishing.
+	resultCh := make(chan error, 1)
 	go func() {
-		message, err := raw.Receive()
-		resultCh <- receiveResult{message: message, err: err}
+		resultCh <- receiveSetup(raw)
 	}()
 
 	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			return fmt.Errorf("receive native voice setup: %w", ErrProvider)
+	case err := <-resultCh:
+		if contextErr := ctx.Err(); contextErr != nil {
+			return safeContextError("setup", contextErr)
 		}
-		if !isSetupComplete(result.message) {
-			scrubProviderMessage(result.message)
-			return fmt.Errorf("receive native voice setup: %w", ErrProtocol)
-		}
-		scrubProviderMessage(result.message)
-		return nil
+		return err
 	case <-ctx.Done():
 		_ = raw.Close()
 		return safeContextError("setup", ctx.Err())
 	}
+}
+
+func receiveSetup(raw ProviderSession) error {
+	message, err := raw.Receive()
+	defer scrubProviderMessage(message)
+	if err != nil {
+		return fmt.Errorf("receive native voice setup: %w", ErrProvider)
+	}
+	if !isSetupComplete(message) {
+		return fmt.Errorf("receive native voice setup: %w", ErrProtocol)
+	}
+	return nil
 }
 
 func isSetupComplete(message *genai.LiveServerMessage) bool {

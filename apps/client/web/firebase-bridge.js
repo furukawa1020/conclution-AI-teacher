@@ -5650,15 +5650,16 @@ function stopBargeInMonitoring(playback) {
   if (playback.bargePcmMonitor) {
     const monitor = playback.bargePcmMonitor;
     playback.bargePcmMonitor = undefined;
-    monitor.stop();
+    try { monitor.stop(); } catch { /* release the remaining recording resources */ }
   }
   if (playback.interrupted) return;
-  restorePlaybackGain(playback);
-  if (playback.interruptRecording) {
-    abandonInterruptRecording(playback.interruptRecording);
-    playback.interruptRecording = undefined;
-  }
+  const recording = playback.interruptRecording;
+  playback.interruptRecording = undefined;
   playback.resetInterruptGuard = undefined;
+  try { restorePlaybackGain(playback); } catch { /* recording cleanup is independent */ }
+  if (recording) {
+    try { abandonInterruptRecording(recording); } catch { /* still disable microphone tracks */ }
+  }
   setTracksEnabled(false);
 }
 

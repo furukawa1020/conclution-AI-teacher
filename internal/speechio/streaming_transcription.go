@@ -196,6 +196,11 @@ func (s *cloudStreamingTranscriptionSession) SendPCM(audio []byte) error {
 		s.cancel()
 		return fmt.Errorf("send regional streaming transcription audio: %w", err)
 	}
+	if err := s.ctx.Err(); err != nil {
+		s.sendClosed = true
+		s.closeErr = fmt.Errorf("send regional streaming transcription audio: %w", err)
+		return s.closeErr
+	}
 	return nil
 }
 
@@ -212,6 +217,9 @@ func (s *cloudStreamingTranscriptionSession) CloseSend() error {
 	}
 	if err := s.stream.CloseSend(); err != nil {
 		s.cancel()
+		s.closeErr = fmt.Errorf("close regional streaming transcription input: %w", err)
+	}
+	if err := s.ctx.Err(); err != nil && s.closeErr == nil {
 		s.closeErr = fmt.Errorf("close regional streaming transcription input: %w", err)
 	}
 	return s.closeErr

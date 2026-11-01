@@ -2631,9 +2631,11 @@ function discardCurrentCandidate(recording, reason = "candidate-rejected") {
   if (!candidate) {
     return true;
   }
-  candidate.captureBuffer.clear();
+  let cleared = true;
+  try { candidate.captureBuffer.clear(); } catch { cleared = false; }
   candidate.stopReason = reason;
-  return stopDetachedCandidate(candidate);
+  const stopped = stopDetachedCandidate(candidate);
+  return cleared && stopped;
 }
 
 function rejectRecording(recording, code, source = "other") {
@@ -2656,14 +2658,14 @@ function rejectRecording(recording, code, source = "other") {
   if (!recording.stopLatch.isRequested()) {
     recording.stopLatch.request("failed");
   }
-  stopVad(recording);
+  try { stopVad(recording); } catch { /* settle the waiting turn even if cleanup fails */ }
   if (activeRecording === recording && activePlayback === undefined) {
-    setStreamTracksEnabled(recording.stream, false);
+    try { setStreamTracksEnabled(recording.stream, false); } catch { /* still settle recording */ }
   }
-  discardCurrentCandidate(recording);
+  try { discardCurrentCandidate(recording); } catch { /* still settle recording */ }
   if (!recording.turnEnded) {
     recording.turnEnded = true;
-    recording.rejectTurnEnded(new Error(code));
+    try { recording.rejectTurnEnded(new Error(code)); } catch { /* endPromise must settle too */ }
   }
   recording.rejectEnd(new Error(code));
 }
@@ -5659,11 +5661,11 @@ function pcm16AudioBuffer(audioBase64, decodedBytes, sampleRateHz) {
 function abandonInterruptRecording(recording) {
   if (!recording || recording.settled) return;
   recording.settled = true;
-  stopVad(recording);
-  discardCurrentCandidate(recording, "interrupt-abandoned");
+  try { stopVad(recording); } catch { /* settle abandoned capture */ }
+  try { discardCurrentCandidate(recording, "interrupt-abandoned"); } catch { /* settle abandoned capture */ }
   if (!recording.turnEnded) {
     recording.turnEnded = true;
-    recording.rejectTurnEnded?.(new Error("request_cancelled"));
+    try { recording.rejectTurnEnded?.(new Error("request_cancelled")); } catch { /* endPromise must settle too */ }
   }
   recording.resolveEnd(
     Object.freeze({

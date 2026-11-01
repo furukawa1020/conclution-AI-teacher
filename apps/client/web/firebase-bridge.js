@@ -2247,34 +2247,36 @@ function installMediaStreamLossListener(stream, expectedEpoch) {
 }
 
 function releaseMicrophone(code = "request_cancelled") {
-  setVoiceReceiptVisible(false);
   const recording = activeRecording;
+  const stream = mediaStream;
+  const binding = mediaStreamLossBinding;
+  const source = analyserSource;
+  const node = analyser;
+  const context = audioContext;
   activeRecording = undefined;
+  mediaStream = undefined;
+  mediaStreamLossBinding = undefined;
+  analyserSource = undefined;
+  analyser = undefined;
+  analyserStream = undefined;
+  audioContext = undefined;
+  try { setVoiceReceiptVisible(false); } catch { /* device cleanup must continue */ }
   if (recording) {
     recording.discard = true;
     recording.totalBytes = 0;
     // Rejecting the owned recording is the single cancellation path: it
     // stops VAD, clears and detaches the current candidate recorder, and
     // settles any Rust task waiting on endPromise.
-    rejectRecording(recording, code);
+    try { rejectRecording(recording, code); } catch { /* remaining devices are independent */ }
   }
-  detachMediaStreamLossListener();
-  setTracksEnabled(false);
-  stopTracks(mediaStream);
-  mediaStream = undefined;
-  if (analyserSource) {
-    analyserSource.disconnect();
-    analyserSource = undefined;
+  try { binding?.track.removeEventListener("ended", binding.onEnded); } catch { /* best effort */ }
+  try { setStreamTracksEnabled(stream, false); } catch { /* still stop tracks */ }
+  try { stopTracks(stream); } catch { /* still close graph */ }
+  try { source?.disconnect(); } catch { /* independent graph node */ }
+  try { node?.disconnect(); } catch { /* still close context */ }
+  if (context && context.state !== "closed") {
+    try { void Promise.resolve(context.close()).catch(() => {}); } catch { /* already detached */ }
   }
-  if (analyser) {
-    analyser.disconnect();
-    analyser = undefined;
-  }
-  analyserStream = undefined;
-  if (audioContext && audioContext.state !== "closed") {
-    void audioContext.close();
-  }
-  audioContext = undefined;
 }
 
 function stoppedSessionCode(expectedEpoch) {

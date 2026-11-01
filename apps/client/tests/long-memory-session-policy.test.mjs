@@ -22,12 +22,50 @@ function deferred() {
 }
 
 function jsonResponse(value, ok = true) {
-  return Object.freeze({
-    headers: Object.freeze({ get: () => "application/json; charset=utf-8" }),
-    ok,
-    text: async () => JSON.stringify(value),
-  });
+  return new Response(JSON.stringify(value), {status:ok ? 200 : 500,
+    headers:{"Content-Type":"application/json; charset=utf-8"}});
 }
+
+test("oversized memory bodies stop before completion and release their reader",async()=>{
+ let cancelled=0;
+ const bytes=new Uint8Array(4225).fill(32);
+ const response=new Response(new ReadableStream({start(c){c.enqueue(bytes);},cancel(){cancelled++;}}),
+  {headers:{"Content-Type":"application/json"}});
+ const controller=createLongMemorySessionController({request:async()=>response});
+ controller.start(credentials); await flushStartupTasks();
+ assert.equal(controller.snapshot().state,LONG_MEMORY_SESSION_STATES.FAILED);
+ assert.equal(cancelled,1); assert.equal(response.body.locked,false);
+ assert.ok(bytes.every(v=>v===0));
+});
+
+test("clearing memory preparation cancels a stalled body reader",async()=>{
+ let cancelled=0;
+ const response=new Response(new ReadableStream({cancel(){cancelled++;}}),
+  {headers:{"Content-Type":"application/json"}});
+ const controller=createLongMemorySessionController({request:async()=>response});
+ controller.start(credentials); await flushStartupTasks();
+ assert.equal(response.body.locked,true);
+ controller.clear(); await flushStartupTasks();
+ assert.equal(cancelled,1); assert.equal(response.body.locked,false);
+ assert.equal(controller.snapshot().state,LONG_MEMORY_SESSION_STATES.CANCELLED);
+});
+
+test("memory responses enforce UTF-8 while allowing split multibyte input",async()=>{
+ for (const valid of [true,false]) {
+  let calls=0;
+  const bytes=valid ? new TextEncoder().encode(JSON.stringify({available:true,capability:"kmc1.声"}))
+    : new Uint8Array([0xff]);
+  const response=new Response(new ReadableStream({start(c){
+   for(const byte of bytes) c.enqueue(new Uint8Array([byte])); c.close();
+  }}),{headers:{"Content-Type":"application/json"}});
+  const controller=createLongMemorySessionController({request:async()=>{
+   calls++; return calls===1 ? response : jsonResponse({expiresInSeconds:900,sessionContext:"kms1.valid"});
+  },setTimer:()=>1});
+  controller.start(credentials); await flushStartupTasks();
+  assert.equal(controller.snapshot().state,valid ? LONG_MEMORY_SESSION_STATES.READY : LONG_MEMORY_SESSION_STATES.FAILED);
+  assert.equal(response.body.locked,false);
+ }
+});
 
 const credentials = Object.freeze({
   appCheckToken: "app-check-token",

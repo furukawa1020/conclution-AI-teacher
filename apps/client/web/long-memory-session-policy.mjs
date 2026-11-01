@@ -61,18 +61,40 @@ function decodeConsume(value) {
   return value.sessionContext;
 }
 
-async function responseJSON(response) {
+async function responseJSON(response, signal) {
   if (
     response?.ok !== true ||
-    !/^application\/json(?:\s*;|$)/iu.test(response.headers?.get("Content-Type") ?? "")
+    !/^application\/json(?:\s*;|$)/iu.test(response.headers?.get("Content-Type") ?? "") ||
+    typeof response.body?.getReader !== "function"
   ) {
+    try { void response?.body?.cancel().catch(() => {}); } catch {}
     throw new TypeError("long_memory_response_invalid");
   }
-  const encoded = await response.text();
-  if (encoded.length === 0 || encoded.length > MAX_TOKEN_CHARACTERS + 128) {
-    throw new TypeError("long_memory_response_invalid");
+  const reader = response.body.getReader();
+  const cancelRead = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener("abort", cancelRead, {once:true});
+  try {
+    const decoder = new TextDecoder("utf-8", {fatal:true});
+    let bytes=0, encoded="";
+    while (true) {
+      if (signal.aborted) throw new Error("long_memory_cancelled");
+      const chunk=await reader.read();
+      try {
+        if (signal.aborted) throw new Error("long_memory_cancelled");
+        if (chunk.done) break;
+        if (!(chunk.value instanceof Uint8Array)) throw new TypeError("long_memory_response_invalid");
+        bytes+=chunk.value.byteLength;
+        if (bytes>MAX_TOKEN_CHARACTERS+128) throw new TypeError("long_memory_response_invalid");
+        encoded+=decoder.decode(chunk.value,{stream:true});
+      } finally { if (chunk.value instanceof Uint8Array) chunk.value.fill(0); }
+    }
+    encoded+=decoder.decode();
+    if (!bytes) throw new TypeError("long_memory_response_invalid");
+    return JSON.parse(encoded);
+  } finally {
+    signal.removeEventListener("abort",cancelRead);
+    cancelRead(); reader.releaseLock();
   }
-  return JSON.parse(encoded);
 }
 
 export function createLongMemorySessionController({
@@ -192,6 +214,7 @@ export function createLongMemorySessionController({
               referrerPolicy: "no-referrer",
               signal: controller.signal,
             }),
+            controller.signal,
           ),
         );
         if (!isCurrent(voiceGeneration, controller, isStillCurrent)) return;
@@ -216,6 +239,7 @@ export function createLongMemorySessionController({
               referrerPolicy: "no-referrer",
               signal: controller.signal,
             }),
+            controller.signal,
           ),
         );
         capability = undefined;

@@ -102,12 +102,14 @@ export function createLongMemorySessionController({
   now = () => performance.now(),
   request = (...args) => fetch(...args),
   setTimer = (callback, delay) => setTimeout(callback, delay),
+  prepareTimeoutMs = 15000,
 } = {}) {
   if (
     typeof clearTimer !== "function" ||
     typeof now !== "function" ||
     typeof request !== "function" ||
-    typeof setTimer !== "function"
+    typeof setTimer !== "function" ||
+    !Number.isInteger(prepareTimeoutMs) || prepareTimeoutMs < 1 || prepareTimeoutMs > 15000
   ) {
     throw new TypeError("long_memory_controller_invalid");
   }
@@ -115,12 +117,20 @@ export function createLongMemorySessionController({
   let abortController;
   let expiresAt;
   let expiryTimer;
+  let preparationTimer;
   let generation;
   let sessionContext;
   let state = LONG_MEMORY_SESSION_STATES.IDLE;
 
   const snapshot = () =>
     Object.freeze({ generation: generation ?? null, state });
+
+  const stopPreparationTimer = () => {
+    if (preparationTimer !== undefined) {
+      clearTimer(preparationTimer);
+      preparationTimer = undefined;
+    }
+  };
 
   const dropSecrets = () => {
     sessionContext = undefined;
@@ -144,6 +154,7 @@ export function createLongMemorySessionController({
     ) {
       throw new TypeError("long_memory_clear_reason_invalid");
     }
+    stopPreparationTimer();
     abortController?.abort();
     abortController = undefined;
     dropSecrets();
@@ -169,6 +180,7 @@ export function createLongMemorySessionController({
     }
     if (generation === voiceGeneration) return snapshot();
 
+    stopPreparationTimer();
     abortController?.abort();
     dropSecrets();
     generation = voiceGeneration;
@@ -194,6 +206,14 @@ export function createLongMemorySessionController({
     const controller = new AbortController();
     abortController = controller;
     state = LONG_MEMORY_SESSION_STATES.PREPARING;
+    preparationTimer = setTimer(() => {
+      if (generation !== voiceGeneration || abortController !== controller) return;
+      preparationTimer = undefined;
+      abortController = undefined;
+      dropSecrets();
+      state = LONG_MEMORY_SESSION_STATES.FAILED;
+      controller.abort();
+    }, prepareTimeoutMs);
     const headers = Object.freeze({
       Accept: "application/json",
       Authorization: `Bearer ${idToken}`,
@@ -219,6 +239,7 @@ export function createLongMemorySessionController({
         );
         if (!isCurrent(voiceGeneration, controller, isStillCurrent)) return;
         if (!begin.available) {
+          stopPreparationTimer();
           abortController = undefined;
           state = LONG_MEMORY_SESSION_STATES.UNAVAILABLE;
           return;
@@ -245,6 +266,7 @@ export function createLongMemorySessionController({
         capability = undefined;
         if (!isCurrent(voiceGeneration, controller, isStillCurrent)) return;
 
+        stopPreparationTimer();
         sessionContext = consumed;
         expiresAt = now() + SESSION_CONTEXT_TTL_SECONDS * 1000;
         state = LONG_MEMORY_SESSION_STATES.READY;
@@ -263,6 +285,7 @@ export function createLongMemorySessionController({
       } catch {
         capability = undefined;
         if (generation === voiceGeneration && abortController === controller) {
+          stopPreparationTimer();
           abortController = undefined;
           dropSecrets();
           state = controller.signal.aborted

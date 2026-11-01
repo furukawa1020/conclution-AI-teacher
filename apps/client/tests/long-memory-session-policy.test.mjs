@@ -76,6 +76,47 @@ const credentials = Object.freeze({
   voiceGeneration: 7,
 });
 
+test("memory preparation has one total deadline and ignores late completion",async()=>{
+ let expire, signal, calls=0;
+ const pending=deferred();
+ const controller=createLongMemorySessionController({
+  request:async(_url,options)=>{calls++; signal=options.signal; return pending.promise;},
+  setTimer:(fn,delay)=>{assert.equal(delay,15000); expire=fn; return 1;}, clearTimer:()=>{},
+ });
+ controller.start(credentials); expire();
+ assert.equal(signal.aborted,true);
+ assert.equal(controller.snapshot().state,LONG_MEMORY_SESSION_STATES.FAILED);
+ pending.resolve(jsonResponse({available:true,capability:"kmc1.late"})); await flushStartupTasks();
+ assert.equal(calls,1); assert.equal(controller.voiceBinding(7),undefined);
+ assert.equal(controller.snapshot().state,LONG_MEMORY_SESSION_STATES.FAILED);
+});
+
+test("retired memory deadline cannot stop the replacement generation",async()=>{
+ const timers=[], signals=[], cleared=[];
+ const controller=createLongMemorySessionController({request:(_url,options)=>{
+  signals.push(options.signal); return new Promise(()=>{});
+ },setTimer:fn=>{timers.push(fn);return timers.length;},clearTimer:id=>cleared.push(id)});
+ controller.start(credentials);
+ controller.start({...credentials,voiceGeneration:8});
+ timers[0]();
+ assert.equal(signals[0].aborted,true); assert.equal(signals[1].aborted,false);
+ assert.deepEqual(controller.snapshot(),{generation:8,state:LONG_MEMORY_SESSION_STATES.PREPARING});
+ controller.clear(); assert.equal(signals[1].aborted,true);
+ assert.deepEqual(cleared,[1,2]);
+});
+
+test("successful memory preparation cancels its deadline before context expiry",async()=>{
+ const timers=[],cleared=[]; let requests=0;
+ const controller=createLongMemorySessionController({request:async()=>jsonResponse(++requests===1
+  ? {available:true,capability:"kmc1.valid"}:{expiresInSeconds:900,sessionContext:"kms1.valid"}),
+  setTimer:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimer:id=>cleared.push(id)});
+ controller.start(credentials);await flushStartupTasks();
+ assert.equal(controller.snapshot().state,LONG_MEMORY_SESSION_STATES.READY);
+ assert.deepEqual(cleared,[1]); assert.equal(timers[1].ms,900000);
+ timers[0].fn(); assert.equal(controller.snapshot().state,LONG_MEMORY_SESSION_STATES.READY);
+ controller.clear();
+});
+
 test("beginとconsumeが遅くてもstartは待たず、同一世代は一度だけ準備する", async () => {
   const begin = deferred();
   const consume = deferred();

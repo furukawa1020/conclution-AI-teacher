@@ -89,8 +89,9 @@ func TestStreamingSynthesisFlightLastSubscriberReleasesPCMBeforeProviderReturns(
 		if err := <-done; !errors.Is(err, context.Canceled) {
 			t.Fatalf("subscriber error=%v", err)
 		}
+		synctest.Wait()
 		flight.mu.Lock()
-		if flight.done || flight.subscribers != 0 || flight.chunks != nil || flight.buffered != 0 {
+		if !flight.done || flight.subscribers != 0 || flight.chunks != nil || flight.buffered != 0 {
 			t.Error("abandoned flight retained PCM while provider was still stopping")
 		}
 		if !bytes.Equal(retained, []byte{0, 0}) || !bytes.Equal(received, []byte{80, 0}) {
@@ -107,6 +108,25 @@ func TestStreamingSynthesisFlightLastSubscriberReleasesPCMBeforeProviderReturns(
 		synctest.Wait()
 		if len(group.flights) != 0 {
 			t.Fatal("finished provider remained registered")
+		}
+	})
+}
+
+func TestStreamingSynthesisDeadlineRejectsLateSuccess(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var group streamingSynthesisFlightGroup
+		key := newStreamingPCMCacheKey("voice", "audited cue")
+		mime, err := group.stream(context.Background(), key,
+			func(ctx context.Context, _ StreamChunkHandler) (string, error) {
+				<-ctx.Done()
+				return StreamingAudioContentType, nil
+			}, func([]byte) error { return nil })
+		if mime != "" || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expired synthesis returned mime=%q err=%v", mime, err)
+		}
+		synctest.Wait()
+		if len(group.flights) != 0 {
+			t.Fatal("expired flight remained registered")
 		}
 	})
 }

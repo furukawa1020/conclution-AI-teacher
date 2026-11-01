@@ -90,6 +90,9 @@ func (group *streamingSynthesisFlightGroup) stream(
 		go func() {
 			defer stopExpiry()
 			mimeType, err := produce(providerCtx, flight.publish)
+			if contextErr := providerCtx.Err(); contextErr != nil {
+				mimeType, err = "", contextErr
+			}
 			flight.complete(mimeType, err)
 			retire()
 		}()

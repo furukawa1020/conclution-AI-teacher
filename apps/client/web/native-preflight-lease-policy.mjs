@@ -84,7 +84,7 @@ export function createNativePreflightInvalidationGate() {
     if (!RETIRE_REASON_VALUES.includes(reason)) {
       throw new TypeError("native_preflight_invalidation_reason_invalid");
     }
-    if (handle !== current || handle?.retired === true) {
+    if (!handle || handle !== current || handle.retired === true) {
       return false;
     }
     current = undefined;
@@ -97,9 +97,7 @@ export function createNativePreflightInvalidationGate() {
     if (!validGeneration(generation) || typeof cancel !== "function") {
       throw new TypeError("native_preflight_invalidation_begin_invalid");
     }
-    if (current) {
-      retireHandle(current, NATIVE_PREFLIGHT_RETIRE_REASONS.REPLACED);
-    }
+    const previous = current;
     const handle = {
       cancel,
       generation,
@@ -108,12 +106,24 @@ export function createNativePreflightInvalidationGate() {
     const ownership = Object.freeze({ generation });
     handles.set(ownership, handle);
     current = handle;
+    if (previous) {
+      // Install first: synchronous cancellation observers may begin a newer
+      // connection. Never overwrite that newer owner after they return.
+      previous.retired = true;
+      try {
+        previous.cancel(NATIVE_PREFLIGHT_RETIRE_REASONS.REPLACED);
+      } catch (error) {
+        try { retireHandle(handle, NATIVE_PREFLIGHT_RETIRE_REASONS.CANCELLED); }
+        catch { /* ownership is cleared before its cleanup callback */ }
+        throw error;
+      }
+    }
     return ownership;
   }
 
   function release(ownership) {
     const handle = handles.get(ownership);
-    if (handle !== current || current?.retired === true) return false;
+    if (!handle || handle !== current || handle.retired === true) return false;
     current = undefined;
     return true;
   }

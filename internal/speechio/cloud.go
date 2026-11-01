@@ -134,6 +134,7 @@ type CloudService struct {
 	) (*speechpb.RecognizeResponse, error)
 	streamRecognizeCall  func(context.Context) (streamingRecognizeClient, error)
 	streamSynthesizeCall func(context.Context) (streamingSynthesizeClient, error)
+	synthesizeCall       func(context.Context, *texttospeechpb.SynthesizeSpeechRequest) (*texttospeechpb.SynthesizeSpeechResponse, error)
 	synthesizePCMCall    func(
 		context.Context,
 		*texttospeechpb.SynthesizeSpeechRequest,
@@ -221,6 +222,7 @@ func NewCloudService(
 	) (*texttospeechpb.SynthesizeSpeechResponse, error) {
 		return ttsClient.SynthesizeSpeech(callContext, request)
 	}
+	service.synthesizeCall = service.synthesizePCMCall
 	return service, nil
 }
 
@@ -688,7 +690,10 @@ func (s *CloudService) Synthesize(
 		return nil, "", ErrReplyLong
 	}
 
-	response, err := s.ttsClient.SynthesizeSpeech(ctx, &texttospeechpb.SynthesizeSpeechRequest{
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	response, err := s.synthesizeCall(ctx, &texttospeechpb.SynthesizeSpeechRequest{
 		Input: &texttospeechpb.SynthesisInput{
 			InputSource: &texttospeechpb.SynthesisInput_Text{Text: text},
 		},
@@ -700,7 +705,18 @@ func (s *CloudService) Synthesize(
 			AudioEncoding: texttospeechpb.AudioEncoding_MP3,
 		},
 	})
+	if contextErr := ctx.Err(); contextErr != nil {
+		if response != nil {
+			clear(response.AudioContent)
+			response.AudioContent = nil
+		}
+		return nil, "", contextErr
+	}
 	if err != nil {
+		if response != nil {
+			clear(response.AudioContent)
+			response.AudioContent = nil
+		}
 		return nil, "", fmt.Errorf("regional speech synthesis failed: %w", err)
 	}
 	if response == nil || len(response.AudioContent) == 0 {

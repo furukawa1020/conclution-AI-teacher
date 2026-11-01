@@ -7378,19 +7378,19 @@ function haltStreamingPlayback(playback, error) {
   }
   // Settle the owner before stopping sources: stopping dispatches "ended"
   // synchronously in some browser engines.
-  playback.reject(error);
-  stopBargeInMonitoring(playback);
-  playback.stopWorklet?.();
+  try { playback.reject(error); } catch { /* continue releasing devices */ }
+  try { stopBargeInMonitoring(playback); } catch { /* other devices still need release */ }
+  try { playback.stopWorklet?.(); } catch { /* stop every queued source below */ }
   for (const source of playback.sources) {
     try {
       source.stop();
     } catch {
       // A source can have ended between validation and cancellation.
     }
-    source.disconnect();
+    try { source.disconnect(); } catch { /* one ended device cannot retain later sources */ }
   }
   playback.sources.clear();
-  playback.gainNode?.disconnect();
+  try { playback.gainNode?.disconnect(); } catch { /* owner and sources are already released */ }
 }
 
 async function awaitValidatedPlaybackCompletion(

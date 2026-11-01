@@ -405,6 +405,12 @@ func (s *liveSession) writerLoop() {
 			s.drainWrites()
 			return
 		case request := <-s.writeCh:
+			if err := s.ctx.Err(); err != nil {
+				zeroizeRealtimeInput(&request.input)
+				request.result <- safeContextError("send", err)
+				s.drainWrites()
+				return
+			}
 			if err := request.ctx.Err(); err != nil {
 				zeroizeRealtimeInput(&request.input)
 				request.result <- safeContextError("send", err)
@@ -412,6 +418,17 @@ func (s *liveSession) writerLoop() {
 			}
 			err := s.raw.SendRealtimeInput(request.input)
 			zeroizeRealtimeInput(&request.input)
+			contextErr := request.ctx.Err()
+			if contextErr == nil {
+				contextErr = s.ctx.Err()
+			}
+			if contextErr != nil {
+				terminal := safeContextError("send", contextErr)
+				request.result <- terminal
+				s.terminate(terminal)
+				s.drainWrites()
+				return
+			}
 			if err != nil {
 				request.result <- fmt.Errorf("send native voice provider input: %w", ErrProvider)
 				s.terminate(ErrProvider)
@@ -465,6 +482,12 @@ func (s *liveSession) sendProvider(
 
 	select {
 	case err := <-request.result:
+		if contextErr := operationCtx.Err(); contextErr != nil {
+			return safeContextError("send", contextErr)
+		}
+		if contextErr := s.ctx.Err(); contextErr != nil {
+			return safeContextError("send", contextErr)
+		}
 		return err
 	case <-operationCtx.Done():
 		return safeContextError("send", operationCtx.Err())
